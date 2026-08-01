@@ -110,6 +110,20 @@ final class LiveServerTests: XCTestCase {
         XCTAssertFalse(text.text.contains("\u{1B}["), "text read should be unstyled")
     }
 
+    /// The panel ruled reflowed transcript the default reading surface, because
+    /// the API exposes no pane geometry and the phone cannot resize the PTY.
+    func testDefaultReadSourceIsReflowedTranscript() async throws {
+        try XCTSkipIf(socketPath == nil, "no live herdr server")
+        let c = try client()
+        let agents = try await c.agentList()
+        let pane = try XCTUnwrap(agents.first).paneID
+        let defaulted = try await c.read(pane: pane, lines: 40)
+        XCTAssertFalse(defaulted.text.isEmpty)
+        // Styling must survive the reflowed source, else the default costs colour.
+        let styled = try await c.read(pane: pane, source: .recentUnwrapped, format: .ansi, lines: 40)
+        XCTAssertTrue(styled.text.contains("\u{1B}["), "recent_unwrapped+ansi must preserve styling")
+    }
+
     /// Guards the measured fact that detection ignores an ansi request.
     func testDetectionWithAnsiIsRefusedLocally() async throws {
         try XCTSkipIf(socketPath == nil, "no live herdr server")

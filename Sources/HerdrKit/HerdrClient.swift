@@ -62,9 +62,15 @@ public actor HerdrClient {
     /// Requesting `.ansi` with `.detection` silently yields plain text, so this
     /// refuses that combination rather than returning unstyled output that the
     /// caller believes is styled.
+    /// Defaults to `.recentUnwrapped` on the panel's ruling: the API exposes no
+    /// pane geometry and no PTY resize (`PaneInfo` carries no cols/rows), so the
+    /// phone renders whatever width the desktop chose and cannot change it. A
+    /// 100-column pane at readable size does not fit a phone, which makes
+    /// grid-faithful and readable mutually exclusive. Reflowed transcript is
+    /// therefore the default reading surface, not a toggle. Styling survives it.
     public func read(
         pane: String,
-        source: ReadSource = .visible,
+        source: ReadSource = .recentUnwrapped,
         format: ReadFormat = .ansi,
         lines: UInt32? = nil
     ) async throws -> PaneRead {

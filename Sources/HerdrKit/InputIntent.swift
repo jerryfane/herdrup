@@ -105,9 +105,18 @@ public struct InputRouter: Sendable {
 /// "confirmed" is visible, and the reader deserves to see which state they are
 /// looking at.
 public struct PendingSubmission: Equatable, Sendable {
+    /// Mirrors herdr's own two-step delivery truth rather than collapsing it.
+    /// `AgentPromptDelivery` distinguishes WrittenToPty (bytes reached the
+    /// composer) from Submitted (a turn actually started) because they are
+    /// different facts — herdr#18 and #26 both exist in the gap between them.
+    /// A client that renders one "sent" state lies about which one it knows.
     public enum State: Equatable, Sendable {
-        case inFlight
-        case confirmed
+        /// Request in flight; nothing confirmed.
+        case pending
+        /// Server acknowledged the bytes reached the pane's composer.
+        case writtenToPty
+        /// Server confirmed a turn started.
+        case submitted
         case failed(String)
     }
 
@@ -115,12 +124,21 @@ public struct PendingSubmission: Equatable, Sendable {
     public let text: String
     public var state: State
 
-    public init(pane: String, text: String, state: State = .inFlight) {
+    public init(pane: String, text: String, state: State = .pending) {
         self.pane = pane
         self.text = text
         self.state = state
     }
 
-    /// True while the UI must visually distinguish this from delivered text.
-    public var needsPendingTreatment: Bool { state == .inFlight }
+    /// True until a turn is confirmed started.
+    ///
+    /// Optimism belongs in a composer chip keyed to the request, never as fake
+    /// characters painted into the grid: the phone has strictly less information
+    /// about delivery than the server does.
+    public var needsPendingTreatment: Bool { state != .submitted }
+
+    /// True once bytes are known to have reached the composer but no turn has
+    /// started — the stranded-draft state herdr#18/#26 are about, and the one
+    /// worth showing the reader explicitly.
+    public var isStrandedDraft: Bool { state == .writtenToPty }
 }

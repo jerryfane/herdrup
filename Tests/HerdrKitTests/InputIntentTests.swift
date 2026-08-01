@@ -76,17 +76,33 @@ final class InputRouterTests: XCTestCase {
 }
 
 final class PendingSubmissionTests: XCTestCase {
-    func testInFlightSubmissionIsMarkedPending() {
+    func testPendingSubmissionIsVisuallyDistinct() {
         let p = PendingSubmission(pane: "p1", text: "hello")
-        XCTAssertTrue(p.needsPendingTreatment, "optimistic echo must be visually distinct until confirmed")
+        XCTAssertTrue(p.needsPendingTreatment, "unconfirmed text must not read as delivered")
+        XCTAssertFalse(p.isStrandedDraft)
     }
 
-    func testConfirmedAndFailedAreNotPending() {
+    /// WrittenToPty and Submitted are different facts. Collapsing them would
+    /// hide exactly the stranded-draft state herdr#18/#26 are about.
+    func testWrittenToPtyIsNotTreatedAsSubmitted() {
         var p = PendingSubmission(pane: "p1", text: "hello")
-        p.state = .confirmed
+        p.state = .writtenToPty
+        XCTAssertTrue(p.isStrandedDraft, "bytes in the composer with no turn is its own state")
+        XCTAssertTrue(p.needsPendingTreatment, "written != submitted; must not read as delivered")
+    }
+
+    func testOnlySubmittedClearsPendingTreatment() {
+        var p = PendingSubmission(pane: "p1", text: "hello")
+        p.state = .submitted
         XCTAssertFalse(p.needsPendingTreatment)
+        XCTAssertFalse(p.isStrandedDraft)
+    }
+
+    func testFailureIsNotAStrandedDraft() {
+        var p = PendingSubmission(pane: "p1", text: "hello")
         p.state = .failed("agent_prompt_stalled")
-        XCTAssertFalse(p.needsPendingTreatment)
+        XCTAssertFalse(p.isStrandedDraft)
+        XCTAssertTrue(p.needsPendingTreatment)
     }
 }
 
