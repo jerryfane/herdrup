@@ -1,0 +1,448 @@
+import CSSH
+import Foundation
+
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+
+/// How to reach and authenticate to a herdr host.
+public struct SSHCredentials: Sendable {
+    public var host: String
+    public var port: UInt16
+    public var username: String
+    /// PEM private key bytes. Held in memory and handed to
+    /// `libssh2_userauth_publickey_frommemory` — never written to disk and never
+    /// referenced by path, so the key material's lifetime is the caller's to
+    /// control rather than the filesystem's.
+    public var privateKeyPEM: String
+    /// Optional public key bytes. libssh2 derives one when absent.
+    public var publicKeyPEM: String?
+    public var passphrase: String?
+    /// Remote unix socket to forward to, e.g. `~/.config/herdr/herdr.sock`
+    /// resolved to an absolute path on the host.
+    public var remoteSocketPath: String
+
+    public init(
+        host: String,
+        port: UInt16 = 22,
+        username: String,
+        privateKeyPEM: String,
+        publicKeyPEM: String? = nil,
+        passphrase: String? = nil,
+        remoteSocketPath: String
+    ) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.privateKeyPEM = privateKeyPEM
+        self.publicKeyPEM = publicKeyPEM
+        self.passphrase = passphrase
+        self.remoteSocketPath = remoteSocketPath
+    }
+}
+
+/// What the caller decides when a host key is seen.
+public enum HostKeyDecision: Sendable, Equatable {
+    /// Accept and remember this fingerprint.
+    case trust
+    /// Refuse the connection.
+    case reject
+}
+
+/// Consulted on every connect. A changed key is never silently accepted: the
+/// policy is asked separately for first-contact and for change, and a change
+/// defaults to refusal at the call site rather than here.
+public protocol HostKeyPolicy: Sendable {
+    /// First time this host has been seen. `fingerprint` is SHA-256, hex.
+    func firstContact(host: String, fingerprint: String) -> HostKeyDecision
+    /// The host's key differs from what was pinned. Refusing is the safe answer.
+    func changed(host: String, pinned: String, presented: String) -> HostKeyDecision
+}
+
+/// Pins on first contact and hard-stops on change.
+public struct PinningHostKeyPolicy: HostKeyPolicy {
+    private let store: PinStore
+
+    public init(store: PinStore = PinStore()) {
+        self.store = store
+    }
+
+    public func firstContact(host: String, fingerprint: String) -> HostKeyDecision {
+        store.pin(host: host, fingerprint: fingerprint)
+        return .trust
+    }
+
+    /// Always refuses. A changed host key is indistinguishable from an
+    /// interception, and this transport carries an operator's whole fleet.
+    public func changed(host: String, pinned: String, presented: String) -> HostKeyDecision {
+        .reject
+    }
+
+    public func pinnedFingerprint(for host: String) -> String? { store.pinned(host: host) }
+
+    /// In-memory pin store. The iOS target substitutes a Keychain-backed one.
+    public final class PinStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pins: [String: String] = [:]
+
+        public init() {}
+
+        public func pinned(host: String) -> String? {
+            lock.lock(); defer { lock.unlock() }
+            return pins[host]
+        }
+
+        public func pin(host: String, fingerprint: String) {
+            lock.lock(); defer { lock.unlock() }
+            pins[host] = fingerprint
+        }
+    }
+}
+
+public enum SSHError: Error, CustomStringConvertible {
+    case resolveFailed(host: String)
+    case connectFailed(host: String, port: UInt16, errno: Int32)
+    case sessionInitFailed
+    case handshakeFailed(code: Int32)
+    case hostKeyUnavailable
+    case hostKeyRejected(host: String, reason: String)
+    case authenticationFailed(code: Int32)
+    case channelOpenFailed(socket: String, code: Int32)
+    case writeFailed(code: Int32)
+
+    public var description: String {
+        switch self {
+        case .resolveFailed(let h): return "could not resolve \(h)"
+        case .connectFailed(let h, let p, let e): return "connect \(h):\(p) failed (errno \(e))"
+        case .sessionInitFailed: return "libssh2_session_init failed"
+        case .handshakeFailed(let c): return "SSH handshake failed (\(c))"
+        case .hostKeyUnavailable: return "server presented no host key"
+        case .hostKeyRejected(let h, let r): return "host key rejected for \(h): \(r)"
+        case .authenticationFailed(let c): return "public-key authentication failed (\(c))"
+        case .channelOpenFailed(let s, let c):
+            return "direct-streamlocal to \(s) failed (\(c))"
+        case .writeFailed(let c): return "channel write failed (\(c))"
+        }
+    }
+}
+
+/// Carries herdr's JSON API over an SSH tunnel.
+///
+/// Uses `direct-streamlocal@openssh.com`, not `direct-tcpip`: only the former
+/// can reach a *remote unix socket*, which is where herdr listens. That single
+/// capability is why this is built on libssh2 — SwiftNIO-SSH and Citadel expose
+/// direct-tcpip only.
+///
+/// Conforms to `HerdrTransport` so the two connection shapes stay distinct, as
+/// they must: herdr's command socket answers one request and closes, while
+/// `events.subscribe` holds its connection open. Each `roundTrip` and each
+/// `stream` therefore opens its own SSH channel.
+public struct SSHTransport: HerdrTransport {
+    public let credentials: SSHCredentials
+    private let hostKeyPolicy: HostKeyPolicy
+
+    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
+        self.credentials = credentials
+        self.hostKeyPolicy = hostKeyPolicy
+    }
+
+    // MARK: - Session
+
+    /// An authenticated session plus the socket beneath it. Both are torn down
+    /// together; the caller owns the lifetime.
+    final class Session {
+        let sock: Int32
+        let handle: OpaquePointer
+
+        init(sock: Int32, handle: OpaquePointer) {
+            self.sock = sock
+            self.handle = handle
+        }
+
+        func close() {
+            libssh2_session_disconnect_ex(handle, SSH_DISCONNECT_BY_APPLICATION, "bye", "")
+            libssh2_session_free(handle)
+            _ = Glibc_close(sock)
+        }
+    }
+
+    private func tcpConnect() throws -> Int32 {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        var info: UnsafeMutablePointer<addrinfo>?
+        let rc = getaddrinfo(credentials.host, String(credentials.port), &hints, &info)
+        guard rc == 0, let list = info else { throw SSHError.resolveFailed(host: credentials.host) }
+        defer { freeaddrinfo(list) }
+
+        var candidate = Optional(list)
+        while let entry = candidate {
+            let fd = socket(entry.pointee.ai_family, entry.pointee.ai_socktype, entry.pointee.ai_protocol)
+            if fd >= 0 {
+                if connect(fd, entry.pointee.ai_addr, entry.pointee.ai_addrlen) == 0 {
+                    return fd
+                }
+                _ = Glibc_close(fd)
+            }
+            candidate = entry.pointee.ai_next
+        }
+        throw SSHError.connectFailed(host: credentials.host, port: credentials.port, errno: errno)
+    }
+
+    /// SHA-256 of the presented host key, hex, lowercase.
+    private func fingerprint(_ session: OpaquePointer) throws -> String {
+        guard let raw = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256) else {
+            throw SSHError.hostKeyUnavailable
+        }
+        return (0..<32).map { String(format: "%02x", UInt8(bitPattern: raw[$0])) }.joined()
+    }
+
+    private func verifyHostKey(_ session: OpaquePointer) throws {
+        let presented = try fingerprint(session)
+        // One decision, one rejection path. An earlier version rejected in two
+        // places, which made the first branch redundant — and a mutation of it
+        // left the test green, because the second branch was doing the work.
+        // Two guards for one property means neither is pinned by its test.
+        let decision: HostKeyDecision
+        var reason = "policy refused"
+        if let pinning = hostKeyPolicy as? PinningHostKeyPolicy,
+           let pinned = pinning.pinnedFingerprint(for: credentials.host) {
+            if pinned == presented {
+                decision = .trust
+            } else {
+                reason = "host key changed"
+                decision = hostKeyPolicy.changed(
+                    host: credentials.host, pinned: pinned, presented: presented
+                )
+            }
+        } else {
+            decision = hostKeyPolicy.firstContact(host: credentials.host, fingerprint: presented)
+        }
+        guard decision == .trust else {
+            throw SSHError.hostKeyRejected(host: credentials.host, reason: reason)
+        }
+    }
+
+    func openSession() throws -> Session {
+        let sock = try tcpConnect()
+        guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
+            _ = Glibc_close(sock)
+            throw SSHError.sessionInitFailed
+        }
+        libssh2_session_set_blocking(handle, 1)
+
+        func fail(_ error: SSHError) -> SSHError {
+            libssh2_session_free(handle)
+            _ = Glibc_close(sock)
+            return error
+        }
+
+        let hs = libssh2_session_handshake(handle, sock)
+        guard hs == 0 else { throw fail(.handshakeFailed(code: hs)) }
+
+        do {
+            try verifyHostKey(handle)
+        } catch {
+            libssh2_session_free(handle)
+            _ = Glibc_close(sock)
+            throw error
+        }
+
+        let auth = credentials.privateKeyPEM.withCString { priv -> Int32 in
+            let privLen = strlen(priv)
+            let run: (UnsafePointer<CChar>?, Int) -> Int32 = { pub, pubLen in
+                credentials.username.withCString { user in
+                    libssh2_userauth_publickey_frommemory(
+                        handle, user, strlen(user),
+                        pub, pubLen,
+                        priv, privLen,
+                        credentials.passphrase
+                    )
+                }
+            }
+            if let pub = credentials.publicKeyPEM {
+                return pub.withCString { run($0, strlen($0)) }
+            }
+            return run(nil, 0)
+        }
+        guard auth == 0 else { throw fail(.authenticationFailed(code: auth)) }
+
+        return Session(sock: sock, handle: handle)
+    }
+
+    /// Opens a direct-streamlocal channel to herdr's socket on the host.
+    func openChannel(_ session: Session) throws -> OpaquePointer {
+        guard let channel = credentials.remoteSocketPath.withCString({ path in
+            libssh2_channel_direct_streamlocal_ex(session.handle, path, "localhost", 0)
+        }) else {
+            throw SSHError.channelOpenFailed(
+                socket: credentials.remoteSocketPath,
+                code: libssh2_session_last_errno(session.handle)
+            )
+        }
+        return channel
+    }
+
+    // MARK: - Channel IO
+
+    private func write(_ channel: OpaquePointer, _ line: String) throws {
+        var bytes = Array(line.utf8)
+        if bytes.last != UInt8(ascii: "\n") { bytes.append(UInt8(ascii: "\n")) }
+        var offset = 0
+        while offset < bytes.count {
+            let n = bytes.withUnsafeBytes { raw -> Int in
+                libssh2_channel_write_ex(
+                    channel, 0,
+                    raw.baseAddress!.advanced(by: offset).assumingMemoryBound(to: CChar.self),
+                    bytes.count - offset
+                )
+            }
+            if n > 0 {
+                offset += n
+            } else if n == Int(LIBSSH2_ERROR_EAGAIN) {
+                continue
+            } else {
+                throw SSHError.writeFailed(code: Int32(n))
+            }
+        }
+    }
+
+    /// Reads to the next newline. Returns nil at channel EOF with nothing buffered.
+    private func readLine(_ channel: OpaquePointer, carry: inout [UInt8]) -> String? {
+        while true {
+            if let idx = carry.firstIndex(of: UInt8(ascii: "\n")) {
+                let line = Array(carry[carry.startIndex..<idx])
+                carry.removeSubrange(carry.startIndex...idx)
+                return String(decoding: line, as: UTF8.self)
+            }
+            var buf = [CChar](repeating: 0, count: 16 * 1024)
+            let n = buf.withUnsafeMutableBufferPointer { p -> Int in
+                libssh2_channel_read_ex(channel, 0, p.baseAddress!, p.count)
+            }
+            if n > 0 {
+                carry.append(contentsOf: buf[0..<n].map { UInt8(bitPattern: $0) })
+            } else if n == Int(LIBSSH2_ERROR_EAGAIN) {
+                continue
+            } else {
+                if carry.isEmpty { return nil }
+                let rest = String(decoding: carry, as: UTF8.self)
+                carry.removeAll()
+                return rest
+            }
+        }
+    }
+
+    // MARK: - HerdrTransport
+
+    public func roundTrip(_ requestLine: String) async throws -> String {
+        let session = try openSession()
+        defer { session.close() }
+        let channel = try openChannel(session)
+        defer { libssh2_channel_free(channel) }
+
+        try write(channel, requestLine)
+        var carry: [UInt8] = []
+        guard let line = readLine(channel, carry: &carry) else {
+            throw TransportError.closedBeforeResponse
+        }
+        return line
+    }
+
+    public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let live = LiveChannel()
+            let work = Task.detached {
+                do {
+                    let session = try openSession()
+                    guard live.adopt(session) else {
+                        session.close()
+                        continuation.finish()
+                        return
+                    }
+                    let channel = try openChannel(session)
+                    live.adopt(channel: channel)
+                    try write(channel, requestLine)
+
+                    var carry: [UInt8] = []
+                    while !Task.isCancelled, let line = readLine(channel, carry: &carry) {
+                        continuation.yield(line)
+                    }
+                    live.close()
+                    continuation.finish()
+                } catch {
+                    live.close()
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                // Same discipline as UnixSocketTransport: Task.cancel() cannot
+                // interrupt a blocking read, so the underlying socket is shut
+                // down to force it to return. Without this a cancelled
+                // subscription holds its descriptor and a pool thread until the
+                // server next writes — which on an idle stream may be never
+                // (herdr-ios#1).
+                live.interrupt()
+                work.cancel()
+            }
+        }
+    }
+}
+
+/// Owns a session and channel shared between a blocking reader and a cancelling
+/// caller, so cancellation can interrupt a read that is already in progress.
+private final class LiveChannel: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session: SSHTransport.Session?
+    private var channel: OpaquePointer?
+    private var closed = false
+
+    func adopt(_ session: SSHTransport.Session) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        self.session = session
+        return true
+    }
+
+    func adopt(channel: OpaquePointer) {
+        lock.lock(); defer { lock.unlock() }
+        self.channel = channel
+    }
+
+    /// Unblocks a pending read without freeing anything the reader still holds.
+    func interrupt() {
+        lock.lock(); defer { lock.unlock() }
+        closed = true
+        if let sock = session?.sock {
+            _ = Glibc_shutdownSocket(sock)
+        }
+    }
+
+    func close() {
+        lock.lock(); defer { lock.unlock() }
+        closed = true
+        if let channel { libssh2_channel_free(channel) }
+        channel = nil
+        session?.close()
+        session = nil
+    }
+}
+
+#if canImport(Glibc)
+private func Glibc_close(_ fd: Int32) -> Int32 { Glibc.close(fd) }
+private func Glibc_shutdownSocket(_ fd: Int32) -> Int32 { Glibc.shutdown(fd, Int32(SHUT_RDWR)) }
+#else
+private func Glibc_close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
+private func Glibc_shutdownSocket(_ fd: Int32) -> Int32 { Darwin.shutdown(fd, Int32(SHUT_RDWR)) }
+#endif
+
+/// Process-wide libssh2 init. Idempotent and cheap; iOS callers get it for free
+/// by constructing any `SSHTransport`.
+public enum SSHRuntime {
+    private static let once: Void = {
+        _ = libssh2_init(0)
+    }()
+
+    public static func start() { _ = once }
+}
