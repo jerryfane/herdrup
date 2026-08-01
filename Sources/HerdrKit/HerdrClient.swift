@@ -95,6 +95,21 @@ public actor HerdrClient {
         _ = try await call("agent.prompt", PromptParams(target: pane, text: text), as: JSONNull.self)
     }
 
+    struct SendTextParams: Encodable {
+        let paneID: String
+        let text: String
+        enum CodingKeys: String, CodingKey {
+            case paneID = "pane_id"
+            case text
+        }
+    }
+
+    /// Types literal characters into a pane. Does not submit — Enter is a
+    /// separate call, so nothing executes without a deliberate second action.
+    public func sendText(pane: String, text: String) async throws {
+        _ = try await call("pane.send_text", SendTextParams(paneID: pane, text: text), as: JSONNull.self)
+    }
+
     struct SendKeysParams: Encodable {
         let target: String
         let keys: [String]

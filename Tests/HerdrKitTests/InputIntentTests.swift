@@ -31,12 +31,37 @@ final class InputRouterTests: XCTestCase {
         )
     }
 
-    /// The refusal must be explicit. A silent drop is indistinguishable from a
-    /// dead connection on a phone.
-    func testTextIsRefusedNotSilentlyDroppedInRawMode() {
-        let plan = router.plan(action: .submitText("ship it"), pane: "p1", mode: .rawKeys)
-        guard case .refused(let reason) = plan else { return XCTFail("expected refusal, got \(plan)") }
-        XCTAssertTrue(reason.contains("composer"), "refusal should explain why: \(reason)")
+    /// herdr-ios#3: a shell pane must be typeable. Refusing left those panes
+    /// unable to receive a single character, so "keys elsewhere" was fictional.
+    func testShellPanesAcceptLiteralTyping() {
+        XCTAssertEqual(
+            router.plan(action: .submitText("ls -la"), pane: "p1", mode: .rawKeys),
+            .text(pane: "p1", "ls -la")
+        )
+    }
+
+    /// The safety property that makes typing into a shell acceptable: text
+    /// lands, nothing runs. Enter must remain a separate deliberate action, so
+    /// no plan for text may carry a submission.
+    func testTypingIntoAShellNeverSubmits() {
+        guard case .text(_, let sent) = router.plan(
+            action: .submitText("rm -rf /tmp/x"), pane: "p1", mode: .rawKeys
+        ) else { return XCTFail("expected literal text") }
+        XCTAssertFalse(sent.contains("\n"), "typed text must not carry a newline")
+        XCTAssertFalse(sent.contains("\r"), "typed text must not carry a carriage return")
+        // Submitting is a separate, explicit key.
+        XCTAssertEqual(
+            router.plan(action: .key("Enter"), pane: "p1", mode: .rawKeys),
+            .keys(pane: "p1", ["Enter"])
+        )
+    }
+
+    /// Agent panes still route text as a prompt, not as literal keystrokes.
+    func testAgentPanesStillUseIntent() {
+        XCTAssertEqual(
+            router.plan(action: .submitText("ship it"), pane: "p1", mode: .intent),
+            .prompt(pane: "p1", text: "ship it")
+        )
     }
 
     func testEmptyAndWhitespacePromptsAreRefused() {
