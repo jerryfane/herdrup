@@ -63,7 +63,7 @@ public struct ComposerState: Decodable, Equatable, Sendable {
 
 public struct CompletedTurn: Decodable, Equatable, Sendable {
     public let turn: Int?
-    public let turnEpoch: Int64?
+    public let turnEpoch: UInt64?
     public let completedUnixMs: Int64?
 
     enum CodingKeys: String, CodingKey {
@@ -89,9 +89,9 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// Monotonic per-agent change counters. These are what make revision-gated
     /// refresh possible: poll the cheap list, fetch a screen only when one moves.
     public let revision: Int?
-    public let stateChangeSeq: Int64?
+    public let stateChangeSeq: UInt64?
     public let turn: Int?
-    public let turnEpoch: Int64?
+    public let turnEpoch: UInt64?
     public let lastCompletedTurn: CompletedTurn?
 
     public var id: String { paneID }
