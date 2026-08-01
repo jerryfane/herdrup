@@ -1,0 +1,114 @@
+import XCTest
+@testable import HerdrKit
+
+private func makeAgent(pane: String, agent: String?, hasComposer: Bool) throws -> AgentInfo {
+    var fields = ["\"pane_id\":\"\(pane)\""]
+    if let agent { fields.append("\"agent\":\"\(agent)\"") }
+    if hasComposer { fields.append("\"composer\":{\"state\":\"unknown\"}") }
+    let json = "{\"id\":\"x\",\"result\":{\"agents\":[{\(fields.joined(separator: ","))}]}}"
+    return try JSONDecoder().decode(ResultEnvelope<AgentListResult>.self, from: Data(json.utf8)).result.agents[0]
+}
+
+final class InputRouterTests: XCTestCase {
+    let router = InputRouter()
+
+    func testAgentPaneWithComposerUsesIntentMode() throws {
+        let a = try makeAgent(pane: "p1", agent: "claude", hasComposer: true)
+        XCTAssertEqual(router.mode(for: a), .intent)
+    }
+
+    /// A shell pane must not be treated as promptable — that is how text ends up
+    /// pasted somewhere it was never meant to go.
+    func testPaneWithoutAgentFallsBackToRawKeys() throws {
+        XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: nil, hasComposer: true)), .rawKeys)
+        XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: "claude", hasComposer: false)), .rawKeys)
+    }
+
+    func testTextBecomesAPromptInIntentMode() {
+        XCTAssertEqual(
+            router.plan(action: .submitText("ship it"), pane: "p1", mode: .intent),
+            .prompt(pane: "p1", text: "ship it")
+        )
+    }
+
+    /// The refusal must be explicit. A silent drop is indistinguishable from a
+    /// dead connection on a phone.
+    func testTextIsRefusedNotSilentlyDroppedInRawMode() {
+        let plan = router.plan(action: .submitText("ship it"), pane: "p1", mode: .rawKeys)
+        guard case .refused(let reason) = plan else { return XCTFail("expected refusal, got \(plan)") }
+        XCTAssertTrue(reason.contains("composer"), "refusal should explain why: \(reason)")
+    }
+
+    func testEmptyAndWhitespacePromptsAreRefused() {
+        for text in ["", "   ", "\n\t "] {
+            guard case .refused = router.plan(action: .submitText(text), pane: "p1", mode: .intent) else {
+                return XCTFail("expected refusal for \(text.debugDescription)")
+            }
+        }
+    }
+
+    func testNavigationKeysWorkInBothModes() {
+        for mode in [InputMode.intent, .rawKeys] {
+            XCTAssertEqual(router.plan(action: .key("Up"), pane: "p1", mode: mode), .keys(pane: "p1", ["Up"]))
+            XCTAssertEqual(router.plan(action: .key("Enter"), pane: "p1", mode: mode), .keys(pane: "p1", ["Enter"]))
+        }
+    }
+
+    func testKeyNamesAreCaseInsensitiveButCanonicalised() {
+        XCTAssertEqual(router.plan(action: .key("enter"), pane: "p1", mode: .intent), .keys(pane: "p1", ["Enter"]))
+        XCTAssertEqual(router.plan(action: .key("ESCAPE"), pane: "p1", mode: .intent), .keys(pane: "p1", ["Escape"]))
+    }
+
+    /// Allowlist, not passthrough — refusing unknown keys is the point (herdr#21).
+    func testUnknownKeysAreRefused() {
+        for key in ["Ctrl+C", "F13", "Meta", "\u{1B}[A", "rm -rf"] {
+            guard case .refused = router.plan(action: .key(key), pane: "p1", mode: .intent) else {
+                return XCTFail("expected refusal for \(key)")
+            }
+        }
+    }
+
+    func testAllowlistDoesNotAdmitChordsOrControlSequences() {
+        XCTAssertNil(InputRouter.canonicalKey("Ctrl+U"))
+        XCTAssertNil(InputRouter.canonicalKey(""))
+        XCTAssertNotNil(InputRouter.canonicalKey("PageDown"))
+    }
+}
+
+final class PendingSubmissionTests: XCTestCase {
+    func testInFlightSubmissionIsMarkedPending() {
+        let p = PendingSubmission(pane: "p1", text: "hello")
+        XCTAssertTrue(p.needsPendingTreatment, "optimistic echo must be visually distinct until confirmed")
+    }
+
+    func testConfirmedAndFailedAreNotPending() {
+        var p = PendingSubmission(pane: "p1", text: "hello")
+        p.state = .confirmed
+        XCTAssertFalse(p.needsPendingTreatment)
+        p.state = .failed("agent_prompt_stalled")
+        XCTAssertFalse(p.needsPendingTreatment)
+    }
+}
+
+/// Read-only live checks.
+///
+/// These deliberately do NOT send prompts or keys. Every pane on this box hosts
+/// a working fleet agent, and injecting input would disrupt real sessions. Input
+/// delivery against a live pane needs a scratch pane and is left for v1b, where
+/// it can be driven from a device against a pane created for the purpose.
+final class LiveInputTests: XCTestCase {
+    func testModeIsClassifiableForEveryLivePane() async throws {
+        let path = ProcessInfo.processInfo.environment["HERDR_SOCKET_PATH"]
+            ?? UnixSocketTransport.defaultPath()
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: path), "no live herdr server")
+
+        let agents = try await HerdrClient(transport: UnixSocketTransport(path: path)).agentList()
+        XCTAssertFalse(agents.isEmpty)
+        let router = InputRouter()
+        // Every real pane must classify without crashing, and agent-hosting panes
+        // on this fleet should reach intent mode — if none do, the classifier is
+        // too strict to be useful.
+        let intentCount = agents.filter { router.mode(for: $0) == .intent }.count
+        XCTAssertGreaterThan(intentCount, 0, "no live pane classified as promptable")
+    }
+}
