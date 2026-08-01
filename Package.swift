@@ -12,7 +12,8 @@ let package = Package(
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],
     targets: [
-        .target(name: "HerdrKit"),
+        .systemLibrary(name: "CSSH", path: "Sources/CSSH"),
+        .target(name: "HerdrKit", dependencies: ["CSSH"]),
         .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit"]),
     ]
 )

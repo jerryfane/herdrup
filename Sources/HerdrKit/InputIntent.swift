@@ -29,6 +29,15 @@ public enum InputAction: Equatable, Sendable {
 /// What the client should actually send.
 public enum InputPlan: Equatable, Sendable {
     case prompt(pane: String, text: String)
+    /// Literal characters typed into a pane that has no composer — a shell, a
+    /// TUI. Deliberately does NOT submit: text goes in, and Enter stays a
+    /// separate explicit key.
+    ///
+    /// That separation is what makes typing into a shell safe. The hazard this
+    /// mode originally guarded against was text ARRIVING AND EXECUTING somewhere
+    /// unintended; typing without submitting cannot execute anything, and the
+    /// reader sees exactly what landed before choosing to run it.
+    case text(pane: String, String)
     case keys(pane: String, [String])
     /// Refused, with a reason fit to show the reader.
     case refused(reason: String)
@@ -61,12 +70,14 @@ public struct InputRouter: Sendable {
             }
             return .prompt(pane: pane, text: text)
 
-        case (.submitText, .rawKeys):
-            // No composer to submit into. Typing a paragraph at a shell and
-            // calling it "sent" would be a lie about what happened.
-            return .refused(
-                reason: "this pane has no agent composer; send keys instead of a prompt"
-            )
+        case (.submitText(let text), .rawKeys):
+            // A pane with no composer still accepts typing. Characters go in
+            // literally via pane.send_text; nothing is submitted, so the reader
+            // must press Enter deliberately. Refusing outright left shell and
+            // TUI panes unable to receive a single character, which made the
+            // "keys elsewhere" half of this design fictional (herdr-ios#3).
+            guard !text.isEmpty else { return .refused(reason: "empty input") }
+            return .text(pane: pane, text)
 
         case (.key(let k), _):
             guard let canonical = Self.canonicalKey(k) else {
