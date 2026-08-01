@@ -222,3 +222,58 @@ final class LiveServerTests: XCTestCase {
         XCTAssertTrue(sawAck, "server should acknowledge the subscription")
     }
 }
+
+/// herdr-ios#1 — cancelling a subscription must interrupt the blocking read.
+///
+/// `Task.cancel()` only sets a flag; it cannot unblock `read(2)`. An idle
+/// `events.subscribe` stream is the worst case: nothing arrives, so a cancelled
+/// reader would hold its descriptor and a cooperative-pool thread indefinitely.
+final class StreamCancellationTests: XCTestCase {
+    private var socketPath: String? {
+        let path = ProcessInfo.processInfo.environment["HERDR_SOCKET_PATH"]
+            ?? UnixSocketTransport.defaultPath()
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    // NOTE: the obvious test here — cancel, then assert the consumer's
+    // `for await` loop exits promptly — is VACUOUS and was removed after a
+    // mutation showed it passing without the fix. AsyncThrowingStream ends the
+    // loop on cancellation regardless of what the producer is doing, so it
+    // observes the stream closing, not the blocking read unwinding. The
+    // descriptor count below is the only assertion that distinguishes them.
+
+    /// Repeated subscribe/cancel cycles must not accumulate descriptors — the
+    /// leak the iOS foreground/background lifecycle would drive.
+    func testRepeatedSubscribeCancelDoesNotLeakDescriptors() async throws {
+        try XCTSkipIf(socketPath == nil, "no live herdr server")
+        let path = try XCTUnwrap(socketPath)
+        let client = HerdrClient(transport: UnixSocketTransport(path: path))
+        let agents = try await client.agentList()
+        let pane = try XCTUnwrap(agents.first).paneID
+
+        func openDescriptors() -> Int {
+            (try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fd").count) ?? -1
+        }
+        // Warm once so one-off allocations are not counted as growth.
+        for _ in 0..<2 {
+            let t = Task { for try await _ in client.subscribe([Subscription(.paneTurnCompleted, paneID: pane)]) {} }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            t.cancel()
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let before = openDescriptors()
+        try XCTSkipIf(before < 0, "/proc/self/fd unavailable")
+
+        for _ in 0..<8 {
+            let t = Task { for try await _ in client.subscribe([Subscription(.paneTurnCompleted, paneID: pane)]) {} }
+            try await Task.sleep(nanoseconds: 150_000_000)
+            t.cancel()
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
+        let after = openDescriptors()
+        XCTAssertLessThanOrEqual(
+            after - before, 2,
+            "8 subscribe/cancel cycles leaked \(after - before) descriptors"
+        )
+    }
+}

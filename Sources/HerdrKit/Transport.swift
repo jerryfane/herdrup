@@ -149,23 +149,88 @@ public struct UnixSocketTransport: HerdrTransport {
 
     public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
+            let socket = SharedSocket()
             let work = Task.detached {
-                var fd: Int32 = -1
                 do {
-                    fd = try connectFD()
+                    let fd = try connectFD()
+                    // Publish before the first read so cancellation arriving
+                    // mid-connect still finds a descriptor to interrupt.
+                    guard socket.adopt(fd) else {
+                        close(fd)
+                        continuation.finish()
+                        return
+                    }
                     try writeLine(fd, requestLine)
                     var carry: [UInt8] = []
                     while !Task.isCancelled, let line = readLine(fd, carry: &carry) {
                         continuation.yield(line)
                     }
-                    if fd >= 0 { close(fd) }
+                    socket.close()
                     continuation.finish()
                 } catch {
-                    if fd >= 0 { close(fd) }
+                    socket.close()
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in work.cancel() }
+            continuation.onTermination = { _ in
+                // Task.cancel() only sets a flag; it cannot interrupt a blocking
+                // read(2). Shutting the socket down forces that read to return
+                // now, so the loop exits instead of holding a descriptor and a
+                // cooperative-pool thread until the server next writes — which,
+                // on an idle events.subscribe stream, may be never.
+                socket.shutdown()
+                work.cancel()
+            }
         }
     }
 }
+
+/// Owns a descriptor shared between a blocking reader and a cancelling caller.
+///
+/// `shutdown` is what unblocks the reader; `close` releases the descriptor.
+/// Both are guarded so a shutdown racing a normal close cannot double-close a
+/// descriptor number the process may have already reused.
+private final class SharedSocket: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32 = -1
+    private var closed = false
+
+    /// Takes ownership. Returns false if teardown already happened, in which
+    /// case the caller must close the descriptor itself.
+    func adopt(_ descriptor: Int32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return false }
+        fd = descriptor
+        return true
+    }
+
+    /// Interrupts a pending read without releasing the descriptor, so the reader
+    /// observes EOF and unwinds through its normal path.
+    func shutdown() {
+        lock.lock()
+        defer { lock.unlock() }
+        closed = true
+        if fd >= 0 {
+            _ = Glibc_shutdown(fd)
+        }
+    }
+
+    func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        closed = true
+        if fd >= 0 {
+            _ = Foundation_close(fd)
+            fd = -1
+        }
+    }
+}
+
+#if canImport(Glibc)
+private func Glibc_shutdown(_ fd: Int32) -> Int32 { Glibc.shutdown(fd, Int32(SHUT_RDWR)) }
+private func Foundation_close(_ fd: Int32) -> Int32 { Glibc.close(fd) }
+#else
+private func Glibc_shutdown(_ fd: Int32) -> Int32 { Darwin.shutdown(fd, Int32(SHUT_RDWR)) }
+private func Foundation_close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
+#endif
