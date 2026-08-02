@@ -157,14 +157,20 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         // from outside — that is the reviewer's interleaving: the death is
         // processed while the call is still suspended, and the call then
         // returns and tries to publish.
-        lock.withLock { terminators[pane, default: []].append(onTermination) }
-        while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
-        record(.openAttempt(pane, attempt))
+        // Both the terminator registration AND the first-open claim happen
+        // BEFORE the stall. Claiming after it made the slot stealable: a
+        // replacement triggered by the death reached the check first, became
+        // "the first open", and published legitimately — the test flaked 1 run
+        // in 4 reporting .open for a reason that had nothing to do with the
+        // guard under test.
         let laterOpen = lock.withLock { () -> Bool in
+            terminators[pane, default: []].append(onTermination)
             guard onlyFirstOpenSucceeds else { return false }
             return !opensSeen.insert(pane).inserted
         }
         if laterOpen { throw TransportError.closedBeforeResponse }
+        while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
+        record(.openAttempt(pane, attempt))
         let succeedThisOnce = lock.withLock { succeedOnceThenKill.remove(pane) != nil }
         if succeedThisOnce {
             record(.openStream(pane, attempt))
