@@ -369,6 +369,54 @@ final class SessionRecoveryTests: XCTestCase {
                        "the ledger recorded a subscription to a closed pane — irretractable on this wire")
     }
 
+    /// AXIS: a single pane's stream dying re-subscribes exactly that pane,
+    /// exactly once — and only for the attempt that lost it.
+    ///
+    /// Requirement one of task 6: the wire is N independent per-pane
+    /// connections, and one dying was previously inexpressible — the pane went
+    /// silent while the client believed itself connected.
+    func testAStreamFailureResubscribesThatPaneExactlyOnce() throws {
+        var state = try seeded(["p1", "p2"])
+        let opened = connect(&state)
+
+        let replaced = plan(.streamFailed(pane: "p2", from: opened), &state)
+        XCTAssertEqual(replaced.subscribes, ["p2"], "exactly the dead pane")
+        XCTAssertEqual(replaced.subscribesOn, opened, "bound to the attempt that lost it")
+        XCTAssertTrue(state.subscribedPanes.contains("p2"), "the ledger reflects the replacement")
+
+        // The semantics are once PER DEATH, not once per pane: the ledger
+        // entry now represents the REPLACEMENT stream, so a second failure
+        // event legitimately replaces the replacement. Deduplicating spurious
+        // duplicates for one death is the EXECUTOR's contract — it mints one
+        // streamFailed per stream termination — and the policy must not absorb
+        // that job, or a real second death would be swallowed.
+        let second = plan(.streamFailed(pane: "p2", from: opened), &state)
+        XCTAssertEqual(second.subscribes, ["p2"],
+                       "a second death is a real death; the policy must replace again")
+    }
+
+    /// AXIS: stream-failure events that cannot be acted on emit nothing and
+    /// touch nothing — a stale attempt's, an unsubscribed pane's, and a
+    /// closed pane's.
+    func testStreamFailuresThatCannotBeActedOnAreInert() throws {
+        var state = try seeded(["p1"])
+        let opened = connect(&state)
+
+        // Stale attempt: not even a drop.
+        let foreign = AttemptID(uuid: UUID())
+        XCTAssertTrue(plan(.streamFailed(pane: "p1", from: foreign), &state).isEmpty)
+        XCTAssertTrue(state.subscribedPanes.contains("p1"), "a stale failure must not drop a live entry")
+
+        // A pane with no ledger entry: no stream existed to die.
+        XCTAssertTrue(plan(.streamFailed(pane: "never-subscribed", from: opened), &state).isEmpty)
+
+        // A pane closed before its stream death arrives: dropped, not replaced.
+        _ = plan(.paneClosed("p1", from: opened), &state)
+        let afterClose = plan(.streamFailed(pane: "p1", from: opened), &state)
+        XCTAssertTrue(afterClose.isEmpty, "a closed pane must not be re-subscribed")
+        XCTAssertFalse(state.subscribedPanes.contains("p1"), "the dead entry is dropped")
+    }
+
     /// AXIS: a subscription action is bound to the attempt that admitted it —
     /// A's delayed plan can never be mistaken for B's.
     ///
@@ -1123,9 +1171,15 @@ final class PaneSnapshotAccessTests: XCTestCase {
             }) else { return nil }
             return path.joined(separator: ".")
         }.sorted()
+        // ExecutorTransport.fetchSnapshot RETURNS a snapshot but cannot MINT
+        // one: an outside conformer must obtain the value it returns, and the
+        // only source is HerdrClient.paneSnapshot() — the internal init still
+        // gates construction. RecoveryExecutor.apply consumes. Judged here,
+        // out loud, as this audit requires.
         XCTAssertEqual(
             mentioners,
-            ["HerdrClient.paneSnapshot()", "SessionRecovery.observe(_:from:state:)"],
+            ["ExecutorTransport.fetchSnapshot(for:)", "HerdrClient.paneSnapshot()",
+             "RecoveryExecutor.apply(snapshot:from:)", "SessionRecovery.observe(_:from:state:)"],
             "a new package-visible symbol mentions PaneSnapshot; if it can yield one from caller data it is a construction path, and only HerdrClient.paneSnapshot() may produce"
         )
     }
