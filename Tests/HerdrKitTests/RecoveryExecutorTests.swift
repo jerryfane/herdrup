@@ -47,6 +47,33 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         terminate?()
     }
 
+    /// A MISBEHAVING transport: fires the SAME registration's termination
+    /// twice, which the executor's once-latch must reduce to one death.
+    func killStreamTwice(_ pane: String) {
+        lock.lock()
+        let terminate = terminators.removeValue(forKey: pane)
+        lock.unlock()
+        terminate?()
+        terminate?()
+    }
+
+    /// One-shot, SELF-RELEASING close stall.
+    ///
+    /// Self-releasing because a test-controlled release deadlocks: the test
+    /// awaits the interleaving event, that event parks inside the stalled
+    /// closeAll, and the release never runs because the test is still awaiting.
+    /// My first version did exactly that and hung the suite.
+    private var closeStallSeconds: TimeInterval = 0
+    func stallFirstClose(_ seconds: TimeInterval) {
+        lock.lock(); closeStallSeconds = seconds; lock.unlock()
+    }
+    private func takeCloseStall() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        let seconds = closeStallSeconds
+        closeStallSeconds = 0
+        return seconds
+    }
+
     func connect(for attempt: AttemptID) async throws {
         record(.connect(attempt))
         if failConnects { throw TransportError.closedBeforeResponse }
@@ -67,7 +94,11 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         lock.lock(); terminators[pane] = onTermination; lock.unlock()
     }
 
-    func closeAll(for attempt: AttemptID) async { record(.closeAll(attempt)) }
+    func closeAll(for attempt: AttemptID) async {
+        let stall = takeCloseStall()
+        if stall > 0 { try? await Task.sleep(nanoseconds: UInt64(stall * 1_000_000_000)) }
+        record(.closeAll(attempt))
+    }
     func discard(attempt: AttemptID) async { record(.discard(attempt)) }
 }
 
@@ -93,11 +124,10 @@ final class RecoveryExecutorTests: XCTestCase {
     /// THE HAPPY PATH, asserted on the operation ORDER: dial, resync, then
     /// streams — and every stream open comes AFTER the snapshot fetch.
     ///
-    /// CONDITION 4 lives here: resync-before-subscribe is documented as
-    /// load-bearing, so this test must FAIL when the order is swapped. It does
-    /// so structurally — subscriptions exist only downstream of `apply` — and
-    /// the mutation reintroducing memory-derived early subscription is run
-    /// against exactly this assertion.
+    /// CONDITION 4's cold-start half. The subscribe-from-memory mutation is
+    /// NOT run against this test — cold-start memory is empty, so it survived
+    /// here vacuously; the reconnect variant below is the armed one the
+    /// mutation kills against. This asserts the happy-path operation order.
     func testColdStartResyncsBeforeAnyStreamOpens() async throws {
         let transport = ScriptedTransport(panes: ["p1", "p2"])
         let executor = RecoveryExecutor(transport: transport)
@@ -166,6 +196,15 @@ final class RecoveryExecutorTests: XCTestCase {
                       "the stale completion must be discarded AT the transport, not only in policy")
         let current = await executor.currentAttempt
         XCTAssertNotEqual(current, retired, "the retired attempt must not have been adopted")
+        // "No work runs on it" is asserted, not narrated: no resync and no
+        // stream may target the discarded attempt after its discard. A mutation
+        // appending a resync for it survived when only the discard was pinned.
+        let ops = transport.log()
+        let discardIndex = ops.firstIndex(of: .discard(retired))!
+        XCTAssertFalse(ops[discardIndex...].contains(.fetchSnapshot(retired)),
+                       "a resync ran on the discarded attempt")
+        XCTAssertFalse(ops[discardIndex...].contains { if case .openStream(_, retired) = $0 { return true }; return false },
+                       "a stream opened on the discarded attempt")
     }
 
     /// CONDITION 1, half two: a subscribe bound to a retired attempt is
@@ -179,7 +218,8 @@ final class RecoveryExecutorTests: XCTestCase {
         let retired = await executor.currentAttempt!
 
         await executor.handle(.networkChanged(at: Date()))
-        _ = await waitUntil { await executor.isConnected }
+        let resettled = await waitUntil { await executor.subscribedPanes == ["p1"] }
+        XCTAssertTrue(resettled, "the replacement never settled; the log below would be mid-flight")
         let streamsBefore = transport.log().filter { if case .openStream = $0 { return true }; return false }.count
 
         // A's delayed plan arrives: a subscribe bound to the retired attempt.
@@ -191,7 +231,10 @@ final class RecoveryExecutorTests: XCTestCase {
         XCTAssertEqual(streamsAfter, streamsBefore, "a retired attempt's subscribe opened a stream")
         let rejections = await executor.rejections
         XCTAssertEqual(rejections.count, 1, "the rejection must be observable, not silent")
-        XCTAssertTrue(rejections[0].reason.contains("retired"))
+        // first?/??, not [0]: when the guard regressed, the empty-array index
+        // trapped with signal 4 and killed the WHOLE suite — a regression must
+        // read as failures the harness can classify, not as a crash.
+        XCTAssertTrue(rejections.first?.reason.contains("retired") ?? false)
     }
 
     /// REQUIREMENT ONE end-to-end: one pane's stream dies; exactly that pane is
@@ -249,6 +292,148 @@ final class RecoveryExecutorTests: XCTestCase {
                        "the loop opened a stream for a retired attempt after its closeAll")
     }
 
+    /// AXIS: a stale plan's reconnect neither dials a retired attempt NOR
+    /// cancels the current attempt's pending dial — the wedge the sweep
+    /// reproduced 4/4: the stale dial's cancel landed on the replacement's
+    /// backoff sleep, the silent cancellation return scheduled nothing, and
+    /// the executor sat wedged with currentAttempt set and no dial in flight.
+    func testAStalePlansReconnectCannotWedgeTheExecutor() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.isConnected }
+        let retired = await executor.currentAttempt!
+
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+        let current = await executor.currentAttempt!
+        let connectsBefore = transport.log().filter { if case .connect = $0 { return true }; return false }.count
+
+        // The stale plan replays, reconnect bound to the retired attempt.
+        await executor.execute(RecoveryPlan([.reconnect(retired, after: 0)]))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(transport.log().suffix(from: 0).contains { op in
+            if case .connect(let a) = op { return a == retired } else { return false }
+        } && transport.log().filter { $0 == .connect(retired) }.count > 1,
+        "the retired attempt was re-dialed")
+        let connectsAfter = transport.log().filter { if case .connect = $0 { return true }; return false }.count
+        XCTAssertEqual(connectsAfter, connectsBefore, "a stale reconnect dialed something")
+        let stillCurrent = await executor.currentAttempt
+        XCTAssertEqual(stillCurrent, current, "the stale plan disturbed the current attempt")
+        let rejected = await executor.rejections
+        XCTAssertTrue(rejected.contains { $0.action == "reconnect" }, "the refusal must be observable")
+    }
+
+    /// AXIS: an interleaved replacement's resource claim survives the first
+    /// plan's teardown continuation — cancelTransport keeps closing the RIGHT
+    /// attempt afterwards.
+    ///
+    /// The sweep's 4/4 reproduction: two rapid networkChanged; the first plan's
+    /// post-closeAll continuation unconditionally cleared resourcedAttempt,
+    /// destroying the second plan's claim — after which every teardown closed a
+    /// resource-less attempt while the current one's streams leaked forever.
+    func testAnInterleavedClaimSurvivesTheFirstPlansTeardown() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.subscribedPanes == ["p1"] }
+
+        transport.stallFirstClose(0.3)   // N1's teardown parks inside closeAll
+        Task { await executor.handle(.networkChanged(at: Date())) }   // N1
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await executor.handle(.networkChanged(at: Date()))            // N2, unstalled
+        let settled = await waitUntil { await executor.isConnected }
+        XCTAssertTrue(settled, "the replacement never connected")
+        let current = await executor.currentAttempt!
+        // N1's continuation resumes after its stall and writes its clear.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // The decisive probe: a THIRD teardown must close the CURRENT attempt.
+        await executor.handle(.backgrounded(at: Date()))
+        let closed = await waitUntil {
+            transport.log().contains { $0 == .closeAll(current) }
+        }
+        XCTAssertTrue(closed,
+                      "teardown closed a resource-less attempt while the current one's streams leaked")
+    }
+
+    /// AXIS: the executor HONOURS the policy's backoff — the dial waits exactly
+    /// the drawn delay, pinned through the sleeper seam because wall-clock
+    /// assertions let a delete-the-delay mutation survive 5/5.
+    func testTheDialHonoursThePolicysBackoffDelay() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        transport.failConnects = true
+        let recorder = SleepRecorder()
+        let executor = RecoveryExecutor(
+            recovery: SessionRecovery(), transport: transport,
+            generator: SeededGenerator(seed: 42))
+        await executor.setSleeper { delay in await recorder.record(delay) }
+
+        await executor.start()
+        let reachedSleep = await waitUntil { await recorder.recorded().count >= 1 }
+        XCTAssertTrue(reachedSleep, "the failed dial never reached its backoff sleep")
+
+        let delays = await recorder.recorded()
+        // Deterministic: the seeded generator draws the same jitter every run.
+        var reference = SeededGenerator(seed: 42)
+        let expected = SessionRecovery().backoff(failures: 1, using: &reference)
+        // XCTUnwrap, not `!`: with the delay deleted the assertion above fails
+        // AND the force-unwrap trapped with signal 4, which the mutation
+        // harness reads as INVALID rather than KILLED — a real kill misfiled as
+        // a broken run. Same class the sweep found in the rejection test.
+        let slept = try XCTUnwrap(delays.first, "no delay was recorded")
+        XCTAssertEqual(slept, expected, accuracy: 0.0001,
+                       "the executor slept \(slept)s where the policy drew \(expected)s")
+        XCTAssertGreaterThan(expected, 0, "a zero draw would make this assertion vacuous")
+    }
+
+    /// AXIS: teardown actually reaches the transport — a networkChanged closes
+    /// the attempt that held resources. The executor could previously leak
+    /// every stream with the suite green: nothing pinned closeAll at all.
+    func testTeardownClosesTheResourcedAttemptAtTheTransport() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.subscribedPanes == ["p1"] }
+        let resourced = await executor.currentAttempt!
+
+        await executor.handle(.networkChanged(at: Date()))
+        XCTAssertTrue(transport.log().contains(.closeAll(resourced)),
+                      "the resourced attempt's streams were never closed at the transport")
+    }
+
+    /// AXIS: a transport double-firing one termination produces ONE death — the
+    /// once-latch enforces the contract the seam previously only stated. The
+    /// probe without it: three opens for one real death, a permanent
+    /// double-subscription the policy cannot dedup without swallowing real
+    /// second deaths.
+    func testADoubleFiredTerminationProducesOneDeath() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.subscribedPanes == ["p1"] }
+        let attempt = await executor.currentAttempt!
+
+        transport.killStreamTwice("p1")
+        _ = await waitUntil {
+            transport.log().filter { $0 == .openStream("p1", attempt) }.count >= 2
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(transport.log().filter { $0 == .openStream("p1", attempt) }.count, 2,
+                       "one death must produce exactly one replacement open")
+        let rejections = await executor.rejections
+        XCTAssertTrue(rejections.contains { $0.reason.contains("duplicate termination") },
+                      "the dropped duplicate must be observable")
+    }
+
+actor SleepRecorder {
+    private var delays: [TimeInterval] = []
+    func record(_ delay: TimeInterval) { delays.append(delay) }
+    func recorded() -> [TimeInterval] { delays }
+}
+
     /// A dial that fails schedules the retry through the policy (backoff), and
     /// a network change cancels a pending dial rather than racing it.
     func testAFailedDialRetriesAndACancelledDialDoesNotLand() async throws {
@@ -265,7 +450,10 @@ final class RecoveryExecutorTests: XCTestCase {
         transport.failConnects = false
         await executor.handle(.backgrounded(at: Date()))
         let connectsAtBackground = transport.log().filter { if case .connect = $0 { return true }; return false }.count
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Short, and NOT the pin: the deterministic pin is the sleeper-based
+        // test above — this residual window only catches a dial that fires
+        // immediately despite the cancel.
+        try? await Task.sleep(nanoseconds: 200_000_000)
         let connectsAfter = transport.log().filter { if case .connect = $0 { return true }; return false }.count
         XCTAssertEqual(connectsAfter, connectsAtBackground,
                        "a pending dial survived backgrounding: the cancel did not land")
@@ -281,9 +469,14 @@ final class RecoveryExecutorTests: XCTestCase {
 /// connect, snapshot, per-pane streams — is implementable over the actual
 /// wire, not just the scripted fake.
 final class LiveHerdrTransport: ExecutorTransport, @unchecked Sendable {
+    private struct Key: Hashable {
+        let attempt: AttemptID
+        let pane: String
+    }
+
     private let client: HerdrClient
     private let lock = NSLock()
-    private var streams: [String: Task<Void, Never>] = [:]
+    private var streams: [Key: Task<Void, Never>] = [:]
 
     init(client: HerdrClient) { self.client = client }
 
@@ -302,14 +495,25 @@ final class LiveHerdrTransport: ExecutorTransport, @unchecked Sendable {
         let stream = client.subscribe([Subscription(.paneTurnCompleted, paneID: pane)])
         let task = Task {
             do { for try await _ in stream {} } catch {}
+            // A teardown-by-closeAll is not a death: the seam requires that a
+            // stream torn down deliberately fires no termination — the first
+            // version fired on cancellation, so every teardown would have
+            // produced a spurious streamFailed per pane.
+            guard !Task.isCancelled else { return }
             onTermination()
         }
-        lock.lock(); streams[pane] = task; lock.unlock()
+        lock.lock(); streams[Key(attempt: attempt, pane: pane)] = task; lock.unlock()
     }
 
+    /// Attempt-SCOPED, as the seam requires. The first version dropped every
+    /// stream regardless of attempt — `attempt` was unused — which violated
+    /// the very requirement this adapter is cited as proving implementable.
     func closeAll(for attempt: AttemptID) async {
-        lock.lock(); let open = streams; streams = [:]; lock.unlock()
-        for task in open.values { task.cancel() }
+        lock.lock()
+        let mine = streams.filter { $0.key.attempt == attempt }
+        for key in mine.keys { streams.removeValue(forKey: key) }
+        lock.unlock()
+        for task in mine.values { task.cancel() }
     }
 
     func discard(attempt: AttemptID) async { await closeAll(for: attempt) }

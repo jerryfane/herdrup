@@ -11,7 +11,7 @@ private struct ConstantGenerator: RandomNumberGenerator {
 
 /// Deterministic generator, so a jitter test asserts a distribution property
 /// rather than hoping.
-private struct SeededGenerator: RandomNumberGenerator {
+struct SeededGenerator: RandomNumberGenerator {
     private var state: UInt64
     init(seed: UInt64) { self.state = seed &* 6364136223846793005 &+ 1442695040888963407 }
     mutating func next() -> UInt64 {
