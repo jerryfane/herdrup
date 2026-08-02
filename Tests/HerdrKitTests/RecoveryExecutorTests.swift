@@ -263,9 +263,8 @@ final class RecoveryExecutorTests: XCTestCase {
         }
         XCTAssertEqual(ops[1], .fetchSnapshot(attempt), "resync must be the first post-connect operation")
         let firstStream = ops.firstIndex { if case .openStream = $0 { return true }; return false }
-        let snapshotIndex = ops.firstIndex(of: .fetchSnapshot(attempt))!
-        XCTAssertNotNil(firstStream)
-        XCTAssertGreaterThan(firstStream!, snapshotIndex,
+        let snapshotIndex = try XCTUnwrap(ops.firstIndex(of: .fetchSnapshot(attempt)))
+        XCTAssertGreaterThan(try XCTUnwrap(firstStream), snapshotIndex,
                              "a stream opened BEFORE the snapshot: subscribe-from-memory is back")
         XCTAssertEqual(Set(ops.compactMap { if case .openStream(let p, _) = $0 { return p }; return nil }),
                        ["p1", "p2"])
@@ -287,13 +286,13 @@ final class RecoveryExecutorTests: XCTestCase {
         // Memory is now non-empty. Reconnect.
         await executor.handle(.networkChanged(at: Date()))
         _ = await waitUntil { await executor.subscribedPanes == ["p1", "p2"] }
-        let attemptB = await executor.currentAttempt!
+        let attemptBOptional = await executor.currentAttempt
+        let attemptB = try XCTUnwrap(attemptBOptional)
 
         let ops = transport.log()
         let snapshotB = ops.firstIndex(of: .fetchSnapshot(attemptB))
         let firstStreamB = ops.firstIndex { if case .openStream(_, attemptB) = $0 { return true }; return false }
-        XCTAssertNotNil(snapshotB); XCTAssertNotNil(firstStreamB)
-        XCTAssertGreaterThan(firstStreamB!, snapshotB!,
+        XCTAssertGreaterThan(try XCTUnwrap(firstStreamB), try XCTUnwrap(snapshotB),
                              "a stream opened on B before B's snapshot: memory-derived subscription is back")
     }
 
@@ -306,7 +305,8 @@ final class RecoveryExecutorTests: XCTestCase {
         _ = await waitUntil { await executor.isConnected }
 
         // The network changes; attempt A is retired, B dials.
-        let retired = await executor.currentAttempt!
+        let retiredOptional = await executor.currentAttempt
+        let retired = try XCTUnwrap(retiredOptional)
         await executor.handle(.networkChanged(at: Date()))
         _ = await waitUntil { await executor.isConnected }
 
@@ -321,7 +321,10 @@ final class RecoveryExecutorTests: XCTestCase {
         // stream may target the discarded attempt after its discard. A mutation
         // appending a resync for it survived when only the discard was pinned.
         let ops = transport.log()
-        let discardIndex = ops.firstIndex(of: .discard(retired))!
+        // XCTUnwrap, not `!`: removing transport.discard failed the assertion
+        // above AND then crashed here with signal 4, which the harness reads as
+        // INVALID rather than KILLED — a real kill misfiled as a broken run.
+        let discardIndex = try XCTUnwrap(ops.firstIndex(of: .discard(retired)))
         XCTAssertFalse(ops[discardIndex...].contains(.fetchSnapshot(retired)),
                        "a resync ran on the discarded attempt")
         XCTAssertFalse(ops[discardIndex...].contains { if case .openStream(_, retired) = $0 { return true }; return false },
@@ -336,7 +339,8 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(recovery: recovery, transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.isConnected }
-        let retired = await executor.currentAttempt!
+        let retiredOptional = await executor.currentAttempt
+        let retired = try XCTUnwrap(retiredOptional)
 
         await executor.handle(.networkChanged(at: Date()))
         let resettled = await waitUntil { await executor.subscribedPanes == ["p1"] }
@@ -366,7 +370,8 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.subscribedPanes == ["p1", "p2"] }
-        let attempt = await executor.currentAttempt!
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
         let opensBefore = transport.log().filter { if case .openStream = $0 { return true }; return false }
 
         transport.killStream("p2")
@@ -396,10 +401,16 @@ final class RecoveryExecutorTests: XCTestCase {
         transport.stall("a-first")             // pane 1 suspends inside its open
         await executor.start()
 
-        _ = await waitUntil {
-            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
-        }
-        let attemptA = await executor.currentAttempt!
+        // Wait for the first pane's REGISTRATION, not fetchSnapshot: the fake
+        // logs the snapshot before returning it and before the stalled stream
+        // registers, so waiting on it let networkChanged retire A BEFORE the
+        // loop began — the mutation removing the per-pane guard then built and
+        // passed. Fourth instance in this file of a test observing something
+        // that precedes the window it names.
+        let inWindow = await waitUntil { transport.registrationCount("a-first") > 0 }
+        XCTAssertTrue(inWindow, "the subscribe loop never entered its first open; the window was not exercised")
+        let attemptAOptional = await executor.currentAttempt
+        let attemptA = try XCTUnwrap(attemptAOptional)
 
         // While the loop is suspended on pane 1, the world moves.
         await executor.handle(.networkChanged(at: Date()))
@@ -423,11 +434,13 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.isConnected }
-        let retired = await executor.currentAttempt!
+        let retiredOptional = await executor.currentAttempt
+        let retired = try XCTUnwrap(retiredOptional)
 
         await executor.handle(.networkChanged(at: Date()))
         _ = await waitUntil { await executor.isConnected }
-        let current = await executor.currentAttempt!
+        let currentOptional = await executor.currentAttempt
+        let current = try XCTUnwrap(currentOptional)
         let connectsBefore = transport.log().filter { if case .connect = $0 { return true }; return false }.count
 
         // The stale plan replays, reconnect bound to the retired attempt.
@@ -466,7 +479,8 @@ final class RecoveryExecutorTests: XCTestCase {
         await executor.handle(.networkChanged(at: Date()))            // N2, unstalled
         let settled = await waitUntil { await executor.isConnected }
         XCTAssertTrue(settled, "the replacement never connected")
-        let current = await executor.currentAttempt!
+        let currentOptional = await executor.currentAttempt
+        let current = try XCTUnwrap(currentOptional)
         // N1's continuation resumes after its stall and writes its clear.
         try? await Task.sleep(nanoseconds: 500_000_000)
 
@@ -517,7 +531,8 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.subscribedPanes == ["p1"] }
-        let resourced = await executor.currentAttempt!
+        let resourcedOptional = await executor.currentAttempt
+        let resourced = try XCTUnwrap(resourcedOptional)
 
         await executor.handle(.networkChanged(at: Date()))
         XCTAssertTrue(transport.log().contains(.closeAll(resourced)),
@@ -534,7 +549,8 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.subscribedPanes == ["p1"] }
-        let attempt = await executor.currentAttempt!
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
 
         transport.killStreamTwice("p1")
         _ = await waitUntil {
@@ -570,7 +586,8 @@ actor SleepRecorder {
         _ = await waitUntil {
             transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
         }
-        let retired = await executor.currentAttempt!
+        let retiredOptional = await executor.currentAttempt
+        let retired = try XCTUnwrap(retiredOptional)
 
         await executor.handle(.networkChanged(at: Date()))   // teardown completes
         transport.release("only")                            // the open lands late
@@ -676,7 +693,8 @@ actor SleepRecorder {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
         _ = await waitUntil { await executor.isConnected }
-        let retired = await executor.currentAttempt!
+        let retiredOptional = await executor.currentAttempt
+        let retired = try XCTUnwrap(retiredOptional)
         await executor.handle(.networkChanged(at: Date()))
         _ = await waitUntil { await executor.isConnected }
 

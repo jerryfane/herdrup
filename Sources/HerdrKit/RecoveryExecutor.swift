@@ -374,18 +374,18 @@ public actor RecoveryExecutor {
 
     private func open(panes: Set<String>, for attempt: AttemptID) async {
         for pane in panes.sorted() {
-            // Re-checked PER PANE, because every openStream await is an actor
-            // suspension point: a retirement can interleave mid-loop, and a
-            // door-only check let the remaining panes open for the retired
-            // attempt AFTER its closeAll had run — orphan streams nothing would
-            // ever close. Reproduced by test before this guard existed.
-            guard attempt == state.currentAttempt else {
-                record(rejection: (
-                    action: "openStream(\(pane))",
-                    reason: "attempt retired mid-subscribe"
-                ))
-                return
-            }
+            // NO pre-await binding check here, deliberately, and this is a
+            // removal rather than an omission: one lived here and was found
+            // UNREACHABLE AS A DECIDER. Actor reentrancy happens only at
+            // suspension points, and between the previous iteration's
+            // post-await reap (which returns) and this position there is none —
+            // so any retirement a pre-check could see was already seen by the
+            // reap. Its mutation survived precisely because the reap covered
+            // every case. Two mechanisms for one property, neither individually
+            // pinnable: the trap this project has now hit four times, and the
+            // fourth was my own fix for the third.
+            //
+            // The single mechanism is the RECHECK-AND-REAP after the open below.
             let failures = openFailures[FailureKey(attempt: attempt, pane: pane)] ?? 0
             guard failures < Self.openFailureCap else {
                 record(rejection: (
