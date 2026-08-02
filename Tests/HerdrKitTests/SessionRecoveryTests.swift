@@ -236,8 +236,11 @@ final class SessionRecoveryTests: XCTestCase {
     /// could not expose this: a copy saved WHILE CONNECTED replayed
     /// connectedSince, so paneCreated subscribed onto the cancelled transport
     /// (isConnected read the replayed date) and connected(B) was classified as
-    /// an already-adopted repeat and suppressed entirely. Connection truth now
-    /// lives in the shared authority, tagged with its attempt.
+    /// an already-adopted repeat and suppressed entirely. Connection and
+    /// subscription state now live in the shared authority, and every
+    /// attempt-changing transition clears them in the same critical section —
+    /// that clearing, not a tag, is the mechanism (an earlier tag was an
+    /// unreachable twin guard and was removed).
     func testACopySavedWhileConnectedCannotPoisonTheReplacementAttempt() throws {
         var state = try seeded(["p1"])
         let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
@@ -286,6 +289,49 @@ final class SessionRecoveryTests: XCTestCase {
             ?? state.currentAttempt!
         XCTAssertEqual(plan(.connected(readopted, at: Date()), &state).subscribes, ["p1", "p2"],
                        "the replacement transport must open the full current set")
+    }
+
+    /// AXIS: concurrent discoveries neither lose ledger entries nor emit a
+    /// pane's subscription twice.
+    ///
+    /// The reviewer's probe: 10,000 concurrent paneCreated calls against
+    /// separately-locked get/set accessors retained ~1,400 ledger entries,
+    /// and every lost pane could be subscribed AGAIN on rediscovery. State
+    /// copies share the authority and both types are Sendable, so this is the
+    /// advertised surface. Admission is now one critical section; this drives
+    /// eight State copies of one lineage concurrently and requires exactly-once
+    /// admission with nothing lost.
+    func testConcurrentDiscoveriesAreAdmittedExactlyOnce() throws {
+        var seed = try seeded(["p0"])
+        _ = connect(&seed)
+
+        let paneCount = 1_000
+        let lanes = 8
+        let collected = NSLock()
+        var emitted: [String] = []
+
+        // EVERY lane attempts EVERY pane, deliberately. A first version strided
+        // the panes so each was owned by one lane — under which a mutation that
+        // split the check from the record SURVIVED, because a stale check can
+        // only double-admit when two threads race the SAME pane, and no two
+        // ever did. Contention on the same keys is the property under test.
+        DispatchQueue.concurrentPerform(iterations: lanes) { lane in
+            var copy = seed          // copies share the lineage's authority
+            var generator = SeededGenerator(seed: UInt64(lane) + 1)
+            for index in 0..<paneCount {
+                let plan = recovery.plan(
+                    for: .paneCreated("pane-\(index)"), state: &copy, using: &generator)
+                if let fresh = plan.subscribes, !fresh.isEmpty {
+                    collected.lock(); emitted.append(contentsOf: fresh); collected.unlock()
+                }
+            }
+        }
+
+        XCTAssertEqual(seed.subscribedPanes.count, paneCount + 1,
+                       "the ledger lost entries under concurrency")
+        XCTAssertEqual(emitted.count, paneCount,
+                       "every pane must be subscribed exactly once; \(emitted.count - paneCount) duplicates or losses")
+        XCTAssertEqual(Set(emitted).count, paneCount, "a pane was emitted twice")
     }
 
     /// AXIS: the stability window measures EVENT time, not wall-clock time.

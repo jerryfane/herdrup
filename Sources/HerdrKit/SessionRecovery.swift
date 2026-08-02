@@ -28,33 +28,95 @@ final class AttemptAuthority: @unchecked Sendable {
     private var _subscribedPanes: Set<String> = []
 
     var current: AttemptID? {
-        get { lock.lock(); defer { lock.unlock() }; return _current }
-        set { lock.lock(); _current = newValue; lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; return _current
     }
 
-    /// When the CURRENT attempt's connection was adopted, or nil.
-    ///
-    /// Lives here — not in the value State — because a value copy saved while A
-    /// was connected replayed its date: `paneCreated` subscribed onto the
-    /// cancelled transport, and the real replacement's `connected(B)` was
-    /// classified as an already-adopted repeat and suppressed. Sharing is the
-    /// fix; the INVARIANT that keeps this honest is that every transition which
-    /// mints or clears `current` clears this first, so it can never describe a
-    /// non-current attempt's transport. A first draft also carried an attempt
-    /// tag as a second guard on the same property; the tag was unreachable
-    /// (mutation-verified: removing it changed nothing), and an unpinnable
-    /// twin guard is the trap this project has now hit three times.
+    /// When the CURRENT attempt's connection was adopted, or nil. Lives here —
+    /// not in the value State — because a value copy saved while connected
+    /// replayed its date, subscribing onto a cancelled transport and
+    /// suppressing the real replacement's adoption as a "repeat".
     var connectedSince: Date? {
-        get { lock.lock(); defer { lock.unlock() }; return _connectedSince }
-        set { lock.lock(); _connectedSince = newValue; lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; return _connectedSince
     }
 
-    /// The subscription ledger, transport-scoped state like the connection —
-    /// a replayed copy's ledger described the CANCELLED transport's
-    /// subscriptions, which is the same poison one field over.
     var subscribedPanes: Set<String> {
-        get { lock.lock(); defer { lock.unlock() }; return _subscribedPanes }
-        set { lock.lock(); _subscribedPanes = newValue; lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; return _subscribedPanes
+    }
+
+    /// Every transition below is ONE critical section, deliberately. The first
+    /// version exposed get/set accessors and let the policy compose them —
+    /// which made every check-then-update a non-atomic read-modify-write across
+    /// two lock acquisitions. A concurrent 10,000-pane probe retained ~1,400
+    /// ledger entries, and each lost pane could then be subscribed AGAIN on
+    /// rediscovery. State copies share this object and both types are Sendable,
+    /// so concurrent use is the advertised surface, not an abuse of it.
+
+    /// Mints a new attempt and makes it current. Tears down transport-scoped
+    /// state in the same section: every mint is a new transport, and clearing
+    /// here is what keeps `connectedSince` unable to describe a non-current
+    /// attempt's transport.
+    func mint() -> AttemptID {
+        lock.lock(); defer { lock.unlock() }
+        let id = AttemptID(uuid: UUID())
+        _current = id
+        _connectedSince = nil
+        _subscribedPanes = []
+        return id
+    }
+
+    /// Clears authority and transport state without minting — backgrounding
+    /// and disconnection, where nothing should be dialing.
+    func teardown() {
+        lock.lock(); defer { lock.unlock() }
+        _current = nil
+        _connectedSince = nil
+        _subscribedPanes = []
+    }
+
+    enum AdoptOutcome {
+        case stale
+        case repeated
+        case adopted
+    }
+
+    /// Staleness check, repeat check, adoption and ledger seed in one section.
+    func adopt(_ attempt: AttemptID, at: Date, subscribing panes: Set<String>) -> AdoptOutcome {
+        lock.lock(); defer { lock.unlock() }
+        guard attempt == _current else { return .stale }
+        guard _connectedSince == nil else { return .repeated }
+        _connectedSince = at
+        _subscribedPanes = panes
+        return .adopted
+    }
+
+    /// Staleness check and failure teardown in one section.
+    enum FailOutcome {
+        /// The failing attempt was not current; touch nothing.
+        case stale
+        /// The failure was real; carries the adoption time it ended, if any,
+        /// for stability accounting.
+        case failed(endedConnectionFrom: Date?)
+    }
+
+    func failIfCurrent(_ attempt: AttemptID) -> FailOutcome {
+        lock.lock(); defer { lock.unlock() }
+        guard attempt == _current else { return .stale }
+        let since = _connectedSince
+        _connectedSince = nil
+        _subscribedPanes = []
+        return .failed(endedConnectionFrom: since)
+    }
+
+    /// Admits the panes not already subscribed, records them, and returns ONLY
+    /// the newly admitted — nil when there is no adopted connection to
+    /// subscribe on. Check, record and connection gate share the section, so no
+    /// interleaving can admit a pane twice or emit for a dead transport.
+    func admitWhileConnected(_ panes: Set<String>) -> Set<String>? {
+        lock.lock(); defer { lock.unlock() }
+        guard _connectedSince != nil else { return nil }
+        let fresh = panes.subtracting(_subscribedPanes)
+        _subscribedPanes.formUnion(fresh)
+        return fresh
     }
 }
 
@@ -291,30 +353,13 @@ public struct SessionRecovery: Sendable {
     ///
     /// Every prior attempt becomes stale at this point, which is what makes a
     /// late callback recognisable rather than plausible.
-    private func nextAttempt(_ state: inout State) -> AttemptID {
-        // Never derived from State: see AttemptID's doc for the two identities
-        // that were, and how each fell to replay.
-        let id = AttemptID(uuid: UUID())
-        state.authority.current = id
-        return id
-    }
-
     /// Starts an attempt no event triggered — a cold launch, or a caller-driven
-    /// restart.
-    ///
-    /// Three properties earned by adversarial sweep, each from an observed
-    /// failure: it **cancels first**, because calling it while a connection was
-    /// live abandoned that transport with its subscriptions open, forever; it
-    /// **clears `connectedSince`**, because the stale date made `paneCreated`
-    /// emit subscribes for a transport the policy had just walked away from; and
-    /// it is **foreground-guarded**, because it was the one mint that ignored
-    /// backgrounding — which also made it the only path by which the redundant
-    /// background guards elsewhere were reachable at all.
+    /// restart. Cancels first, clears adoption state (via mint's teardown), and
+    /// is foreground-guarded; each property was earned by an observed failure,
+    /// recorded on the case bodies below.
     public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
         guard state.isForeground else { return RecoveryPlan() }
-        state.authority.connectedSince = nil
-        state.authority.subscribedPanes = []
-        return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
+        return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
     }
 
     public func plan(
@@ -324,75 +369,54 @@ public struct SessionRecovery: Sendable {
     ) -> RecoveryPlan {
         switch event {
         case .connected(let attempt, let at):
-            // Staleness is the ONE mechanism here, deliberately. A cancelled
-            // attempt still finishes, and adopting it opens persistent
-            // subscriptions on a transport the client already replaced — and
-            // because backgrounding, network changes and cancellation all clear
-            // `currentAttempt`, this same guard is what discards a connection
-            // completing while backgrounded. An earlier version also kept a
-            // separate `isForeground` guard for that case; it was unreachable
-            // (nothing mints an attempt while backgrounded), and an unreachable
-            // twin guard is the two-guards-one-property trap this project has
-            // now hit twice: neither copy is individually pinnable.
-            guard attempt == state.currentAttempt else {
+            // Staleness, repeat-detection and adoption are ONE atomic
+            // transition on the shared authority. Staleness is the sole
+            // background protection (backgrounding clears the authority, so a
+            // late completion cannot match — the removed isForeground twin
+            // guard was unreachable); a repeat ready for the adopted attempt is
+            // news, not a new adoption, because platforms deliver
+            // ready -> waiting -> ready without a failure between.
+            switch state.authority.adopt(attempt, at: at, subscribing: state.knownPanes) {
+            case .stale:
                 return RecoveryPlan([.discardConnection])
+            case .repeated:
+                return RecoveryPlan()
+            case .adopted:
+                return RecoveryPlan([.resyncAllPanes, .subscribe(state.knownPanes)])
             }
-            // A REPEAT connected for the already-adopted attempt is news, not a
-            // new adoption. Platforms deliver it: a connection can go
-            // ready -> waiting -> ready across a viability blip without failing,
-            // so nothing guarantees one connected per attempt. Re-adopting
-            // re-emitted resync and the full subscribe set — the duplicate this
-            // type exists to prevent — and overwrote `connectedSince`, silently
-            // restarting the stability clock.
-            guard state.connectedSince == nil else { return RecoveryPlan() }
-            state.authority.connectedSince = at
-            state.authority.subscribedPanes = state.knownPanes
-            // The only emitter of `.resyncAllPanes`, and the only emitter of the
-            // FULL-SET subscribe. Not the only `.subscribe` site: `paneCreated`
-            // and `observe` emit incremental single-pane/added-pane subscribes
-            // while connected. The invariant actually held is narrower than an
-            // earlier comment claimed: no pane's persistent subscription is
-            // opened twice within one recovery.
-            return RecoveryPlan([.resyncAllPanes, .subscribe(state.knownPanes)])
 
         case .transportFailed(let attempt, let at):
-            // A stale failure must not tear down the attempt that replaced it,
-            // nor count against the backoff — it is news about a connection
-            // nobody is using.
-            // The staleness guard is also the background protection: backgrounding
-            // clears `currentAttempt`, so a failure arriving while backgrounded
-            // can never match it. An earlier version kept a second
-            // `isForeground` branch below this guard; every mint requires the
-            // foreground, so the branch was unreachable — dead defense that no
-            // test could pin.
-            guard attempt == state.currentAttempt else { return RecoveryPlan() }
+            // Stale failures are news about a connection nobody is using; the
+            // staleness check and the teardown share the authority's critical
+            // section, and streak accounting runs only when the failure was
+            // real.
+            guard case .failed(let endedConnectionFrom) = state.authority.failIfCurrent(attempt) else {
+                return RecoveryPlan()
+            }
             // A connection that lasted counts as healthy, so the next failure
             // starts from a short delay rather than inheriting an old streak.
-            if let since = state.connectedSince, at.timeIntervalSince(since) >= stabilityInterval {
+            if let since = endedConnectionFrom,
+               at.timeIntervalSince(since) >= stabilityInterval {
                 state.consecutiveFailures = 0
             }
-            state.authority.connectedSince = nil
-            state.authority.subscribedPanes = []
             state.consecutiveFailures += 1
             let delay = backoff(failures: state.consecutiveFailures, using: &generator)
-            return RecoveryPlan([.reconnect(nextAttempt(&state), after: delay)])
+            return RecoveryPlan([.reconnect(state.authority.mint(), after: delay)])
 
         case .networkChanged:
-            // Reconnect, not migrate. Cancel first: the old socket is bound to an
-            // address that may no longer exist, and a half-open connection on a
-            // dead interface fails by timing out rather than by erroring.
-            state.authority.connectedSince = nil
-            state.authority.subscribedPanes = []
+            // Reconnect, not migrate. Cancel first: the old socket is bound to
+            // an address that may no longer exist, and a half-open connection on
+            // a dead interface fails by timing out rather than by erroring.
             state.consecutiveFailures = 0
-            state.authority.current = nil
-            guard state.isForeground else { return RecoveryPlan([.cancelTransport]) }
-            return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
+            guard state.isForeground else {
+                state.authority.teardown()
+                return RecoveryPlan([.cancelTransport])
+            }
+            return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
 
         case .backgrounded:
             state.isForeground = false
-            state.authority.connectedSince = nil
-            state.authority.subscribedPanes = []
-            state.authority.current = nil
+            state.authority.teardown()
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
             // between closing it deliberately and discovering it dead later.
@@ -401,31 +425,23 @@ public struct SessionRecovery: Sendable {
         case .foregrounded:
             state.isForeground = true
             state.consecutiveFailures = 0
-            state.authority.connectedSince = nil
-            state.authority.subscribedPanes = []
-            // Cancel FIRST. Foregrounding is not guaranteed to find a dead
-            // transport: a foregrounded event with a connection still live (the
-            // OS never suspended us, or a lifecycle bug delivered no
-            // backgrounded) previously minted a replacement while the old
-            // transport stayed open and subscribed — two sockets reading the
-            // same panes, double-applied events, and nothing in any later plan
-            // would ever close the first one. Then reconnect; resync and
-            // subscriptions follow on `connected`, since there is no transport
-            // yet to run them on.
-            return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
+            // Cancel FIRST — foregrounding is not guaranteed to find a dead
+            // transport, and dialing beside a live one previously leaked two
+            // sockets reading the same panes forever. Resync and subscriptions
+            // follow on `connected`; there is no transport yet to run them on.
+            return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
 
         case .paneCreated(let pane):
             state.knownPanes.insert(pane)
-            // Subscribe only if there is a connection AND this transport does
-            // not already hold a subscription for the pane. The second check is
-            // the reappearing-pane case: a snapshot shrink forgets a pane while
-            // its subscription stays open (no unsubscribe verb exists), so
-            // "newly known" is not "unwatched".
-            guard state.isConnected, !state.subscribedPanes.contains(pane) else {
+            // Admission is atomic on the authority: the connection gate, the
+            // already-subscribed check and the record are one critical section,
+            // so concurrent discoveries can neither drop a ledger entry nor
+            // subscribe a pane twice. Not connected -> the next adoption's
+            // full-set subscribe covers it.
+            guard let fresh = state.authority.admitWhileConnected([pane]), !fresh.isEmpty else {
                 return RecoveryPlan()
             }
-            state.authority.subscribedPanes.insert(pane)
-            return RecoveryPlan([.subscribe([pane])])
+            return RecoveryPlan([.subscribe(fresh)])
 
         case .paneClosed(let pane):
             state.knownPanes.remove(pane)
@@ -454,15 +470,14 @@ public struct SessionRecovery: Sendable {
     /// with no wildcard, so nothing else would ever cover it.
     public func observe(_ snapshot: PaneSnapshot, state: inout State) -> RecoveryPlan {
         state.knownPanes = snapshot.paneIDs
-        // Diffed against the SUBSCRIPTION ledger, not prior knowledge: a pane
-        // this transport already watches must not be subscribed twice however
-        // many times snapshots forget and rediscover it, and a shrink leaves
-        // its open subscriptions in place because nothing on the wire can close
-        // one short of the connection itself.
-        let unwatched = snapshot.paneIDs.subtracting(state.subscribedPanes)
-        guard state.isConnected, !unwatched.isEmpty else { return RecoveryPlan() }
-        state.authority.subscribedPanes.formUnion(unwatched)
-        return RecoveryPlan([.subscribe(unwatched)])
+        // Atomic admission against the SUBSCRIPTION ledger, not prior
+        // knowledge: a pane this transport already watches must not be
+        // subscribed twice however many times snapshots forget and rediscover
+        // it, and a shrink leaves its open subscriptions in place because
+        // nothing on the wire can close one short of the connection itself.
+        guard let fresh = state.authority.admitWhileConnected(snapshot.paneIDs),
+              !fresh.isEmpty else { return RecoveryPlan() }
+        return RecoveryPlan([.subscribe(fresh)])
     }
 }
 
