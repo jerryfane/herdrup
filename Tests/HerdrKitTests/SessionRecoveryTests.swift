@@ -229,6 +229,38 @@ final class SessionRecoveryTests: XCTestCase {
                        "the lineage's real current attempt must still adopt")
     }
 
+    /// AXIS: a copy saved AFTER A connected cannot poison B's lifecycle.
+    ///
+    /// The reviewer's fifth replay probe, now the regression. Their previous
+    /// probe copied State before A connected, so its bookkeeping was empty and
+    /// could not expose this: a copy saved WHILE CONNECTED replayed
+    /// connectedSince, so paneCreated subscribed onto the cancelled transport
+    /// (isConnected read the replayed date) and connected(B) was classified as
+    /// an already-adopted repeat and suppressed entirely. Connection truth now
+    /// lives in the shared authority, tagged with its attempt.
+    func testACopySavedWhileConnectedCannotPoisonTheReplacementAttempt() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptA, at: Date()), &state)
+        let saved = state                       // connected bookkeeping aboard
+
+        let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
+        let attemptB = changed.reconnectAttempt!
+
+        state = saved                           // the replay
+
+        // No incremental subscribe may target the cancelled transport.
+        XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty,
+                      "a replayed connectedSince let paneCreated subscribe onto a cancelled transport")
+
+        // And B's adoption must not be suppressed as a repeat.
+        let adoptedB = plan(.connected(attemptB, at: Date()), &state)
+        XCTAssertEqual(adoptedB.actions.first, .resyncAllPanes,
+                       "the replayed connectedSince classified B's adoption as a repeat and suppressed it")
+        XCTAssertEqual(adoptedB.subscribes, ["p1", "p9"],
+                       "B must open the full current set, including the pane learned mid-replay")
+    }
+
     /// AXIS: a pane forgotten by a snapshot shrink and later rediscovered is
     /// NOT subscribed a second time on the same transport.
     ///
@@ -397,10 +429,12 @@ final class SessionRecoveryTests: XCTestCase {
         // precisely so authority is NOT replayable value contents. Judged out
         // loud, as this guard requires. (`currentAttempt` left the list: it is
         // computed through the authority now, and Mirror sees stored fields.)
+        // connectedSince and subscribedPanes left the stored list: both are
+        // computed through the shared authority now, precisely so a value copy
+        // cannot replay them. Mirror sees stored fields only.
         XCTAssertEqual(
             fields,
-            ["authority", "connectedSince", "consecutiveFailures",
-             "isForeground", "knownPanes", "subscribedPanes"],
+            ["authority", "consecutiveFailures", "isForeground", "knownPanes"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
         // One level down too: State stores AttemptID, so a position smuggled
