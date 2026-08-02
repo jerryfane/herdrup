@@ -61,8 +61,9 @@ def main(path):
         for field in ("t_request_ms", "t_ready_ms", "session_age_ms", "started_at_ms"):
             raw = r[field]
             if not raw:
-                if field == "t_ready_ms" and r["arm"] == "A":
-                    continue
+                # No exemptions — A's t_ready is an explicit 0.000, per the
+                # retained-data schema. The A carve-out here let an emptied
+                # field pass while the doc claimed every timing parses finite.
                 problems.append(f"row {r['sequence']} lacks {field}")
                 break
             try:
@@ -151,9 +152,15 @@ def main(path):
     print(f"decision (preregistered flat rule): {sorted(outcome)}")
     b_ready = arms["B"]["t_ready_p95"] or 0.0
     c_ready = arms["C"]["t_ready_p95"] or 0.0
-    print(f"sensitivity — replenishment cap applied to BOTH arms (not the preregistered rule): "
-          f"B t_ready p95={b_ready:.2f}ms, C={c_ready:.2f}ms vs cap {rule.READY_CAP}ms -> "
-          f"{'neither qualifies' if b_ready > rule.READY_CAP and c_ready > rule.READY_CAP else 'differs from preregistered outcome' if (b_ready > rule.READY_CAP) != (c_ready > rule.READY_CAP) else 'same outcome'}")
+    symmetric = rule.flat_symmetric(
+        arms["A"]["p95"], arms["B"]["p95"], arms["C"]["p95"],
+        arms["A"]["outliers"], arms["B"]["outliers"], arms["C"]["outliers"],
+        c_ready, b_ready,
+    )
+    print(f"sensitivity — the SYMMETRIC-CAP selector (cap on both arms; not the "
+          f"preregistered rule), run in full: {sorted(symmetric)} "
+          f"[B t_ready p95={b_ready:.2f}ms, C={c_ready:.2f}ms, cap {rule.READY_CAP}ms]"
+          + ("" if symmetric == outcome else " — DIFFERS from the preregistered outcome"))
     if len(outcome) != 1:
         print("ERROR: the rule returned multiple outcomes; the enumeration guarantee is broken")
         return 1

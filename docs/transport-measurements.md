@@ -434,19 +434,29 @@ record-the-blocker obligation:
 **The cap is asymmetric, and review caught the rationale claiming otherwise.**
 `t_ready` is defined as pool-slot-blocking cost for both arms, and B's is
 100.08 ms p95 — its idle *is* the treatment. Applying the stated affordability
-criterion symmetrically disqualifies **both** arms (the analyzer prints this
-sensitivity beside every decision). So, precisely:
+criterion symmetrically disqualifies **both** arms. The analyzer prints this
+sensitivity beside every decision by running an actual symmetric selector
+(`flat_symmetric` in the canonical rule module — all qualification conditions
+and ordering, not a t_ready-only comparison, which a review probe showed
+mislabels datasets where an arm fails a different condition). So, precisely:
 
 - The adoption of B is the outcome of the rule **as committed**, cap on C only.
   It does not follow from the rationale as previously written, which stated a
   criterion broader than the rule applied.
-- There is a real distinction the asymmetry can rest on — B's `t_ready` is idle
-  wall-clock, deterministic by construction (it is the treatment parameter, and
-  pool sizing absorbs it as known slot-occupancy), while C's is **active work**:
-  a real herdr connection opened and torn down per insertion, with observed
-  variance (96–185 ms). That distinction is *declared* here as the cap's basis
-  for future runs, with its post-run timing stated; it was not written down
-  before the run, and the 50 ms number remains operational, not derived.
+- The distinction the asymmetry rests on is **declared as an operational
+  preference and nothing more**: B's `t_ready` is passive waiting; C's is
+  **active work** — a real herdr connection opened and torn down per insertion,
+  with observed variance (96–185 ms). An earlier version of this bullet also
+  called B's delay "deterministic by construction" and said pool sizing
+  "absorbs" it; review caught both as unsupported. `usleep` sets a *minimum* —
+  it overshoots under scheduling, suspension and load (this run's B `t_ready`
+  p95 was 100.08 ms, already above the 100 ms parameter) — and nothing here
+  measured slot occupancy, cold start, bursts, eviction or request demand, so
+  "absorbed" was a hypothesis wearing a conclusion. Both are now **hypotheses
+  assigned to the pool prototype**, which must measure slot occupancy,
+  cold-start latency and burst behaviour before the age gate's cost is treated
+  as absorbed. The preference stands declared, with its post-run timing stated;
+  the 50 ms number remains operational, not derived.
 - Under the symmetric reading the outcome is adopt-neither: hand sessions out
   immediately and pay A's request-path p95. Anyone consuming this decision
   should know it is not robust to that reading; what IS robust across every

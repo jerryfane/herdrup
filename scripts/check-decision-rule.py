@@ -49,6 +49,28 @@ def flat(A, B, C, oa, ob, oc, ready_c):
     return {"C" if (B - C) >= MARGIN else "B"}
 
 
+def flat_symmetric(A, B, C, oa, ob, oc, ready_c, ready_b):
+    """The symmetric-cap reading: identical to flat() except the replenishment
+    cap applies to BOTH candidates. Not the preregistered rule — it exists so
+    the sensitivity the analyzer prints is a run of an ACTUAL selector with all
+    qualification conditions and ordering, not an ad-hoc inequality. The first
+    "sensitivity" compared only the two t_ready values against the cap, and on
+    a dataset where B failed the request margin while C qualified it reported
+    "differs" when both real rules select C.
+    """
+    if A <= MARGIN:
+        return {"neither"}
+    qb = (A - B) >= MARGIN and ob <= oa + TAIL_TOLERANCE and ready_b <= READY_CAP
+    qc = (A - C) >= MARGIN and oc <= oa + TAIL_TOLERANCE and ready_c <= READY_CAP
+    if not qb and not qc:
+        return {"neither"}
+    if qb and not qc:
+        return {"B"}
+    if qc and not qb:
+        return {"C"}
+    return {"C" if (B - C) >= MARGIN else "B"}
+
+
 def superseded(A, B, C, oa, ob, oc, ready_c):
     """The ordered form with vetoes written as fallback steps.
 
@@ -143,6 +165,21 @@ def main():
         got = flat(*case)
         if got != {want}:
             failures.append(f"{message}: {case} gave {got}, expected {{{want}}}")
+
+    # The symmetric selector's own boundaries, including the case that exposed
+    # the ad-hoc sensitivity: B disqualified on the request margin while C
+    # qualifies -> BOTH rules select C, so a sensitivity that only compares
+    # t_ready values against the cap wrongly reports divergence.
+    symmetric_boundaries = [
+        ((100, 95, 5, 0, 0, 0, 10, 10), "C", "B fails margin, C qualifies under both rules"),
+        ((100, 5, 5, 0, 0, 0, 10, 100), "C", "B's own t_ready beyond cap must disqualify B symmetrically"),
+        ((100, 5, 5, 0, 0, 0, 100, 100), "neither", "both beyond cap must adopt neither"),
+        ((100, 5, 5, 0, 0, 0, 10, 10), "B", "tie-break unchanged when both qualify"),
+    ]
+    for case, want, message in symmetric_boundaries:
+        got = flat_symmetric(*case)
+        if got != {want}:
+            failures.append(f"symmetric: {message}: {case} gave {got}, expected {{{want}}}")
     # Both cases the ordered version resolved two ways.
     for case, want in ((100, 80, 80, 1, 0, 0, 10), "B"), ((100, 50, 70, 1, 0, 0, 10), "B"):
         got = flat(*case)
