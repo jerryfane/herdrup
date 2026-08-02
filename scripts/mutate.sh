@@ -77,3 +77,20 @@ fi
 
 echo "KILLED: $FILTER ($EXECUTED tests) fails when '$NAME' is broken."
 grep -m3 -E "^/.*error: .*XCTAssert|^Test Case .* failed" "$RUN_LOG"
+
+# WHICH tests killed it, not just that something did.
+#
+# A kill is a PATTERN, not a verdict. On herdr-ios #13 a compiling no-op
+# survived the two tests written for it and was killed by an unrelated one —
+# and that SPLIT was the evidence those two tests were vacuous, available a
+# full round before anyone ran a premise mutation. Reading the outcome as
+# pass/fail threw it away. Named here so an uneven split is visible without
+# re-reading the log.
+#
+# If a mutation is killed only by tests OTHER than the one written for it,
+# that named test is a premise-mutation suspect (run 4).
+KILLERS=$(grep -oE "^Test Case '[^']+' failed" "$RUN_LOG" \
+          | sed -E "s/^Test Case '([^']+)' failed/\1/" | sort -u)
+KILL_COUNT=$(printf '%s\n' "$KILLERS" | grep -c . || true)
+echo "  killed by $KILL_COUNT of $EXECUTED:"
+printf '%s\n' "$KILLERS" | sed 's/^/    /'
