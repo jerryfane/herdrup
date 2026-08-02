@@ -47,15 +47,38 @@ public protocol ExecutorTransport: Sendable {
     func discard(attempt: AttemptID) async
 }
 
-/// One-shot claim for a stream's termination callback.
+/// Lifecycle latch for one stream registration: coordinates the termination
+/// callback with the openStream return, atomically.
+///
+/// Two states short of this were two lies: a termination firing WHILE
+/// openStream was suspended still saw the success path publish the pane as
+/// open afterwards (falsely `.open` after exhaustion), and nothing tied a
+/// termination to the registration it belonged to.
 final class TerminationLatch: @unchecked Sendable {
+    private enum Lifecycle {
+        case fresh
+        case published
+        case terminated
+    }
+
     private let lock = NSLock()
-    private var claimed = false
-    /// True exactly once.
+    private var lifecycle: Lifecycle = .fresh
+
+    /// Termination side: true exactly once, whether or not the open ever
+    /// published — at-most-once is unconditional.
     func claim() -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if claimed { return false }
-        claimed = true
+        if case .terminated = lifecycle { return false }
+        lifecycle = .terminated
+        return true
+    }
+
+    /// Open-return side: true iff the stream is still alive to publish. A
+    /// registration whose termination already fired must NOT surface as open.
+    func publishIfUnterminated() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard case .fresh = lifecycle else { return false }
+        lifecycle = .published
         return true
     }
 }
@@ -103,9 +126,17 @@ public actor RecoveryExecutor {
     }
     private var openFailures: [FailureKey: Int] = [:]
     private var lastOpenErrors: [FailureKey: String] = [:]
-    /// Panes whose stream ACTUALLY opened on the current attempt — the
-    /// executor's observation, distinct from the policy's admission ledger.
-    private var openPanes: Set<String> = []
+    /// Streams ACTUALLY open, keyed by pane and carrying the REGISTRATION that
+    /// opened them — the executor's observation, distinct from the policy's
+    /// admission ledger. Provenance here for the same reason as everywhere
+    /// else in this file: an unprovenanced Set let a retired attempt's delayed
+    /// termination flip a LIVE pane's status to admitted-not-open.
+    private struct OpenRegistration {
+        let attempt: AttemptID
+        let registration: ObjectIdentifier
+    }
+    private var openStreams: [String: OpenRegistration] = [:]
+    private var openPanes: Set<String> { Set(openStreams.keys) }
 
     /// What a caller asking "is this pane watched?" can actually know.
     ///
@@ -213,7 +244,7 @@ public actor RecoveryExecutor {
             case .cancelTransport:
                 pendingDial?.cancel()
                 pendingDial = nil
-                openPanes = []
+                openStreams = [:]
                 retireCounters(keeping: nil)
                 if let owned = resourcedAttempt {
                     await transport.closeAll(for: owned)
@@ -299,7 +330,7 @@ public actor RecoveryExecutor {
         let previous = resourcedAttempt
         resourcedAttempt = attempt
         retireCounters(keeping: attempt)
-        openPanes = []
+        openStreams = [:]
         pendingDial = Task { [transport] in
             if let previous, previous != attempt {
                 await transport.closeAll(for: previous)
@@ -377,12 +408,15 @@ public actor RecoveryExecutor {
                 // cannot dedup this without swallowing real second deaths).
                 // The latch drops duplicates and records them observably.
                 let once = TerminationLatch()
+                let registration = ObjectIdentifier(once)
                 try await transport.openStream(pane: pane, for: attempt) { [weak self] in
                     guard once.claim() else {
                         Task { await self?.recordDuplicateTermination(pane: pane) }
                         return
                     }
-                    Task { await self?.streamDied(pane: pane, from: attempt) }
+                    Task {
+                        await self?.streamDied(pane: pane, from: attempt, registration: registration)
+                    }
                 }
                 // RECHECK-AND-REAP after the await. The pre-await guard cannot
                 // cover the suspension itself: a teardown completing while
@@ -400,7 +434,13 @@ public actor RecoveryExecutor {
                 }
                 openFailures[FailureKey(attempt: attempt, pane: pane)] = nil
                 lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = nil
-                openPanes.insert(pane)
+                // Published only if the stream is still alive: a termination
+                // firing while openStream was suspended already processed the
+                // death, and publishing here anyway reported a dead stream as
+                // .open — after exhaustion, permanently.
+                if once.publishIfUnterminated() {
+                    openStreams[pane] = OpenRegistration(attempt: attempt, registration: registration)
+                }
             } catch {
                 // A stream that cannot OPEN is a death the same as one that
                 // dies later; the policy decides whether to replace it, and the
@@ -424,10 +464,17 @@ public actor RecoveryExecutor {
         lastOpenErrors = lastOpenErrors.filter { $0.key.attempt == attempt }
     }
 
-    /// A stream's exactly-once death: the pane is no longer open, then the
-    /// policy decides about replacement.
-    private func streamDied(pane: String, from attempt: AttemptID) async {
-        openPanes.remove(pane)
+    /// A stream's exactly-once death: the pane is no longer open — IF this
+    /// death belongs to the registration currently published. A retired
+    /// attempt's delayed termination must not flip a live replacement's status;
+    /// the policy's own provenance gate then decides about the ledger and any
+    /// replacement stream.
+    private func streamDied(
+        pane: String, from attempt: AttemptID, registration: ObjectIdentifier
+    ) async {
+        if let published = openStreams[pane], published.registration == registration {
+            openStreams[pane] = nil
+        }
         await handle(.streamFailed(pane: pane, from: attempt))
     }
 
