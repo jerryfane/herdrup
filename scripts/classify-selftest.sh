@@ -159,13 +159,15 @@ expect hang 3 "A hang is not a kill" 124 "Test Case 'S.testA' started"
 expect no-tests-matched 2 "matched no tests" 0 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 	 Executed 0 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.0 seconds"
 # Previously "broke-not-failed", expecting the no-failure-line branch. The
-# failure-count check now catches this log FIRST and says something more precise,
-# so the expectation moves rather than the log. Worth recording: with the
-# consistency checks in place, the no-failure-line branch is unreachable for any
-# internally consistent log — an aggregate can only say FAILED with a nonzero
-# count, and a nonzero count with no failed case line is itself rejected. It is
-# kept as a backstop for logs no check anticipated, not because a fixture can
-# still reach it.
+# failure-count check now catches THIS log first and says something more precise,
+# so the expectation moved rather than the log.
+#
+# I wrote here that the no-failure-line branch had become unreachable for any
+# consistent log. THAT WAS WRONG, and review found the shape that reaches it: a
+# FAILED aggregate reporting one failure whose only terminal case PASSED is
+# consistent by every earlier check. It is pinned by
+# positive-count-no-failed-case above. Leaving the claim standing would have
+# told the next reader not to bother testing a branch that needed testing.
 expect failed-aggregate-no-failures 2 "reports 0 failures" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds"
