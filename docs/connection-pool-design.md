@@ -24,13 +24,32 @@ channels.**
   **Consequence: pooling alone is insufficient.** A freshly authenticated session
   handed straight out still pays.
 
-  **Readiness, defined executably** — "prewarmed" is not a design until it names
-  a transition. A session becomes eligible for checkout when a **sacrificial
-  `direct-streamlocal` channel has been opened and freed on it**. That is the
-  operation whose cost is being avoided, so performing it once is what proves
-  readiness; an age gate would be a proxy for it and would need its own
-  measurement to justify a number. Prewarm on insertion, not on borrow, so the
-  cost lands off the request path.
+  **Readiness is not settled, and this memo previously pretended it was.** It
+  named the sacrificial `direct-streamlocal` open as the transition and
+  dismissed an age gate as "a proxy that would need its own measurement" — while
+  the two lines above report the measurement that an age gate *does* have and a
+  sacrificial channel does not. Nothing measured so far opens one.
+
+  Two candidate transitions, to be decided by the three-arm experiment in
+  `transport-measurements.md` before implementation, not after:
+
+  - **Age gate** — a session is eligible once it is 100 ms old. Has supporting
+    data (0.28–0.54 ms against ~96 ms) and costs nothing at the server.
+  - **Sacrificial channel** — a session is eligible once one channel has been
+    opened and freed on it. Exercises the exact operation being avoided, but
+    **doubles the connections herdr sees per checkout**, and herdr reaps
+    connections that open and go idle (`INITIAL_REQUEST_TIMEOUT`), so it
+    manufactures the condition the pool exists to avoid.
+
+  The rule fixed in advance: **the sacrificial channel is adopted only if it
+  beats the age gate by a margin worth its server-side cost.** If they tie, the
+  age gate wins on simplicity. Whichever is chosen, prewarm **on insertion**, not
+  on borrow, so the cost lands off the request path — that part holds either way,
+  because it follows from where the cost is paid rather than from what removes it.
+
+  **Failure handling for the transition:** a session whose prewarm fails is
+  discarded, never inserted, and never counted toward pool capacity. A prewarm
+  that fails is evidence about the session, not a step to retry on it.
 - Channels cost 0.1 ms **on a ready session** — there is nothing to amortise — and herdr's command socket is **single-shot**, so every request
   needs its own channel regardless.
 
@@ -102,7 +121,21 @@ that already landed.
 So:
 
 - **A separate pre-send liveness probe**, not the user's request doubling as the
-  check.
+  check. Specified, because "a probe" is not implementable:
+  - **Operation:** open a `direct-streamlocal` channel to herdr's socket and
+    send `{"id":"<probe>","method":"ping","params":{}}`.
+  - **Success:** a decodable response envelope carrying the same `id`. Not
+    "bytes arrived", and not "the channel opened" — herdr's socket accepts a
+    connection before it commits to answering, so a channel that opens proves
+    the tunnel and nothing about the server.
+  - **Timeout:** 1 s. Above herdr's observed round trip by a wide margin and far
+    below any interval a user would wait through. Stated as a chosen bound, not
+    a measured one.
+  - **On failure or timeout:** discard the session, close it, replace it. Never
+    probe twice, and never send the user's request down a session that failed —
+    a second probe is the same optimism the delivery rule below refuses.
+  - **`ping` specifically** because it changes nothing. A probe with a side
+    effect would make every checkout an unlogged write.
 - **Discard and replace** a session that fails the probe; never nurse it.
 - **Delivery phases are defined by observed write progress, not by error
   names.** `libssh2_channel_write_ex` returns a positive accepted-byte count or
@@ -111,6 +144,23 @@ So:
     accepted for this request. Safe to retry automatically.
   - **possibly-sent** — any positive byte count was accepted, even partially.
     Not safe to retry, regardless of what error followed.
+
+  Two return values are easy to misread as progress, and both have bitten this
+  codebase's read path already:
+
+  - **`EAGAIN` is not a failure and not progress.** It means resume the *same*
+    attempt with the identical buffer and length. libssh2 keeps a partially
+    transmitted packet in its pending-send state and only returns a positive
+    payload count once the whole channel-data packet has cleared, so a request
+    can sit in EAGAIN with bytes already on the wire. Restarting the write from
+    a different offset corrupts the stream.
+  - **A zero return is not completion.** It means the channel window had no
+    capacity, so nothing was accepted — no progress, and the request stays
+    definitely-not-sent unless a previous call already returned positive.
+
+  Cumulative progress is therefore tracked **per request across every write**,
+  not per call: a request spanning several writes becomes possibly-sent at the
+  first positive return and stays that way.
 
   Tracking accepted bytes per request is what makes the boundary decidable; an
   error code alone cannot supply it, because the same code can follow either
@@ -135,19 +185,45 @@ So:
 **Why the post-authentication readiness delay exists.** Not herdr, not `UseDNS`,
 not GSSAPI. It resembles a settling period more than work, but that is untested.
 
-The design does not depend on the cause — prewarming addresses it either way —
-which is why the investigation stopped.
+The design does not depend on the *cause*: whichever readiness transition wins,
+it moves the cost off the request path without needing to know why the cost is
+there. That is why the investigation stopped, and it remains a gap rather than a
+closed question.
 
-**The falsifier is cheap and already available.** The earlier version of this
-memo proposed a falsifier that required implementation. It does not: compare
-first-channel cost on an *immediate* session against one *aged* by a short
-interval. If ageing stops helping, prewarming is not the answer and this design
-needs revising. That control costs one test and can be run before any pool
-exists.
+**The falsifier is cheap and needs no pool.** It is specified in
+`transport-measurements.md` — three randomised arms (immediate, age-only,
+prewarmed by sacrificial channel), n=100 each, raw timings and session ages
+retained, with the rejection rule fixed before the run.
+
+An earlier version of this section proposed comparing an immediate session
+against an aged one and called that the falsifier for prewarming. It is not:
+it never opens a sacrificial channel, so it can only falsify *waiting*. The
+same mistake, phrased two ways in two documents, is why the arms are now
+enumerated in one place and referenced from the other rather than described
+twice.
 
 ## Verification, when implemented
 
-The axis is **not** that a pool returns a session. It is that **the second
-request to a host does not pay the readiness cost.** A test that borrows
-twice and compares the cost of the two is the guard; one that merely checks a
-session comes back proves nothing.
+The axis is **not** that a pool returns a session, and it is **not** that the
+second request is cheap.
+
+The second-request version was the axis here until review caught it, and it is
+wrong in a way worth keeping on the page: delete insertion-time prewarming
+entirely and the first request is slow while the second is cheap — which is
+exactly what that test asserts. It passes on the broken implementation. It is
+the same shape as the twelve tests this seat shipped that asserted less than
+their names implied.
+
+**The axis is that the FIRST request served from a newly eligible session does
+not pay the readiness cost.** That is the only claim prewarming makes, and it is
+the one a user experiences.
+
+The guard must therefore:
+
+- measure the **first** borrow from a session the pool has just declared
+  eligible, not a subsequent one;
+- be **mutation-verified by removing the prewarm transition** and confirming the
+  test fails — with an assertion that the removal actually applied, since three
+  silent no-op mutations this week made green runs look like working guards;
+- record the raw latency, not a pass/fail, so a regression that halves the
+  benefit is visible rather than rounded away.
