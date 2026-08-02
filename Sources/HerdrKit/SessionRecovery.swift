@@ -149,15 +149,30 @@ final class AttemptAuthority: @unchecked Sendable {
     }
 
     /// Admits the panes not already subscribed, records them, and returns ONLY
-    /// the newly admitted — nil when there is no adopted connection to
-    /// subscribe on. Check, record and connection gate share the section, so no
-    /// interleaving can admit a pane twice or emit for a dead transport.
-    func admitWhileConnected(_ panes: Set<String>) -> Set<String>? {
+    /// the newly admitted — nil when the data's provenance is not the currently
+    /// adopted attempt, or there is no adopted connection. Provenance, the
+    /// connection gate, the check and the record share one section: a delayed
+    /// snapshot or pane event from an abandoned attempt is indistinguishable
+    /// from current data by CONTENT, so the attempt that produced it is the
+    /// only thing that can reject it — and without this gate, a probe admitted
+    /// an abandoned attempt's closed pane onto the replacement's ledger,
+    /// irretractably.
+    func admitWhileConnected(_ panes: Set<String>, from attempt: AttemptID) -> Set<String>? {
         lock.lock(); defer { lock.unlock() }
-        guard _connectedSince != nil else { return nil }
+        guard attempt == _current, _connectedSince != nil else { return nil }
         let fresh = panes.subtracting(_subscribedPanes)
         _subscribedPanes.formUnion(fresh)
         return fresh
+    }
+
+    /// True iff the attempt is current — for gating KNOWLEDGE mutations from
+    /// transport-delivered data (snapshots, pane events) the same way
+    /// subscriptions are gated. Reading it and acting is two steps for
+    /// knowledge, acceptably: stale knowledge is bounded (next snapshot
+    /// corrects it), unlike a stale subscription, which nothing can retract.
+    func isCurrent(_ attempt: AttemptID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return attempt == _current
     }
 }
 
@@ -191,11 +206,15 @@ public enum ClientEvent: Equatable, Sendable {
     case networkChanged(at: Date)
     case backgrounded(at: Date)
     case foregrounded(at: Date)
-    /// The event stream reported a pane that did not exist before.
-    case paneCreated(String)
-    /// A pane went away. Without this, the only way to remove one is a wholesale
-    /// replacement, which is what made partial listings dangerous.
-    case paneClosed(String)
+    /// The event stream reported a pane that did not exist before. Carries the
+    /// attempt whose transport delivered it: a late event from an abandoned
+    /// attempt is indistinguishable from a current one by content, and without
+    /// provenance it could subscribe or mutate the replacement transport.
+    case paneCreated(String, from: AttemptID)
+    /// A pane went away, per the transport of the carried attempt. Without this
+    /// event, the only way to remove one is a wholesale replacement, which is
+    /// what made partial listings dangerous.
+    case paneClosed(String, from: AttemptID)
 }
 
 /// One step of recovery, in the order it must happen.
@@ -213,8 +232,11 @@ public enum RecoveryAction: Equatable, Sendable {
     /// Open a new transport, tagging it with this identifier. Every later
     /// `connected` or `transportFailed` must carry it back.
     case reconnect(AttemptID, after: TimeInterval)
-    /// Drop every cached pane generation and refetch.
-    case resyncAllPanes
+    /// Drop every cached pane generation and refetch — ON the carried
+    /// attempt's transport. The snapshot that comes back must be handed to
+    /// `observe` WITH this attempt, so a resync outlived by its attempt
+    /// produces data that is recognisably stale rather than silently admitted.
+    case resyncAllPanes(AttemptID)
     /// Open subscriptions for these panes. The pane-scoped subscription kinds
     /// have **no wildcard**, so a pane absent here is a pane nothing is
     /// watching. (`Wire.swift` also models non-pane-scoped subscription kinds;
@@ -360,8 +382,10 @@ public struct SessionRecovery: Sendable {
         /// authority, so a restored copy reports the LINEAGE's current attempt,
         /// not the one it was carrying when saved.
         public var currentAttempt: AttemptID? { authority.current }
-        /// Every pane the client believes exists. Subscriptions are pane-scoped,
-        /// so this is also the re-subscribe list on the next adoption.
+        /// Every pane the client believes exists. INFORMATIONAL ONLY: it is
+        /// never a subscription source — adoption emits resync alone, and every
+        /// replacement-transport subscription comes from the post-adoption
+        /// authoritative snapshot through `observe`.
         public internal(set) var knownPanes: Set<String> = []
         /// Panes with an open subscription on the CURRENT transport. Distinct
         /// from `knownPanes`, and the distinction is load-bearing: a snapshot
@@ -436,7 +460,7 @@ public struct SessionRecovery: Sendable {
                 // `observe`, whose atomic admission subscribes exactly what the
                 // server says exists. Remembered panes are never subscription
                 // targets — knowledge is not a decision input any more.
-                return RecoveryPlan([.resyncAllPanes])
+                return RecoveryPlan([.resyncAllPanes(attempt)])
             }
 
         case .transportFailed(let attempt, let at):
@@ -486,19 +510,22 @@ public struct SessionRecovery: Sendable {
             // follow on `connected`; there is no transport yet to run them on.
             return RecoveryPlan([.cancelTransport, .reconnect(state.authority.foregroundAndMint(), after: 0)])
 
-        case .paneCreated(let pane):
-            state.knownPanes.insert(pane)
-            // Admission is atomic on the authority: the connection gate, the
-            // already-subscribed check and the record are one critical section,
-            // so concurrent discoveries can neither drop a ledger entry nor
-            // subscribe a pane twice. Not connected -> the next adoption's
-            // full-set subscribe covers it.
-            guard let fresh = state.authority.admitWhileConnected([pane]), !fresh.isEmpty else {
+        case .paneCreated(let pane, let from):
+            // The atomic admission is the ONLY gate — provenance, connection,
+            // already-subscribed check and record in one section. Knowledge
+            // follows the verdict: an event a dead transport delivered is not
+            // knowledge either. An event arriving from the CURRENT attempt
+            // before its adoption is processed also admits nothing, and needs
+            // nothing — the post-adoption snapshot covers it via observe.
+            guard let fresh = state.authority.admitWhileConnected([pane], from: from) else {
                 return RecoveryPlan()
             }
+            state.knownPanes.insert(pane)
+            guard !fresh.isEmpty else { return RecoveryPlan() }
             return RecoveryPlan([.subscribe(fresh)])
 
-        case .paneClosed(let pane):
+        case .paneClosed(let pane, let from):
+            guard state.authority.isCurrent(from) else { return RecoveryPlan() }
             state.knownPanes.remove(pane)
             return RecoveryPlan()
         }
@@ -523,15 +550,27 @@ public struct SessionRecovery: Sendable {
     /// even the app-layer workaround closed: `paneCreated` for it returned
     /// nothing, since the pane was already known. Subscriptions are pane-scoped
     /// with no wildcard, so nothing else would ever cover it.
-    public func observe(_ snapshot: PaneSnapshot, state: inout State) -> RecoveryPlan {
+    public func observe(
+        _ snapshot: PaneSnapshot, from attempt: AttemptID, state: inout State
+    ) -> RecoveryPlan {
+        // ONE gate decides everything: atomic admission checks provenance, the
+        // connection, the ledger and records — and KNOWLEDGE follows its
+        // verdict. A first version had an outer isCurrent guard ahead of this,
+        // which was both a twin (the inner provenance check became unreachable
+        // — its mutation survived) and itself a two-acquisition split of the
+        // kind this review has repeatedly killed. Admission failing means the
+        // snapshot came from a dead transport or none: it is not knowledge
+        // either.
+        //
+        // The knowledge write lands after the section; a retirement between
+        // verdict and write leaves knowledge stale-but-bounded (the next
+        // current snapshot replaces it) — the documented, tolerable class,
+        // unlike a stale subscription, which nothing can retract.
+        guard let fresh = state.authority.admitWhileConnected(snapshot.paneIDs, from: attempt) else {
+            return RecoveryPlan()
+        }
         state.knownPanes = snapshot.paneIDs
-        // Atomic admission against the SUBSCRIPTION ledger, not prior
-        // knowledge: a pane this transport already watches must not be
-        // subscribed twice however many times snapshots forget and rediscover
-        // it, and a shrink leaves its open subscriptions in place because
-        // nothing on the wire can close one short of the connection itself.
-        guard let fresh = state.authority.admitWhileConnected(snapshot.paneIDs),
-              !fresh.isEmpty else { return RecoveryPlan() }
+        guard !fresh.isEmpty else { return RecoveryPlan() }
         return RecoveryPlan([.subscribe(fresh)])
     }
 }
