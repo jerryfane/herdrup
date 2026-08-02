@@ -79,8 +79,33 @@ if [ "$EXECUTED" -eq 0 ]; then
     exit 2
 fi
 
+# SKIPS ARE EXTRACTED BEFORE EITHER VERDICT, not on the kill path only.
+#
+# The first version of this printed skips after the KILLED branch, so the
+# SURVIVED branch exited before ever looking. A filter matching ONE test that
+# immediately XCTSkips then reported "SURVIVED — the test does not guard it",
+# which is the worst possible misreport: SURVIVED sends someone to rewrite a
+# guard that never executed. Same shape as the crash defect fixed above — one
+# branch corrected and the other left alone — and it is the second time in this
+# file, so the extraction now happens where BOTH paths must pass through it.
+SKIPPED=$(grep -oE "^Test Case '[^']+' skipped" "$RUN_LOG" \
+          | sed -E "s/^Test Case '([^']+)' skipped/\1/" | sort -u)
+SKIP_COUNT=$(printf '%s\n' "$SKIPPED" | grep -c . || true)
+report_skips() {
+    [ -n "$SKIPPED" ] || return 0
+    echo "  SKIPPED (did not run — arm these before reading this result):"
+    printf '%s\n' "$SKIPPED" | sed 's/^/    /'
+}
+RAN=$((EXECUTED - SKIP_COUNT))
+if [ "$RAN" -le 0 ]; then
+    echo "INVALID: every matched test SKIPPED — nothing ran, so '$NAME' is unverified, not survived."
+    report_skips
+    exit 2
+fi
+
 if [ "$STATUS" -eq 0 ]; then
-    echo "SURVIVED: $FILTER ($EXECUTED tests) still passes with '$NAME' broken. The test does not guard it."
+    echo "SURVIVED: $FILTER ($RAN of $EXECUTED ran) still passes with '$NAME' broken. The test does not guard it."
+    report_skips
     exit 1
 fi
 
@@ -107,18 +132,12 @@ grep -m3 -E "^/.*error: .*XCTAssert|^Test Case .* failed" "$RUN_LOG"
 KILLERS=$(grep -oE "^Test Case '[^']+' failed" "$RUN_LOG" \
           | sed -E "s/^Test Case '([^']+)' failed/\1/" | sort -u)
 KILL_COUNT=$(printf '%s\n' "$KILLERS" | grep -c . || true)
-echo "  killed by $KILL_COUNT of $EXECUTED:"
+echo "  killed by $KILL_COUNT of $RAN that ran:"
 printf '%s\n' "$KILLERS" | sed 's/^/    /'
 
-# SKIPPED TESTS ARE NOT PASSING TESTS, and the split prompt cannot tell them
-# apart without this. A probe where the INTENDED regression skipped and an
-# unrelated test killed the mutant printed "killed by 1 of 2" — indistinguishable
-# from the premise-suspect pattern, while the intended test never ran its body.
-# This repo has conditional live-server and descriptor-canary skips, so it is not
-# hypothetical.
-SKIPPED=$(grep -oE "^Test Case '[^']+' skipped" "$RUN_LOG" \
-          | sed -E "s/^Test Case '([^']+)' skipped/\1/" | sort -u)
-if [ -n "$SKIPPED" ]; then
-    echo "  SKIPPED (did not run — arm these before reading the split):"
-    printf '%s\n' "$SKIPPED" | sed 's/^/    /'
-fi
+# SKIPPED TESTS ARE NOT PASSING TESTS: a probe where the INTENDED regression
+# skipped and an unrelated test killed the mutant printed "killed by 1 of 2",
+# indistinguishable from the premise-suspect pattern while the intended test
+# never ran its body. This repo has conditional live-server and descriptor-canary
+# skips, so it is not hypothetical.
+report_skips
