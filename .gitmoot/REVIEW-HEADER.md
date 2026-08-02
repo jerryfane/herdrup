@@ -40,11 +40,20 @@ any review contract written in this lane, not just this one.
   granting the reviewer network: that expands privilege on the least-privileged
   party to perform a check the merge gate already does without a race.
 
-**The job record is not evidence.** At execution the job's `head_sha` is
-overwritten from the worktree, so a stale checkout produces a record that agrees
-with it — self-consistent and wrong. Only two surfaces can be trusted: the
-worktree HEAD observed *before* the verdict, and the head you name in your own
-verdict body.
+**The job record is not evidence, and it is not a second witness.** The value is
+stored correctly when the job is queued and REPLACED FROM THE WORKTREE during
+execution (measured: `queued → 3b04cd0`, `running → e02e40ba`, same job). So a
+stale checkout produces a record that agrees with it — self-consistent and
+wrong.
+
+The trap is subtler than "the record can be stale": *record agrees with
+worktree* looks like corroboration and is not. The record is DERIVED from the
+worktree, so the two agree by construction, including when both are wrong.
+Counting that as two surfaces is reading one fact twice and calling it two
+witnesses — a derived value is never independent evidence of the thing it was
+derived from. **There are two independent surfaces:** (record ≡ worktree), and
+the head the verdict names. Compare both against the PR head; agreement between
+*those* means something.
 
 **Why this is a requirement and not a courtesy:** C1 of gitmoot#1354 made the
 review task id stable rather than head-derived, so the worktree keyed by it is
