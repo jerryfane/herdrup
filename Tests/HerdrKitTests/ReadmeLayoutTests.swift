@@ -20,37 +20,67 @@ final class ReadmeLayoutTests: XCTestCase {
             .deletingLastPathComponent()   // repo
     }
 
-    func testTheReadmeLayoutListsEverySourceFile() throws {
+    /// Rows are PARSED and compared as sets, and EVERY entry under Sources/ is
+    /// checked — not just HerdrKit's.
+    ///
+    /// Both corrections come from probes against my previous version:
+    ///   - `block.contains(name)` searched the whole block, so deleting
+    ///     Wire.swift's row passed as long as some OTHER row's description
+    ///     mentioned "Wire.swift". A substring search cannot tell an inventory
+    ///     entry from prose.
+    ///   - the guard hardcoded Sources/HerdrKit, so replacing the Sources/CSSH
+    ///     row with a nonexistent directory passed, and so did adding a whole
+    ///     new target the layout never mentioned.
+    ///
+    /// I named that second gap in two consecutive review dispatches before
+    /// closing it. Naming a gap is not closing it; it just makes the omission
+    /// deliberate.
+    func testTheReadmeLayoutMatchesTheRepositoryExactly() throws {
         let root = repoRoot()
-        let sources = root.appendingPathComponent("Sources/HerdrKit")
-        let onDisk = try FileManager.default
-            .contentsOfDirectory(atPath: sources.path)
-            .filter { $0.hasSuffix(".swift") }
-            .sorted()
-        XCTAssertFalse(onDisk.isEmpty, "no sources found; the comparison would be vacuous")
+        let fm = FileManager.default
+
+        let sourcesDir = root.appendingPathComponent("Sources")
+        let dirsOnDisk = Set(try fm.contentsOfDirectory(atPath: sourcesDir.path)
+            .filter { name in
+                var isDir: ObjCBool = false
+                _ = fm.fileExists(atPath: sourcesDir.appendingPathComponent(name).path,
+                                  isDirectory: &isDir)
+                return isDir.boolValue
+            })
+        XCTAssertFalse(dirsOnDisk.isEmpty, "no source directories found; the comparison is vacuous")
 
         let readme = try String(
             contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8)
-        guard let start = readme.range(of: "Sources/HerdrKit/"),
-              let end = readme.range(of: "```", range: start.upperBound..<readme.endIndex)
+        guard let open = readme.range(of: "Sources/"),
+              let close = readme.range(of: "```", range: open.lowerBound..<readme.endIndex)
         else { return XCTFail("no layout block found in README.md") }
-        let block = String(readme[start.upperBound..<end.lowerBound])
+        let block = String(readme[open.lowerBound..<close.lowerBound])
 
-        let missing = onDisk.filter { !block.contains($0) }
-        XCTAssertTrue(missing.isEmpty,
-                      "README layout omits \(missing.joined(separator: ", ")) — it reads as an "
-                      + "inventory, so a silent omission is a false claim about the repository")
-
-        // The other direction: a name in the README that no longer exists is the
-        // same defect pointing backwards, and it is how a layout goes stale
-        // without anyone deleting anything.
-        let listed = block.split(separator: "\n").compactMap { line -> String? in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard let name = t.split(separator: " ").first, name.hasSuffix(".swift") else { return nil }
-            return String(name)
+        // A row is its FIRST token. Anything after it is prose and is ignored,
+        // which is the whole point of parsing rather than substring-searching.
+        var dirsListed = Set<String>()
+        var filesListed = Set<String>()
+        for line in block.split(separator: "\n") {
+            guard let token = line.split(separator: " ").first.map(String.init) else { continue }
+            if token.hasPrefix("Sources/"), token.hasSuffix("/") {
+                dirsListed.insert(String(token.dropFirst("Sources/".count).dropLast()))
+            } else if token.hasSuffix(".swift") {
+                filesListed.insert(token)
+            }
         }
-        let vanished = listed.filter { !onDisk.contains($0) }
-        XCTAssertTrue(vanished.isEmpty,
-                      "README layout lists files that do not exist: \(vanished.joined(separator: ", "))")
+
+        XCTAssertEqual(dirsListed, dirsOnDisk,
+                       "the layout's source directories do not match the repository: "
+                       + "listed \(dirsListed.sorted()), on disk \(dirsOnDisk.sorted())")
+
+        for dir in dirsOnDisk {
+            let swift = Set(try fm.contentsOfDirectory(
+                atPath: sourcesDir.appendingPathComponent(dir).path)
+                .filter { $0.hasSuffix(".swift") })
+            guard !swift.isEmpty else { continue }   // CSSH carries no Swift
+            XCTAssertEqual(filesListed, swift,
+                           "the layout's \(dir) files do not match the repository: "
+                           + "listed \(filesListed.sorted()), on disk \(swift.sorted())")
+        }
     }
 }
