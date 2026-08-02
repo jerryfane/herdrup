@@ -191,36 +191,43 @@ A candidate **qualifies** when all of the following hold:
 | outlier count within tolerance | ≤ A's + 1 | ≤ A's + 1 |
 | replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
 
-The tail condition is **non-regression, not strict improvement**. Requiring
-strict improvement had a hole: when A records zero outliers — which the
-controlled ~96 ms batch could easily produce — no candidate can have *fewer*, so
-a treatment that removed the delay entirely would be rejected and the readiness
-hypothesis declared failed. `A95` = 100, `B95` = `C95` = 5, all outlier counts
-zero was a real input that adopted neither.
+The tail condition is an **outlier-count tolerance**. Requiring strict
+improvement had a hole: when A records zero outliers — which the controlled
+~96 ms batch could easily produce — no candidate can have *fewer*, so a treatment
+that removed the delay entirely would be rejected and the readiness hypothesis
+declared failed. `A95` = 100, `B95` = `C95` = 5, all outlier counts zero was a
+real input that adopted neither.
 
-**The `+1` is a preregistered operational tolerance, not an evidence
-threshold**, and the distinction is the whole of what this paragraph is for.
+**The `+1` is a preregistered operational cutoff, not an evidence threshold**,
+and the distinction is the whole of what this paragraph is for.
 
-Two versions of this rule have now dressed an arbitrary cutoff in statistical
-language. The first required exact non-regression while arguing that one sample
-in 100 proves nothing — a contradiction in the same section. The fix moved the
-cutoff to two and called that a *clear* regression, which is the identical
-overclaim one step along: at n = 100, 0 against 2 observed outliers is
-**two-sided Fisher exact p ≈ 0.50**. Nothing about 2 is clear.
+Three versions of this rule have now overstated what it can support, each
+correcting the last and introducing the next:
 
-So the honest statement is that **n = 100 cannot support an evidence-based tail
-criterion at all**, in either direction. What the rule needs is a cutoff fixed
-*before* the run so the choice cannot be made after seeing the numbers, and `+1`
-is that cutoff — chosen for decidability, not derived from the data. It is
-declared here rather than defended.
+1. Exact non-regression, while arguing that one sample in 100 proves nothing — a
+   contradiction inside one section.
+2. A cutoff of two, called a *clear* regression. The same overclaim one step
+   along: at n = 100, 0 against 2 observed outliers is **two-sided Fisher exact
+   p ≈ 0.50**.
+3. "n = 100 cannot support an evidence-based tail criterion at all." Also false,
+   in the opposite direction — a **large enough** difference is perfectly
+   detectable at n = 100.
+
+The accurate limitation is narrower than any of them: **n = 100 does not justify
+the `+1` boundary specifically, and does not support a useful non-inferiority
+guarantee for events this rare.** A cutoff has to be fixed *before* the run so it
+cannot be chosen after seeing the numbers, and `+1` is that cutoff — picked for
+decidability. It is declared here rather than defended.
 
 **What follows, so the tolerance is not mistaken for safety:** this condition
-neither establishes that an adopted arm improves the tail nor that it leaves it
-alone. It rejects only regressions gross enough to clear an arbitrary line. An
-inference rule — non-inferiority at a stated power — would need an n far above
-100, and this experiment is deliberately cheap. If the tail turns out to matter
-more than the p95, that is the experiment to run next, and it is a different
-experiment.
+establishes neither that an adopted arm improves the tail nor that it leaves it
+alone. It rejects **observed differences beyond the cutoff** — an observed
+difference is not by itself an established regression, and at these counts it
+usually is not one. An inference rule instead of a cutoff would need a baseline
+rate, a margin, an alpha and a power stated up front, and then whatever n those
+imply; naming a sample size without them is the same kind of unbacked number this
+paragraph exists to stop. If the tail turns out to matter more than the p95, that
+calculation is the next piece of work, and it is a different experiment.
 
 **If A has outliers and the adopted arm does not reduce them, the tail stays an
 open question** and must not be reported as solved: the arm was adopted on its

@@ -15,20 +15,21 @@ import sys
 
 MARGIN = 20
 READY_CAP = 50
-TAIL_TOLERANCE = 1   # preregistered operational cutoff, NOT an evidence threshold:
-                     # at n=100, 0 vs 2 outliers is Fisher two-sided p~0.50, so no
-                     # cutoff here is statistically justified. Fixed before the run
-                     # so the choice cannot be made after seeing the numbers.
+TAIL_TOLERANCE = 1   # preregistered operational cutoff, NOT an evidence threshold.
+                     # n=100 does not justify THIS boundary specifically (0 vs 2 is
+                     # Fisher two-sided p~0.50) nor a non-inferiority guarantee for
+                     # events this rare. Fixed before the run so the choice cannot
+                     # be made after seeing the numbers.
 
 
 def flat(A, B, C, oa, ob, oc, ready_c):
     """Current rule: qualification per candidate, then an ordered selection.
 
-    The tail condition is an OPERATIONAL TOLERANCE, not an inference. Strict
+    The tail condition is an OPERATIONAL CUTOFF, not an inference. Strict
     improvement rejects a perfect treatment against a zero-outlier baseline;
-    exact non-regression vetoes on a single event. Neither +1 nor +2 is
-    statistically justified at n=100 — the cutoff exists to be decidable and
-    fixed in advance, not to be defensible as evidence.
+    a cutoff of zero vetoes on a single event. Neither +1 nor +2 is justified by
+    n=100 — the cutoff exists to be decidable and fixed in advance, not to be
+    defensible as evidence.
     """
     if A <= MARGIN:
         return {"neither"}
@@ -123,7 +124,7 @@ def main():
     boundaries = [
         # zero-outlier baseline must not reject a perfect treatment
         ((100, 5, 5, 0, 0, 0, 10), "B", "zero-outlier baseline rejects a perfect treatment"),
-        # one extra outlier is inside the tolerance the rationale requires
+        # one extra outlier is inside the preregistered cutoff
         ((100, 5, 100, 0, 1, 0, 10), "B", "a single extra outlier vetoes the only effective arm"),
         # two extra is outside it
         ((100, 5, 100, 0, 2, 0, 10), "neither", "an outlier count beyond tolerance is accepted"),
