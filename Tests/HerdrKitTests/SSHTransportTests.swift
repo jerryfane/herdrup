@@ -411,7 +411,13 @@ final class SSHTransportTests: XCTestCase {
             hostKeyPolicy: PinningHostKeyPolicy(store: store)
         )
 
-        let baseline = DescriptorAudit.doubleCloses
+        // Attributed to THIS transport, not the process. The old form snapshotted
+        // a process-wide counter and compared it after 25 stream attempts —
+        // sound only if nothing else in the process closes a descriptor inside
+        // that window. Other tests' async teardown does, so this failed about
+        // one run in ten under full-suite load and never in isolation. The
+        // assertion was reporting other tests' work as this transport's defect.
+        let baseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
         var rejections = 0
         for _ in 0..<25 {
             do {
@@ -428,9 +434,10 @@ final class SSHTransportTests: XCTestCase {
         }
         XCTAssertEqual(rejections, 25, "every attempt must have reached the rejection path")
         XCTAssertEqual(
-            DescriptorAudit.doubleCloses, baseline,
+            DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
             "LiveChannel closed a descriptor openSession had already closed"
         )
+        DescriptorAudit.forget(transport.auditToken)
     }
 
     /// AXIS: `setupTimeout` bounds the *connect*, not only the handshake.
