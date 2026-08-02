@@ -964,10 +964,30 @@ final class SessionRecoveryTests: XCTestCase {
     /// Removal used to require passing a fresh full listing, which is what made
     /// partial listings dangerous — there was no other way to drop one.
     func testClosedPanesAreDroppedIncrementally() throws {
+        // CONNECT FIRST, so paneClosed arrives from the CURRENT attempt.
+        //
+        // This seeded knownPanes with no current attempt and sent paneClosed
+        // with a fresh random AttemptID, which production correctly REJECTS at
+        // the provenance gate. The drop never happened — the authoritative
+        // snapshot below removed p2 wholesale, producing the same final state,
+        // and the assertion could not tell the two apart. Replacing the
+        // paneClosed call with `_ = state` left the test green.
+        //
+        // Ninth instance today of an assertion expecting an absence with
+        // nothing establishing the presence was reachable. Found by applying
+        // the rule from the previous round to a test this PR never touched.
         var state = try seeded(["p1", "p2"])
-        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
         let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertEqual(plan(.connected(opened, at: Date()), &state).actions, [.resyncAllPanes(opened)])
+        XCTAssertTrue(state.knownPanes.contains("p2"), "p2 was never present; the drop is vacuous")
+
+        _ = plan(.paneClosed("p2", from: opened), &state)
+
+        // Asserted BEFORE any snapshot, which would otherwise mask the result by
+        // producing the same absence for an unrelated reason.
+        XCTAssertFalse(state.knownPanes.contains("p2"),
+                       "the incremental close did not drop the pane")
+
         let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state)
         XCTAssertEqual(resub.subscribes, ["p1"])
     }
