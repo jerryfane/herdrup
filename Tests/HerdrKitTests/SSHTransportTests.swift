@@ -494,6 +494,41 @@ final class SSHTransportTests: XCTestCase {
     ///
     /// So the error type is the assertion, and the budget is set far beyond the
     /// timing bound so nothing but cancellation can end the attempt at all.
+    /// AXIS: a RECYCLED descriptor number is not closed in place of the one the
+    /// caller meant.
+    ///
+    /// Descriptor numbers are reused: close 7, open a socket, get 7 back. The
+    /// audit used to verify only that the number was closeable, so a probe
+    /// closed a descriptor, opened another that reused the number, and the
+    /// helper closed the UNRELATED socket while reporting the first one's
+    /// rejection as successful. EBADF describes a number's current state, never
+    /// which opening it belonged to.
+    func testARecycledDescriptorIsNotClosedInPlaceOfTheOriginal() throws {
+        let token = SSHTransport.AuditToken()
+        // /dev/null rather than a socket: any descriptor exercises recycling,
+        // and this avoids the Glibc/Darwin SOCK_STREAM divergence entirely —
+        // which is a live concern in this repo rather than a hypothetical one.
+        let first = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(first < 0, "could not open a descriptor")
+        let staleGeneration = DescriptorAudit.opened(first)
+        close(first)
+
+        let second = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(second < 0, "could not open the second descriptor")
+        defer { close(second) }
+        try XCTSkipIf(second != first,
+                      "the descriptor number was not recycled; the hazard is not staged")
+        _ = DescriptorAudit.opened(second)
+
+        DescriptorAudit.closeRejectedAdoption(second, generation: staleGeneration, owner: token)
+
+        XCTAssertEqual(DescriptorAudit.adoptionRejections(by: token), 0,
+                       "a stale generation was accepted as a successful rejection")
+        XCTAssertEqual(fcntl(second, F_GETFD) == -1 && errno == EBADF, false,
+                       "the audit closed a descriptor that was not the one it was given")
+        DescriptorAudit.forget(token)
+    }
+
     /// AXIS: the adopt-rejection cleanup closes its descriptor exactly once.
     ///
     /// The last unaudited-then-unpinned branch in tcpConnect. It runs only when
@@ -684,6 +719,20 @@ final class SSHTransportTests: XCTestCase {
     /// AXIS: an expired deadline is not waited out, so a stalled resolver never
     /// becomes the caller's problem.
     func testResolutionGivesUpOnAnExpiredDeadline() {
+        // THE RESOLVER MUST STILL BE PENDING. `claim` checks the deadline only
+        // while `finished == false`, so a resolver that completes first makes
+        // `.resolved` the CORRECT answer and this test fail — for 127.0.0.1,
+        // which resolves immediately. It failed on suite repeat 18, once in 200
+        // isolated processes, and left the head's suite intermittently red;
+        // review measured it. A precondition that races the thing it is meant
+        // to hold is the same vacuity as an absence assertion, wearing timing
+        // instead.
+        let holding = DispatchSemaphore(value: 0)
+        SSHTransport.Resolution.startGate = { holding.wait() }
+        defer {
+            SSHTransport.Resolution.startGate = nil
+            holding.signal()
+        }
         let resolution = SSHTransport.ResolutionRegistry.resolution(host: "127.0.0.1", port: 22)
         guard case .gaveUp = resolution.claim(
             by: Date().addingTimeInterval(-1), isInterrupted: { false }

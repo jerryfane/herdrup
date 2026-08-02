@@ -561,11 +561,12 @@ public struct SSHTransport: HerdrTransport {
         for address in addresses {
             let fd = socket(address.family, address.socketType, address.protocolNumber)
             guard fd >= 0 else { lastErrno = errno; continue }
+            let generation = DescriptorAudit.opened(fd)
             afterDescriptorPublished?(live)
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
-                DescriptorAudit.closeRejectedAdoption(fd, owner: auditToken)
+                DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: auditToken)
                 throw CancellationError()
             }
             do {
@@ -1176,17 +1177,41 @@ enum DescriptorAudit {
     /// counter incrementing: the test saw "one rejection, zero double closes"
     /// and passed, while the descriptor LEAKED. A positive observable that does
     /// not originate from the act it witnesses is just a second claim.
-    static func closeRejectedAdoption(_ fd: Int32, owner: AnyObject?) {
-        if Glibc_close(fd) == 0 {
-            guard let owner else { return }
-            lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
-            return
-        }
-        guard errno == EBADF else { return }
-        lock.lock()
-        doubleCloseCount += 1
-        if let owner { byOwner[ObjectIdentifier(owner), default: 0] += 1 }
-        lock.unlock()
+    /// Records that a descriptor number has just been opened, and returns the
+    /// GENERATION that identifies this particular use of it.
+    ///
+    /// Descriptor numbers are recycled: close 7, open a socket, and the kernel
+    /// hands back 7. `EBADF` therefore distinguishes only the NUMBER'S current
+    /// state, never which opening it belonged to — a probe closed a descriptor,
+    /// opened another that reused the number, and the audit reported the second
+    /// one's close as the first one's success. A generation is the only thing
+    /// that can tell those apart.
+    static func opened(_ fd: Int32) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        generations[fd, default: 0] += 1
+        return generations[fd] ?? 0
+    }
+    private static var generations: [Int32: Int] = [:]
+
+    /// Closes the descriptor an adoption refused, and records the rejection only
+    /// on PROOF that THIS generation of THAT descriptor is now gone.
+    ///
+    /// Two things are verified rather than assumed, because both were exploited:
+    ///   - the GENERATION still matches, so a recycled number cannot be closed
+    ///     in place of the one the caller meant;
+    ///   - the descriptor is ACTUALLY GONE afterwards, checked with F_GETFD.
+    ///     Trusting close's return value let a build-valid substitute —
+    ///     `(fd >= 0 ? 0 : -1)` — report success while leaking the descriptor.
+    ///     A result is a claim; the post-state is evidence.
+    static func closeRejectedAdoption(_ fd: Int32, generation: Int, owner: AnyObject?) {
+        let current = lock.withLock { generations[fd] ?? 0 }
+        guard current == generation else { return }   // recycled: not ours to close
+        _ = Glibc_close(fd)
+        // The descriptor must be GONE. fcntl on a closed fd fails with EBADF;
+        // if it still answers, nothing was closed however the call reported.
+        guard fcntl(fd, F_GETFD) == -1, errno == EBADF else { return }
+        guard let owner else { return }
+        lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
     }
     static func adoptionRejections(by owner: AnyObject) -> Int {
         lock.lock(); defer { lock.unlock() }
