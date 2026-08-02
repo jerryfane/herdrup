@@ -24,10 +24,19 @@ speculatively.
 - Lint gate before every push: `swift build` must be warning-clean.
 - A live herdr server runs at `~/.config/herdr/herdr.sock`, so live tests
   execute rather than skip. `HERDR_SOCKET_PATH` overrides the path.
-- `CSSH` is already declared as a `systemLibrary` target in `Package.swift`,
-  with `Sources/CSSH/module.modulemap` mapping `/usr/include/libssh2.h` and
-  linking `ssh2`. Verified working: libssh2 1.11.0,
-  `libssh2_channel_direct_streamlocal_ex` resolves from Swift.
+- `CSSH` is declared as a `systemLibrary` target in `Package.swift` with
+  `pkgConfig: "libssh2"`. `Sources/CSSH/module.modulemap` names a RELATIVE
+  `shim.h`, which includes `<libssh2.h>` BY NAME; pkg-config supplies the
+  platform's header path. Verified working: libssh2 1.11.0 on Linux,
+  1.11.1 under Homebrew on macOS, `libssh2_channel_direct_streamlocal_ex`
+  resolves from Swift on both.
+
+  This paragraph previously said the module map mapped `/usr/include/libssh2.h`
+  directly. That was true when written and became false when the package moved
+  to pkg-config — and it is exactly the kind of stale repo fact a later task
+  reads as current and reintroduces. A goal file describing the build is a
+  REPRESENTATION of the build's assumptions, no different from a comment or a
+  recipe, and it needs sweeping when those assumptions change.
 
 ## Core Rules
 
