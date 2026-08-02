@@ -39,8 +39,18 @@ fi
 # later — so a kill can land past the terminator with no crash text flushed. A
 # synthetic complete summary plus status 137 was classified KILLED before this.
 # 124 is the timeout, handled above as ESCAPED.
-if [ "$STATUS" -gt 128 ] && [ "$STATUS" -ne 124 ]; then
+# 129..192 is 128+signal for signals 1..64. ABOVE that a status is not
+# necessarily a signal — GNU timeout propagates the command's own status, and
+# this host's shell does not recognise 193+ as signalled (kill -l 65 is
+# rejected). Still INVALID, because an exit above 128 from `swift test` is not a
+# verdict either way, but the message no longer invents a signal number.
+# The 124 timeout is handled above as ESCAPED and never reaches here.
+if [ "$STATUS" -ge 129 ] && [ "$STATUS" -le 192 ]; then
     echo "INVALID: '$NAME' was terminated by signal $((STATUS - 128)) (status $STATUS). Not a kill."
+    exit 2
+fi
+if [ "$STATUS" -gt 192 ]; then
+    echo "INVALID: '$NAME' exited $STATUS — above the range swift test reports. Not a verdict."
     exit 2
 fi
 
@@ -53,9 +63,26 @@ fi
 # summary, then status 137 and no aggregate. That reported KILLED with exit 0.
 # An incomplete run is indistinguishable from a completed one by its prefix, so
 # the terminator is the only evidence that there was no more to come.
-if ! grep -qE "^Test Suite '(All tests|Selected tests)' (passed|failed)" "$RUN_LOG"; then
+AGGREGATE=$(grep -oE "^Test Suite '(All tests|Selected tests)' (passed|failed)" "$RUN_LOG" \
+            | tail -1 | grep -oE "(passed|failed)$")
+if [ -z "$AGGREGATE" ]; then
     echo "INVALID: '$NAME' produced no aggregate suite summary — the run did not complete (status $STATUS)."
     tail -3 "$RUN_LOG"
+    exit 2
+fi
+
+# THE AGGREGATE VERDICT AND THE EXIT STATUS MUST AGREE. Matching the terminator
+# and then discarding what it SAID let two contradictions through: a failed test
+# with "Selected tests passed" and status 1 classified KILLED, and a failed
+# aggregate with status 0 classified SURVIVED. XCTest does not produce either,
+# so seeing one means the log and the status came from different places — a
+# wrapper, a tee, a truncated read — and no verdict drawn from them is sound.
+if [ "$AGGREGATE" = "passed" ] && [ "$STATUS" -ne 0 ]; then
+    echo "INVALID: '$NAME' — aggregate says PASSED but the run exited $STATUS. Contradictory; no verdict."
+    exit 2
+fi
+if [ "$AGGREGATE" = "failed" ] && [ "$STATUS" -eq 0 ]; then
+    echo "INVALID: '$NAME' — aggregate says FAILED but the run exited 0. Contradictory; no verdict."
     exit 2
 fi
 
