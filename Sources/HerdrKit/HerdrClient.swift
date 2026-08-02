@@ -50,6 +50,17 @@ public actor HerdrClient {
         try await call("agent.list", EmptyParams(), as: AgentListResult.self).agents
     }
 
+    /// The complete pane set, as a value that carries its own provenance.
+    ///
+    /// `SessionRecovery.observe` takes this rather than `[AgentInfo]` because an
+    /// array can be filtered and a `PaneSnapshot` cannot be constructed outside
+    /// the module. A partial listing silently unsubscribes every omitted pane,
+    /// and their silence afterwards is indistinguishable from having no output —
+    /// so "this is the whole set" is enforced by where the value came from.
+    public func paneSnapshot() async throws -> PaneSnapshot {
+        PaneSnapshot(agents: try await agentList())
+    }
+
     struct ReadParams: Encodable {
         let target: String
         let source: ReadSource
