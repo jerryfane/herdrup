@@ -225,6 +225,18 @@ public actor RecoveryExecutor {
     /// plans and duplicate callbacks are rare but unbounded over days.
     public private(set) var rejections: [(action: String, reason: String)] = []
     public private(set) var droppedRejections = 0
+
+    /// How many stream deaths arrived for a pane the ledger could not act on —
+    /// a duplicate, a late callback, or one already retracted by exhaustion.
+    ///
+    /// Deliberately a COUNTER on its own surface rather than an entry in
+    /// `rejections`: these are unbounded in principle (a conformer double-firing
+    /// terminations produces one per fire) and sharing the bounded buffer let
+    /// them evict actionable refusals, measured at 129 deaths destroying a
+    /// seeded real rejection. An observation that degrades the diagnostics it
+    /// sits next to is not an observation.
+    public private(set) var ignoredDeaths = 0
+    public private(set) var lastIgnoredDeathPane: String?
     static let rejectionCapacity = 128
 
     private func record(rejection: (action: String, reason: String)) {
@@ -339,20 +351,19 @@ public actor RecoveryExecutor {
                 await resync(for: attempt)
 
             case .noteIgnoredDeath(let pane, let from):
-                // The ONLY effect is that the no-op becomes observable. See the
-                // case's own documentation: ignoring was already correct, and
-                // was also indistinguishable from the event never arriving.
-                // The reason names the CLASS, not a cause. `dropAndReadmit`
-                // returns nil for three distinct situations — a stale attempt,
-                // no live connection, or no ledger entry — and this note cannot
-                // tell them apart. Claiming one would be the three-states-into-
-                // one flattening this lane has spent the day removing; the note
-                // exists to prove the path RAN, which does not require knowing
-                // which of the three it was.
-                record(rejection: (
-                    action: "streamFailed(\(pane))",
-                    reason: "death not actionable (stale attempt, disconnected, or no ledger entry)"
-                ))
+                // A COUNTER, NOT A REJECTION ENTRY, and that distinction is a
+                // review finding rather than a preference. Putting these in the
+                // shared 128-entry buffer meant a flood of duplicate deaths
+                // EVICTED ACTIONABLE REFUSALS: a probe seeded one real
+                // "bound to a retired attempt" rejection, then delivered 129
+                // ignored deaths, and the real entry was gone. A path added for
+                // VISIBILITY had started destroying visibility.
+                //
+                // Counting cannot evict anything and is O(1). It is also
+                // sufficient for what this exists to do — prove the path RAN —
+                // which does not require a message per occurrence.
+                ignoredDeaths += 1
+                lastIgnoredDeathPane = pane
                 _ = from
 
             case .subscribe(let panes, let on):
