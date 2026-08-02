@@ -49,8 +49,10 @@ public enum RecoveryAction: Equatable, Sendable {
     case reconnect(AttemptID, after: TimeInterval)
     /// Drop every cached pane generation and refetch.
     case resyncAllPanes
-    /// Open subscriptions for these panes. herdr's subscriptions are pane-scoped
-    /// with **no wildcard**, so a pane absent here is a pane nothing is watching.
+    /// Open subscriptions for these panes. The pane-scoped subscription kinds
+    /// have **no wildcard**, so a pane absent here is a pane nothing is
+    /// watching. (`Wire.swift` also models non-pane-scoped subscription kinds;
+    /// this plan carries pane identity only and does not express those.)
     case subscribe(Set<String>)
 }
 
@@ -62,8 +64,11 @@ public enum RecoveryAction: Equatable, Sendable {
 /// following both plans literally opened every persistent subscription twice and
 /// could start work on a transport that was already stale.
 ///
-/// Resync and subscription now happen in exactly one place: on `connected`,
-/// while in the foreground. Nothing else emits them.
+/// `.resyncAllPanes` and the FULL-SET subscribe are emitted in exactly one
+/// place: on adoption of a current attempt. `paneCreated` and `observe` emit
+/// incremental subscribes for newly discovered panes while connected — so the
+/// invariant is not "one emission site" but **no pane's persistent
+/// subscription is opened twice within one recovery**.
 public struct RecoveryPlan: Equatable, Sendable {
     public var actions: [RecoveryAction]
 
@@ -96,27 +101,30 @@ public struct RecoveryPlan: Equatable, Sendable {
 ///
 /// ## Why there is no "resume from sequence" here
 ///
-/// An earlier version of this comment said the client sees sequence numbers
-/// "perfectly continuous with the ones it remembers". **That was invented.** The
-/// client sees no sequence numbers at all, and checking the wire types is what
-/// established it:
+/// **Scoped precisely, after two wrong versions.** The first invented a wire
+/// fact ("the client sees perfectly continuous sequence numbers" — it sees
+/// none on the stream). The second overcorrected into "a client cannot record
+/// a position even if it wanted one" — also false, and false in the dangerous
+/// direction: `AgentInfo` carries monotonic per-pane counters
+/// (`stateChangeSeq`, `turnEpoch`, `revision`), `RefreshCoordinator` records
+/// exactly such a position, and `invalidateAll()` exists because that
+/// remembered position WOULD mislead across a gap.
 ///
-/// - `Subscription` (`Wire.swift`) encodes exactly `type` and `pane_id`. There is
-///   **no cursor field**, so there is no way to ask for "everything since X".
-/// - Event envelopes carry no sequence, so a client cannot record a position even
-///   if it wanted one.
-/// - herdr's 512-entry ring is server-private. A subscription silently starts
-///   from whatever history the server chooses to replay, with no signal about
-///   what was skipped.
+/// What is actually true, checked against the wire types:
 ///
-/// So resumption is not *unwise* here, it is **unexpressible** — and the real
-/// consequence is stronger than the invented one. After any gap the only way to
-/// learn the current state is to ask again: `agent.list` plus fresh reads. Not
-/// because a remembered position would mislead, but because there is none to
-/// remember.
+/// - **Stream resumption is unexpressible.** `Subscription` (`Wire.swift`)
+///   encodes exactly `type` and `pane_id` — no cursor, so there is no way to
+///   ask for "everything since X". Event envelopes carry no sequence. herdr's
+///   512-entry ring is server-private, and a subscription silently starts from
+///   whatever the server chooses, with no signal about what was skipped.
+/// - **Positions a client CAN remember must not be trusted across a gap.**
+///   That is `RefreshCoordinator`'s job, and it is why every adoption here
+///   emits `.resyncAllPanes` — the action that drives `invalidateAll()` —
+///   rather than letting cached generations stand.
 ///
-/// The one thing worth persisting across a gap is which pane the reader had
-/// selected. Everything else is re-established by asking.
+/// So after any gap the only way to learn current state is to ask again:
+/// `agent.list` plus fresh reads. This type persists pane identity and
+/// connection bookkeeping, nothing stream-positional.
 public struct SessionRecovery: Sendable {
     /// First retry delay.
     public var baseDelay: TimeInterval
@@ -143,8 +151,18 @@ public struct SessionRecovery: Sendable {
 
     /// Mutable recovery state. Kept separate from the policy so the policy stays
     /// a value with no hidden history.
-    /// Fields are read-only to callers: every transition goes through `plan`, so
-    /// there is no second way to reach this state that the policy does not see.
+    /// Field WRITES are closed to callers — `internal(set)` — so state changes
+    /// go through this type's methods: `plan`, `beginInitialAttempt`, `observe`.
+    ///
+    /// Stated at that strength and no more, after a sweep refuted the stronger
+    /// claim ("every transition goes through plan()"): two other methods mutate
+    /// state, and value semantics plus the public initialiser mean a caller can
+    /// still REPLACE the whole value — `state = SessionRecovery.State()` resets
+    /// the attempt counter, after which a pre-reset attempt's identifier can be
+    /// re-minted and a late callback mistaken for current. Wholesale
+    /// replacement is the caller destroying their own session tracking, and no
+    /// access level on fields prevents it; hold one `State` per client and
+    /// never rebuild it mid-session.
     public struct State: Equatable, Sendable {
         public internal(set) var consecutiveFailures: Int = 0
         public internal(set) var connectedSince: Date?
@@ -153,8 +171,10 @@ public struct SessionRecovery: Sendable {
         /// cancellation, backgrounding and network changes, so anything that
         /// completes afterwards is recognisably stale.
         public internal(set) var currentAttempt: AttemptID?
-        /// Monotonic, so an identifier is never reused and a late callback can
-        /// never be mistaken for a current one.
+        /// Monotonic within one `State` value's lifetime, so an identifier is
+        /// not reused and a late callback is not mistaken for a current one —
+        /// see the type doc for the wholesale-replacement caveat that bounds
+        /// this claim.
         internal var nextAttemptValue: UInt64 = 0
         /// Every pane the client believes exists. Subscriptions are pane-scoped,
         /// so this is also the re-subscribe list.
@@ -191,9 +211,21 @@ public struct SessionRecovery: Sendable {
         return id
     }
 
-    /// Starts the first attempt of a cold launch, where no event triggered it.
+    /// Starts an attempt no event triggered — a cold launch, or a caller-driven
+    /// restart.
+    ///
+    /// Three properties earned by adversarial sweep, each from an observed
+    /// failure: it **cancels first**, because calling it while a connection was
+    /// live abandoned that transport with its subscriptions open, forever; it
+    /// **clears `connectedSince`**, because the stale date made `paneCreated`
+    /// emit subscribes for a transport the policy had just walked away from; and
+    /// it is **foreground-guarded**, because it was the one mint that ignored
+    /// backgrounding — which also made it the only path by which the redundant
+    /// background guards elsewhere were reachable at all.
     public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
-        RecoveryPlan([.reconnect(nextAttempt(&state), after: 0)])
+        guard state.isForeground else { return RecoveryPlan() }
+        state.connectedSince = nil
+        return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
     }
 
     public func plan(
@@ -203,25 +235,46 @@ public struct SessionRecovery: Sendable {
     ) -> RecoveryPlan {
         switch event {
         case .connected(let attempt, let at):
-            // Stale completions are the reason attempts are identified at all: a
-            // cancelled attempt still finishes, and adopting it opens persistent
-            // subscriptions on a transport the client already replaced.
+            // Staleness is the ONE mechanism here, deliberately. A cancelled
+            // attempt still finishes, and adopting it opens persistent
+            // subscriptions on a transport the client already replaced — and
+            // because backgrounding, network changes and cancellation all clear
+            // `currentAttempt`, this same guard is what discards a connection
+            // completing while backgrounded. An earlier version also kept a
+            // separate `isForeground` guard for that case; it was unreachable
+            // (nothing mints an attempt while backgrounded), and an unreachable
+            // twin guard is the two-guards-one-property trap this project has
+            // now hit twice: neither copy is individually pinnable.
             guard attempt == state.currentAttempt else {
                 return RecoveryPlan([.discardConnection])
             }
-            // A connection completing after the client backgrounded is not wanted
-            // either — iOS is about to suspend the process.
-            guard state.isForeground else { return RecoveryPlan([.discardConnection]) }
+            // A REPEAT connected for the already-adopted attempt is news, not a
+            // new adoption. Platforms deliver it: a connection can go
+            // ready -> waiting -> ready across a viability blip without failing,
+            // so nothing guarantees one connected per attempt. Re-adopting
+            // re-emitted resync and the full subscribe set — the duplicate this
+            // type exists to prevent — and overwrote `connectedSince`, silently
+            // restarting the stability clock.
+            guard state.connectedSince == nil else { return RecoveryPlan() }
             state.connectedSince = at
-            // THE ONLY PLACE resync and subscription are emitted. Every
-            // reconnection is a gap of unknown length, and doing it here rather
-            // than also on `foregrounded` is what makes it exactly once.
+            // The only emitter of `.resyncAllPanes`, and the only emitter of the
+            // FULL-SET subscribe. Not the only `.subscribe` site: `paneCreated`
+            // and `observe` emit incremental single-pane/added-pane subscribes
+            // while connected. The invariant actually held is narrower than an
+            // earlier comment claimed: no pane's persistent subscription is
+            // opened twice within one recovery.
             return RecoveryPlan([.resyncAllPanes, .subscribe(state.knownPanes)])
 
         case .transportFailed(let attempt, let at):
             // A stale failure must not tear down the attempt that replaced it,
             // nor count against the backoff — it is news about a connection
             // nobody is using.
+            // The staleness guard is also the background protection: backgrounding
+            // clears `currentAttempt`, so a failure arriving while backgrounded
+            // can never match it. An earlier version kept a second
+            // `isForeground` branch below this guard; every mint requires the
+            // foreground, so the branch was unreachable — dead defense that no
+            // test could pin.
             guard attempt == state.currentAttempt else { return RecoveryPlan() }
             // A connection that lasted counts as healthy, so the next failure
             // starts from a short delay rather than inheriting an old streak.
@@ -230,10 +283,6 @@ public struct SessionRecovery: Sendable {
             }
             state.connectedSince = nil
             state.consecutiveFailures += 1
-            guard state.isForeground else {
-                state.currentAttempt = nil
-                return RecoveryPlan()
-            }
             let delay = backoff(failures: state.consecutiveFailures, using: &generator)
             return RecoveryPlan([.reconnect(nextAttempt(&state), after: delay)])
 
@@ -260,10 +309,16 @@ public struct SessionRecovery: Sendable {
             state.isForeground = true
             state.consecutiveFailures = 0
             state.connectedSince = nil
-            // Reconnect ONLY. The resync and subscriptions follow on `connected`,
-            // because there is no transport yet to run them on — emitting them
-            // here as well is what produced duplicate subscriptions.
-            return RecoveryPlan([.reconnect(nextAttempt(&state), after: 0)])
+            // Cancel FIRST. Foregrounding is not guaranteed to find a dead
+            // transport: a foregrounded event with a connection still live (the
+            // OS never suspended us, or a lifecycle bug delivered no
+            // backgrounded) previously minted a replacement while the old
+            // transport stayed open and subscribed — two sockets reading the
+            // same panes, double-applied events, and nothing in any later plan
+            // would ever close the first one. Then reconnect; resync and
+            // subscriptions follow on `connected`, since there is no transport
+            // yet to run them on.
+            return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
 
         case .paneCreated(let pane):
             let isNew = state.knownPanes.insert(pane).inserted
@@ -288,8 +343,20 @@ public struct SessionRecovery: Sendable {
     /// one-element array silently deleting two known panes.
     ///
     /// Incremental discovery goes through `.paneCreated` / `.paneClosed`.
-    public func observe(_ snapshot: PaneSnapshot, state: inout State) {
+    ///
+    /// Returns a plan, because the previous `Void` signature had a hole the
+    /// sweep reproduced: a pane created during a disconnection gap arrives via
+    /// the post-reconnect snapshot, not via `paneCreated` — and the snapshot
+    /// merely recorded it. The pane was then on the "re-subscribe list" and
+    /// unsubscribed until the NEXT reconnect, silent the whole session, with
+    /// even the app-layer workaround closed: `paneCreated` for it returned
+    /// nothing, since the pane was already known. Subscriptions are pane-scoped
+    /// with no wildcard, so nothing else would ever cover it.
+    public func observe(_ snapshot: PaneSnapshot, state: inout State) -> RecoveryPlan {
+        let added = snapshot.paneIDs.subtracting(state.knownPanes)
         state.knownPanes = snapshot.paneIDs
+        guard state.isConnected, !added.isEmpty else { return RecoveryPlan() }
+        return RecoveryPlan([.subscribe(added)])
     }
 }
 
@@ -300,6 +367,11 @@ public struct SessionRecovery: Sendable {
 /// filtered list. Inside the module any code can use the initializer, and
 /// `HerdrClient.paneSnapshot()` is the intended source by convention rather than
 /// by enforcement.
+///
+/// This guards ONE of the two routes to a shrunken pane set, and that is the
+/// intended shape: the other route, `.paneClosed`, removes panes one at a time
+/// on server-reported events — per-event removal driven by the wire, not a
+/// caller-supplied list, which is the failure mode snapshots had.
 ///
 /// An earlier comment here said "only `HerdrClient` can make one". That was
 /// wrong, and wrong in the direction that makes a weak guarantee sound like a
