@@ -22,6 +22,19 @@ pinned SHA through the plumbing above and say which you did.
 **State in `Tests Run` BOTH the SHA you reviewed AND the worktree HEAD you
 found**, even when they agree — especially when they agree.
 
+**And report the CONTENT DISCRIMINATOR the dispatch asks for.** Each dispatch
+names a file and asks for `git rev-parse <sha>:<path>` — a blob id — plus the
+verbatim text of a specified line. Do not infer these from the dispatch; it
+never contains them.
+
+That requirement exists because naming the SHA is not independent evidence: the
+brief HANDS you the SHA. A reviewer that reads a stale worktree and quotes the
+pinned SHA satisfies every check above without ever touching the code under
+review, and under gitmoot#1415 that is the common case rather than an edge
+case — a PR elsewhere merged on exactly such a void verdict. A blob id cannot
+be produced without reading the tree it belongs to, so it is the first
+statement in this header that the coordinator did not supply the answer to.
+
 That pairing is the whole mechanism, and it is why this is a requirement rather
 than advice: it turns an instruction into a **detector**. A reviewer that
 quietly skips the plumbing is caught by the mismatch in its own output, at
