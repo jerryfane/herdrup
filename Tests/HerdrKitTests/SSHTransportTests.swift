@@ -12,6 +12,14 @@ import XCTest
 ///
 /// Skips when the local SSH prerequisites are absent so other environments stay
 /// honest about what they did not cover, rather than failing for the wrong reason.
+/// A counter a @Sendable seam can raise for its test.
+final class UncheckedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func bump() { lock.withLock { n += 1 } }
+    var value: Int { lock.withLock { n } }
+}
+
 /// A set-once flag a @Sendable seam can raise for its test.
 final class UncheckedFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -553,6 +561,16 @@ final class SSHTransportTests: XCTestCase {
         }
         let baseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
 
+        // WITNESS THE CLOSE ITSELF, through an injected closer that delegates to
+        // the real one. Both a success-shaped substitute for the syscall and
+        // deleting the close outright leave this UNINVOKED — and neither is
+        // catchable by looking at the descriptor number afterwards, because by
+        // then the number may belong to someone else. I had accepted that as an
+        // unclosable gap; review built this.
+        let closes = UncheckedCounter()
+        DescriptorAudit.setCloser({ fd in closes.bump(); return DescriptorAudit.realClose(fd) },
+                                  for: transport.auditToken)
+
         do {
             for try await _ in transport.stream(#"{"id":"x","method":"events.subscribe","params":{}}"#) {
                 XCTFail("the stream must not deliver after an interrupted adoption")
@@ -568,6 +586,8 @@ final class SSHTransportTests: XCTestCase {
         XCTAssertEqual(
             DescriptorAudit.adoptionRejections(by: transport.auditToken), 1,
             "the adopt-rejection branch never ran; the tally comparison below proves nothing")
+        XCTAssertEqual(closes.value, 1,
+                       "the rejection branch did not invoke the close: \(closes.value) calls")
         XCTAssertEqual(
             DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
             "the adopt-rejection cleanup closed its descriptor twice")
