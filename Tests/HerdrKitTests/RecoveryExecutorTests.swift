@@ -99,6 +99,42 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             return openCounts[pane] ?? 0
         }
     }
+
+    /// How many times `openStream` has been ENTERED for this pane, counted
+    /// independently of how many terminators are live.
+    ///
+    /// The two are not the same number and conflating them cost a whole round.
+    /// `registrationCount` was serving as "how many opens have happened", which
+    /// is only true if a throwing open leaves its registration behind — the
+    /// exact thing `ExecutorTransport` forbids. So the precondition was reading
+    /// evidence that existed only because the fake broke the contract under
+    /// test: fix the fake and the count silently drops to 1 and the window
+    /// never arms. Entry count answers the question directly and stays correct
+    /// whether an open throws, stalls, or succeeds.
+    private var openEntries: [String: Int] = [:]
+    func openEntryCount(_ pane: String) -> Int { lock.withLock { openEntries[pane] ?? 0 } }
+
+    /// Whether the pane's open is CURRENTLY parked in the stall.
+    ///
+    /// Stronger than the entry count as a precondition, and the difference is a
+    /// real race rather than a nicety: the entry count is incremented at the top
+    /// of `openStream`, the stall is inserted further down, and a test that
+    /// observed the count could call `release` in between — removing a stall
+    /// that had not been inserted yet. The open then parked forever and the
+    /// test timed out having proven nothing (1 run in 5). Observing the stall
+    /// itself cannot be early by construction.
+    func retryIsParked(_ pane: String) -> Bool { lock.withLock { stalledPanes.contains(pane) } }
+
+    /// Drops the registration this call made, so a throwing open leaves none.
+    /// Deliberately NOT applied on the `installsThenThrows` path: that one
+    /// exists to break the contract on purpose.
+    private func dropOwnRegistration(_ pane: String) {
+        lock.withLock {
+            guard var list = terminators[pane], !list.isEmpty else { return }
+            list.removeLast()
+            terminators[pane] = list
+        }
+    }
     private func isStalled(_ pane: String) -> Bool {
         lock.lock(); defer { lock.unlock() }; return stalledPanes.contains(pane)
     }
@@ -199,17 +235,25 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         // in 4 reporting .open for a reason that had nothing to do with the
         // guard under test.
         let laterOpen = lock.withLock { () -> Bool in
+            openEntries[pane, default: 0] += 1
             terminators[pane, default: []].append(onTermination)
             guard onlyFirstOpenSucceeds else { return false }
             return !opensSeen.insert(pane).inserted
         }
+        // NOT contract-abiding, and deliberately so — like `installsThenThrows`,
+        // `onlyFirstOpenSucceeds` is a probe of what the executor does when a
+        // conformer RETAINS a callback it promised to drop. The orphan IS the
+        // observable in the false-open test; dropping it here made that test's
+        // precondition read 0 registrations and the hazard vanish.
         if laterOpen { throw TransportError.closedBeforeResponse }
         // Armed catch-path window: throw the first time, stall every time
         // after. Both decisions happen AFTER the terminator registration
         // above, so `registrationCount` counts opens ENTERED — which is what
         // lets a test wait for the retry to exist rather than for a proxy.
         switch catchPathPhase(pane) {
-        case 1: throw TransportError.closedBeforeResponse
+        case 1:
+            dropOwnRegistration(pane)      // the contract: a throwing open leaves nothing live
+            throw TransportError.closedBeforeResponse
         case let phase where phase >= 2: lock.withLock { _ = stalledPanes.insert(pane) }
         default: break
         }
@@ -231,6 +275,8 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         if failOpens || lock.withLock({ failingPanes.contains(pane) }) {
             if installsThenThrows {
                 lock.withLock { terminators[pane, default: []].append(onTermination) }
+            } else {
+                dropOwnRegistration(pane)
             }
             throw TransportError.closedBeforeResponse
         }
@@ -301,8 +347,21 @@ final class RecoveryExecutorTests: XCTestCase {
         let executor = RecoveryExecutor(transport: transport)
         await executor.start()
 
-        let settled = await waitUntil { await executor.subscribedPanes == ["p1", "p2"] }
-        XCTAssertTrue(settled, "the cold start never reached full subscription")
+        // Settle on the TRANSPORT LOG, which is what every assertion below
+        // reads, rather than on the ledger. The ledger records a subscription
+        // before the transport finishes opening it, so waiting on
+        // subscribedPanes could return with only p1's openStream logged — the
+        // final set assertion then failed about 1 run in 5. Same shape as the
+        // precondition defects reviewed out of this file: the wait observed
+        // something that PRECEDES what the assertion inspects.
+        let settled = await waitUntil {
+            Set(transport.log().compactMap { if case .openStream(let p, _) = $0 { return p }; return nil })
+                == ["p1", "p2"]
+        }
+        XCTAssertTrue(settled, "the cold start never opened both streams")
+        let ledger = await executor.subscribedPanes
+        XCTAssertEqual(ledger, ["p1", "p2"],
+                       "the ledger disagrees with the streams actually opened")
 
         let ops = transport.log()
         guard case .connect(let attempt) = ops.first else {
@@ -490,14 +549,30 @@ final class RecoveryExecutorTests: XCTestCase {
         transport.armCatchPathWindow("a-fails")   // open 1 throws, open 2 stalls
         await executor.start()
 
-        // The window is ENTERED when the replacement open exists: registration
-        // 1 is the throwing open, 2 is the retry the policy dialed from inside
+        // The window is ENTERED when the replacement open exists: entry 1 is the
+        // throwing open, entry 2 is the retry the policy dialed from inside
         // handle(.streamFailed), and the retry stalls immediately after
-        // registering. Two registrations therefore prove the outer loop is
-        // parked in its catch — the precondition the whole test rests on.
-        let inWindow = await waitUntil { transport.registrationCount("a-fails") >= 2 }
+        // entering. Two ENTRIES therefore prove the outer loop is parked in its
+        // catch — the precondition the whole test rests on.
+        //
+        // Counted as entries, not live registrations. The first version waited
+        // on registrationCount >= 2, which only reached 2 because the fake
+        // registered a terminator and then threw — the one thing
+        // ExecutorTransport forbids a throwing open to do. Making the fake obey
+        // its own contract dropped that count to 1 and the window stopped
+        // arming: the precondition had been reading an artifact of the
+        // violation rather than the retry it named.
+        let inWindow = await waitUntil { transport.retryIsParked("a-fails") }
         XCTAssertTrue(inWindow,
                       "the failed open never produced a replacement; the catch-path window never opened")
+        XCTAssertGreaterThanOrEqual(transport.openEntryCount("a-fails"), 2,
+                                    "parked without a second entry: the stall is not the retry's")
+        // Two entries, exactly ONE live registration: the stalled retry's. The
+        // throwing first open left nothing behind, which is the seam contract
+        // holding — and asserting it here is what stops this precondition from
+        // silently going back to counting orphans.
+        XCTAssertEqual(transport.registrationCount("a-fails"), 1,
+                       "expected only the stalled retry to hold a registration; the throwing open left an orphan")
         let attemptAOptional = await executor.currentAttempt
         let attemptA = try XCTUnwrap(attemptAOptional)
 
@@ -505,9 +580,18 @@ final class RecoveryExecutorTests: XCTestCase {
         await executor.handle(.networkChanged(at: Date()))
         transport.release("a-fails")
 
-        try? await Task.sleep(nanoseconds: 300_000_000)
-
-        XCTAssertFalse(transport.log().contains { $0 == .openAttempt("z-must-not-open", attemptA) },
+        // Settle on an OUTCOME, not on elapsed time. A fixed sleep let the
+        // guard-removal mutant pass 1 run in 9: the negative assertion was
+        // inspected before the faulty outer loop had resumed, so "no forbidden
+        // open yet" and "no forbidden open ever" were indistinguishable. Wait
+        // until one of the two mutually exclusive outcomes is observable.
+        let forbidden: () -> Bool = { transport.log().contains { $0 == .openAttempt("z-must-not-open", attemptA) } }
+        let settled = await waitUntil {
+            if forbidden() { return true }
+            return await executor.rejections.contains { $0.reason.contains("attempt retired while handling an open failure") }
+        }
+        XCTAssertTrue(settled, "neither outcome was reached; the test proved nothing either way")
+        XCTAssertFalse(forbidden(),
                        "the loop resumed from its catch and opened a stream for a retired attempt")
     }
 
@@ -528,17 +612,29 @@ final class RecoveryExecutorTests: XCTestCase {
         let transport = ScriptedTransport(panes: ["p"])
         let executor = RecoveryExecutor(transport: transport)
         transport.failingPanes = ["p"]           // every open throws -> a retry is dialed
-        await executor.start()
 
         // Park the backoff instead of sleeping it: the retry's suspension has
         // to be held open long enough to retire the attempt underneath it, and
         // wall-clock timing cannot pin that without flaking.
+        //
+        // Installed BEFORE start(), and selective on the delay. Installing it
+        // after start() raced the executor's own first backoff, which then ran
+        // on the REAL sleeper and burned a retry before the seam existed — the
+        // test saw 2 opens where it asserted 1, intermittently. Selective
+        // because `dial` shares this seam: parking every call would park the
+        // initial connect and nothing would ever happen. 0.25 is failures(1) *
+        // 0.25, the first pane-retry backoff and the only delay under test.
         let parked = Signal()
         let release = Signal()
-        await executor.setSleeper { _ in
+        await executor.setSleeper { delay in
+            guard delay == 0.25 else {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                return
+            }
             parked.fire()
             await release.wait()
         }
+        await executor.start()
 
         // Entering the backoff is the precondition, and it is observed rather
         // than assumed: it can only be reached after the first open threw and
@@ -554,10 +650,16 @@ final class RecoveryExecutorTests: XCTestCase {
         await executor.handle(.networkChanged(at: Date()))
         release.fire()
 
-        try? await Task.sleep(nanoseconds: 300_000_000)
-
-        let opensAfter = transport.log().filter { $0 == .openAttempt("p", attemptA) }.count
-        XCTAssertEqual(opensAfter, 1,
+        // Same reasoning as the catch-path regression: settle on whichever
+        // outcome occurs rather than on a fixed duration, so a slow resume
+        // cannot be read as a passing guard.
+        let opensFor: () -> Int = { transport.log().filter { $0 == .openAttempt("p", attemptA) }.count }
+        let settled = await waitUntil {
+            if opensFor() > 1 { return true }
+            return await executor.rejections.contains { $0.reason.contains("attempt retired during retry backoff") }
+        }
+        XCTAssertTrue(settled, "neither outcome was reached; the test proved nothing either way")
+        XCTAssertEqual(opensFor(), 1,
                        "the retry woke from its backoff and opened a channel for a retired attempt")
     }
 
