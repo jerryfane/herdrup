@@ -66,7 +66,7 @@ public struct UnixSocketTransport: HerdrTransport {
     }
 
     private func connectFD() throws -> Int32 {
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_UNIX, sockStream, 0)
         guard fd >= 0 else { throw TransportError.socketCreationFailed(errno: errno) }
 
         var addr = sockaddr_un()

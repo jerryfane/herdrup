@@ -8,6 +8,19 @@ import PackageDescription
 // consumes it unchanged.
 let package = Package(
     name: "HerdrKit",
+    // REQUIRED, and its absence was invisible from Linux. With no `platforms`,
+    // SwiftPM assumes macOS 10.10 and every modern-concurrency symbol this
+    // package is built on becomes unavailable — Task, AsyncThrowingStream,
+    // CancellationError, withTaskCancellationHandler, and the rest. Linux does
+    // no availability checking at all, so the package compiled there while
+    // being unbuildable on any Apple platform.
+    //
+    // The floors are chosen, not defaults: macOS 13 for the toolchain that runs
+    // the tests, iOS 17 because that is the floor the app target will inherit
+    // and it decides which SwiftUI is available to the UI work. `platforms`
+    // constrains Apple platforms only, so the "builds on Linux too" property
+    // above is untouched.
+    platforms: [.macOS(.v13), .iOS(.v17)],
     products: [
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],
