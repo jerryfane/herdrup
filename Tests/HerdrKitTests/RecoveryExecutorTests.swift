@@ -1072,6 +1072,21 @@ final class RecoveryExecutorTests: XCTestCase {
                       "the dropped duplicate must be observable")
     }
 
+/// Observes a parked dial's cancellation. `pendingDial` holds the task that
+/// runs the sleeper, so a cancelled dial surfaces as `Task.sleep` throwing —
+/// the one place that state is directly visible.
+actor DialGate {
+    private var entered = false
+    private var cancelled = false
+    private var released = false
+    func enter() { entered = true }
+    func markCancelled() { cancelled = true }
+    func release() { released = true }
+    var hasEntered: Bool { entered }
+    var wasCancelled: Bool { cancelled }
+    var isReleased: Bool { released }
+}
+
 actor SleepRecorder {
     private var delays: [TimeInterval] = []
     func record(_ delay: TimeInterval) { delays.append(delay) }
@@ -1602,6 +1617,8 @@ actor SleepRecorder {
         let backoffsBefore = await backoffs.recorded().count
         XCTAssertGreaterThan(backoffsBefore, 0, "the sleeper never fired; its assertion would be vacuous")
         let rejectionsBefore = await executor.rejections.count
+        XCTAssertGreaterThan(rejectionsBefore, 0,
+                             "the rejection buffer is empty; its assertion below would compare 0 to 0")
 
         // The note.
         await executor.handle(.streamFailed(pane: "p", from: attempt))
@@ -1634,19 +1651,39 @@ actor SleepRecorder {
         let backedOff = await waitUntil { await backoffs.recorded().count > backoffsBefore }
         XCTAssertTrue(backedOff, "the note replaced the sleeper; nothing waits any more")
 
-        // NOT PINNED: pendingDial. Its only observable effect is whether an
-        // in-flight dial gets CANCELLED, and every version I wrote to observe
-        // that raced the cancellation against the stall release — flaky at
-        // first, then wrong 4 runs in 5 once I made the wait deterministic.
-        // Reporting it as uncovered rather than shipping a test that fails on
-        // correct code: an unreliable guard is worse than a named gap, because
-        // the gap is visible and the flake gets muted.
+        // AND THE PENDING-DIAL HANDLE SURVIVED.
         //
-        // A mutation clearing pendingDial from this branch therefore SURVIVES.
-        // What it would cost in production: a superseded dial is never
-        // cancelled, lands late, and is discarded — wasteful, not incorrect,
-        // since the discard path exists for exactly that. That is why I am
-        // willing to leave it named rather than keep grinding.
+        // I declared this unpinnable last round and I was wrong: I had only
+        // tried to observe it through the TRANSPORT — whether a superseded dial
+        // records a connect — which races the stall release against the
+        // cancellation. Review showed the observation belongs on the SLEEPER
+        // instead. `dial` parks inside it, `pendingDial` holds that task, and a
+        // cancelled task's `Task.sleep` THROWS. So cancellation is directly
+        // observable, deterministically, with no race to lose.
+        //
+        // The lesson is not about dials: I concluded "cannot be observed" from
+        // "the one surface I tried did not work".
+        let gate = DialGate()
+        await executor.setSleeper { delay in
+            guard delay >= 4 else { return }          // only the parked reconnect
+            await gate.enter()
+            while await !gate.isReleased {
+                do { try await Task.sleep(nanoseconds: 20_000_000) }
+                catch { await gate.markCancelled(); return }
+            }
+        }
+        await executor.execute(RecoveryPlan([.reconnect(attempt, after: 5)]))
+        let parked = await waitUntil { await gate.hasEntered }
+        XCTAssertTrue(parked, "the dial never parked; there was no handle to lose")
+
+        await executor.handle(.streamFailed(pane: "p", from: attempt))   // the note
+        await executor.handle(.networkChanged(at: Date()))               // supersedes the dial
+
+        let cancelled = await waitUntil { await gate.wasCancelled }
+        await gate.release()                                             // frees the mutant's orphan
+        XCTAssertTrue(cancelled,
+                      "the superseded dial was never cancelled: the note dropped pendingDial, and "
+                      + "the orphan keeps its connection resources until it completes")
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
