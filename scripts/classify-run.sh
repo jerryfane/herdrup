@@ -33,11 +33,26 @@ if grep -qE "Exited with unexpected signal code|Program crashed|Fatal error" "$R
     exit 2
 fi
 
-# From the TERMINAL summary, not the largest component suite. A filter spanning
-# two suites reports each separately and then a total; taking the largest
-# component made the denominator a partial count whenever a later suite was
-# bigger or never finished.
-EXECUTED=$(grep -E "^[[:space:]]+Executed [0-9]+ tests?" "$RUN_LOG" | tail -1 | grep -oE "[0-9]+" | head -1)
+# THE RUN MUST HAVE COMPLETED. XCTest closes with an AGGREGATE suite line —
+# "All tests" unfiltered, "Selected tests" under --filter — and without it the
+# run ended early however normal its earlier lines look.
+#
+# Taking the last "Executed N" without this check classified an OOM/SIGKILL as a
+# KILL: a probe supplied a genuine failed test, its completed COMPONENT-suite
+# summary, then status 137 and no aggregate. That reported KILLED with exit 0.
+# An incomplete run is indistinguishable from a completed one by its prefix, so
+# the terminator is the only evidence that there was no more to come.
+if ! grep -qE "^Test Suite '(All tests|Selected tests)' (passed|failed)" "$RUN_LOG"; then
+    echo "INVALID: '$NAME' produced no aggregate suite summary — the run did not complete (status $STATUS)."
+    tail -3 "$RUN_LOG"
+    exit 2
+fi
+
+# From the AGGREGATE summary — the Executed line following that terminator — not
+# the largest component and not merely the last line. A filter spanning two
+# suites reports each separately and then a total.
+EXECUTED=$(awk "/^Test Suite '(All tests|Selected tests)' (passed|failed)/{f=1;next} f&&/Executed [0-9]+ tests?/{print;exit}" "$RUN_LOG" \
+           | grep -oE "[0-9]+" | head -1)
 EXECUTED=${EXECUTED:-0}
 if [ "$EXECUTED" -eq 0 ]; then
     echo "INVALID: filter '$FILTER' matched no tests — nothing was exercised"
