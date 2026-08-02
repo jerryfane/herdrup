@@ -55,15 +55,14 @@ public enum HostKeyDecision: Sendable, Equatable {
 /// policy is asked separately for first-contact and for change, and a change
 /// defaults to refusal at the call site rather than here.
 public protocol HostKeyPolicy: Sendable {
-    /// The fingerprint previously accepted for this host, if any. Part of the
-    /// protocol so `changed` is reachable for every implementation, not only
-    /// for the bundled pinning one.
-    func pinnedFingerprint(for host: String) -> String?
-
-    /// First time this host has been seen. `fingerprint` is SHA-256, hex.
-    func firstContact(host: String, fingerprint: String) -> HostKeyDecision
-    /// The host's key differs from what was pinned. Refusing is the safe answer.
-    func changed(host: String, pinned: String, presented: String) -> HostKeyDecision
+    /// Decide, compare and pin as ONE operation.
+    ///
+    /// A split lookup-then-callback interface is a TOFU race: two concurrent
+    /// first connections can both observe no pin, trust different keys, and
+    /// overwrite each other — silently violating hard-stop-on-change at exactly
+    /// the moment pinning is supposed to establish trust. Keyed by host AND
+    /// port, since two hosts can share a name on different ports.
+    func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision
 }
 
 /// Pins on first contact and hard-stops on change.
@@ -74,18 +73,17 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
         self.store = store
     }
 
-    public func firstContact(host: String, fingerprint: String) -> HostKeyDecision {
-        store.pin(host: host, fingerprint: fingerprint)
-        return .trust
+    /// Compare-and-pin under a single lock, so concurrent first contacts cannot
+    /// both win. A key that differs from the pin is always refused: a changed
+    /// host key is indistinguishable from interception, and this transport
+    /// carries an operator's whole fleet.
+    public func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision {
+        store.compareAndPin(key: "\(host):\(port)", presented: presented)
     }
 
-    /// Always refuses. A changed host key is indistinguishable from an
-    /// interception, and this transport carries an operator's whole fleet.
-    public func changed(host: String, pinned: String, presented: String) -> HostKeyDecision {
-        .reject
+    public func pinnedFingerprint(for host: String, port: UInt16 = 22) -> String? {
+        store.pinned(key: "\(host):\(port)")
     }
-
-    public func pinnedFingerprint(for host: String) -> String? { store.pinned(host: host) }
 
     /// In-memory pin store. The iOS target substitutes a Keychain-backed one.
     public final class PinStore: @unchecked Sendable {
@@ -94,14 +92,24 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
 
         public init() {}
 
-        public func pinned(host: String) -> String? {
+        public func pinned(key: String) -> String? {
             lock.lock(); defer { lock.unlock() }
-            return pins[host]
+            return pins[key]
         }
 
-        public func pin(host: String, fingerprint: String) {
+        public func pin(host: String, port: UInt16 = 22, fingerprint: String) {
             lock.lock(); defer { lock.unlock() }
-            pins[host] = fingerprint
+            pins["\(host):\(port)"] = fingerprint
+        }
+
+        /// The whole decision inside one critical section.
+        func compareAndPin(key: String, presented: String) -> HostKeyDecision {
+            lock.lock(); defer { lock.unlock() }
+            if let existing = pins[key] {
+                return existing == presented ? .trust : .reject
+            }
+            pins[key] = presented
+            return .trust
         }
     }
 }
@@ -214,28 +222,18 @@ public struct SSHTransport: HerdrTransport {
         // places, which made the first branch redundant — and a mutation of it
         // left the test green, because the second branch was doing the work.
         // Two guards for one property means neither is pinned by its test.
-        // Pinning is asked of the POLICY, not of a concrete type. The previous
-        // version downcast to PinningHostKeyPolicy, so every custom policy — a
-        // Keychain-backed one on iOS, say — was sent through firstContact on
-        // every connection and its documented `changed` callback was
-        // unreachable. A policy that cannot be told its key changed cannot
-        // protect anything.
-        let decision: HostKeyDecision
-        var reason = "policy refused"
-        if let pinned = hostKeyPolicy.pinnedFingerprint(for: credentials.host) {
-            if pinned == presented {
-                decision = .trust
-            } else {
-                reason = "host key changed"
-                decision = hostKeyPolicy.changed(
-                    host: credentials.host, pinned: pinned, presented: presented
-                )
-            }
-        } else {
-            decision = hostKeyPolicy.firstContact(host: credentials.host, fingerprint: presented)
-        }
+        // One call: the policy compares and pins atomically. A split
+        // lookup-then-decide interface leaves a window where two concurrent
+        // first contacts both observe no pin, trust different keys, and
+        // overwrite each other — silently defeating hard-stop-on-change at the
+        // exact moment pinning is meant to establish trust.
+        let decision = hostKeyPolicy.evaluate(
+            host: credentials.host, port: credentials.port, presented: presented
+        )
         guard decision == .trust else {
-            throw SSHError.hostKeyRejected(host: credentials.host, reason: reason)
+            throw SSHError.hostKeyRejected(
+                host: credentials.host, reason: "host key not trusted for this host:port"
+            )
         }
     }
 
@@ -341,7 +339,11 @@ public struct SSHTransport: HerdrTransport {
             } else if n == Int(LIBSSH2_ERROR_EAGAIN) {
                 continue
             } else if n == 0 {
-                // Genuine EOF. Any buffered tail is a final unterminated line.
+                // A zero-byte read is NOT proof of EOF for libssh2 — it also
+                // occurs on a live channel with nothing available. Ask the
+                // channel. Treating zero as EOF ended streams that were merely
+                // idle, which on an event subscription is most of the time.
+                if libssh2_channel_eof(channel) == 0 { continue }
                 if carry.isEmpty { return nil }
                 let rest = String(decoding: carry, as: UTF8.self)
                 carry.removeAll()
@@ -359,31 +361,41 @@ public struct SSHTransport: HerdrTransport {
     // MARK: - HerdrTransport
 
     public func roundTrip(_ requestLine: String) async throws -> String {
-        // Connect, handshake, auth, open, write and read are all BLOCKING. Run
-        // them on a detached task rather than directly in the async function:
-        // done inline they block the calling cooperative thread for the whole
-        // exchange, which on a width-limited pool stalls unrelated work. The
-        // PR's original risk note claimed this was already the case; it was
-        // true only of `stream`.
-        try await Task.detached(priority: .userInitiated) { () throws -> String in
-            let session = try openSession()
-            defer { session.close() }
-            let channel = try openChannel(session)
-            defer { libssh2_channel_free(channel) }
+        // Connect, handshake, auth, open, write and read are all BLOCKING, and
+        // Task.detached does NOT isolate them: a detached task is unstructured,
+        // not a dedicated thread, so its synchronous work still occupies a
+        // cooperative worker. An earlier version used it and claimed isolation
+        // it did not provide. Blocking work needs a real thread.
+        try await withCheckedThrowingContinuation { continuation in
+            let thread = Thread {
+                do {
+                    let session = try openSession()
+                    defer { session.close() }
+                    let channel = try openChannel(session)
+                    defer { libssh2_channel_free(channel) }
 
-            try write(channel, requestLine)
-            var carry: [UInt8] = []
-            guard let line = try readLine(channel, carry: &carry) else {
-                throw TransportError.closedBeforeResponse
+                    try write(channel, requestLine)
+                    var carry: [UInt8] = []
+                    guard let line = try readLine(channel, carry: &carry) else {
+                        throw TransportError.closedBeforeResponse
+                    }
+                    continuation.resume(returning: line)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
-            return line
-        }.value
+            thread.name = "herdrkit.ssh.roundTrip"
+            thread.stackSize = 512 * 1024
+            thread.start()
+        }
     }
 
     public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let live = LiveChannel()
-            let work = Task.detached {
+            // Same reasoning as roundTrip: a detached task is not a thread, and
+            // this loop blocks for the life of the subscription.
+            let work = Thread {
                 do {
                     let session = try openSession()
                     guard live.adopt(session) else {
@@ -396,7 +408,7 @@ public struct SSHTransport: HerdrTransport {
                     try write(channel, requestLine)
 
                     var carry: [UInt8] = []
-                    while !Task.isCancelled, let line = try readLine(channel, carry: &carry) {
+                    while !live.isInterrupted, let line = try readLine(channel, carry: &carry) {
                         continuation.yield(line)
                     }
                     live.close()
@@ -406,6 +418,9 @@ public struct SSHTransport: HerdrTransport {
                     continuation.finish(throwing: error)
                 }
             }
+            work.name = "herdrkit.ssh.stream"
+            work.stackSize = 512 * 1024
+            work.start()
             continuation.onTermination = { _ in
                 // Same discipline as UnixSocketTransport: Task.cancel() cannot
                 // interrupt a blocking read, so the underlying socket is shut
@@ -414,7 +429,6 @@ public struct SSHTransport: HerdrTransport {
                 // server next writes — which on an idle stream may be never
                 // (herdr-ios#1).
                 live.interrupt()
-                work.cancel()
             }
         }
     }
@@ -441,6 +455,11 @@ private final class LiveChannel: @unchecked Sendable {
     }
 
     /// Unblocks a pending read without freeing anything the reader still holds.
+    var isInterrupted: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closed
+    }
+
     func interrupt() {
         lock.lock(); defer { lock.unlock() }
         closed = true

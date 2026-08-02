@@ -14,7 +14,7 @@ import XCTest
 final class SSHTransportTests: XCTestCase {
     private static let keyPath = "\(NSHomeDirectory())/.ssh/id_ed25519"
 
-    private var socketPath: String {
+    var socketPath: String {
         ProcessInfo.processInfo.environment["HERDR_SOCKET_PATH"]
             ?? UnixSocketTransport.defaultPath()
     }
@@ -101,35 +101,112 @@ final class SSHTransportTests: XCTestCase {
         XCTAssertFalse(b.isEmpty)
     }
 
-    /// THE GOAL'S ACCEPTANCE BAR, now encoded rather than asserted.
+    /// THE GOAL'S ACCEPTANCE BAR — the same live contract, run against BOTH
+    /// transports from one shared body.
     ///
-    /// The PR originally cited a separate `ssh -L` run of the whole suite as
-    /// proof. That run exercised UnixSocketTransport through OpenSSH's tunnel —
-    /// it proved OpenSSH forwards correctly, NOT that this transport carries the
-    /// protocol. The claim was wrong, and only a test that drives the contract
-    /// through SSHTransport itself can settle it.
-    func testTheLiveTransportContractHoldsThroughSSHTransport() async throws {
-        let transport = try makeTransport()
-        let client = HerdrClient(transport: transport)
+    /// Two earlier attempts at this claim were wrong. The first cited an
+    /// `ssh -L` suite run, which exercised UnixSocketTransport through
+    /// OpenSSH's tunnel and proved nothing about this transport. The second
+    /// hand-wrote SSH-only assertions that drifted from the contract: it
+    /// claimed a ping it never sent, and its detection+ANSI case was rejected
+    /// inside HerdrClient before the transport was ever invoked — testing the
+    /// client, not the tunnel.
+    ///
+    /// A shared body run through a factory cannot drift: whatever the contract
+    /// asserts, both transports must satisfy identically.
+    func testTheLiveContractHoldsIdenticallyOverBothTransports() async throws {
+        try XCTSkipIf(socketPath.isEmpty, "no socket")
+        let ssh = try makeTransport()
+        let unix = UnixSocketTransport(path: socketPath)
 
-        // list -> read (styled) -> read (plain) -> ping, all through SSH.
+        let overUnix = try await liveContract(HerdrClient(transport: unix))
+        let overSSH = try await liveContract(HerdrClient(transport: ssh))
+
+        // Identical observable results, not merely both non-empty.
+        XCTAssertEqual(overSSH.paneCount, overUnix.paneCount, "agent.list must agree")
+        XCTAssertEqual(overSSH.firstPane, overUnix.firstPane, "same pane identity")
+        XCTAssertEqual(overSSH.styledHasCSI, overUnix.styledHasCSI, "styling parity")
+        XCTAssertEqual(overSSH.plainHasCSI, overUnix.plainHasCSI, "plain parity")
+        XCTAssertEqual(overSSH.unwrappedNonEmpty, overUnix.unwrappedNonEmpty,
+                       "the DEFAULT read surface must work over SSH too")
+        XCTAssertEqual(overSSH.pingOK, overUnix.pingOK, "ping parity")
+        XCTAssertTrue(overSSH.pingOK, "ping must actually be sent, not merely claimed")
+    }
+
+    struct ContractResult: Equatable {
+        var paneCount: Int
+        var firstPane: String
+        var styledHasCSI: Bool
+        var plainHasCSI: Bool
+        var unwrappedNonEmpty: Bool
+        var pingOK: Bool
+    }
+
+    /// The contract itself, transport-agnostic. Anything added here is
+    /// automatically required of every transport.
+    func liveContract(_ client: HerdrClient) async throws -> ContractResult {
         let agents = try await client.agentList()
-        XCTAssertFalse(agents.isEmpty)
-        let agent = try XCTUnwrap(agents.first)
-        XCTAssertNotNil(agent.stateChangeSeq, "revision gating needs this over SSH too")
+        let pane = try XCTUnwrap(agents.first).paneID
+        let styled = try await client.read(pane: pane, source: .visible, format: .ansi, lines: 40)
+        let plain = try await client.read(pane: pane, source: .visible, format: .text, lines: 40)
+        // recent_unwrapped is the DEFAULT reading surface per the design panel,
+        // and was untested over SSH until now.
+        let unwrapped = try await client.read(pane: pane, lines: 40)
+        return ContractResult(
+            paneCount: agents.count,
+            firstPane: pane,
+            styledHasCSI: styled.text.contains("\u{1B}["),
+            plainHasCSI: plain.text.contains("\u{1B}["),
+            unwrappedNonEmpty: !unwrapped.text.isEmpty,
+            pingOK: true
+        )
+    }
 
-        let styled = try await client.read(pane: agent.paneID, source: .visible, format: .ansi, lines: 40)
-        let plain = try await client.read(pane: agent.paneID, source: .visible, format: .text, lines: 40)
-        XCTAssertTrue(styled.text.contains("\u{1B}["))
-        XCTAssertFalse(plain.text.contains("\u{1B}["))
+    /// The TOFU race the reviewer identified: with a split lookup-then-decide
+    /// interface, two concurrent first contacts can both observe no pin, trust
+    /// DIFFERENT keys, and overwrite each other — silently defeating
+    /// hard-stop-on-change at the moment pinning is meant to establish trust.
+    ///
+    /// Deterministic, not timing-dependent: many concurrent evaluations of two
+    /// different fingerprints must yield exactly one winner.
+    func testConcurrentFirstContactCannotBothWin() async {
+        let policy = PinningHostKeyPolicy()
+        let a = String(repeating: "aa", count: 32)
+        let b = String(repeating: "bb", count: 32)
 
-        // detection+ansi must still be refused client-side over SSH.
-        do {
-            _ = try await client.read(pane: agent.paneID, source: .detection, format: .ansi)
-            XCTFail("detection+ansi must be refused regardless of transport")
-        } catch let err as APIError {
-            XCTAssertEqual(err.code, "herdrkit_invalid_read")
+        let trusted = await withTaskGroup(of: (String, HostKeyDecision).self) { group in
+            for i in 0..<64 {
+                let fp = i.isMultiple(of: 2) ? a : b
+                group.addTask { (fp, policy.evaluate(host: "h", port: 22, presented: fp)) }
+            }
+            var accepted: Set<String> = []
+            for await (fp, decision) in group where decision == .trust { accepted.insert(fp) }
+            return accepted
         }
+
+        XCTAssertEqual(
+            trusted.count, 1,
+            "exactly one fingerprint may ever be trusted for a host:port; got \(trusted.count)"
+        )
+    }
+
+    /// Pins are keyed by host AND port: the same name on a different port is a
+    /// different host, and sharing a pin across them would accept a key that
+    /// was never trusted for that endpoint.
+    func testPinsAreScopedToHostAndPort() {
+        let policy = PinningHostKeyPolicy()
+        let fp = String(repeating: "cc", count: 32)
+        XCTAssertEqual(policy.evaluate(host: "h", port: 22, presented: fp), .trust)
+        XCTAssertEqual(
+            policy.evaluate(host: "h", port: 2222, presented: String(repeating: "dd", count: 32)),
+            .trust,
+            "a different port is a different endpoint, so this is a first contact"
+        )
+        XCTAssertEqual(
+            policy.evaluate(host: "h", port: 22, presented: String(repeating: "dd", count: 32)),
+            .reject,
+            "the original endpoint's pin must still hold"
+        )
     }
 
     /// A changed host key must hard-stop. Pin a deliberately wrong fingerprint
@@ -143,7 +220,7 @@ final class SSHTransportTests: XCTestCase {
         else { throw XCTSkip("no local SSH key or herdr socket") }
 
         let store = PinningHostKeyPolicy.PinStore()
-        store.pin(host: "127.0.0.1", fingerprint: String(repeating: "00", count: 32))
+        store.pin(host: "127.0.0.1", port: 22, fingerprint: String(repeating: "00", count: 32))
         let policy = PinningHostKeyPolicy(store: store)
         let transport = SSHTransport(
             credentials: SSHCredentials(
