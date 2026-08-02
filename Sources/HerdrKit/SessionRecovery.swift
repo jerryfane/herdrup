@@ -12,14 +12,21 @@ import Foundation
 /// steps inside one plan, and this is about which *attempt* a callback belongs
 /// to.
 public struct AttemptID: Equatable, Hashable, Sendable {
-    /// Random per `State` lifetime. A bare counter restarts at 1 when a caller
-    /// replaces the State value — `state = SessionRecovery.State()` — after
-    /// which a late callback minted by the DISCARDED state matched the new
-    /// state's first attempt and was adopted, defeating the stale-callback
-    /// protection entirely. Identity must survive the identity-holder being
-    /// rebuilt, so it carries an epoch the rebuild cannot reproduce.
-    let epoch: UInt64
-    let value: UInt64
+    /// A fresh UUID per mint, derived from NOTHING the State stores.
+    ///
+    /// Two prior identities each fell to state replay. A bare counter restarted
+    /// at 1 when a caller rebuilt the State, so a discarded state's callback
+    /// matched the rebuild's first attempt. A per-State random epoch fixed the
+    /// rebuild and fell to the copy: State is a value, so save-copy → mint →
+    /// restore-copy → mint reproduced the identical (epoch, counter). The only
+    /// identity replay cannot reproduce is one that never derives from
+    /// replayable contents — so nothing about an AttemptID comes from State.
+    ///
+    /// What this cannot fix, stated because it is inherent to value semantics:
+    /// restoring an old State copy restores its `currentAttempt`, making that
+    /// old attempt current again by the caller's own hand. Minting is
+    /// replay-proof; the caller's stored value is the caller's to misuse.
+    let uuid: UUID
 }
 
 /// Something that happened to the connection or the app.
@@ -164,11 +171,12 @@ public struct SessionRecovery: Sendable {
     /// Stated at that strength and no more, after a sweep refuted the stronger
     /// claim ("every transition goes through plan()"): two other methods mutate
     /// state, and value semantics plus the public initialiser mean a caller can
-    /// still REPLACE the whole value. Attempt identity survives that: each
-    /// State draws a random epoch at init and every AttemptID carries it, so a
-    /// callback minted before a replacement cannot match anything minted after
-    /// — it goes stale instead of being adopted. Replacement still discards
-    /// pane and connection bookkeeping; hold one `State` per client.
+    /// still REPLACE the whole value. Attempt MINTING survives that: identity
+    /// is a fresh UUID derived from nothing the State stores, so no
+    /// replacement or copy-restore can make a new mint collide with an old
+    /// one. What replay can still do is restore an old copy's `currentAttempt`
+    /// verbatim — the caller reinstating an abandoned attempt by hand — which
+    /// no value-typed design prevents. Hold one `State` per client.
     public struct State: Equatable, Sendable {
         public internal(set) var consecutiveFailures: Int = 0
         public internal(set) var connectedSince: Date?
@@ -177,13 +185,6 @@ public struct SessionRecovery: Sendable {
         /// cancellation, backgrounding and network changes, so anything that
         /// completes afterwards is recognisably stale.
         public internal(set) var currentAttempt: AttemptID?
-        /// Counter within this State's epoch; the pair (epoch, value) is what
-        /// identifies an attempt, so replacing the State value changes the
-        /// epoch and every callback minted before the replacement goes stale.
-        internal var nextAttemptValue: UInt64 = 0
-        /// Drawn at init. Two State values agreeing by chance is a 1-in-2^64
-        /// event, not a caller mistake away.
-        internal var attemptEpoch: UInt64 = UInt64.random(in: UInt64.min...UInt64.max)
         /// Every pane the client believes exists. Subscriptions are pane-scoped,
         /// so this is also the re-subscribe list on the next adoption.
         public internal(set) var knownPanes: Set<String> = []
@@ -221,8 +222,9 @@ public struct SessionRecovery: Sendable {
     /// Every prior attempt becomes stale at this point, which is what makes a
     /// late callback recognisable rather than plausible.
     private func nextAttempt(_ state: inout State) -> AttemptID {
-        state.nextAttemptValue += 1
-        let id = AttemptID(epoch: state.attemptEpoch, value: state.nextAttemptValue)
+        // Never derived from State: see AttemptID's doc for the two identities
+        // that were, and how each fell to replay.
+        let id = AttemptID(uuid: UUID())
         state.currentAttempt = id
         return id
     }
