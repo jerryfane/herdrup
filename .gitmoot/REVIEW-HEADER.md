@@ -118,6 +118,16 @@ a live race.
   condition under test passes for reasons unrelated to its name; on this repo
   that has been the cause more often than a weak assertion.
 - Restore per-file after probing; leave the worktree clean.
+- **Mutate the PREMISE, not only the production code.** Breaking a line the test
+  never reaches proves nothing and reports as a survivor. Neuter the test's own
+  setup instead — swap a failing fake for a stalling one, remove the arming
+  flag, make the hazard unreachable — and if the test still passes it was never
+  armed. This caught three vacuous preconditions on #13 that nineteen rounds of
+  production-side mutation could not, and that I had looked for twice myself.
+- **Prefer POSITIVE preconditions.** A wait on an absence, a zero, or a nil
+  matches the t=0 default, so it cannot distinguish "not yet" from "never" — and
+  it reads as correct, because the state the window PRODUCES looks like the state
+  that proves the window opened.
 
 ## 3. What this lane wants from a review
 
