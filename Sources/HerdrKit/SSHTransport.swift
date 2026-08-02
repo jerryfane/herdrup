@@ -368,14 +368,30 @@ public struct SSHTransport: HerdrTransport {
 
         /// Test seam: runs on the resolver thread before `getaddrinfo`, so a
         /// test can hold a resolution in flight and force callers to overlap.
-        nonisolated(unsafe) static var startGate: (@Sendable () -> Void)?
+        ///
+        /// Read and written under `auditLock`, and **captured at construction**
+        /// rather than read from the resolver thread. The first version was an
+        /// unsynchronised `static var`: resolver threads read it while the test's
+        /// `defer` cleared it, which ThreadSanitizer caught twice even though ten
+        /// ordinary runs passed. A seam whose own guard is undefined behaviour
+        /// cannot pin anything.
+        nonisolated(unsafe) private static var _startGate: (@Sendable () -> Void)?
+
+        static var startGate: (@Sendable () -> Void)? {
+            get { auditLock.lock(); defer { auditLock.unlock() }; return _startGate }
+            set { auditLock.lock(); _startGate = newValue; auditLock.unlock() }
+        }
 
         init(host: String, port: UInt16, onFinish: @escaping @Sendable (Resolution) -> Void) {
             Resolution.auditLock.lock()
             Resolution.constructions += 1
+            // Captured here, so the resolver thread invokes an immutable local
+            // and never touches the shared property — and the lock is released
+            // before the gate can block on it.
+            let gate = Resolution._startGate
             Resolution.auditLock.unlock()
             let thread = Thread { [self] in
-                Resolution.startGate?()
+                gate?()
                 var hints = addrinfo()
                 hints.ai_family = AF_UNSPEC
                 hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
