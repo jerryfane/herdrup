@@ -305,6 +305,17 @@ public enum RecoveryAction: Equatable, Sendable {
     /// `Wire.swift` also models non-pane-scoped kinds this plan does not
     /// express.)
     case subscribe(Set<String>, on: AttemptID)
+
+    /// A stream death was received for a pane the ledger does not hold, and
+    /// deliberately ignored — a duplicate, a late callback, or one for a pane
+    /// already retracted by exhaustion.
+    ///
+    /// It exists ONLY to make a correct no-op observable. Ignoring was already
+    /// right; it was also indistinguishable from the event never arriving, so
+    /// the guard asserting "a death after retraction does not re-admit" passed
+    /// with the death removed entirely. A path with no success signal cannot be
+    /// armed by any test.
+    case noteIgnoredDeath(pane: String, from: AttemptID)
 }
 
 /// An ordered list of steps. Order is the point.
@@ -627,7 +638,20 @@ public struct SessionRecovery: Sendable {
             // favour, and a later snapshot corrects any miss.
             guard let readmitted = state.authority.dropAndReadmit(
                 pane, from: from, readmit: state.knownPanes.contains(pane)
-            ) else { return RecoveryPlan() }
+            ) else {
+                // A death for a pane the ledger does not hold: a duplicate, a
+                // late callback, or one for a pane already retracted by
+                // exhaustion. Correct to ignore — and until now, INVISIBLE.
+                //
+                // A path that produces no observable when it behaves correctly
+                // cannot be distinguished from a path that never ran, by any
+                // test, ever. That is not a testing inconvenience: the guard
+                // asserting "a death after retraction does not re-admit" passed
+                // with the death never delivered, and no premise mutation could
+                // have armed it without something to observe. The refusal is
+                // recorded so the no-op is a fact rather than an absence.
+                return RecoveryPlan([.noteIgnoredDeath(pane: pane, from: from)])
+            }
             return subscriptionPlan(for: readmitted)
 
         case .streamExhausted(let pane, let from):
