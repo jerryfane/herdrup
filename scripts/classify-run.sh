@@ -109,7 +109,15 @@ fi
 # reports "2 failures", so the exact value cannot be compared to anything.
 AGG_FAILS=$(awk "/^Test Suite '(All tests|Selected tests)' (passed|failed)/{f=1;next} f&&/Executed [0-9]+ tests?/{print;exit}" "$RUN_LOG" \
             | grep -oE "[0-9]+ failures?" | grep -oE "^[0-9]+")
-AGG_FAILS=${AGG_FAILS:-0}
+# ABSENCE IS NOT ZERO. Defaulting to 0 meant a log with no failure-count field
+# at all — "Executed 1 test in 0.1 seconds" — passed the consistency check and
+# classified SURVIVED. XCTest ALWAYS supplies this count (unlike the zero-skip
+# clause, which it legitimately omits), so its absence means the grammar is not
+# what this parser thinks and no verdict drawn from it is sound.
+if [ -z "$AGG_FAILS" ]; then
+    echo "INVALID: '$NAME' — aggregate has no failure count; the summary grammar is not what this parses."
+    exit 2
+fi
 if [ "$AGGREGATE" = "passed" ] && [ "$AGG_FAILS" -ne 0 ]; then
     echo "INVALID: '$NAME' — aggregate says PASSED but reports $AGG_FAILS failures. Contradictory; no verdict."
     exit 2

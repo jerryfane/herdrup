@@ -138,6 +138,22 @@ expect failed-aggregate-zero-failures 2 "reports 0 failures" 1 "Test Case 'S.tes
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds"
 
+# 4g. A FAILURE COUNT MUST BE PRESENT. Absence is not zero.
+expect missing-failure-count 2 "no failure count" 0 "Test Case 'S.testPass1' passed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 1 test in 0.1 seconds"
+
+# 4h. THE NO-FAILED-CASE BACKSTOP, which I claimed last round was unreachable.
+#     It is not: a FAILED aggregate reporting one failure whose only terminal
+#     case PASSED is internally consistent by every earlier check and reaches
+#     it. Deleting the branch left all 23 fixtures passing and made this report
+#     KILLED with "0 of 1" killers. I reasoned about reachability instead of
+#     testing it, one round after being caught doing exactly that about
+#     pendingDial.
+expect positive-count-no-failed-case 2 "no test-case failure" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.1 seconds"
+
 # 5. THE ESTABLISHED CASES, so this file pins what already worked.
 expect hang 3 "A hang is not a kill" 124 "Test Case 'S.testA' started"
 expect no-tests-matched 2 "matched no tests" 0 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
