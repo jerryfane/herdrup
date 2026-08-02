@@ -38,6 +38,11 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// Panes whose opens always throw, for paired-control tests where one pane
     /// is healthy and one is not.
     var failingPanes: Set<String> = []
+    /// Only the FIRST open of each pane succeeds; every later one throws. Lets
+    /// a test have one live registration and no possible replacement, without
+    /// racing a flag against the executor.
+    var onlyFirstOpenSucceeds = false
+    private var opensSeen: Set<String> = []
     /// Installs the callback and THEN throws: the ownership violation the seam
     /// now forbids, kept as a probe of what the executor does when a conformer
     /// breaks the contract anyway.
@@ -48,6 +53,27 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
 
     func stall(_ pane: String) { lock.withLock { _ = stalledPanes.insert(pane) } }
     func release(_ pane: String) { lock.withLock { _ = stalledPanes.remove(pane) } }
+
+    /// Kill-on-registration: arms a flag so the pane's NEXT registered
+    /// terminator fires immediately, INSIDE openStream before it returns —
+    /// the termination-races-the-return interleaving made deterministic.
+    private var killOnRegister: Set<String> = []
+    func releaseAndKill(_ pane: String) {
+        lock.withLock {
+            _ = stalledPanes.remove(pane)
+            _ = killOnRegister.insert(pane)
+        }
+    }
+
+    /// The first open for this pane SUCCEEDS and fires its termination before
+    /// returning; every later one fails (via failingPanes). That is the
+    /// termination-races-the-return window with a deterministic aftermath:
+    /// replacements exhaust, so a false publish by the original call is the
+    /// only way the pane can ever read .open.
+    private var succeedOnceThenKill: Set<String> = []
+    func killDuringFirstSuccessfulOpen(_ pane: String) {
+        lock.withLock { _ = succeedOnceThenKill.insert(pane) }
+    }
     private func isStalled(_ pane: String) -> Bool {
         lock.lock(); defer { lock.unlock() }; return stalledPanes.contains(pane)
     }
@@ -127,8 +153,31 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         pane: String, for attempt: AttemptID,
         onTermination: @escaping @Sendable () -> Void
     ) async throws {
+        // Registered BEFORE the stall so a suspended open can be terminated
+        // from outside — that is the reviewer's interleaving: the death is
+        // processed while the call is still suspended, and the call then
+        // returns and tries to publish.
+        lock.withLock { terminators[pane, default: []].append(onTermination) }
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
         record(.openAttempt(pane, attempt))
+        let laterOpen = lock.withLock { () -> Bool in
+            guard onlyFirstOpenSucceeds else { return false }
+            return !opensSeen.insert(pane).inserted
+        }
+        if laterOpen { throw TransportError.closedBeforeResponse }
+        let succeedThisOnce = lock.withLock { succeedOnceThenKill.remove(pane) != nil }
+        if succeedThisOnce {
+            record(.openStream(pane, attempt))
+            // Fires INSIDE the call: the executor's publish runs after this.
+            let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
+                guard var list = terminators[pane], !list.isEmpty else { return nil }
+                let last = list.removeLast()
+                terminators[pane] = list
+                return last
+            }
+            terminate?()
+            return
+        }
         if failOpens || lock.withLock({ failingPanes.contains(pane) }) {
             if installsThenThrows {
                 lock.withLock { terminators[pane, default: []].append(onTermination) }
@@ -136,7 +185,18 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             throw TransportError.closedBeforeResponse
         }
         record(.openStream(pane, attempt))
-        lock.withLock { terminators[pane, default: []].append(onTermination) }
+        let fireNow = lock.withLock { killOnRegister.remove(pane) != nil }
+        if fireNow {
+            // Fire BEFORE returning: the executor's success path runs after
+            // this, which is exactly the window under test.
+            let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
+                guard var list = terminators[pane], !list.isEmpty else { return nil }
+                let last = list.removeLast()
+                terminators[pane] = list
+                return last
+            }
+            terminate?()
+        }
     }
 
     func closeAll(for attempt: AttemptID) async {
@@ -533,8 +593,14 @@ actor SleepRecorder {
         let backoffs = await recorder.recorded()
         XCTAssertGreaterThan(backoffs.count, 0, "retries must be delayed, not immediate")
         XCTAssertTrue(backoffs.allSatisfy { $0 > 0 })
-        XCTAssertLessThanOrEqual(backoffs.count, RecoveryExecutor.openFailureCap,
-                                 "retries exceeded the cap: \(backoffs.count) attempts")
+        // EXACT, not <=: the <= form let the failures <= cap off-by-one mutant
+        // survive the whole executor selection. The cap means exactly cap
+        // failed registrations: cap attempts, cap-1 backoffs between them.
+        XCTAssertEqual(backoffs.count, RecoveryExecutor.openFailureCap - 1,
+                       "expected exactly \(RecoveryExecutor.openFailureCap - 1) backoffs, got \(backoffs.count)")
+        let attempts = transport.log().filter { if case .openAttempt = $0 { return true }; return false }.count
+        XCTAssertEqual(attempts, RecoveryExecutor.openFailureCap,
+                       "expected exactly \(RecoveryExecutor.openFailureCap) registration attempts, got \(attempts)")
 
         // KNOWN GAP, asserted so it cannot change silently and ESCALATED rather
         // than fixed here: the ledger still lists the pane, because admission
@@ -570,8 +636,8 @@ actor SleepRecorder {
             if case .openAttempt = $0 { return true }; return false
         }.count
         XCTAssertGreaterThan(attemptsAtCap, 0, "precondition: registrations were attempted")
-        XCTAssertLessThanOrEqual(attemptsAtCap, RecoveryExecutor.openFailureCap + 1,
-                                 "the cap did not bound registration attempts")
+        XCTAssertEqual(attemptsAtCap, RecoveryExecutor.openFailureCap,
+                       "expected exactly \(RecoveryExecutor.openFailureCap) registration attempts, got \(attemptsAtCap)")
 
         // The OLDEST registration's orphaned callback fires late.
         transport.killOldestRegistration("p1")
@@ -634,6 +700,60 @@ actor SleepRecorder {
         }
         let staleFree = await executor.openFailureEntryCountForRetiredAttempts == 0
         XCTAssertTrue(staleFree, "retired attempts' failure counters were retained")
+    }
+
+    /// AXIS: a retired attempt's delayed termination cannot flip a LIVE pane's
+    /// status — the reviewer's probe: p1 open on B, A's stale termination
+    /// arrives, and B's status fell to admittedNotOpen while its stream lived.
+    func testAStaleTerminationCannotFlipALivePanesStatus() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.paneStatus("p1") == .open }
+
+        // A's registration survives the teardown in the fake's registry (the
+        // stale callback the wire can always deliver late); B re-opens p1.
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.paneStatus("p1") == .open }
+
+        // The OLDEST registration — A's — fires its termination late.
+        transport.killOldestRegistration("p1")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let status = await executor.paneStatus("p1")
+        XCTAssertEqual(status, .open,
+                       "a stale termination flipped a live pane to \(status)")
+    }
+
+    /// AXIS: a termination racing the open's suspension cannot yield a false
+    /// .open — the reviewer's probe: replacements exhausted, then the
+    /// terminated ORIGINAL call returned and published, and paneStatus lied
+    /// .open forever after.
+    func testATerminationDuringTheOpenCannotPublishAFalseOpen() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        transport.onlyFirstOpenSucceeds = true     // one live registration, no replacements
+        transport.stall("p1")                      // the open suspends, terminator registered
+        await executor.start()
+        _ = await waitUntil {
+            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
+        }
+
+        // The stream dies while its open is STILL SUSPENDED: the death is
+        // processed on the free actor before the call returns.
+        transport.killStream("p1")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        transport.release("p1")                    // the original call now returns
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        // UNCONDITIONAL: the registration that terminated must never publish.
+        // The first version asserted only IF status was .open — vacuous
+        // whenever the bug is absent, and the mutation survived it.
+        let status = await executor.paneStatus("p1")
+        guard case .admittedNotOpen = status else {
+            return XCTFail("a terminated registration published .open (status: \(status))")
+        }
     }
 
     /// THE COORDINATOR'S PAIRED CONTROL: a healthy pane reports `.open` AND a
