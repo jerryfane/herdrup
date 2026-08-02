@@ -18,38 +18,48 @@ best case.
 | every subsequent channel | 0.1 ms | free |
 | missing `TCP_NODELAY` | ~30 ms | fixed, now recovered |
 
-## The finding that matters
+## The finding that matters — CORRECTED
 
-**The first channel opened on a fresh SSH session is expensive. Every channel
-after it, on that same session, is free.**
+An earlier version of this document claimed *"the first channel opened on a
+fresh session is expensive; every channel after it is free."* **That is false**,
+and a reviewer disproved it with a measurement I had not thought to run.
 
-That shape is stable and reproducible on every target tested — the live herdr
-socket and a trivial echo socket with no herdr code in the path. The *magnitude*
-is not stable: the same code against the same target on the same machine
-produced 1804 ms once and 99.7 ms another time.
+| condition | first-channel cost |
+|---|---|
+| opened **immediately** after authentication | 89.6–102.1 ms |
+| session **aged 100 ms** before its first channel | **0.28–0.54 ms** |
+| pre-opened sessions | ~0.22 ms |
+
+**It is not the first channel that is expensive. It is a channel opened
+immediately after authentication.** Waiting 100 ms makes the cost vanish. So
+this is a *post-authentication readiness delay*, not an intrinsic per-session
+cost — the session needs a moment to become ready, and a channel requested
+inside that window pays for it.
+
+The distinction matters for the design: a pool that merely holds sessions does
+not fix this, because a freshly authenticated session handed straight out still
+pays. **Sessions must be prewarmed or validated before checkout.**
 
 Because `roundTrip` opens a fresh session per request, **every request pays a
 once-per-session cost.** That is the dominant term in the whole transport.
 
-## How this was nearly missed
+## The method lesson — also corrected
 
-Three rounds of measurement reported percentiles and found nothing. Channel-open
-looked like a modest `p50 = 40.7 ms` worth optimising.
+An earlier version claimed the `p50 = 40.7 ms` was a "confident wrong number"
+produced by a median over a bimodal distribution. **That reasoning conflated two
+datasets.** The displayed sequence — eleven samples near 0.1 ms and one at
+1804.6 ms — has a median near 0.1 ms, not 40.7 ms. The 40.7 ms came from a
+different run under different conditions.
 
-Printing the **sequence** instead found it in one look:
+A median is not inherently misleading. **The actual error was aggregating
+measurements taken in heterogeneous session states** — some channels opened
+immediately after auth, some on aged sessions — into one statistic, as though
+they were samples of the same thing. They were not.
 
-```
-1804.6  0.2  0.1  0.1  0.1  0.1  0.1  0.1  0.1  0.1  0.1  0.1   (ms)
-```
-
-The distribution is bimodal — one enormous sample and eleven free ones — and a
-p50 across it is not a weak signal but a **confident wrong one**. A separate
-"pathological p95 of 1958 ms", logged for a while as an unrelated defect, turned
-out to be the same phenomenon sampled differently.
-
-**Prefer the sequence to the summary when hunting a cause.** A summary statistic
-over a bimodal distribution manufactures a plausible number that describes
-nothing real.
+The surviving lesson is narrower and more useful than the one first written:
+**print the sequence when hunting a cause**, because it exposes whether your
+samples are even measuring the same condition. The bimodality was real; the
+explanation attached to it was wrong.
 
 ## What was ruled out
 
