@@ -22,10 +22,16 @@ channels.**
   an earlier version of this memo wrongly described it as one.
 
   **Consequence: pooling alone is insufficient.** A freshly authenticated session
-  handed straight out still pays. Pooled objects must be **authenticated *and*
-  prewarmed or readiness-validated** before checkout.
-- Channels cost 0.1 ms after the first on a session — there is nothing to
-  amortise — and herdr's command socket is **single-shot**, so every request
+  handed straight out still pays.
+
+  **Readiness, defined executably** — "prewarmed" is not a design until it names
+  a transition. A session becomes eligible for checkout when a **sacrificial
+  `direct-streamlocal` channel has been opened and freed on it**. That is the
+  operation whose cost is being avoided, so performing it once is what proves
+  readiness; an age gate would be a proxy for it and would need its own
+  measurement to justify a number. Prewarm on insertion, not on borrow, so the
+  cost lands off the request path.
+- Channels cost 0.1 ms **on a ready session** — there is nothing to amortise — and herdr's command socket is **single-shot**, so every request
   needs its own channel regardless.
 
 That asymmetry is the whole design. It was not obvious and was not guessable.
@@ -34,7 +40,7 @@ That asymmetry is the whole design. It was not obvious and was not guessable.
 
 1. **"Pool channels; evict at ~3 s."** Premise: channel-open is the dominant
    cost, and herdr's `INITIAL_REQUEST_TIMEOUT = 5 s` reaps idle ones.
-   *Wrong:* channel-open is free after the first.
+   *Wrong:* channel-open is free on a ready session; the cost is readiness.
 2. **"The residual is herdr's two-write response pattern."** *Wrong:* a trivial
    echo socket with no herdr code paid more. `jerryfane/herdr#29` stays parked;
    its 190× claim was retracted as a comparison of two different programs.
@@ -43,7 +49,8 @@ That asymmetry is the whole design. It was not obvious and was not guessable.
    first-channel portion is anomalous.
 4. **"The first channel costs 1.8 s."** *Wrong as stated:* the magnitude varies
    ~100 ms to ~1900 ms between runs. The stable fact is the *shape* — first
-   expensive, rest free — not the number.
+   readiness-gated, not position-gated. An *aged* session's first channel is
+   as cheap as its tenth.
 
 ## Eviction
 
@@ -97,8 +104,17 @@ So:
 - **A separate pre-send liveness probe**, not the user's request doubling as the
   check.
 - **Discard and replace** a session that fails the probe; never nurse it.
-- **Error phases must distinguish definitely-not-sent from possibly-sent.** Only
-  the first is safe to retry automatically.
+- **Delivery phases are defined by observed write progress, not by error
+  names.** `libssh2_channel_write_ex` returns a positive accepted-byte count or
+  a negative status, and `EAGAIN` means resume rather than fail. So:
+  - **definitely-not-sent** — the channel never opened, or zero bytes were ever
+    accepted for this request. Safe to retry automatically.
+  - **possibly-sent** — any positive byte count was accepted, even partially.
+    Not safe to retry, regardless of what error followed.
+
+  Tracking accepted bytes per request is what makes the boundary decidable; an
+  error code alone cannot supply it, because the same code can follow either
+  state.
 - **Never replay a possibly-sent mutation** without an idempotency or attempt
   identifier. herdr's `agent.prompt` has no idempotency key today
   (`jerryfane/herdr#16`), so for now a possibly-sent prompt must surface to the
@@ -106,8 +122,8 @@ So:
 
 ## What it must not do
 
-- **Do not pool channels.** Free after the first, and single-shot at the herdr
-  end.
+- **Do not pool channels.** Free on a ready session, and single-shot at the
+  herdr end.
 - **Do not size the pool against the 100–1900 ms figure.** Its cause is unknown
   and its magnitude unstable. Size it against concurrency demand — how many
   simultaneous requests the UI actually issues — which is a product question,
@@ -132,6 +148,6 @@ exists.
 ## Verification, when implemented
 
 The axis is **not** that a pool returns a session. It is that **the second
-request to a host does not pay the first-channel cost.** A test that borrows
+request to a host does not pay the readiness cost.** A test that borrows
 twice and compares the cost of the two is the guard; one that merely checks a
 session comes back proves nothing.
