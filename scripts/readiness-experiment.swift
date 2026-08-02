@@ -32,7 +32,19 @@
 //     block the decision in the analyzer.
 // It is a measurement harness, not production code: no cancellation.
 //
-// Build:  swiftc -I Sources/CSSH -lssh2 -O -o /tmp/readiness scripts/readiness-experiment.swift
+// Build:  swiftc -I Sources/CSSH $(pkg-config --cflags --libs libssh2) \
+//              -O -o /tmp/readiness scripts/readiness-experiment.swift
+//
+// THE pkg-config CALL IS NOT OPTIONAL. This recipe hardcoded `-lssh2` and no
+// include path, which works only where libssh2 sits in the compiler's default
+// search paths — Debian. Under Homebrew, or any staged prefix, it fails at
+// shim.h with "libssh2.h file not found", exactly as the package itself did
+// before CSSH moved to pkg-config.
+//
+// This is the SECOND hand-rolled libssh2 invocation in the repo, and I told a
+// reviewer there was only one: I had grepped Swift source for Process and
+// executableURL, which cannot see a build command written in a comment. The
+// class was not closed; it was closed in the places I knew how to look.
 // Run:    /tmp/readiness [trials-per-arm] [output.csv]
 
 import CSSH
