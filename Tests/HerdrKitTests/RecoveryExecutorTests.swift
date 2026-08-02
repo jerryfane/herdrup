@@ -1447,6 +1447,7 @@ actor SleepRecorder {
         // The real death lands after the retraction: the ledger has no entry,
         // so dropAndReadmit's was-in-the-ledger check refuses it. Exactly-once
         // holds because BOTH paths go through that one check.
+        let transportOpsBeforeDeath = transport.log().count
         await executor.handle(.streamFailed(pane: "p", from: attempt))
         let afterSecond = await executor.subscribedPanes.contains("p")
         XCTAssertFalse(afterSecond,
@@ -1466,9 +1467,57 @@ actor SleepRecorder {
         // Ignoring the death produced no observable at all, so this assertion
         // was unwritable until the policy started recording the refusal — a
         // path with no success signal cannot be armed by any test.
-        let rejections = await executor.rejections
-        XCTAssertTrue(rejections.contains { $0.reason.contains("death not actionable") },
-                      "the death was never delivered; the assertion above proved nothing")
+        let ignored = await executor.ignoredDeaths
+        XCTAssertEqual(ignored, 1, "the death was never delivered; the assertion above proved nothing")
+        let lastPane = await executor.lastIgnoredDeathPane
+        XCTAssertEqual(lastPane, "p", "a different pane's death was counted")
+
+        // AND THE NOTE DID NO TRANSPORT WORK. Its entire contract is that it
+        // makes a no-op observable; if executing it can touch the transport it
+        // is behaviour wearing an observation's name. A mutation adding
+        // `closeAll(for:)` after the record SURVIVED both regressions and the
+        // whole 32-test filter, because nothing compared the transport log
+        // across the note's execution.
+        XCTAssertEqual(transport.log().count, transportOpsBeforeDeath,
+                       "executing noteIgnoredDeath performed transport work; it must only observe")
+    }
+
+    /// AXIS: a flood of ignored deaths cannot evict an actionable rejection.
+    ///
+    /// The review's probe, kept: ignored deaths used to be entries in the shared
+    /// 128-cap buffer, so 129 of them destroyed a seeded real refusal and bumped
+    /// droppedRejections. A surface added for VISIBILITY was deleting
+    /// visibility. Ignored deaths now have their own counter and cannot displace
+    /// anything.
+    func testAFloodOfIgnoredDeathsCannotEvictActionableRejections() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        transport.failingPanes = ["p"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        await waitForExhaustion(executor, "p")
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
+
+        // Seed ONE actionable refusal, through the public path.
+        let retired = AttemptID(uuid: UUID())
+        await executor.execute(RecoveryPlan([.subscribe(["p"], on: retired)]))
+        let seeded = await executor.rejections.contains { $0.reason.contains("retired attempt") }
+        XCTAssertTrue(seeded, "the actionable rejection was never recorded; the test is not armed")
+
+        // More ignored deaths than the buffer could ever hold.
+        for _ in 0..<(RecoveryExecutor.rejectionCapacity + 1) {
+            await executor.handle(.streamFailed(pane: "p", from: attempt))
+        }
+
+        let survived = await executor.rejections.contains { $0.reason.contains("retired attempt") }
+        XCTAssertTrue(survived,
+                      "\(RecoveryExecutor.rejectionCapacity + 1) ignored deaths evicted an actionable rejection")
+        let dropped = await executor.droppedRejections
+        XCTAssertEqual(dropped, 0, "ignored deaths consumed the actionable rejection budget")
+        let counted = await executor.ignoredDeaths
+        XCTAssertEqual(counted, RecoveryExecutor.rejectionCapacity + 1,
+                       "the deaths were not all counted; the flood did not happen")
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
