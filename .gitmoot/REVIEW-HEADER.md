@@ -13,6 +13,12 @@ first confirming its HEAD matches the head you intend.
 examined.** That line is load-bearing evidence, not a formality — it is
 currently the only channel that reports which code a verdict actually covers.
 
+**The job record is not evidence.** At execution the job's `head_sha` is
+overwritten from the worktree, so a stale checkout produces a record that agrees
+with it — self-consistent and wrong. Only two surfaces can be trusted: the
+worktree HEAD observed *before* the verdict, and the head you name in your own
+verdict body.
+
 **Why this is a requirement and not a courtesy:** C1 of gitmoot#1354 made the
 review task id stable rather than head-derived, so the worktree keyed by it is
 reused and never re-synced. On this repo, five consecutive dispatches recorded a
