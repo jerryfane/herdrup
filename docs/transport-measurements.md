@@ -54,16 +54,18 @@ Because `roundTrip` opens a session per request and uses it immediately, every
 request lands inside the window where the delay appears.
 
 **Pooling alone does not fix this** — a pooled session handed out before it is
-ready pays the same. The design response is to prewarm: open and free a
-sacrificial channel before checkout, so the request path does not carry it.
+ready pays the same. Something must make a session *ready* before it is handed
+out, and there are two candidates:
 
-**Prewarming is an untested hypothesis, and nothing here supports it directly.**
-Every measurement in this document varies *elapsed time*; not one opens a
-sacrificial channel. The reasoning behind it — that a channel opened after
-another one is cheap — is an inference from arm-B-shaped data about waiting, and
-it may well turn out that waiting is the whole effect and the sacrificial
-channel adds only a second connection for herdr to reap. The falsifier below
-exists to settle that, and it should be run before the pool commits to it.
+- **Age gate** — do not hand out a session until it is 100 ms old.
+- **Sacrificial channel** — open and free one channel on the session, then hand
+  it out.
+
+**Neither is chosen here, and this document does not prescribe one.** Every
+measurement below varies *elapsed time*; not one opens a sacrificial channel, so
+there is no evidence bearing on the second candidate at all. Earlier versions
+named it as the design response anyway. The experiment further down selects
+between them, and until it is run the pool should treat both as open.
 
 ## The method lesson — corrected twice
 
@@ -114,8 +116,9 @@ timeout or retry more than work, but that is a hypothesis and is untested.
 
 - Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
   once instead of per request.
-- **Prewarm before checkout.** Pooling alone leaves the readiness delay on the
-  request path.
+- **A readiness transition is required before checkout** — pooling alone leaves
+  the delay on the request path — but *which* transition is undecided. See the
+  experiment below; do not implement one before running it.
 - Channels are not worth pooling: they are consistently cheap on a ready
   session, and herdr's command socket is single-shot, so each request needs its
   own regardless.
@@ -123,12 +126,17 @@ timeout or retry more than work, but that is a hypothesis and is untested.
   ~3 s from herdr's `INITIAL_REQUEST_TIMEOUT`, which governs herdr's socket, not
   sshd's session.
 
-### The cheap falsifier
+## The readiness experiment — CANONICAL
 
-The previous version of this section compared an immediate first-channel open
-against an aged one. That tests **waiting**, which is not what the design
-proposes: `docs/connection-pool-design.md` proposes opening and freeing a
-*sacrificial channel*. An experiment that never opens one cannot falsify it.
+**This section is the single source for the experiment and its decision
+procedure.** `docs/connection-pool-design.md` references it and must not restate
+any threshold; two copies of a rule drifted apart once already and prescribed
+different outcomes for the same numbers.
+
+An earlier version compared an immediate first-channel open against an aged one
+and called that the falsifier. It tests **waiting**, and waiting is only one of
+the two candidates — an experiment that never opens a sacrificial channel cannot
+say anything about opening one.
 
 Three arms, each starting from a **fresh authenticated session**:
 
@@ -149,23 +157,72 @@ Method:
 - Measure the **first channel that carries a real request** in each arm, since
   that is the one a user waits on.
 
-Decision rule, fixed before running:
+### What exactly is measured
 
-- **Adopt prewarming** only if C's p95 is at least **20 ms** below A's p95 — the
-  rough floor for a difference a person can feel — *and* C's p95 is no worse
-  than B's.
-- **Reject prewarming** if C's p95 is within 20 ms of A's, or if C's rate of
-  samples above 500 ms is not below A's. Either result says the sacrificial
-  channel is not what removes the cost.
-- **Prefer B if C ≈ B.** If simply not handing out a session for its first
-  100 ms performs as well, prewarming is added machinery for nothing, and the
-  simpler rule wins.
+Ambiguity here makes every number below uncomparable, so:
 
-Also record, because it is a cost and not just a latency: **how many connections
-herdr sees per checkout in arm C.** A sacrificial open is a real connection to
-herdr's socket that is then abandoned, and `INITIAL_REQUEST_TIMEOUT` reaps
-connections that open and go idle — so arm C may double herdr's connection rate
-and manufacture exactly the reap condition the pool is meant to avoid. If it
-does, that counts against C independently of what the latency shows.
+- **`t_request`** — from the call opening the `direct-streamlocal` channel that
+  carries the request, to the complete response line having been read. This is
+  what a person waits through, and it is the quantity all decisions below use.
+- **`t_ready`** — the cost paid *off* the request path to make the session
+  eligible: the sacrificial open-and-free in arm C, the 100 ms wait in arm B,
+  zero in arm A. It matters because it blocks a pool slot during replenishment,
+  so an arm can win on `t_request` and still be the wrong choice.
+- **p95** — nearest-rank on the sorted sample: with n = 100, the 95th smallest
+  value. No interpolation, so two people computing it get the same number.
+- **outlier rate** — the fraction of an arm's samples with `t_request` > 500 ms.
+
+Write `A95`, `B95`, `C95` for each arm's p95 `t_request`.
+
+### Decision procedure, fixed before running
+
+Ordered and exhaustive: take the first step that applies and stop. **20 ms** is
+the margin throughout — roughly the floor for a difference a person notices —
+and it is **inclusive on the effective side**, so a difference of exactly 20 ms
+counts as effective.
+
+1. **If `A95` ≤ 20 ms — adopt neither.** The delay did not reproduce, so there
+   is nothing for a readiness transition to remove. Hand sessions out directly.
+2. Otherwise classify each candidate: **B is effective if `A95 − B95` ≥ 20 ms**;
+   **C is effective if `A95 − C95` ≥ 20 ms**.
+3. **Neither effective — adopt neither**, and record that the readiness
+   hypothesis failed. The mechanism is then genuinely unknown and the open
+   question below is the next work, not a pool feature.
+4. **Exactly one effective — adopt that one.**
+5. **Both effective — adopt C only if `B95 − C95` ≥ 20 ms; otherwise adopt B.**
+   Ties and near-ties go to B because B costs herdr nothing (see below). This is
+   the single tie-break; there is no separate "approximately equal" test.
+6. **Outlier veto.** If the arm selected above does not have a *lower* outlier
+   rate than A, do not adopt it — it moved the median and left the tail, and the
+   tail is what gets reported as "it hangs sometimes". Fall back to the other
+   effective arm if there is one, otherwise adopt neither.
+7. **Replenishment veto, C only.** If C survives to here but its `t_ready` p95
+   exceeds **50 ms**, reject C and take B if B is effective, otherwise adopt
+   neither. A transition that blocks a pool slot longer than the delay it hides
+   has moved the cost rather than removed it.
+
+Worked, against the two cases that broke the previous rules:
+
+- `A95` = 100, `B95` = 80, `C95` = 80 → both effective (step 2); `B95 − C95` = 0
+  < 20 → **adopt B** (step 5). One answer.
+- `A95` = 100, `B95` = 50, `C95` = 70 → both effective; `B95 − C95` = −20 < 20 →
+  **adopt B**, regardless of C's outlier rate. One answer.
+
+### The cost side, with the right denominators
+
+Reported alongside, and load-bearing only where a step above says so:
+
+| | extra herdr connections |
+|---|---|
+| age gate (B) | none |
+| sacrificial channel (C) | one **per session insertion** |
+| liveness probe | one **per checkout** — required either way, so not part of this comparison |
+
+An earlier version of this document said the sacrificial channel "doubles the
+connections herdr sees per checkout." **That was wrong, and wrong in the
+direction that made C look worse than it is:** C's cost is per *insertion*, and
+pooling exists precisely so that checkouts outnumber insertions. Against the
+mandatory per-checkout probe, C's added load is small. The denominator was the
+error, and it would have biased the decision before the experiment ran.
 
 No pool implementation is required — only a measurement harness.
