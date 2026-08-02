@@ -459,9 +459,11 @@ mislabels datasets where an arm fails a different condition). So, precisely:
   the 50 ms number remains operational, not derived.
 - Under the symmetric reading the outcome is adopt-neither: hand sessions out
   immediately and pay A's request-path p95. Anyone consuming this decision
-  should know it is not robust to that reading; what IS robust across every
-  reading and both runs is that C's active per-insertion cost exceeds B's idle
-  cost, so no reading prefers C.
+  should know it is not robust to that reading. What IS robust, within the
+  validated run under both selectors: neither reading prefers C — its measured
+  `t_ready` exceeds B's, and it fails every reading that B fails. Run 1
+  contributes nothing decisional here; it is an unvalidated timing-only
+  projection that also outputs B, no more.
 
 Unconditional tail report (raw counts, all arms): 1 / 0 / 0 trials above
 500 ms — a single 1855.44 ms trial in **A** (sequence 296). No tail inference
@@ -477,8 +479,9 @@ after seeing run 1's data** — not preregistered, no decision weight:
   C's three exceptions. Whether any of these are "the same event" is a
   mechanism question this experiment does not answer. The consequence for the
   pool stands on the counts alone: an age-gated open is *typically*
-  sub-millisecond, and a substantial minority still cost ~100 ms in both runs
-  (33% then 43%), so a UI latency budget should assume the ~100 ms case.
+  sub-millisecond, and a substantial minority still cost ~100 ms in the
+  validated run (43%) and in run 1's timing-only lines (33%), so a UI latency
+  budget should assume the ~100 ms case.
 - **Batches differ, again.** Run 1: A p95 165.37 ms, no A outlier, B carried
   the single >500 ms trial, C `t_ready` p95 105.16 ms. Run 2: A p95 173.87 ms
   with a 1855 ms outlier, B's worst open 101.74 ms, C `t_ready` p95 125.25 ms.
@@ -494,11 +497,14 @@ after seeing run 1's data** — not preregistered, no decision weight:
 
 What this settles for `docs/connection-pool-design.md`: the eligibility rule,
 if the pool applies one, is **the 100 ms age gate on insertion** — selected by
-the preregistered rule in the validated run, with the cap-symmetry caveat above
-and the deterministic ~100 ms slot-occupancy cost stated rather than hidden.
-The sacrificial channel is not adopted under any reading of either run, so its
-per-insertion server cost does not arise **while C stays unadopted**; a future
-run could select differently.
+the preregistered rule in the validated run, with the cap-symmetry caveat
+above. Its slot-occupancy cost is the **observed run-2 distribution** (`t_ready`
+median 100.06 ms, p95 100.08 ms in that run), not a deterministic constant —
+whether the wait is predictable and absorbed is assigned to the pool
+prototype's occupancy, cold-start and burst measurements. The sacrificial
+channel is not adopted under either selector **in the validated run**, so its
+per-insertion server cost does not arise while C stays unadopted; a future run
+could select differently.
 
 A separate randomised-contrast analysis over the retained samples — effect
 sizes with uncertainty — remains possible and **has not been performed**;
