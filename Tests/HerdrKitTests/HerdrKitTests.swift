@@ -150,7 +150,7 @@ final class LiveServerTests: XCTestCase {
         try XCTSkipIf(socketPath == nil, "no live herdr server")
         let path = try XCTUnwrap(socketPath)
 
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_UNIX, sockStream, 0)
         XCTAssertGreaterThanOrEqual(fd, 0)
         defer { close(fd) }
 
