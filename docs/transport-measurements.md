@@ -151,9 +151,12 @@ Method:
 - **n = 100 per arm**, 300 sessions total, arms **interleaved in randomised
   order** so machine load and thermal drift hit all three alike. A blocked run
   of A followed by a blocked run of C would confound the treatment with time.
-- **Retain every raw sample**: arm, latency, session age at open, and sequence
-  index. Summaries are what made the earlier `p50 = 40.7 ms` unexplainable after
-  the fact.
+- **Retain every raw sample**: arm, **`t_request`**, **`t_ready`** (the full
+  sacrificial open-and-free duration for C, the idle interval for B, zero for A),
+  session age at open, and sequence index. Both durations, because the
+  replenishment condition is stated in terms of `t_ready` and a contract that
+  retains one latency cannot recompute it. Summaries are what made the earlier
+  `p50 = 40.7 ms` unexplainable after the fact.
 - Measure the **first channel that carries a real request** in each arm, since
   that is the one a user waits on.
 
@@ -185,8 +188,24 @@ A candidate **qualifies** when all of the following hold:
 | | B (age gate) | C (sacrificial channel) |
 |---|---|---|
 | effective | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
-| tail improved | outlier rate < A's | outlier rate < A's |
+| tail not worsened | outlier count ≤ A's | outlier count ≤ A's |
 | replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
+
+The tail condition is **non-regression, not strict improvement**. Requiring
+strict improvement had a hole: when A records zero outliers — which the
+controlled ~96 ms batch could easily produce — no candidate can have *fewer*, so
+a treatment that removed the delay entirely would be rejected and the readiness
+hypothesis declared failed. `A95` = 100, `B95` = `C95` = 5, all outlier counts
+zero was a real input that adopted neither.
+
+Sampling is why it is counts and not rates: at n = 100 a single sample is 1%, so
+a one-outlier difference is not evidence of anything in either direction. The
+condition therefore asks only that a candidate not make the tail worse.
+
+**If A has outliers and the adopted arm does not reduce them, the tail stays an
+open question** and must not be reported as solved: the arm was adopted for its
+median, and the multi-second hangs are still unexplained. That is a reporting
+obligation, not a veto — vetoing it was what produced the hole above.
 
 Then, in order:
 
@@ -211,6 +230,14 @@ input combinations): the fallback form was ambiguous on 13.2% of them, and this
 form on none. The claim of exhaustiveness had been made by reading the rule over
 and agreeing with myself, which is the weakest check available and does not
 survive 23,328 cases.
+
+The script encodes **three** readings of the superseded rule, not two. A review
+pointed out that the first version returned immediately after an outlier
+fallback, so a fallback to C never reached the replenishment veto — a faithful
+sequential reading disagrees with that model on 1,152 inputs. The 13.2% figure
+happens to hold under it, but "models both forms" was a stronger claim than the
+script supported, which is the same overclaim this document keeps having to
+correct.
 
 Worked, against the two cases that broke the version before that:
 
