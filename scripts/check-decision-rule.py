@@ -15,16 +15,20 @@ import sys
 
 MARGIN = 20
 READY_CAP = 50
-TAIL_TOLERANCE = 1   # one outlier in n=100 is not evidence in either direction
+TAIL_TOLERANCE = 1   # preregistered operational cutoff, NOT an evidence threshold:
+                     # at n=100, 0 vs 2 outliers is Fisher two-sided p~0.50, so no
+                     # cutoff here is statistically justified. Fixed before the run
+                     # so the choice cannot be made after seeing the numbers.
 
 
 def flat(A, B, C, oa, ob, oc, ready_c):
     """Current rule: qualification per candidate, then an ordered selection.
 
-    Tail is NON-REGRESSION WITH A TOLERANCE OF ONE. Strict improvement rejects a
-    perfect treatment against a zero-outlier baseline; exact non-regression makes
-    a single extra observed outlier a hard veto, which contradicts the stated
-    reason for using counts at all (one sample in 100 is not evidence).
+    The tail condition is an OPERATIONAL TOLERANCE, not an inference. Strict
+    improvement rejects a perfect treatment against a zero-outlier baseline;
+    exact non-regression vetoes on a single event. Neither +1 nor +2 is
+    statistically justified at n=100 — the cutoff exists to be decidable and
+    fixed in advance, not to be defensible as evidence.
     """
     if A <= MARGIN:
         return {"neither"}
@@ -122,10 +126,10 @@ def main():
         # one extra outlier is inside the tolerance the rationale requires
         ((100, 5, 100, 0, 1, 0, 10), "B", "a single extra outlier vetoes the only effective arm"),
         # two extra is outside it
-        ((100, 5, 100, 0, 2, 0, 10), "neither", "a clear tail regression is accepted"),
+        ((100, 5, 100, 0, 2, 0, 10), "neither", "an outlier count beyond tolerance is accepted"),
         # tolerance applies against a non-zero baseline too
         ((100, 5, 100, 3, 4, 0, 10), "B", "tolerance does not apply against a non-zero baseline"),
-        ((100, 5, 100, 3, 5, 0, 10), "neither", "a regression past tolerance is accepted"),
+        ((100, 5, 100, 3, 5, 0, 10), "neither", "an outlier count beyond tolerance is accepted (non-zero baseline)"),
         # replenishment cap still bites
         ((100, 100, 5, 0, 0, 0, 51), "neither", "replenishment cap does not reject a slow prewarm"),
     ]
