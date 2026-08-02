@@ -267,10 +267,26 @@ public struct SSHTransport: HerdrTransport {
             self.handle = handle
         }
 
-        func close() {
+        /// Everything except the descriptor.
+        ///
+        /// Split out so `LiveChannel` can keep the socket shuttable-down through
+        /// the blocking part of teardown and still stop publishing the number
+        /// *before* it is closed. Closing it while it is still published leaves a
+        /// window where a concurrent `interrupt()` shuts down whatever the
+        /// process has since opened on that number — the double-close hazard
+        /// running the other way.
+        func disconnectAndFree() {
             libssh2_session_disconnect_ex(handle, SSH_DISCONNECT_BY_APPLICATION, "bye", "")
             libssh2_session_free(handle)
+        }
+
+        func closeSocket() {
             _ = Glibc_close(sock)
+        }
+
+        func close() {
+            disconnectAndFree()
+            closeSocket()
         }
     }
 
@@ -871,14 +887,24 @@ final class LiveChannel: @unchecked Sendable {
         }
         if let channel { libssh2_channel_free(channel) }
         if let session {
-            session.close()
-        } else if raw >= 0 {
-            DescriptorAudit.close(raw)
+            session.disconnectAndFree()
         }
-
+        // Stop publishing the number BEFORE anything closes it. Clearing it
+        // afterwards left a window in which `interrupt()` would shut down a
+        // descriptor this method had already closed — and by then the number may
+        // name an unrelated socket, so the shutdown lands on a live connection
+        // somewhere else entirely. Same defect as the double close, running in
+        // the other direction, and no amount of care at the call sites fixes it:
+        // the ordering has to.
         lock.lock()
         teardownSocket = -1
         lock.unlock()
+
+        if let session {
+            session.closeSocket()
+        } else if raw >= 0 {
+            DescriptorAudit.close(raw)
+        }
     }
 }
 
