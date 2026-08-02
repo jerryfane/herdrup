@@ -8,16 +8,21 @@ import Foundation
 /// callback from a retired attempt on cue.
 ///
 /// Each call carries the `AttemptID` it serves. The transport does not
-/// interpret it; it hands it back on outcomes so the executor can route them
-/// into the policy with provenance intact.
+/// interpret it — and does not hand it back: the executor binds outcomes to
+/// their attempt by closure capture, so a conformer only needs the ID to key
+/// its own resources per attempt (closeAll/discard MUST be attempt-scoped).
 public protocol ExecutorTransport: Sendable {
     /// Establish a connection for this attempt. Throws on failure.
     func connect(for attempt: AttemptID) async throws
     /// The complete pane set, from the transport this attempt owns.
     func fetchSnapshot(for attempt: AttemptID) async throws -> PaneSnapshot
-    /// Open one pane's persistent event stream. `onTermination` fires EXACTLY
-    /// once when the stream dies — this is the executor's contract with the
-    /// policy, which deliberately treats every termination as a real death.
+    /// Open one pane's persistent event stream. `onTermination` SHOULD fire
+    /// exactly once when the stream dies; the executor enforces the once with a
+    /// latch regardless, because a double-fire would otherwise become a
+    /// permanent double-subscription — the policy deliberately treats every
+    /// admitted termination as a real death and cannot dedup without
+    /// swallowing real second deaths. A conformer whose stream is torn down by
+    /// `closeAll` should NOT fire termination for that teardown.
     func openStream(
         pane: String, for attempt: AttemptID,
         onTermination: @escaping @Sendable () -> Void
@@ -28,6 +33,19 @@ public protocol ExecutorTransport: Sendable {
     /// Close a connection that completed but was never wanted (stale or
     /// backgrounded completion). Must not touch any other attempt's resources.
     func discard(attempt: AttemptID) async
+}
+
+/// One-shot claim for a stream's termination callback.
+final class TerminationLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    /// True exactly once.
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
 }
 
 /// Drives `SessionRecovery`'s plans against a real transport, and turns the
@@ -46,7 +64,14 @@ public actor RecoveryExecutor {
     private let recovery: SessionRecovery
     private let transport: ExecutorTransport
     private var state: SessionRecovery.State
-    private var generator = SystemRandomNumberGenerator()
+    private var generator: any RandomNumberGenerator
+    /// Internal seam replacing Task.sleep in dial, so tests pin the backoff
+    /// deterministically: a mutation deleting the delay SURVIVED 5/5 against
+    /// wall-clock assertions — real time cannot pin "waited long enough"
+    /// without flakes, so the seam records instead.
+    var sleeper: @Sendable (TimeInterval) async -> Void = { delay in
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    }
     /// The pending dial, so a cancelTransport can stop an attempt that has not
     /// completed yet rather than letting it land and be discarded later.
     private var pendingDial: Task<Void, Never>?
@@ -66,9 +91,19 @@ public actor RecoveryExecutor {
     public private(set) var rejections: [(action: String, reason: String)] = []
 
     public init(recovery: SessionRecovery = SessionRecovery(), transport: ExecutorTransport) {
+        self.init(recovery: recovery, transport: transport, generator: SystemRandomNumberGenerator())
+    }
+
+    /// Internal: a seeded generator makes the policy's jittered delay a known
+    /// number, which is what lets a test assert the executor HONOURED it.
+    init(
+        recovery: SessionRecovery, transport: ExecutorTransport,
+        generator: any RandomNumberGenerator
+    ) {
         self.recovery = recovery
         self.transport = transport
         self.state = SessionRecovery.State()
+        self.generator = generator
     }
 
     /// Cold start: mints the first attempt and dials.
@@ -112,19 +147,37 @@ public actor RecoveryExecutor {
                 pendingDial = nil
                 if let owned = resourcedAttempt {
                     await transport.closeAll(for: owned)
-                    resourcedAttempt = nil
+                    // Conditional, because the closeAll await is a suspension
+                    // point: an interleaved plan may have dialed a replacement
+                    // and installed ITS claim, and the unconditional nil
+                    // destroyed it — after which every later cancelTransport
+                    // closed a resource-less attempt while the current one's
+                    // streams leaked past teardown forever. Reproduced 4/4.
+                    if resourcedAttempt == owned { resourcedAttempt = nil }
                 }
 
             case .discardConnection:
-                // The completing attempt is by definition not current (that is
-                // why it is being discarded), so the transport is told which
-                // one to drop by the event that got us here — but the action
-                // itself carries nothing. The executor closes NOTHING here
-                // beyond what the transport already associates with the stale
-                // completion; see handleConnected for the routing.
+                // Routed where the completing attempt is KNOWN: both production
+                // doors (the dial callback and the public .connected event) go
+                // through handleConnected, which awaits transport.discard for
+                // the stale attempt before executing this plan. Through the
+                // internal execute() door the action is inert by construction —
+                // it carries no attempt, deliberately, so a stale plan replay
+                // cannot aim a discard at anything.
                 break
 
             case .reconnect(let attempt, let after):
+                // The same execution-time binding .subscribe has, and for a
+                // sharper reason: a stale plan's continuation resuming after an
+                // interleaved replacement would not merely dial a retired
+                // attempt — its dial() would CANCEL the current attempt's
+                // pending dial, and the silent cancellation return leaves no
+                // reconnect scheduled at all: a wedged executor. Reproduced 4/4
+                // by the sweep before this guard existed.
+                guard attempt == state.currentAttempt else {
+                    rejections.append((action: "reconnect", reason: "bound to a retired attempt"))
+                    continue
+                }
                 dial(attempt, after: after)
 
             case .resyncAllPanes(let attempt):
@@ -158,13 +211,17 @@ public actor RecoveryExecutor {
         await execute(plan)
     }
 
+    func currentSleeper() -> @Sendable (TimeInterval) async -> Void { sleeper }
+
+    func setSleeper(_ replacement: @escaping @Sendable (TimeInterval) async -> Void) {
+        sleeper = replacement
+    }
+
     private func dial(_ attempt: AttemptID, after delay: TimeInterval) {
         pendingDial?.cancel()
         resourcedAttempt = attempt
         pendingDial = Task { [transport] in
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            }
+            if delay > 0 { await self.currentSleeper()(delay) }
             guard !Task.isCancelled else { return }
             do {
                 try await transport.connect(for: attempt)
@@ -175,11 +232,12 @@ public actor RecoveryExecutor {
         }
     }
 
-    /// Resync THEN subscribe, and only through `apply` — the ordering the
-    /// policy documents as load-bearing. Subscriptions on a fresh transport
-    /// exist only downstream of this snapshot; there is no other path that
-    /// opens one, which is what makes the order enforceable by a test that
-    /// fails when it is swapped.
+    /// Resync THEN subscribe, through `apply` — the ordering the policy
+    /// documents as load-bearing. Subscriptions on a FRESH transport exist only
+    /// downstream of this snapshot; the incremental paths (`paneCreated`,
+    /// `streamFailed` re-admission) also open streams, but only for panes the
+    /// atomic gate admits on an ALREADY-adopted transport — an earlier comment
+    /// claimed no other path existed, which a probe refuted.
     private func resync(for attempt: AttemptID) async {
         do {
             let snapshot = try await transport.fetchSnapshot(for: attempt)
@@ -204,9 +262,18 @@ public actor RecoveryExecutor {
                 return
             }
             do {
+                // The exactly-once termination contract is ENFORCED here, not
+                // merely asked of conformers: a transport double-firing one
+                // stream's termination produced a permanent double-subscription
+                // (the ledger legitimately re-admits per death, so the policy
+                // cannot dedup this without swallowing real second deaths).
+                // The latch drops duplicates and records them observably.
+                let once = TerminationLatch()
                 try await transport.openStream(pane: pane, for: attempt) { [weak self] in
-                    // One termination, one death event — the exactly-once
-                    // contract the policy's per-death semantics rely on.
+                    guard once.claim() else {
+                        Task { await self?.recordDuplicateTermination(pane: pane) }
+                        return
+                    }
                     Task { await self?.handle(.streamFailed(pane: pane, from: attempt)) }
                 }
             } catch {
@@ -215,6 +282,13 @@ public actor RecoveryExecutor {
                 await handle(.streamFailed(pane: pane, from: attempt))
             }
         }
+    }
+
+    private func recordDuplicateTermination(pane: String) {
+        rejections.append((
+            action: "termination(\(pane))",
+            reason: "duplicate termination dropped by the once-latch"
+        ))
     }
 
     // MARK: - Read-only state, for tests and the UI layer
