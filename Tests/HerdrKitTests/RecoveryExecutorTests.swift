@@ -23,12 +23,18 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     private var terminators: [String: @Sendable () -> Void] = [:]
     var panesToServe: [String]
     var failConnects = false
+    /// Every openStream throws — a persistently broken conformer.
+    var failOpens = false
+    /// Installs the callback and THEN throws: the ownership violation the seam
+    /// now forbids, kept as a probe of what the executor does when a conformer
+    /// breaks the contract anyway.
+    var installsThenThrows = false
     /// When set, openStream suspends (a REAL actor suspension, not a thread
     /// block) until the flag clears — the door interleavings walk through.
     private var stalledPanes: Set<String> = []
 
-    func stall(_ pane: String) { lock.lock(); stalledPanes.insert(pane); lock.unlock() }
-    func release(_ pane: String) { lock.lock(); stalledPanes.remove(pane); lock.unlock() }
+    func stall(_ pane: String) { lock.withLock { _ = stalledPanes.insert(pane) } }
+    func release(_ pane: String) { lock.withLock { _ = stalledPanes.remove(pane) } }
     private func isStalled(_ pane: String) -> Bool {
         lock.lock(); defer { lock.unlock() }; return stalledPanes.contains(pane)
     }
@@ -36,23 +42,19 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     init(panes: [String]) { self.panesToServe = panes }
 
     func log() -> [Operation] { lock.lock(); defer { lock.unlock() }; return operations }
-    private func record(_ op: Operation) { lock.lock(); operations.append(op); lock.unlock() }
+    private func record(_ op: Operation) { lock.withLock { operations.append(op) } }
 
     /// Kills a pane's stream from the outside, firing its termination exactly
     /// once — the contract the executor promises the policy.
     func killStream(_ pane: String) {
-        lock.lock()
-        let terminate = terminators.removeValue(forKey: pane)
-        lock.unlock()
+        let terminate = lock.withLock { terminators.removeValue(forKey: pane) }
         terminate?()
     }
 
     /// A MISBEHAVING transport: fires the SAME registration's termination
     /// twice, which the executor's once-latch must reduce to one death.
     func killStreamTwice(_ pane: String) {
-        lock.lock()
-        let terminate = terminators.removeValue(forKey: pane)
-        lock.unlock()
+        let terminate = lock.withLock { terminators.removeValue(forKey: pane) }
         terminate?()
         terminate?()
     }
@@ -65,7 +67,7 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// My first version did exactly that and hung the suite.
     private var closeStallSeconds: TimeInterval = 0
     func stallFirstClose(_ seconds: TimeInterval) {
-        lock.lock(); closeStallSeconds = seconds; lock.unlock()
+        lock.withLock { closeStallSeconds = seconds }
     }
     private func takeCloseStall() -> TimeInterval {
         lock.lock(); defer { lock.unlock() }
@@ -90,8 +92,12 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         onTermination: @escaping @Sendable () -> Void
     ) async throws {
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
+        if failOpens {
+            if installsThenThrows { lock.withLock { terminators[pane] = onTermination } }
+            throw TransportError.closedBeforeResponse
+        }
         record(.openStream(pane, attempt))
-        lock.lock(); terminators[pane] = onTermination; lock.unlock()
+        lock.withLock { terminators[pane] = onTermination }
     }
 
     func closeAll(for attempt: AttemptID) async {
@@ -434,6 +440,137 @@ actor SleepRecorder {
     func recorded() -> [TimeInterval] { delays }
 }
 
+    /// AXIS: a teardown completing WHILE an open is in flight leaves no stream
+    /// registered for the retired attempt — the recheck-and-reap after the
+    /// await, which the pre-await guard structurally cannot cover.
+    ///
+    /// The earlier mid-loop regression missed this: it asserted the SECOND pane
+    /// stayed closed, while the first pane's registration was recorded after
+    /// closeAll and unexamined.
+    func testAnOpenCompletingAfterTeardownIsReaped() async throws {
+        let transport = ScriptedTransport(panes: ["only"])
+        let executor = RecoveryExecutor(transport: transport)
+        transport.stall("only")                       // the open suspends
+        await executor.start()
+        _ = await waitUntil {
+            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
+        }
+        let retired = await executor.currentAttempt!
+
+        await executor.handle(.networkChanged(at: Date()))   // teardown completes
+        transport.release("only")                            // the open lands late
+
+        let reaped = await waitUntil {
+            let ops = transport.log()
+            guard let open = ops.firstIndex(of: .openStream("only", retired)) else { return false }
+            return ops[open...].contains(.closeAll(retired))
+        }
+        XCTAssertTrue(reaped,
+                      "a stream published for the retired attempt after its teardown was never reaped")
+        let rejected = await executor.rejections
+        XCTAssertTrue(rejected.contains { $0.reason.contains("reaped") }, "the reap must be observable")
+    }
+
+    /// AXIS: a persistently failing openStream cannot spin — the failure count
+    /// caps the retries and the pane is left visibly unsubscribed.
+    ///
+    /// Without the cap: an open that throws becomes streamFailed, the policy
+    /// re-admits, the re-admission opens again — an unbounded, delay-free loop
+    /// that saturates the actor. Deterministic here: the transport always
+    /// throws, and the sleeper is recorded rather than slept.
+    func testAPersistentlyFailingOpenCannotSpin() async throws {
+        let transport = ScriptedTransport(panes: ["bad"])
+        transport.failOpens = true
+        let recorder = SleepRecorder()
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { delay in await recorder.record(delay) }
+        await executor.start()
+
+        let capped = await waitUntil(8) {
+            await executor.rejections.contains { $0.reason.contains("left unsubscribed") }
+        }
+        XCTAssertTrue(capped, "the retry loop never hit its cap")
+
+        let backoffs = await recorder.recorded()
+        XCTAssertGreaterThan(backoffs.count, 0, "retries must be delayed, not immediate")
+        XCTAssertTrue(backoffs.allSatisfy { $0 > 0 })
+        XCTAssertLessThanOrEqual(backoffs.count, RecoveryExecutor.openFailureCap,
+                                 "retries exceeded the cap: \(backoffs.count) attempts")
+
+        // KNOWN GAP, asserted so it cannot change silently and ESCALATED rather
+        // than fixed here: the ledger still lists the pane, because admission
+        // happens at observe time and records intent, not an open stream. The
+        // pane therefore reads as subscribed while nothing is watching it —
+        // the silence class this task exists to remove, one level in. Closing
+        // it means the policy distinguishing admitted-from-open, which is a
+        // POLICY change and belongs in its own review round (condition 2).
+        let subscribed = await executor.subscribedPanes
+        XCTAssertTrue(subscribed.contains("bad"),
+                      "documented gap changed: the ledger no longer lists an unopenable pane — if this now fails, the policy gained admitted-vs-open and this test should assert the better behaviour")
+    }
+
+    /// AXIS: a conformer that violates the seam — installing a callback and
+    /// THEN throwing — cannot make the executor open a third stream when that
+    /// orphaned callback finally fires.
+    ///
+    /// The seam now forbids this outright; the test records what happens when a
+    /// conformer breaks the contract anyway, because "requirement on the
+    /// conformer" is only as strong as what the executor does when it is
+    /// violated.
+    func testAnOrphanedCallbackFromAFailedRegistrationCannotStackStreams() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        transport.failOpens = true
+        transport.installsThenThrows = true
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        _ = await waitUntil(8) {
+            await executor.rejections.contains { $0.reason.contains("left unsubscribed") }
+        }
+
+        // The orphaned callback from a failed registration fires late.
+        transport.killStream("p1")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        // The decisive property: a contract-violating conformer cannot make
+        // the executor STACK streams. No open ever succeeded, so none may be
+        // recorded, whatever the orphaned callback does.
+        let opens = transport.log().filter { if case .openStream = $0 { return true }; return false }.count
+        XCTAssertEqual(opens, 0, "an orphaned callback caused an open; \(opens) recorded")
+        let rejections = await executor.rejections
+        XCTAssertTrue(rejections.contains { $0.reason.contains("left unsubscribed") },
+                      "the cap must still bound a contract-violating conformer")
+    }
+
+    /// AXIS: the diagnostics buffer is bounded and drainable — append-only was
+    /// a slow leak on a long-running client, where stale plans and duplicate
+    /// callbacks are rare but unbounded over days.
+    func testRejectionsAreBoundedAndDrainable() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.start()
+        _ = await waitUntil { await executor.isConnected }
+        let retired = await executor.currentAttempt!
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+
+        // More stale plans than the buffer holds.
+        for _ in 0..<(RecoveryExecutor.rejectionCapacity + 20) {
+            await executor.execute(RecoveryPlan([.subscribe(["p1"], on: retired)]))
+        }
+
+        let held = await executor.rejections.count
+        XCTAssertLessThanOrEqual(held, RecoveryExecutor.rejectionCapacity,
+                                 "the buffer grew past its cap: \(held)")
+        let dropped = await executor.droppedRejections
+        XCTAssertGreaterThan(dropped, 0, "overflow must be counted, not silent")
+
+        let drained = await executor.drainRejections()
+        XCTAssertEqual(drained.entries.count, held)
+        let afterDrain = await executor.rejections.count
+        XCTAssertEqual(afterDrain, 0, "drain must clear")
+    }
+
     /// A dial that fails schedules the retry through the policy (backoff), and
     /// a network change cancels a pending dial rather than racing it.
     func testAFailedDialRetriesAndACancelledDialDoesNotLand() async throws {
@@ -477,6 +614,7 @@ final class LiveHerdrTransport: ExecutorTransport, @unchecked Sendable {
     private let client: HerdrClient
     private let lock = NSLock()
     private var streams: [Key: Task<Void, Never>] = [:]
+    private var tornDown: Set<AttemptID> = []
 
     init(client: HerdrClient) { self.client = client }
 
@@ -502,17 +640,28 @@ final class LiveHerdrTransport: ExecutorTransport, @unchecked Sendable {
             guard !Task.isCancelled else { return }
             onTermination()
         }
-        lock.lock(); streams[Key(attempt: attempt, pane: pane)] = task; lock.unlock()
+        // Registered under the lock, and reaped immediately if a teardown for
+        // this attempt already ran — the same register-after-close window the
+        // executor closes on its side; a conformer must not leave one either.
+        let key = Key(attempt: attempt, pane: pane)
+        let stillWanted = lock.withLock { () -> Bool in
+            guard !tornDown.contains(attempt) else { return false }
+            streams[key] = task
+            return true
+        }
+        if !stillWanted { task.cancel() }
     }
 
     /// Attempt-SCOPED, as the seam requires. The first version dropped every
     /// stream regardless of attempt — `attempt` was unused — which violated
     /// the very requirement this adapter is cited as proving implementable.
     func closeAll(for attempt: AttemptID) async {
-        lock.lock()
-        let mine = streams.filter { $0.key.attempt == attempt }
-        for key in mine.keys { streams.removeValue(forKey: key) }
-        lock.unlock()
+        let mine = lock.withLock { () -> [Key: Task<Void, Never>] in
+            tornDown.insert(attempt)
+            let matching = streams.filter { $0.key.attempt == attempt }
+            for key in matching.keys { streams.removeValue(forKey: key) }
+            return matching
+        }
         for task in mine.values { task.cancel() }
     }
 
