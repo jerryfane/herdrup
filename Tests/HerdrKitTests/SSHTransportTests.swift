@@ -1,3 +1,4 @@
+import CSSH
 import XCTest
 @testable import HerdrKit
 
@@ -327,6 +328,50 @@ final class SSHTransportTests: XCTestCase {
         )
     }
 
+    /// AXIS: a rejected session adoption stops publishing the descriptor.
+    ///
+    /// `adopt(_ session:)` cleared `rawSocket` only when it accepted. On the
+    /// rejected path — cancellation landing between `openSession` returning and
+    /// the adoption — both callers close the session and throw, so `LiveChannel`
+    /// was left holding a number that had just been closed. The same canary as
+    /// the release test, reached through cancellation instead of failure.
+    func testRejectedSessionAdoptionStopsPublishingTheDescriptor() throws {
+        try SSHRuntime.ensureStarted()
+        let live = LiveChannel()
+        let published = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        try XCTSkipIf(published < 0, "could not open a descriptor")
+        XCTAssertTrue(live.adopt(rawSocket: published))
+
+        // Cancellation lands while openSession is finishing.
+        live.interrupt()
+
+        guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
+            return XCTFail("libssh2 session init failed")
+        }
+        let session = SSHTransport.Session(sock: published, handle: handle)
+        XCTAssertFalse(live.adopt(session), "a closed LiveChannel must reject the adoption")
+
+        // What both callers do next: close the session and throw. This closes
+        // the descriptor.
+        session.close()
+
+        let canary = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        try XCTSkipIf(
+            canary != published,
+            "another thread took the freed descriptor; the canary would prove nothing"
+        )
+        defer { _ = close(canary) }
+
+        live.close()
+
+        var kind: Int32 = 0
+        var size = socklen_t(MemoryLayout<Int32>.size)
+        XCTAssertEqual(
+            getsockopt(canary, SOL_SOCKET, SO_TYPE, &kind, &size), 0,
+            "a rejected adoption left the descriptor published, and close() took the canary"
+        )
+    }
+
     /// AXIS: the production failure path — the one that really does call
     /// `close()` after `openSession` released — closes nothing twice.
     ///
@@ -480,7 +525,7 @@ final class SSHTransportTests: XCTestCase {
     /// AXIS: an expired deadline is not waited out, so a stalled resolver never
     /// becomes the caller's problem.
     func testResolutionGivesUpOnAnExpiredDeadline() {
-        let resolution = SSHTransport.Resolution(host: "127.0.0.1", port: 22)
+        let resolution = SSHTransport.ResolutionRegistry.resolution(host: "127.0.0.1", port: 22)
         guard case .gaveUp = resolution.claim(
             by: Date().addingTimeInterval(-1), isInterrupted: { false }
         ) else {
@@ -490,12 +535,45 @@ final class SSHTransportTests: XCTestCase {
 
     /// AXIS: an interrupt ends the wait even with budget remaining.
     func testResolutionGivesUpWhenInterrupted() {
-        let resolution = SSHTransport.Resolution(host: "127.0.0.1", port: 22)
+        let resolution = SSHTransport.ResolutionRegistry.resolution(host: "127.0.0.1", port: 22)
         guard case .gaveUp = resolution.claim(
             by: Date().addingTimeInterval(30), isInterrupted: { true }
         ) else {
             return XCTFail("an interrupt must end the wait without spending the budget")
         }
+    }
+
+    /// AXIS: concurrent requests for one endpoint share a single resolver, so a
+    /// wedged DNS server costs one thread rather than one per request.
+    ///
+    /// Abandoning a stalled resolver on its own only *relocates* exhaustion: the
+    /// worker is freed and a detached thread takes its place, so a retrying
+    /// client against wedged DNS grows threads without limit. Sharing is what
+    /// bounds it, and this transport has a single endpoint.
+    ///
+    /// A name in `.invalid` is used because it takes a real resolver round trip
+    /// (~1.3 ms measured here) — long enough for a burst to overlap. A numeric
+    /// address returns in microseconds and nothing would overlap.
+    func testConcurrentRequestsForOneEndpointShareOneResolver() throws {
+        let host = "resolver-bound-probe.invalid"
+        let lock = NSLock()
+        var distinct = Set<ObjectIdentifier>()
+
+        DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            let resolution = SSHTransport.ResolutionRegistry.resolution(host: host, port: 22)
+            lock.lock(); distinct.insert(ObjectIdentifier(resolution)); lock.unlock()
+        }
+
+        // Sequential completions legitimately start a fresh lookup, so a few
+        // distinct resolvers are expected. Sixteen means none were shared.
+        try XCTSkipIf(
+            distinct.count == 16,
+            "no two of 16 requests overlapped; sharing is unobservable on this machine"
+        )
+        XCTAssertLessThanOrEqual(
+            distinct.count, 8,
+            "16 concurrent requests started \(distinct.count) resolvers; a wedged resolver would cost one thread each"
+        )
     }
 
     /// AXIS: teardown against a peer that has stopped answering returns, rather
@@ -543,9 +621,20 @@ final class SSHTransportTests: XCTestCase {
         thread.name = "teardown-under-test"
         thread.start()
 
+        // The margin is scheduling slack, not a second teardown. It was three
+        // seconds, which let a 2s constant pass while teardown actually took
+        // 4.3s — the bound was per-call, so channel_free and the session
+        // disconnect each got the full two. Both now share one deadline, so the
+        // total is what the constant says and the margin can be small enough to
+        // notice if that regresses.
+        let started = Date()
         XCTAssertEqual(
-            finished.wait(timeout: .now() + SSHTransport.teardownTimeout + 3.0), .success,
+            finished.wait(timeout: .now() + SSHTransport.teardownTimeout + 0.75), .success,
             "teardown against a silent peer never returned; a worker is stranded"
+        )
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), SSHTransport.teardownTimeout + 0.75,
+            "teardown exceeded its stated TOTAL bound"
         )
     }
 
