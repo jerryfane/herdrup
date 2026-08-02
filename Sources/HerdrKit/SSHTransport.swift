@@ -179,6 +179,18 @@ public struct SSHTransport: HerdrTransport {
     final class AuditToken: Sendable {}
     let auditToken = AuditToken()
 
+    /// Internal seam: fires once a descriptor exists and BEFORE it is offered to
+    /// the LiveChannel for adoption.
+    ///
+    /// It exists to reach one branch and nothing else. The adopt-rejection
+    /// cleanup runs only when a channel is already closed at that instant, and
+    /// no ordinary cancellation lands there: interrupting BEFORE connect is
+    /// caught earlier, at the resolution claim, and interrupting later lands in
+    /// the catch cleanup instead. Without a hook inside the window the branch is
+    /// unreachable from a test, and a deliberate double close in it survived the
+    /// whole SSH suite.
+    var afterDescriptorPublished: (@Sendable (LiveChannel?) -> Void)?
+
     /// Shared, bounded pool for blocking libssh2 work. Bounded because a thread
     /// per request grows without limit under concurrency; shared because each
     /// request needs its own connection but not its own operating-system thread.
@@ -549,6 +561,7 @@ public struct SSHTransport: HerdrTransport {
         for address in addresses {
             let fd = socket(address.family, address.socketType, address.protocolNumber)
             guard fd >= 0 else { lastErrno = errno; continue }
+            afterDescriptorPublished?(live)
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
