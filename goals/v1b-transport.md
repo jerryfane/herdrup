@@ -237,8 +237,19 @@ When review returns findings:
 
 ## Definition of done — SCOPED TO WHAT THIS SEAT CONTROLS
 
-**Done when all five tasks are open as PRs with a clean review verdict at their
-current head.** Merging is explicitly NOT part of this condition.
+**Done when each of the five tasks has EITHER a clean review verdict at its
+current head, OR has been merged.** Merging is not required — but a merged task
+obviously counts, and the first wording ("open as PRs with a clean verdict")
+literally excluded merged ones, so task 5 landing made it stop counting toward
+the goal it had just satisfied.
+
+That is the third scoping error in this file, all the same shape: a condition
+written so that legitimate progress fails to satisfy it. First "all merged"
+(unreachable — merge authority is elsewhere). Then dependent work gated on merge
+(same bug one level down). Now "open" excluding "merged". The lesson is not
+about wording: **a completion condition must be checked against the states real
+progress actually produces**, not against the one state imagined while writing
+it.
 
 This is a correction, and the reason matters. v1 of this file defined done as
 "all five PRs merged by the coordinator" — a state this seat cannot reach, since
