@@ -35,6 +35,28 @@ case — a PR elsewhere merged on exactly such a void verdict. A blob id cannot
 be produced without reading the tree it belongs to, so it is the first
 statement in this header that the coordinator did not supply the answer to.
 
+### Choosing a discriminator (coordinator-side)
+
+**It must sit on the CRITICAL PATH OF THE REASONING, not merely inside the
+diff.** Content a reviewer would read but never have reason to quote —
+comment prose, an identifier cited by line number rather than by name, a hash
+nothing depends on — produces FALSE NEGATIVES: elsewhere this check missed
+three times on a review that had demonstrably read the right head. Prefer an
+exact count the reviewer must verify to reach a verdict, an identifier central
+to the change, or a label with zero occurrences at the parent commit.
+
+**Classify the result in THREE states, never two:**
+
+| | |
+|---|---|
+| ENGAGED | the verdict engages the discriminator → confirmed |
+| INCONCLUSIVE | no engagement, but other head-specific evidence is present — line-number citations, answers to structural questions, findings naming code absent at the parent. **Look closer; do not re-run and do not accuse.** |
+| NO EVIDENCE | no engagement and nothing else head-specific → treat as unverified |
+
+A two-state classifier folds UNCERTAIN into ACCUSATORY, and the remedy for a
+suspected void verdict is another round — so the error lands in the expensive
+direction *and* trains distrust of a reviewer that was correct.
+
 That pairing is the whole mechanism, and it is why this is a requirement rather
 than advice: it turns an instruction into a **detector**. A reviewer that
 quietly skips the plumbing is caught by the mismatch in its own output, at
