@@ -1142,16 +1142,28 @@ actor SleepRecorder {
         XCTAssertEqual(attempts, RecoveryExecutor.openFailureCap,
                        "expected exactly \(RecoveryExecutor.openFailureCap) registration attempts, got \(attempts)")
 
-        // KNOWN GAP, asserted so it cannot change silently and ESCALATED rather
-        // than fixed here: the ledger still lists the pane, because admission
-        // happens at observe time and records intent, not an open stream. The
-        // pane therefore reads as subscribed while nothing is watching it —
-        // the silence class this task exists to remove, one level in. Closing
-        // it means the policy distinguishing admitted-from-open, which is a
-        // POLICY change and belongs in its own review round (condition 2).
+        // THE GAP IS CLOSED, and this assertion is the inversion of the one
+        // that stood here. #11 asserted the ledger STILL listed an unopenable
+        // pane, with a failure message telling whoever broke it to assert the
+        // better behaviour instead. Task 7 broke it deliberately; this is that
+        // instruction being followed.
+        //
+        // Exhaustion now retracts the admission, so the pane is no longer
+        // listed as subscribed — nothing claims to be watching it.
         let subscribed = await executor.subscribedPanes
-        XCTAssertTrue(subscribed.contains("bad"),
-                      "documented gap changed: the ledger no longer lists an unopenable pane — if this now fails, the policy gained admitted-vs-open and this test should assert the better behaviour")
+        XCTAssertFalse(subscribed.contains("bad"),
+                       "an unopenable pane is still listed as subscribed with nothing watching it")
+
+        // AND THE RETRACTION DID NOT DELETE THE REASON. Absence alone would say
+        // never-wanted; the status must still distinguish it, which is the
+        // whole point of retracting through a surface rather than silently.
+        let status = await executor.paneStatus("bad")
+        guard case .admittedNotOpen(let attempts, let lastError) = status else {
+            return XCTFail("a retracted-because-unopenable pane reports \(status), not admittedNotOpen")
+        }
+        XCTAssertEqual(attempts, RecoveryExecutor.openFailureCap,
+                       "the exhaustion count was lost with the ledger entry")
+        XCTAssertNotNil(lastError, "the last error was lost with the ledger entry")
     }
 
     /// AXIS: a conformer that violates the seam — installing a callback and
@@ -1341,6 +1353,186 @@ actor SleepRecorder {
     /// accessor in the same test. One control alone is satisfied by a
     /// degenerate implementation answering the same thing for everything —
     /// this is the discriminating-evidence requirement made executable.
+    // MARK: - Task 7: admitted-vs-open under transition
+    //
+    // The coordinator's condition for landing B: promoting `paneStatus` from a
+    // diagnostic to a load-bearing signal raises its guard requirements. The
+    // paired control proves the surface DISCRIMINATES; these prove it stays
+    // correct across the transitions that now depend on it. A signal promoted
+    // without a matching rise in its guards is how a class gets reopened later.
+
+    /// Waits for POSITIVE evidence that a pane exhausted its attempts, and
+    /// asserts it.
+    ///
+    /// `!subscribedPanes.contains(pane)` is NOT that evidence, and both
+    /// transition tests were armed on it: absence is true immediately at
+    /// start, before the first connection and snapshot have admitted anything,
+    /// so the wait returned instantly and the tests ran with no exhaustion
+    /// having occurred. A compiling no-op replacing the whole retraction
+    /// SURVIVED both. Seventh instance in this file of a precondition
+    /// observing something that PRECEDES the window it names — and the first
+    /// where the observable was the very state the window is supposed to
+    /// produce, which is what made it look right.
+    ///
+    /// Exhaustion at the cap is positive and cannot be true early.
+    private func waitForExhaustion(
+        _ executor: RecoveryExecutor, _ pane: String
+    ) async {
+        let exhausted = await waitUntil {
+            if case .admittedNotOpen(let attempts, _) = await executor.paneStatus(pane) {
+                return attempts >= RecoveryExecutor.openFailureCap
+            }
+            return false
+        }
+        XCTAssertTrue(exhausted,
+                      "\(pane) never reached the failure cap; the test is not armed and any "
+                      + "assertion about retraction below is vacuous")
+    }
+
+    /// AXIS: exhaustion arriving DURING adoption cannot retract from the new
+    /// attempt's ledger — the retraction is bound to the attempt that exhausted.
+    func testExhaustionDuringAdoptionCannotRetractTheNewAttemptsAdmission() async throws {
+        let transport = ScriptedTransport(panes: ["bad"])
+        transport.failingPanes = ["bad"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        let oldOptional = await executor.currentAttempt
+        let old = try XCTUnwrap(oldOptional)
+        // POSITIVE evidence of exhaustion first, then absence — so the late
+        // event below is genuinely a RETIRED attempt's exhaustion.
+        await waitForExhaustion(executor, "bad")
+        let firstRetracted = await !executor.subscribedPanes.contains("bad")
+        XCTAssertTrue(firstRetracted, "exhaustion did not retract the first attempt's admission")
+
+        // A new attempt adopts and re-admits from a fresh snapshot. The pane
+        // is STALLED rather than failing now, so the new attempt holds a live
+        // admission for it — otherwise it exhausts again and there is nothing
+        // for the late event to retract wrongly.
+        transport.failingPanes = []
+        transport.stall("bad")
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+        let freshOptional = await executor.currentAttempt
+        let fresh = try XCTUnwrap(freshOptional)
+        XCTAssertNotEqual(fresh, old, "the attempt did not roll over; the test is not armed")
+        let readmitted = await waitUntil { await executor.subscribedPanes.contains("bad") }
+        XCTAssertTrue(readmitted, "adoption did not re-admit the pane; nothing to retract wrongly")
+
+        // The OLD attempt's exhaustion, arriving late.
+        await executor.handle(.streamExhausted(pane: "bad", from: old))
+
+        let stillAdmitted = await executor.subscribedPanes
+        XCTAssertTrue(stillAdmitted.contains("bad"),
+                      "a retired attempt's exhaustion retracted the live attempt's admission")
+        transport.release("bad")
+    }
+
+    /// AXIS: exhaustion racing a real stream death does not double-retract, and
+    /// the death's re-admission is not silently undone by the late exhaustion.
+    func testExhaustionRacingARealDeathRetractsExactlyOnce() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        _ = await waitUntil { await executor.paneStatus("p") == .open }
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
+
+        // Both arrive for the same pane on the same attempt.
+        await executor.handle(.streamExhausted(pane: "p", from: attempt))
+        let afterFirst = await executor.subscribedPanes.contains("p")
+        XCTAssertFalse(afterFirst, "exhaustion did not retract")
+
+        // The real death lands after the retraction: the ledger has no entry,
+        // so dropAndReadmit's was-in-the-ledger check refuses it. Exactly-once
+        // holds because BOTH paths go through that one check.
+        await executor.handle(.streamFailed(pane: "p", from: attempt))
+        let afterSecond = await executor.subscribedPanes.contains("p")
+        XCTAssertFalse(afterSecond,
+                       "a death after retraction re-admitted a pane the policy had given up on")
+    }
+
+    /// AXIS: after retraction, a genuine re-admission works — the pane is not
+    /// permanently barred by having been exhausted once.
+    func testAPaneCanBeReadmittedAfterExhaustion() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        transport.failingPanes = ["p"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        await waitForExhaustion(executor, "p")
+        let retracted = await !executor.subscribedPanes.contains("p")
+        XCTAssertTrue(retracted, "exhaustion did not retract the admission")
+
+        // A new connection is a genuine fresh chance: counters retire with the
+        // attempt and adoption re-admits from the snapshot.
+        transport.failingPanes = []
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+        let reopened = await waitUntil { await executor.paneStatus("p") == .open }
+        XCTAssertTrue(reopened, "an exhausted pane was barred from recovering on a new connection")
+    }
+
+    /// AXIS: a pane exhausted on attempt N reports `.notAdmitted` on attempt
+    /// N+1 BEFORE it has been tried — not `.admittedNotOpen`.
+    ///
+    /// Correct behaviour, and correct BY THE KEYING rather than by a check:
+    /// the counter is keyed by (attempt, pane) and retires with its attempt, so
+    /// the new attempt has no failures to report. That is exactly the kind of
+    /// property that breaks silently when someone re-keys the counter, which is
+    /// why the coordinator asked for it explicitly.
+    func testAnExhaustedPaneDoesNotReportUnreachableOnAFreshAttempt() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        transport.failingPanes = ["p"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        // Through the helper, NOT a bare `.admittedNotOpen` match. The bare
+        // match accepted `attempts: 0` — the state of a pane admitted a
+        // moment ago and not yet opened — so this test asserted that counters
+        // retire across attempts without ever requiring a counter to exist. A
+        // premise mutation replacing the failing pane with a stalled one, so
+        // nothing ever failed, left it passing.
+        //
+        // Same class as round one's two, and the third time: the wait matched a
+        // state that is ALSO reachable before the window opens. There the
+        // early value was an empty set; here it is a zero count inside an
+        // otherwise-correct case, which is harder to see and no different.
+        await waitForExhaustion(executor, "p")
+        let retracted = await !executor.subscribedPanes.contains("p")
+        XCTAssertTrue(retracted, "exhaustion did not retract before the attempt rolled")
+
+        // Roll the attempt with the pane STALLED rather than failing, so on the
+        // new connection it is admitted and not yet open — the state in which
+        // an inherited count would be visible.
+        transport.failingPanes = []
+        transport.stall("p")
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+        let readmitted = await waitUntil { await executor.subscribedPanes.contains("p") }
+        XCTAssertTrue(readmitted, "adoption did not re-admit; the fresh-attempt state is not armed")
+
+        // It reports admitted-not-open — true, it IS admitted and not yet open —
+        // but with ZERO attempts. The count is the whole point: inheriting the
+        // previous connection's exhaustion would report this pane as having
+        // burned its chances on a connection it has not been tried on.
+        let status = await executor.paneStatus("p")
+        guard case .admittedNotOpen(let attempts, let lastError) = status else {
+            return XCTFail("a re-admitted pane reports \(status) on a fresh attempt")
+        }
+        XCTAssertEqual(attempts, 0,
+                       "the fresh attempt inherited \(attempts) failures from the previous one; "
+                       + "the counter is no longer retiring with its attempt")
+        XCTAssertNil(lastError, "the fresh attempt inherited the previous connection's error")
+
+        // The paired half: a pane with no admission AND no failures is the
+        // never-wanted case, and must not be dressed up as unreachable.
+        let unknown = await executor.paneStatus("never-heard-of")
+        XCTAssertEqual(unknown, .notAdmitted, "an unknown pane reported \(unknown)")
+        transport.release("p")
+    }
+
     func testPaneStatusDiscriminatesOpenFromAdmittedNotOpen() async throws {
         let transport = ScriptedTransport(panes: ["healthy", "broken"])
         transport.failingPanes = ["broken"]

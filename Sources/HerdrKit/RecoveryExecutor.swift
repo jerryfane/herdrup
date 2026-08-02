@@ -124,6 +124,22 @@ public actor RecoveryExecutor {
         let attempt: AttemptID
         let pane: String
     }
+    /// LOAD-BEARING, NOT INCIDENTAL — read this before changing when it clears.
+    ///
+    /// It bounds retries, and since task 7 it is also the ONLY thing that
+    /// distinguishes a never-wanted pane from a wanted-but-unreachable one.
+    /// Exhaustion RETRACTS the ledger admission, so `paneStatus` can no longer
+    /// learn that from ledger membership; at cap this counter is what makes an
+    /// absent pane report `.admittedNotOpen` instead of `.notAdmitted`.
+    ///
+    /// Two properties are therefore contractual rather than convenient:
+    ///   - NO LEDGER OPERATION MAY TOUCH IT. It has to survive the retraction
+    ///     that removes the entry, or the distinction dies with the entry.
+    ///   - IT IS KEYED BY (attempt, pane) AND RETIRES WITH ITS ATTEMPT, so a
+    ///     pane exhausted on one connection gets a genuine fresh chance on the
+    ///     next and does not report unreachable before it has been tried.
+    /// Clearing it earlier, or keying it by pane alone, silently breaks a
+    /// reported status rather than a retry bound.
     private var openFailures: [FailureKey: Int] = [:]
     private var lastOpenErrors: [FailureKey: String] = [:]
     /// Streams ACTUALLY open, keyed by pane and carrying the REGISTRATION that
@@ -140,28 +156,66 @@ public actor RecoveryExecutor {
 
     /// What a caller asking "is this pane watched?" can actually know.
     ///
-    /// Coordinator-mandated: the refusal must be readable from the same surface
-    /// the ledger is read from — not a log line. `admittedNotOpen` is the
-    /// silent-pane condition made visible: the policy admitted the pane, and no
-    /// stream exists. This ADDS an observation of what already happened; it
-    /// does not redefine admission (that boundary is task 7's policy round).
+    /// **The answer is about WATCHING, not about ledger membership**, and since
+    /// task 7 those are genuinely different questions. #11 introduced this
+    /// surface as an observation that explicitly did NOT redefine admission —
+    /// that sentence stood here and is now wrong, because task 7's policy round
+    /// made exhaustion RETRACT the admission. A caller can no longer infer
+    /// ledger membership from a case, and should not try to: ask
+    /// `subscribedPanes` for membership and this for whether anything is
+    /// actually watching.
+    ///
+    /// The three answers partition WATCHED / WANTED-BUT-UNWATCHED /
+    /// NOT-WANTED, which is what a caller needs and what ledger membership
+    /// alone can no longer express.
     public enum PaneWatchStatus: Equatable, Sendable {
-        /// Admitted and a live stream exists.
+        /// A live stream exists. Necessarily admitted.
         case open
-        /// Admitted, but no stream could be opened: the pane is NOT watched,
-        /// whatever the ledger says. Carries the attempt count and last error.
+
+        /// The pane is WANTED and NOT WATCHED — no stream exists.
+        ///
+        /// Two situations reach it and callers are not expected to
+        /// distinguish them, because the actionable fact is the same:
+        ///   - still in the ledger, opening or between retries;
+        ///   - RETRACTED after exhausting its attempts on this connection —
+        ///     absent from the ledger, but retained here because the intent
+        ///     survives the retraction and a new connection will retry it.
+        /// `attempts` at `openFailureCap` identifies the second.
         case admittedNotOpen(attempts: Int, lastError: String?)
-        /// Not admitted at all.
+
+        /// Not wanted: no admission and no exhausted attempt on this
+        /// connection. NOT the same as "absent from the ledger" — an exhausted
+        /// pane is also absent and reports `admittedNotOpen`.
         case notAdmitted
     }
 
     /// The same query path as `subscribedPanes`, answering per pane.
     public func paneStatus(_ pane: String) -> PaneWatchStatus {
-        guard state.subscribedPanes.contains(pane) else { return .notAdmitted }
-        if openPanes.contains(pane) { return .open }
         let key = state.currentAttempt.map { FailureKey(attempt: $0, pane: pane) }
+        let failures = key.flatMap { openFailures[$0] } ?? 0
+        guard state.subscribedPanes.contains(pane) else {
+            // ABSENCE IS NOT ONE FACT. Since exhaustion RETRACTS the admission,
+            // an absent pane is either never-wanted or wanted-but-unreachable,
+            // and reporting `.notAdmitted` for both would delete the very
+            // distinction this accessor exists to make.
+            //
+            // The failure counter is the discriminator, and no second store was
+            // needed for it: it is keyed by (attempt, pane) and NO ledger
+            // operation touches it, so it survives the retraction that removed
+            // the ledger entry. At cap it means "admitted, could not be opened,
+            // and will be retried on the next attempt".
+            //
+            // A pane exhausted on attempt N has NO failures on attempt N+1, so
+            // after a reconnect it reports `.notAdmitted` until resync
+            // re-admits it. That is correct — a new connection is a genuine
+            // fresh chance and the pane has not failed on it — and it is
+            // correct BY THE KEYING, which is why it is tested explicitly.
+            guard failures >= Self.openFailureCap else { return .notAdmitted }
+            return .admittedNotOpen(attempts: failures, lastError: key.flatMap { lastOpenErrors[$0] })
+        }
+        if openPanes.contains(pane) { return .open }
         return .admittedNotOpen(
-            attempts: key.flatMap { openFailures[$0] } ?? 0,
+            attempts: failures,
             lastError: key.flatMap { lastOpenErrors[$0] }
         )
     }
@@ -406,6 +460,22 @@ public actor RecoveryExecutor {
                     action: "openStream(\(pane))",
                     reason: "open failed \(failures) times; pane left unsubscribed"
                 ))
+                // RETRACT THE ADMISSION. Before this, the pane stayed in the
+                // ledger with nothing watching it — subscribed in name, silent
+                // in fact. The policy owns the ledger, so exhaustion is an
+                // EVENT, not a reach-in.
+                //
+                // Suspension point: `handle` re-enters the policy. It is
+                // followed by its own attempt recheck, per this loop's
+                // invariant — see the enumeration at the top of the body.
+                await handle(.streamExhausted(pane: pane, from: attempt))
+                guard attempt == state.currentAttempt else {
+                    record(rejection: (
+                        action: "openStream(\(pane))",
+                        reason: "attempt retired while retracting an exhausted pane; remaining panes abandoned"
+                    ))
+                    return
+                }
                 continue
             }
             if failures > 0 {
