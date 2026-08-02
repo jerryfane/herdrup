@@ -74,6 +74,31 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     func killDuringFirstSuccessfulOpen(_ pane: String) {
         lock.withLock { _ = succeedOnceThenKill.insert(pane) }
     }
+    /// The pane's FIRST open throws; its SECOND open stalls until released.
+    ///
+    /// That pair IS the catch-path window and nothing else. While the second
+    /// open (the policy's replacement, dialed from inside
+    /// `handle(.streamFailed)`) sits suspended, the outer subscribe loop is
+    /// parked in the middle of its catch — the one position from which a
+    /// retirement is invisible to both the post-open reap and the backoff
+    /// guard. Encoded as a single armed seam rather than composed from
+    /// `failingPanes` + `stall`, because composing them cannot express
+    /// "throw, THEN stall" for one pane: the stall precedes the failure check,
+    /// so a pre-set stall would park the first open instead of the retry and
+    /// the window would never open.
+    private var catchPathWindow: Set<String> = []
+    private var openCounts: [String: Int] = [:]
+    func armCatchPathWindow(_ pane: String) {
+        lock.withLock { _ = catchPathWindow.insert(pane) }
+    }
+    /// 0 = not armed for this pane, 1 = the throwing first open, 2+ = a retry.
+    private func catchPathPhase(_ pane: String) -> Int {
+        lock.withLock {
+            guard catchPathWindow.contains(pane) else { return 0 }
+            openCounts[pane, default: 0] += 1
+            return openCounts[pane] ?? 0
+        }
+    }
     private func isStalled(_ pane: String) -> Bool {
         lock.lock(); defer { lock.unlock() }; return stalledPanes.contains(pane)
     }
@@ -179,6 +204,15 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             return !opensSeen.insert(pane).inserted
         }
         if laterOpen { throw TransportError.closedBeforeResponse }
+        // Armed catch-path window: throw the first time, stall every time
+        // after. Both decisions happen AFTER the terminator registration
+        // above, so `registrationCount` counts opens ENTERED — which is what
+        // lets a test wait for the retry to exist rather than for a proxy.
+        switch catchPathPhase(pane) {
+        case 1: throw TransportError.closedBeforeResponse
+        case let phase where phase >= 2: lock.withLock { _ = stalledPanes.insert(pane) }
+        default: break
+        }
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
         record(.openAttempt(pane, attempt))
         let succeedThisOnce = lock.withLock { succeedOnceThenKill.remove(pane) != nil }
@@ -231,6 +265,19 @@ extension NSLock {
 
 final class RecoveryExecutorTests: XCTestCase {
     /// Waits until the executor settles (no fixed sleeps: poll a condition).
+    /// A one-shot latch: fires once, and `wait()` suspends until it has. Both
+    /// sides are safe to call in either order, which is the point — a signal
+    /// that only works when fired second is a race dressed as a helper.
+    final class Signal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        var hasFired: Bool { lock.withLock { fired } }
+        func fire() { lock.withLock { fired = true } }
+        func wait() async {
+            while !hasFired { try? await Task.sleep(nanoseconds: 5_000_000) }
+        }
+    }
+
     private func waitUntil(
         _ timeout: TimeInterval = 5, _ condition: @escaping () async -> Bool
     ) async -> Bool {
@@ -422,6 +469,96 @@ final class RecoveryExecutorTests: XCTestCase {
 
         XCTAssertFalse(transport.log().contains { $0 == .openStream("b-second", attemptA) },
                        "the loop opened a stream for a retired attempt after its closeAll")
+    }
+
+    /// AXIS: a retirement landing while the loop is parked in its CATCH — not
+    /// its open — still stops the remaining panes.
+    ///
+    /// The sibling test above covers the success path, where the post-open reap
+    /// catches the retirement on its way out. This one covers the path the reap
+    /// never sees: the open THREW, so the catch awaits `handle(.streamFailed)`,
+    /// the policy dials a replacement, and that replacement suspends. The outer
+    /// loop is now parked at a suspension point that returns to the TOP OF THE
+    /// NEXT ITERATION rather than through the reap.
+    ///
+    /// This is a review finding, not a hypothesis: round seven built this probe
+    /// against a head where I had removed the guard covering it, and watched
+    /// the loop open the second pane for an attempt that was already dead.
+    func testARetirementDuringAFailedOpensHandlingStopsTheRemainingStreams() async throws {
+        let transport = ScriptedTransport(panes: ["a-fails", "z-must-not-open"])
+        let executor = RecoveryExecutor(transport: transport)
+        transport.armCatchPathWindow("a-fails")   // open 1 throws, open 2 stalls
+        await executor.start()
+
+        // The window is ENTERED when the replacement open exists: registration
+        // 1 is the throwing open, 2 is the retry the policy dialed from inside
+        // handle(.streamFailed), and the retry stalls immediately after
+        // registering. Two registrations therefore prove the outer loop is
+        // parked in its catch — the precondition the whole test rests on.
+        let inWindow = await waitUntil { transport.registrationCount("a-fails") >= 2 }
+        XCTAssertTrue(inWindow,
+                      "the failed open never produced a replacement; the catch-path window never opened")
+        let attemptAOptional = await executor.currentAttempt
+        let attemptA = try XCTUnwrap(attemptAOptional)
+
+        // The world moves while the loop is parked mid-catch.
+        await executor.handle(.networkChanged(at: Date()))
+        transport.release("a-fails")
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(transport.log().contains { $0 == .openAttempt("z-must-not-open", attemptA) },
+                       "the loop resumed from its catch and opened a stream for a retired attempt")
+    }
+
+    /// AXIS: a retirement landing during a pane's RETRY BACKOFF stops the
+    /// retry, rather than opening a channel for a dead attempt and reaping it.
+    ///
+    /// The third suspension point in the subscribe loop, and the last one with
+    /// no test of its own. Its mutation SURVIVED when this test did not exist:
+    /// the post-open reap makes deleting the guard harmless to correctness — an
+    /// open bound to a retired attempt is still closed — so the surviving
+    /// difference is one wasted channel open against a connection that is
+    /// already being torn down. That is a real difference and it is observable,
+    /// so it gets pinned rather than argued about. Removing the guard on the
+    /// strength of "the reap covers it" is exactly the reasoning that failed
+    /// review at round seven; the rule this file now follows is that a
+    /// suspension point keeps its own guard AND its own test.
+    func testARetirementDuringARetryBackoffStopsTheRetry() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        let executor = RecoveryExecutor(transport: transport)
+        transport.failingPanes = ["p"]           // every open throws -> a retry is dialed
+        await executor.start()
+
+        // Park the backoff instead of sleeping it: the retry's suspension has
+        // to be held open long enough to retire the attempt underneath it, and
+        // wall-clock timing cannot pin that without flaking.
+        let parked = Signal()
+        let release = Signal()
+        await executor.setSleeper { _ in
+            parked.fire()
+            await release.wait()
+        }
+
+        // Entering the backoff is the precondition, and it is observed rather
+        // than assumed: it can only be reached after the first open threw and
+        // the policy dialed a replacement for the same pane on the same
+        // attempt, which is the exact state the guard exists for.
+        let inBackoff = await waitUntil { parked.hasFired }
+        XCTAssertTrue(inBackoff, "the retry never reached its backoff; the window was not exercised")
+        let attemptAOptional = await executor.currentAttempt
+        let attemptA = try XCTUnwrap(attemptAOptional)
+        let opensBefore = transport.log().filter { $0 == .openAttempt("p", attemptA) }.count
+        XCTAssertEqual(opensBefore, 1, "expected exactly the one failed open before the backoff")
+
+        await executor.handle(.networkChanged(at: Date()))
+        release.fire()
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let opensAfter = transport.log().filter { $0 == .openAttempt("p", attemptA) }.count
+        XCTAssertEqual(opensAfter, 1,
+                       "the retry woke from its backoff and opened a channel for a retired attempt")
     }
 
     /// AXIS: a stale plan's reconnect neither dials a retired attempt NOR

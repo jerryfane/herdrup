@@ -374,18 +374,26 @@ public actor RecoveryExecutor {
 
     private func open(panes: Set<String>, for attempt: AttemptID) async {
         for pane in panes.sorted() {
-            // NO pre-await binding check here, deliberately, and this is a
-            // removal rather than an omission: one lived here and was found
-            // UNREACHABLE AS A DECIDER. Actor reentrancy happens only at
-            // suspension points, and between the previous iteration's
-            // post-await reap (which returns) and this position there is none —
-            // so any retirement a pre-check could see was already seen by the
-            // reap. Its mutation survived precisely because the reap covered
-            // every case. Two mechanisms for one property, neither individually
-            // pinnable: the trap this project has now hit four times, and the
-            // fourth was my own fix for the third.
+            // NO pre-await binding check at the top of the iteration. The
+            // invariant this loop keeps is stated once and held per site:
+            // EVERY SUSPENSION POINT IN THIS BODY IS FOLLOWED BY ITS OWN
+            // ATTEMPT RECHECK. There are exactly three, and each has a distinct
+            // correction because each leaves the world in a different state:
+            //   1. the backoff `sleeper` below       -> plain return, nothing built yet
+            //   2. `transport.openStream` succeeding  -> RECHECK-AND-REAP; a
+            //      registration now exists past the teardown that would have
+            //      closed it, so returning without reaping leaks it
+            //   3. `handle(.streamFailed)` in the catch -> plain return; the
+            //      throwing open left no registration to reap
             //
-            // The single mechanism is the RECHECK-AND-REAP after the open below.
+            // A top-of-iteration guard was tried and removed as unreachable,
+            // and that removal was WRONG — round seven built a probe that
+            // walked straight through the hole. The reasoning failed by
+            // enumerating only the success path: the catch path also suspends,
+            // and it did not pass through the reap on its way back to here. The
+            // per-site rule is what makes that enumerable at all; a single
+            // top-of-loop check invites exactly the mistake I made, because it
+            // reads as covering suspensions it never sees.
             let failures = openFailures[FailureKey(attempt: attempt, pane: pane)] ?? 0
             guard failures < Self.openFailureCap else {
                 record(rejection: (
@@ -460,6 +468,25 @@ public actor RecoveryExecutor {
                     lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = String(describing: error)
                 }
                 await handle(.streamFailed(pane: pane, from: attempt))
+                // Suspension point 3. `handle` re-enters the policy, which
+                // typically dials a REPLACEMENT stream for this pane and
+                // suspends again inside it — a long, reliably-hit window with
+                // this loop parked in the middle of it. A retirement delivered
+                // there is invisible to every other check: the reap above is on
+                // the success path, and the next iteration's backoff guard only
+                // runs for a pane that has already failed once.
+                //
+                // Nothing to reap: `openStream` threw, and the seam's contract
+                // is that a throwing open leaves no live registration. Streams
+                // this attempt opened for EARLIER panes were closed by the
+                // teardown's own closeAll while this await was suspended.
+                guard attempt == state.currentAttempt else {
+                    record(rejection: (
+                        action: "openStream(\(pane))",
+                        reason: "attempt retired while handling an open failure; remaining panes abandoned"
+                    ))
+                    return
+                }
             }
         }
     }
