@@ -85,8 +85,17 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
 
     /// Kills a pane's stream from the outside, firing its termination exactly
     /// once — the contract the executor promises the policy.
-    /// Fires the NEWEST registration's termination.
-    func killStream(_ pane: String) {
+    /// How many terminators are currently registered for a pane — an
+    /// observable precondition, so a test can wait for the registration to
+    /// EXIST rather than for a proxy that precedes it.
+    func registrationCount(_ pane: String) -> Int {
+        lock.withLock { terminators[pane]?.count ?? 0 }
+    }
+
+    /// Fires the NEWEST registration's termination. Returns whether one fired:
+    /// a silent no-op kill made a death-race test pass by never racing.
+    @discardableResult
+    func killStream(_ pane: String) -> Bool {
         let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
             guard var list = terminators[pane], !list.isEmpty else { return nil }
             let last = list.removeLast()
@@ -94,6 +103,7 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             return last
         }
         terminate?()
+        return terminate != nil
     }
 
     /// Fires the OLDEST registration's termination — the orphaned-callback case.
@@ -742,24 +752,41 @@ actor SleepRecorder {
         transport.onlyFirstOpenSucceeds = true     // one live registration, no replacements
         transport.stall("p1")                      // the open suspends, terminator registered
         await executor.start()
-        _ = await waitUntil {
-            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
-        }
 
-        // The stream dies while its open is STILL SUSPENDED: the death is
-        // processed on the free actor before the call returns.
-        transport.killStream("p1")
+        // Wait for the REGISTRATION, not a proxy: the reviewer showed that
+        // waiting on fetchSnapshot lets killStream be a silent no-op, after
+        // which releasing the stall publishes a legitimately live stream and
+        // the test passes without ever racing anything.
+        let registered = await waitUntil { transport.registrationCount("p1") > 0 }
+        XCTAssertTrue(registered, "no terminator was ever registered; the race could not happen")
+
+        // The stream dies while its open is STILL SUSPENDED.
+        XCTAssertTrue(transport.killStream("p1"), "the death did not fire; the race did not happen")
         try? await Task.sleep(nanoseconds: 150_000_000)
         transport.release("p1")                    // the original call now returns
         try? await Task.sleep(nanoseconds: 400_000_000)
 
-        // UNCONDITIONAL: the registration that terminated must never publish.
-        // The first version asserted only IF status was .open — vacuous
-        // whenever the bug is absent, and the mutation survived it.
+        // UNCONDITIONAL, and on the FULL status: a terminated registration must
+        // neither publish .open nor erase why the pane is unopenable.
         let status = await executor.paneStatus("p1")
-        guard case .admittedNotOpen = status else {
+        guard case .admittedNotOpen(let attempts, let lastError) = status else {
             return XCTFail("a terminated registration published .open (status: \(status))")
         }
+        XCTAssertEqual(attempts, RecoveryExecutor.openFailureCap,
+                       "exhausted retry state was erased: attempts reported \(attempts)")
+        XCTAssertNotNil(lastError, "the last error was erased with the retry state")
+
+        // And a retained orphan callback must not restart attempts past the cap.
+        let attemptsBefore = transport.log().filter {
+            if case .openAttempt = $0 { return true }; return false
+        }.count
+        transport.killOldestRegistration("p1")
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        let attemptsAfter = transport.log().filter {
+            if case .openAttempt = $0 { return true }; return false
+        }.count
+        XCTAssertEqual(attemptsAfter, attemptsBefore,
+                       "an orphan callback restarted registration past the exhausted cap")
     }
 
     /// THE COORDINATOR'S PAIRED CONTROL: a healthy pane reports `.open` AND a
