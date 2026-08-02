@@ -1206,12 +1206,36 @@ enum DescriptorAudit {
     static func closeRejectedAdoption(_ fd: Int32, generation: Int, owner: AnyObject?) {
         let current = lock.withLock { generations[fd] ?? 0 }
         guard current == generation else { return }   // recycled: not ours to close
-        _ = Glibc_close(fd)
-        // The descriptor must be GONE. fcntl on a closed fd fails with EBADF;
-        // if it still answers, nothing was closed however the call reported.
-        guard fcntl(fd, F_GETFD) == -1, errno == EBADF else { return }
-        guard let owner else { return }
-        lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+        // NO POST-CLOSE PROBE. A previous version closed and then verified with
+        // fcntl(fd, F_GETFD) that the descriptor was gone. That check is
+        // ITSELF RACY: once close returns, the number is free and another
+        // thread can reuse it before the fcntl runs, whereupon a HEALTHY
+        // rejection goes unrecorded. Review measured it — unchanged code failed
+        // this regression under live full-suite load while passing 20/20 in
+        // isolation, which is the same load-dependent shape as the flake this
+        // whole PR set out to remove. I replaced one flaky observation with
+        // another and called it evidence.
+        //
+        // An unreliable guard is worse than a named gap. So the fact recorded
+        // is close's own return, which is the KERNEL'S answer about this
+        // descriptor at the moment it acted — the last point at which the
+        // number still means what the caller meant.
+        //
+        // KNOWN AND ACCEPTED: a source mutation replacing the syscall with a
+        // success-shaped expression is not caught here. That attack rewrites
+        // the audit's own body rather than the code under audit, and catching
+        // it in-process requires exactly the racy probe removed above. The
+        // adjacent mutation — deleting the call entirely — IS caught, because
+        // then nothing is recorded.
+        // ONE STATEMENT, deliberately. As a `guard ... else { return }` followed
+        // by the record, deleting the close line left the record reachable and
+        // the leak passed. As an `if` whose body IS the record, deleting the
+        // condition orphans the body and fails to COMPILE — which the harness
+        // classifies INVALID rather than SURVIVED, so the difference between
+        // "not caught" and "not a valid experiment" stays visible.
+        if Glibc_close(fd) == 0, let owner {
+            lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+        }
     }
     static func adoptionRejections(by owner: AnyObject) -> Int {
         lock.lock(); defer { lock.unlock() }
