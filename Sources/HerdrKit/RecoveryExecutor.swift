@@ -412,7 +412,13 @@ public actor RecoveryExecutor {
                 // Back off between consecutive failures for THIS pane on THIS
                 // attempt, through the same seam the dial uses so tests pin it.
                 await sleeper(Double(failures) * 0.25)
-                guard attempt == state.currentAttempt else { return }
+                guard attempt == state.currentAttempt else {
+                    record(rejection: (
+                        action: "openStream(\(pane))",
+                        reason: "attempt retired during retry backoff; retry abandoned"
+                    ))
+                    return
+                }
             }
             do {
                 // The exactly-once termination contract is ENFORCED here, not
