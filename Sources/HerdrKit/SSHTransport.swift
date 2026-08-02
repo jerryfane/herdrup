@@ -565,8 +565,7 @@ public struct SSHTransport: HerdrTransport {
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
-                DescriptorAudit.recordAdoptionRejection(owner: auditToken)
-                DescriptorAudit.close(fd, owner: auditToken)
+                DescriptorAudit.closeRejectedAdoption(fd, owner: auditToken)
                 throw CancellationError()
             }
             do {
@@ -1169,9 +1168,25 @@ enum DescriptorAudit {
     /// regression green. A path with no success signal cannot be armed by any
     /// test; this is that signal.
     private static var rejectionsByOwner: [ObjectIdentifier: Int] = [:]
-    static func recordAdoptionRejection(owner: AnyObject?) {
-        guard let owner else { return }
-        lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+    /// Closes a descriptor whose adoption was refused, and records the rejection
+    /// ONLY BECAUSE the close happened.
+    ///
+    /// ONE operation, because two independent ones diverge. Recording and
+    /// closing were separate calls, so deleting the close compiled and left the
+    /// counter incrementing: the test saw "one rejection, zero double closes"
+    /// and passed, while the descriptor LEAKED. A positive observable that does
+    /// not originate from the act it witnesses is just a second claim.
+    static func closeRejectedAdoption(_ fd: Int32, owner: AnyObject?) {
+        if Glibc_close(fd) == 0 {
+            guard let owner else { return }
+            lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+            return
+        }
+        guard errno == EBADF else { return }
+        lock.lock()
+        doubleCloseCount += 1
+        if let owner { byOwner[ObjectIdentifier(owner), default: 0] += 1 }
+        lock.unlock()
     }
     static func adoptionRejections(by owner: AnyObject) -> Int {
         lock.lock(); defer { lock.unlock() }
