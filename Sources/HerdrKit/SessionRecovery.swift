@@ -11,6 +11,26 @@ import Foundation
 /// Ordering the actions did not fix that, and could not: order is about the
 /// steps inside one plan, and this is about which *attempt* a callback belongs
 /// to.
+/// The authoritative record of which attempt is current, REFERENCE-backed.
+///
+/// This exists because State is a public copyable value, and three identity
+/// designs in a row fell to some form of replay — the last through ordinary
+/// value restoration: save a copy while attempt A is current, cancel A and
+/// mint B, restore the copy, and A was current again, reauthorized through the
+/// sole staleness guard. No identity scheme fixes that while the authority
+/// itself lives in replayable contents. So it does not: every copy of a State
+/// lineage shares this one object, and restoring an old copy restores
+/// bookkeeping but NOT authority — the shared reference still says B.
+final class AttemptAuthority: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _current: AttemptID?
+
+    var current: AttemptID? {
+        get { lock.lock(); defer { lock.unlock() }; return _current }
+        set { lock.lock(); _current = newValue; lock.unlock() }
+    }
+}
+
 public struct AttemptID: Equatable, Hashable, Sendable {
     /// A fresh UUID per mint, derived from NOTHING the State stores.
     ///
@@ -178,13 +198,28 @@ public struct SessionRecovery: Sendable {
     /// verbatim — the caller reinstating an abandoned attempt by hand — which
     /// no value-typed design prevents. Hold one `State` per client.
     public struct State: Equatable, Sendable {
+        public static func == (lhs: State, rhs: State) -> Bool {
+            lhs.authority === rhs.authority
+                && lhs.consecutiveFailures == rhs.consecutiveFailures
+                && lhs.connectedSince == rhs.connectedSince
+                && lhs.isForeground == rhs.isForeground
+                && lhs.knownPanes == rhs.knownPanes
+                && lhs.subscribedPanes == rhs.subscribedPanes
+        }
+
         public internal(set) var consecutiveFailures: Int = 0
         public internal(set) var connectedSince: Date?
         public internal(set) var isForeground: Bool = true
+        /// Shared by every copy of this State lineage — see `AttemptAuthority`
+        /// for why authority must not live in replayable value contents.
+        internal let authority = AttemptAuthority()
+
         /// The only attempt whose callbacks are still wanted. Cleared by
         /// cancellation, backgrounding and network changes, so anything that
-        /// completes afterwards is recognisably stale.
-        public internal(set) var currentAttempt: AttemptID?
+        /// completes afterwards is recognisably stale. Reads through the shared
+        /// authority, so a restored copy reports the LINEAGE's current attempt,
+        /// not the one it was carrying when saved.
+        public var currentAttempt: AttemptID? { authority.current }
         /// Every pane the client believes exists. Subscriptions are pane-scoped,
         /// so this is also the re-subscribe list on the next adoption.
         public internal(set) var knownPanes: Set<String> = []
@@ -225,7 +260,7 @@ public struct SessionRecovery: Sendable {
         // Never derived from State: see AttemptID's doc for the two identities
         // that were, and how each fell to replay.
         let id = AttemptID(uuid: UUID())
-        state.currentAttempt = id
+        state.authority.current = id
         return id
     }
 
@@ -314,7 +349,7 @@ public struct SessionRecovery: Sendable {
             state.connectedSince = nil
             state.subscribedPanes = []
             state.consecutiveFailures = 0
-            state.currentAttempt = nil
+            state.authority.current = nil
             guard state.isForeground else { return RecoveryPlan([.cancelTransport]) }
             return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
 
@@ -322,7 +357,7 @@ public struct SessionRecovery: Sendable {
             state.isForeground = false
             state.connectedSince = nil
             state.subscribedPanes = []
-            state.currentAttempt = nil
+            state.authority.current = nil
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
             // between closing it deliberately and discovering it dead later.

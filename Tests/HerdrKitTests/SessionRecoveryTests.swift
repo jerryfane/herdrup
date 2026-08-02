@@ -201,6 +201,34 @@ final class SessionRecoveryTests: XCTestCase {
                        "the pre-restore attempt's callback was adopted as current")
     }
 
+    /// AXIS: restoring a copied State cannot REAUTHORIZE a cancelled attempt.
+    ///
+    /// The reviewer's public-API probe, now the regression: mint A, copy State
+    /// while A is current, networkChanged (cancels A, mints B), restore the
+    /// copy, deliver connected(A) — and A was adopted, resync and subscriptions
+    /// emitted for a transport the policy had cancelled. Fresh-UUID minting
+    /// could not stop it because the AUTHORITY itself lived in replayable value
+    /// contents. It now lives in a reference shared by every copy of the
+    /// lineage: restoring the copy restores bookkeeping, but the shared
+    /// authority still says B.
+    func testRestoringACopiedStateCannotReauthorizeACancelledAttempt() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        let saved = state                      // A is current in this copy
+
+        let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
+        let attemptB = changed.reconnectAttempt!
+
+        state = saved                          // the replay
+        let lateA = plan(.connected(attemptA, at: Date()), &state)
+        XCTAssertEqual(lateA.actions, [.discardConnection],
+                       "a cancelled attempt was reauthorized by value restoration")
+
+        let adoptedB = plan(.connected(attemptB, at: Date()), &state)
+        XCTAssertEqual(adoptedB.actions.first, .resyncAllPanes,
+                       "the lineage's real current attempt must still adopt")
+    }
+
     /// AXIS: a pane forgotten by a snapshot shrink and later rediscovered is
     /// NOT subscribed a second time on the same transport.
     ///
@@ -364,9 +392,14 @@ final class SessionRecoveryTests: XCTestCase {
         // watches), no ordering, no position. attemptEpoch: random identity
         // salt, never on the wire. Judged here out loud, which is this guard's
         // whole job.
+        // `authority` is a reference to the lineage's live attempt record —
+        // it holds one AttemptID and nothing pane- or stream-shaped; it exists
+        // precisely so authority is NOT replayable value contents. Judged out
+        // loud, as this guard requires. (`currentAttempt` left the list: it is
+        // computed through the authority now, and Mirror sees stored fields.)
         XCTAssertEqual(
             fields,
-            ["connectedSince", "consecutiveFailures", "currentAttempt",
+            ["authority", "connectedSince", "consecutiveFailures",
              "isForeground", "knownPanes", "subscribedPanes"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
@@ -650,6 +683,12 @@ final class PaneSnapshotAccessTests: XCTestCase {
         ))
         process.arguments = [
             "symbolgraph-extract", "-module-name", "HerdrKit", "-target", triple,
+            // Without this, @_spi(Anything) public symbols are OMITTED from the
+            // graph — and an SPI initializer is callable outside the module by
+            // any @_spi import, so its absence made the audit's "outside the
+            // module" claim quietly narrower than stated. Verified both ways by
+            // compiler probe before adding.
+            "-include-spi-symbols",
             "-I", moduleDir.path,
             "-I", root.appendingPathComponent("Sources/CSSH").path,
             "-output-dir", output.path, "-minimum-access-level", "package",
