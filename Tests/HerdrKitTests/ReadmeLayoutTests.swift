@@ -47,28 +47,40 @@ final class ReadmeLayoutTests: XCTestCase {
         else { return XCTFail("no layout block found in README.md") }
         let block = String(readme[open.lowerBound..<close.lowerBound])
 
-        // UNRECOGNISED ROWS FAIL; they do not vanish. The previous parser skipped
-        // anything whose first token it did not understand, so wrapping a name
-        // in backticks silently removed it from the guard — the file could then
-        // name something nonexistent and pass. A parser that ignores what it
-        // cannot read is a filter, not a check, and the thing it filters out is
-        // exactly the thing nobody looked at.
+        // A STRICT GRAMMAR, AND NO NORMALISATION AT ALL.
         //
-        // I named this risk in my own review dispatch and shipped without
-        // closing it. Twice, on this file.
+        // The previous version stripped a set of decoration characters before
+        // matching. `trimmingCharacters(in:)` removes each listed character
+        // INDEPENDENTLY from both ends rather than recognising balanced
+        // formatting, so `HerdrClient.swift*` — a path that does not exist —
+        // had its stray `*` stripped and silently checked the real file
+        // instead. Failing closed on rows it cannot read was right; being
+        // generous about what it CAN read reintroduced the same defect
+        // pointing the other way, and I named that exact risk in a review
+        // dispatch before shipping it.
+        //
+        // The block is a bare code fence, so decoration is not expected and
+        // rejecting it is correct. Two shapes are legal and nothing else is:
+        //     <name>.swift        a file under Sources/HerdrKit
+        //     Sources/<name>/     a source directory
         var named: [String] = []
         var unparsed: [String] = []
         for line in block.split(separator: "\n") {
             let text = line.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
             let token = String(text.split(separator: " ").first ?? "")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "`*-+•│├└─"))
-            if token.hasSuffix(".swift") { named.append("Sources/HerdrKit/" + token) }
-            else if token.hasPrefix("Sources/"), token.hasSuffix("/") { named.append(String(token.dropLast())) }
+            let isFile = token.hasSuffix(".swift")
+                && token.dropLast(6).allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+                && !token.dropLast(6).isEmpty
+            let isDir = token.hasPrefix("Sources/") && token.hasSuffix("/")
+                && token.dropFirst(8).dropLast().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+                && !token.dropFirst(8).dropLast().isEmpty
+            if isFile { named.append("Sources/HerdrKit/" + token) }
+            else if isDir { named.append(String(token.dropLast())) }
             else { unparsed.append(text) }
         }
         XCTAssertTrue(unparsed.isEmpty,
-                      "layout rows the guard cannot read, so it cannot check them: "
+                      "layout rows that do not match the grammar, so the guard cannot check them: "
                       + unparsed.joined(separator: " | "))
         XCTAssertFalse(named.isEmpty, "no entries parsed from the layout; the check is vacuous")
 
