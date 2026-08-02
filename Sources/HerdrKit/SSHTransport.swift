@@ -125,6 +125,10 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
 public enum SSHError: Error, CustomStringConvertible {
     case resolveFailed(host: String)
     case connectFailed(host: String, port: UInt16, errno: Int32)
+    /// The setup budget ran out in a named phase. Distinct from a connection
+    /// refusal: nothing failed, the peer simply never answered in time, and the
+    /// caller may want to retry where it would not retry a refusal.
+    case setupTimedOut(phase: String)
     case sessionInitFailed
     case handshakeFailed(code: Int32)
     case hostKeyUnavailable
@@ -139,6 +143,7 @@ public enum SSHError: Error, CustomStringConvertible {
         switch self {
         case .resolveFailed(let h): return "could not resolve \(h)"
         case .connectFailed(let h, let p, let e): return "connect \(h):\(p) failed (errno \(e))"
+        case .setupTimedOut(let phase): return "SSH setup timed out during \(phase)"
         case .sessionInitFailed: return "libssh2_session_init failed"
         case .handshakeFailed(let c): return "SSH handshake failed (\(c))"
         case .hostKeyUnavailable: return "server presented no host key"
@@ -179,9 +184,17 @@ public struct SSHTransport: HerdrTransport {
 
     public let credentials: SSHCredentials
     private let hostKeyPolicy: HostKeyPolicy
-    /// Bound on handshake and authentication, in seconds. Configurable rather
-    /// than an unmeasured constant imposed on every network — a value tuned on
-    /// loopback would be wrong for a poor cellular link.
+    /// Total budget for establishing a session: resolution, connect, handshake
+    /// and authentication share it, and each phase gets what the previous ones
+    /// left.
+    ///
+    /// The default of 20s is **not** a measured value and is not offered as one.
+    /// It is a liveness ceiling — the point past which a phone user is owed an
+    /// error rather than a spinner — chosen to sit far above anything observed:
+    /// `docs/transport-measurements.md` puts handshake plus authentication at
+    /// ~39ms on loopback, with a worst recorded outlier of 2594ms. Tuning for
+    /// latency belongs to the pool work, where checkout cost is measured;
+    /// nothing here should be read as a tuned number.
     public let setupTimeout: TimeInterval
 
     public init(
@@ -191,14 +204,55 @@ public struct SSHTransport: HerdrTransport {
     ) {
         self.credentials = credentials
         self.hostKeyPolicy = hostKeyPolicy
-        // libssh2 takes milliseconds and reads 0 as NO TIMEOUT, so a value under
-        // 1ms truncates to unbounded — the exact opposite of what a small value
-        // asks for. Clamp to a floor rather than silently inverting the request.
-        self.setupTimeout = max(setupTimeout, SSHTransport.minimumSetupTimeout)
+        self.setupTimeout = SSHTransport.representableSetupTimeout(setupTimeout)
     }
 
     /// Below this, millisecond truncation would turn a bound into no bound.
     public static let minimumSetupTimeout: TimeInterval = 0.001
+
+    /// Above this, the request is a bound in name only.
+    public static let maximumSetupTimeout: TimeInterval = 600
+
+    /// Maps any `TimeInterval` onto a bound libssh2 can actually be given.
+    ///
+    /// Three ways a caller's number stops being a bound, all of which reached
+    /// libssh2 before:
+    ///
+    /// - **Under 1ms** truncates to 0 milliseconds, and libssh2 documents 0 as
+    ///   *no timeout* — so the smallest possible request produced the largest
+    ///   possible behaviour.
+    /// - **NaN** slips through `max(_:_:)` untouched, because every comparison
+    ///   against NaN is false and `max` returns its first argument. `Int(nan *
+    ///   1000)` then traps, so an unusable value became a crash rather than a
+    ///   clamp.
+    /// - **Infinity** has no `Int` representation and traps on conversion.
+    ///
+    /// Non-finite values clamp to the ceiling rather than disabling the bound:
+    /// "wait forever" is exactly the behaviour this transport refuses to expose,
+    /// since an unbounded setup occupies a worker no cancellation can reach.
+    static func representableSetupTimeout(_ requested: TimeInterval) -> TimeInterval {
+        guard requested.isFinite else { return maximumSetupTimeout }
+        return min(max(requested, minimumSetupTimeout), maximumSetupTimeout)
+    }
+
+    /// Remaining budget in milliseconds, floored at 1.
+    ///
+    /// Floored because libssh2 reads 0 as *no timeout*: an exhausted budget
+    /// passed through verbatim would remove the bound at precisely the moment
+    /// it is most needed.
+    static func milliseconds(remainingUntil deadline: Date) -> Int {
+        max(Int(deadline.timeIntervalSinceNow * 1000), 1)
+    }
+
+    /// Bound on teardown, separate from setup.
+    ///
+    /// The session timeout is cleared to zero after authentication so an idle
+    /// subscription is never truncated — but zero means *no timeout* for every
+    /// blocking call, including `libssh2_channel_free`, which may wait for the
+    /// peer's close message. Teardown therefore takes its own finite bound: a
+    /// silent peer must not strand a worker after `roundTrip` has already
+    /// resumed its caller.
+    public static let teardownTimeout: TimeInterval = 2
 
     // MARK: - Session
 
@@ -220,32 +274,207 @@ public struct SSHTransport: HerdrTransport {
         }
     }
 
-    private func tcpConnect() throws -> Int32 {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
-        var info: UnsafeMutablePointer<addrinfo>?
-        let rc = getaddrinfo(credentials.host, String(credentials.port), &hints, &info)
-        guard rc == 0, let list = info else { throw SSHError.resolveFailed(host: credentials.host) }
+    /// Name resolution running off the caller's thread, so a stalled resolver
+    /// strands a throwaway thread instead of a pool worker.
+    ///
+    /// `getaddrinfo` has no timeout and no cancellation: once called, it returns
+    /// when the resolver decides to. On a queue of four workers that is
+    /// unbounded occupancy, and no interrupt can reach it — there is no
+    /// descriptor to shut down yet, which is what makes this different from
+    /// every other blocking call here. Running it on a detached thread lets the
+    /// caller give up on a deadline; the abandoned thread frees its own result
+    /// when the resolver finally answers.
+    final class Resolution: @unchecked Sendable {
+        enum Outcome {
+            case resolved(UnsafeMutablePointer<addrinfo>)
+            case failed(Int32)
+            case gaveUp
+        }
+
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var list: UnsafeMutablePointer<addrinfo>?
+        private var code: Int32 = 0
+        private var abandoned = false
+
+        init(host: String, port: UInt16) {
+            let thread = Thread { [self] in
+                var hints = addrinfo()
+                hints.ai_family = AF_UNSPEC
+                hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+                var info: UnsafeMutablePointer<addrinfo>?
+                let rc = getaddrinfo(host, String(port), &hints, &info)
+                lock.lock()
+                if abandoned {
+                    lock.unlock()
+                    // Nobody is waiting any more, so this thread owns the result
+                    // and must free it or it leaks for the life of the process.
+                    if let info { freeaddrinfo(info) }
+                    return
+                }
+                code = rc
+                list = info
+                lock.unlock()
+                ready.signal()
+            }
+            thread.name = "herdrkit.ssh.resolve"
+            thread.start()
+        }
+
+        /// Waits in slices so an interrupt is noticed without sitting out the
+        /// whole deadline. On success the caller owns the list and must free it.
+        func claim(by deadline: Date, isInterrupted: () -> Bool) -> Outcome {
+            while true {
+                if isInterrupted() { abandon(); return .gaveUp }
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { abandon(); return .gaveUp }
+                if ready.wait(timeout: .now() + min(0.02, remaining)) == .success { break }
+            }
+            lock.lock(); defer { lock.unlock() }
+            if let list {
+                self.list = nil          // ownership transfers to the caller
+                return .resolved(list)
+            }
+            return .failed(code)
+        }
+
+        /// Hands cleanup back to the resolver thread — or performs it here if
+        /// the thread already delivered. Either order is safe because both sides
+        /// check `abandoned` under the same lock, so exactly one frees.
+        private func abandon() {
+            lock.lock(); defer { lock.unlock() }
+            abandoned = true
+            if let list { freeaddrinfo(list); self.list = nil }
+        }
+    }
+
+    /// Resolves and connects within `deadline`, publishing every candidate
+    /// descriptor before it can block on that descriptor.
+    ///
+    /// The previous version could not be bounded or cancelled at all: it
+    /// resolved and then called blocking `connect`, both before the socket was
+    /// handed to `LiveChannel`. A SYN to a host that accepts nothing holds the
+    /// worker for the kernel's retry schedule — minutes — and four of those
+    /// exhaust the queue while `setupTimeout` and task cancellation both look
+    /// on. Non-blocking connect plus `poll` turns that into the deadline the
+    /// caller actually asked for.
+    private func tcpConnect(by deadline: Date, publishingTo live: LiveChannel?) throws -> Int32 {
+        let resolution = Resolution(host: credentials.host, port: credentials.port)
+        let list: UnsafeMutablePointer<addrinfo>
+        switch resolution.claim(by: deadline, isInterrupted: { live?.isInterrupted ?? false }) {
+        case .resolved(let resolved):
+            list = resolved
+        case .failed:
+            throw SSHError.resolveFailed(host: credentials.host)
+        case .gaveUp:
+            if live?.isInterrupted == true { throw CancellationError() }
+            throw SSHError.setupTimedOut(phase: "resolve")
+        }
         defer { freeaddrinfo(list) }
 
+        var lastErrno: Int32 = 0
         var candidate = Optional(list)
         while let entry = candidate {
-            let fd = socket(entry.pointee.ai_family, entry.pointee.ai_socktype, entry.pointee.ai_protocol)
-            if fd >= 0 {
-                if connect(fd, entry.pointee.ai_addr, entry.pointee.ai_addrlen) == 0 {
-                    // SSH carries small request/response exchanges; Nagle holds a
-                    // small write waiting for an ACK the peer has delayed, which
-                    // shows up as a fixed ~40ms floor rather than as work.
-                    var on: Int32 = 1
-                    setsockopt(fd, Int32(IPPROTO_TCP), TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
-                    return fd
-                }
-                _ = Glibc_close(fd)
-            }
             candidate = entry.pointee.ai_next
+            let fd = socket(entry.pointee.ai_family, entry.pointee.ai_socktype, entry.pointee.ai_protocol)
+            guard fd >= 0 else { lastErrno = errno; continue }
+            // Published before the first call that can block on it, so an
+            // interrupt arriving mid-connect has a real descriptor to shut down.
+            guard live?.adopt(rawSocket: fd) ?? true else {
+                _ = Glibc_close(fd)
+                throw CancellationError()
+            }
+            do {
+                try connectCandidate(fd, entry.pointee, by: deadline, live: live)
+                // SSH carries small request/response exchanges; Nagle holds a
+                // small write waiting for an ACK the peer has delayed, which
+                // shows up as a fixed ~40ms floor rather than as work.
+                var on: Int32 = 1
+                setsockopt(fd, Int32(IPPROTO_TCP), TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
+                return fd
+            } catch {
+                // This candidate is ours to clean up, so relinquish the
+                // published number before closing it — otherwise `close()` closes
+                // it a second time, by which point it may name another socket.
+                live?.release()
+                _ = Glibc_close(fd)
+                guard case SSHError.connectFailed(_, _, let failure) = error else {
+                    // A deadline or an interrupt ends the attempt outright: both
+                    // are global, and trying the next address cannot help.
+                    throw error
+                }
+                lastErrno = failure
+            }
         }
-        throw SSHError.connectFailed(host: credentials.host, port: credentials.port, errno: errno)
+        throw SSHError.connectFailed(host: credentials.host, port: credentials.port, errno: lastErrno)
+    }
+
+    private func connectCandidate(
+        _ fd: Int32, _ entry: addrinfo, by deadline: Date, live: LiveChannel?
+    ) throws {
+        func failed(_ code: Int32) -> SSHError {
+            .connectFailed(host: credentials.host, port: credentials.port, errno: code)
+        }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw failed(errno) }
+
+        if connect(fd, entry.ai_addr, entry.ai_addrlen) != 0 {
+            let pending = errno
+            guard pending == EINPROGRESS || pending == EINTR else { throw failed(pending) }
+            try waitWritable(fd, by: deadline, live: live)
+            // poll() reporting the socket writable says the attempt finished,
+            // not that it succeeded — a refusal is also a completion. SO_ERROR
+            // carries which one it was.
+            var pendingError: Int32 = 0
+            var size = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &pendingError, &size) == 0 else {
+                throw failed(errno)
+            }
+            guard pendingError == 0 else { throw failed(pendingError) }
+        }
+
+        // libssh2 is used in blocking mode, so hand it back a blocking
+        // descriptor: non-blocking was only ever a device for bounding connect.
+        guard fcntl(fd, F_SETFL, flags) == 0 else { throw failed(errno) }
+    }
+
+    /// Waits for a connect to finish, in slices, until the deadline.
+    ///
+    /// The interrupt check is **not** what unblocks a cancelled connect —
+    /// measured, not assumed: `shutdown()` on a still-connecting socket wakes
+    /// `poll` on Linux within a millisecond (`revents` = POLLOUT|POLLERR|POLLHUP,
+    /// `SO_ERROR` = ECONNRESET). What the check provides is the *right error*.
+    /// Without it, a cancelled connect surfaces as `connectFailed(ECONNRESET)`,
+    /// indistinguishable from a peer that reset us — and a caller that retries
+    /// connection failures would then retry a request the user cancelled.
+    ///
+    /// Sliced so the check is reached promptly even where that wakeup does not
+    /// hold, rather than depending on one platform's behaviour for correctness.
+    private func waitWritable(_ fd: Int32, by deadline: Date, live: LiveChannel?) throws {
+        while true {
+            if live?.isInterrupted == true { throw CancellationError() }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { throw SSHError.setupTimedOut(phase: "connect") }
+            var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let slice = Int32(max(min(remaining, 0.05) * 1000, 1))
+            let ready = poll(&descriptor, 1, slice)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw SSHError.connectFailed(
+                    host: credentials.host, port: credentials.port, errno: errno
+                )
+            }
+            if ready > 0 {
+                // Readiness is not necessarily a finished connect. Shutting the
+                // socket down to cancel makes poll ready too, with SO_ERROR set
+                // to ECONNRESET — so returning here unasked turns a cancellation
+                // into a peer reset. Checking only at the top of the loop missed
+                // this entirely, because the wakeup arrives inside the slice.
+                if live?.isInterrupted == true { throw CancellationError() }
+                return
+            }
+        }
     }
 
     /// SHA-256 of the presented host key, hex, lowercase.
@@ -287,10 +516,15 @@ public struct SSHTransport: HerdrTransport {
     /// whole queue.
     func openSession(publishingTo live: LiveChannel? = nil) throws -> Session {
         try SSHRuntime.ensureStarted()
-        let sock = try tcpConnect()
-        // Ownership is published here, before handshake/auth, so an interrupt
-        // during establishment reaches a real descriptor.
-        if let live, !live.adopt(rawSocket: sock) {
+        // One budget for the whole of establishment. Each phase gets what the
+        // ones before it left, so a slow resolver cannot buy the handshake a
+        // fresh 20 seconds and the caller's bound means what it says.
+        let deadline = Date().addingTimeInterval(setupTimeout)
+        // tcpConnect publishes each candidate before it can block on it, so by
+        // the time it returns, ownership is already with `live`.
+        let sock = try tcpConnect(by: deadline, publishingTo: live)
+        if let live, live.isInterrupted {
+            live.release()
             _ = Glibc_close(sock)
             throw CancellationError()
         }
@@ -314,7 +548,7 @@ public struct SSHTransport: HerdrTransport {
             return error
         }
 
-        libssh2_session_set_timeout(handle, Int(setupTimeout * 1000))
+        libssh2_session_set_timeout(handle, SSHTransport.milliseconds(remainingUntil: deadline))
         let hs = libssh2_session_handshake(handle, sock)
         guard hs == 0 else { throw fail(.handshakeFailed(code: hs)) }
 
@@ -327,6 +561,10 @@ public struct SSHTransport: HerdrTransport {
             throw error
         }
 
+        // Re-armed with what is left. libssh2's timeout bounds each blocking
+        // call individually, not the session's total, so leaving the handshake's
+        // value in place would hand authentication a second full budget.
+        libssh2_session_set_timeout(handle, SSHTransport.milliseconds(remainingUntil: deadline))
         let auth = credentials.privateKeyPEM.withCString { priv -> Int32 in
             let privLen = strlen(priv)
             let run: (UnsafePointer<CChar>?, Int) -> Int32 = { pub, pubLen in
@@ -533,7 +771,19 @@ final class LiveChannel: @unchecked Sendable {
     private var session: SSHTransport.Session?
     private var channel: OpaquePointer?
     private var rawSocket: Int32 = -1
+    /// Set only while `close()` tears down outside the lock, so an interrupt
+    /// arriving during teardown still has something to shut down.
+    private var teardownSocket: Int32 = -1
     private var closed = false
+
+    /// Signalled as `close()` enters libssh2's teardown.
+    ///
+    /// Internal, and here for one reason: timing `interrupt()` against a sleep
+    /// is a race, and the test that did so passed and failed on alternate runs
+    /// against the same code. A semaphore needs no lock to observe, so it
+    /// reports teardown has begun even in the broken shape where the lock is
+    /// held throughout — which is exactly the shape the test has to distinguish.
+    let teardownBegan = DispatchSemaphore(value: 0)
 
     /// Relinquish ownership of the published descriptor without closing it,
     /// for failure paths that close it themselves.
@@ -578,21 +828,82 @@ final class LiveChannel: @unchecked Sendable {
     func interrupt() {
         lock.lock(); defer { lock.unlock() }
         closed = true
-        // Either phase may be in flight: establishment (raw socket published,
-        // no Session yet) or the read loop (Session owns it).
+        // Any phase may be in flight: establishment (raw socket published, no
+        // Session yet), the read loop (Session owns it), or teardown (detached,
+        // but still worth unblocking).
         if let sock = session?.sock { _ = Glibc_shutdownSocket(sock) }
         else if rawSocket >= 0 { _ = Glibc_shutdownSocket(rawSocket) }
+        else if teardownSocket >= 0 { _ = Glibc_shutdownSocket(teardownSocket) }
     }
 
+    /// Detaches everything under the lock, then tears down outside it.
+    ///
+    /// Holding the mutex across teardown deadlocked the interrupt path against
+    /// the very stall it exists to break: `libssh2_channel_free` and the session
+    /// disconnect can wait for the peer, the post-auth timeout is zero so they
+    /// wait without bound, and `interrupt()` could not take the lock to shut the
+    /// socket down. A silent peer therefore held a worker after `roundTrip` had
+    /// already resumed its caller.
+    ///
+    /// Two things fix it together, because either alone still fails:
+    /// detaching frees the lock so an interrupt can land, and the finite
+    /// teardown bound covers the case where no interrupt ever comes.
     func close() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         closed = true
+        let channel = self.channel
+        let session = self.session
+        let raw = self.rawSocket
+        self.channel = nil
+        self.session = nil
+        self.rawSocket = -1
+        // Kept shuttable-down while teardown runs unlocked: a concurrent
+        // interrupt must still be able to unblock a teardown stalling on a
+        // peer that has stopped answering.
+        teardownSocket = session?.sock ?? raw
+        lock.unlock()
+
+        teardownBegan.signal()
+        if let session {
+            libssh2_session_set_timeout(
+                session.handle, Int(SSHTransport.teardownTimeout * 1000)
+            )
+        }
         if let channel { libssh2_channel_free(channel) }
-        channel = nil
-        if session == nil && rawSocket >= 0 { _ = Glibc_close(rawSocket) }
-        rawSocket = -1
-        session?.close()
-        session = nil
+        if let session {
+            session.close()
+        } else if raw >= 0 {
+            DescriptorAudit.close(raw)
+        }
+
+        lock.lock()
+        teardownSocket = -1
+        lock.unlock()
+    }
+}
+
+/// Counts descriptors closed that were already closed.
+///
+/// A double close is otherwise invisible from a test: `close(2)` returns EBADF
+/// and nothing reads it, and by the time it happens the number may already name
+/// an unrelated socket — which is the actual damage, and it lands somewhere else
+/// entirely. This exists because a double close shipped here once behind a test
+/// whose name said it was guarded, and nothing in the suite could have noticed.
+enum DescriptorAudit {
+    private static let lock = NSLock()
+    private static var doubleCloseCount = 0
+
+    /// Closes, and records the close of a descriptor that was not open.
+    static func close(_ fd: Int32) {
+        guard Glibc_close(fd) != 0, errno == EBADF else { return }
+        lock.lock(); doubleCloseCount += 1; lock.unlock()
+    }
+
+    /// Process-wide tally. Compared against a baseline rather than zero, since
+    /// tests share a process.
+    static var doubleCloses: Int {
+        lock.lock(); defer { lock.unlock() }
+        return doubleCloseCount
     }
 }
 
