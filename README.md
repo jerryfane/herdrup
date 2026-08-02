@@ -8,15 +8,32 @@ exposes both, so panes become real UI objects instead of pixels.
 
 ## Status
 
-Pre-alpha. Only `HerdrKit` — the transport and protocol layer — exists so far.
+Pre-alpha. Only `HerdrKit` — the transport and protocol layer — exists so far; there is no app target yet.
 
 `HerdrKit` contains no UIKit or SwiftUI, so it builds and tests on Linux and can be exercised
 against a real herdr server. The iOS target will consume it unchanged.
+
+### Prerequisites
+
+`HerdrKit` links **libssh2** through pkg-config, so the development package must be present
+before `swift build` will work on a clean machine:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y libssh2-1-dev pkg-config
+
+# macOS
+brew install libssh2 pkg-config
+```
 
 ```bash
 swift build
 swift test          # live tests run when a herdr socket is present, skip otherwise
 ```
+
+Builds and tests on **Linux and macOS** (macOS 13+, iOS 17+ floors are declared in
+`Package.swift`). The header path comes from `pkg-config --cflags libssh2` rather than a
+hardcoded location, because Debian and Homebrew put it in different places.
 
 ## Measured protocol facts
 
@@ -37,10 +54,18 @@ and they shape the transport design:
 
 ```
 Sources/HerdrKit/
-  Transport.swift    HerdrTransport protocol + AF_UNIX implementation
-  Wire.swift         request/response envelopes, models, subscription types
-  HerdrClient.swift  typed API: agentList, read, prompt, sendKeys, subscribe
+  Transport.swift        HerdrTransport protocol + AF_UNIX implementation
+  SSHTransport.swift     libssh2 direct-streamlocal tunnel to a remote herdr socket
+  SessionRecovery.swift  reconnect/resync policy: attempt identity, the subscription ledger
+  RecoveryExecutor.swift drives that policy against a real transport
+  PlatformSocket.swift   the C symbols whose Swift spelling differs on Glibc vs Darwin
+  Wire.swift             request/response envelopes, models, subscription types
+  HerdrClient.swift      typed API: agentList, read, prompt, sendKeys, subscribe
+Sources/CSSH/            libssh2 system-library target (shim.h + module map)
 ```
 
-Planned: SSH transport (`direct-streamlocal@openssh.com` — note that plain `direct-tcpip`
-cannot reach a remote unix socket), terminal rendering, and the gesture layer.
+**Done**: the SSH transport (`direct-streamlocal@openssh.com` — plain `direct-tcpip` cannot
+reach a remote unix socket), connection measurement, the pool design, and reconnect/resync
+including how an unopenable pane is distinguished from an unwanted one.
+
+**Planned**: the iOS app target, terminal rendering, and the gesture layer.
