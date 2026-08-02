@@ -1220,6 +1220,24 @@ actor SleepRecorder {
         XCTAssertEqual(drained.entries.count, held)
         let afterDrain = await executor.rejections.count
         XCTAssertEqual(afterDrain, 0, "drain must clear")
+
+        // The DROPPED COUNT is half of what drain returns and none of it was
+        // asserted: a mutant returning `dropped: 0`, and a separate one leaving
+        // `droppedRejections` un-reset, both compiled and SURVIVED. The buffer's
+        // whole reason for counting overflow is that a caller can tell how much
+        // diagnostic history it lost — a drain that reports zero losses is the
+        // silent-overflow failure this cap exists to prevent, wearing the
+        // counter as decoration.
+        XCTAssertEqual(drained.dropped, dropped,
+                       "drain reported \(drained.dropped) drops against \(dropped) counted")
+        let droppedAfter = await executor.droppedRejections
+        XCTAssertEqual(droppedAfter, 0, "drain must reset the drop counter, not just the entries")
+
+        // A second drain reports nothing, which is what makes the count a
+        // DELTA since the last drain rather than a running total.
+        let second = await executor.drainRejections()
+        XCTAssertEqual(second.entries.count, 0, "a second drain returned entries")
+        XCTAssertEqual(second.dropped, 0, "a second drain re-reported drops already accounted for")
     }
 
     /// AXIS: failure counters are retired with their attempt — they were one
