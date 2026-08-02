@@ -1451,6 +1451,24 @@ actor SleepRecorder {
         let afterSecond = await executor.subscribedPanes.contains("p")
         XCTAssertFalse(afterSecond,
                        "a death after retraction re-admitted a pane the policy had given up on")
+
+        // AND ASSERT THE DEATH WAS ACTUALLY DELIVERED. Without this the test is
+        // a tautology: it sets up absence, runs a path, and asserts absence —
+        // which is true whether the path was harmless or never ran. Deleting
+        // the `handle(.streamFailed)` line above left it passing.
+        //
+        // That is the authoring pattern, not a slip: "prove path P does not
+        // disturb state Y" naturally becomes arrange-Y, run-P, assert-Y, and if
+        // the setup establishes Y directly the assertion is satisfied before P
+        // executes. The rule that prevents it: WHEN ASSERTING P DID NOT DISTURB
+        // Y, ALSO ASSERT P RAN.
+        //
+        // Ignoring the death produced no observable at all, so this assertion
+        // was unwritable until the policy started recording the refusal — a
+        // path with no success signal cannot be armed by any test.
+        let rejections = await executor.rejections
+        XCTAssertTrue(rejections.contains { $0.reason.contains("death not actionable") },
+                      "the death was never delivered; the assertion above proved nothing")
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
