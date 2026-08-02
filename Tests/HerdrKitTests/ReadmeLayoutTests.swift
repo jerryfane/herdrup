@@ -1,6 +1,8 @@
 import XCTest
 
-/// The README's layout block must list every source file, and only real ones.
+/// Every path the README's layout NAMES must exist. It deliberately does not
+/// check the reverse — see the test's own comment for why that claim was
+/// dropped after four rounds of trying to make it correct.
 ///
 /// WHY THIS IS A TEST AND NOT A SCRIPT: I described that block as "generated
 /// from `ls`, and the generator fails if a file has no description" — and then
@@ -45,12 +47,29 @@ final class ReadmeLayoutTests: XCTestCase {
         else { return XCTFail("no layout block found in README.md") }
         let block = String(readme[open.lowerBound..<close.lowerBound])
 
+        // UNRECOGNISED ROWS FAIL; they do not vanish. The previous parser skipped
+        // anything whose first token it did not understand, so wrapping a name
+        // in backticks silently removed it from the guard — the file could then
+        // name something nonexistent and pass. A parser that ignores what it
+        // cannot read is a filter, not a check, and the thing it filters out is
+        // exactly the thing nobody looked at.
+        //
+        // I named this risk in my own review dispatch and shipped without
+        // closing it. Twice, on this file.
         var named: [String] = []
+        var unparsed: [String] = []
         for line in block.split(separator: "\n") {
-            guard let token = line.split(separator: " ").first.map(String.init) else { continue }
+            let text = line.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { continue }
+            let token = String(text.split(separator: " ").first ?? "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "`*-+•│├└─"))
             if token.hasSuffix(".swift") { named.append("Sources/HerdrKit/" + token) }
             else if token.hasPrefix("Sources/"), token.hasSuffix("/") { named.append(String(token.dropLast())) }
+            else { unparsed.append(text) }
         }
+        XCTAssertTrue(unparsed.isEmpty,
+                      "layout rows the guard cannot read, so it cannot check them: "
+                      + unparsed.joined(separator: " | "))
         XCTAssertFalse(named.isEmpty, "no entries parsed from the layout; the check is vacuous")
 
         let missing = named.filter { !FileManager.default.fileExists(
