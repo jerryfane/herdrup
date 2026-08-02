@@ -282,14 +282,15 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(plan(.connected(opened, at: Date()), &state).subscribes, ["p1"])
     }
 
-    /// AXIS: only an authoritative snapshot can replace the pane set.
+    /// AXIS: a snapshot replaces the pane set wholesale.
     ///
-    /// Two earlier signatures failed this. `[String]` replaced wholesale, so a
-    /// filtered listing silently forgot the rest; `[AgentInfo]` was described as
-    /// making that hard and did not — `result.filter { … }` is exactly as easy to
-    /// write as `result`. `PaneSnapshot` cannot be constructed outside the
-    /// module, so provenance is enforced by the type rather than by care.
-    func testOnlyAnAuthoritativeSnapshotCanReplaceThePaneSet() throws {
+    /// Named for what it actually checks. It was called
+    /// `testOnlyAnAuthoritativeSnapshotCanReplaceThePaneSet` and claimed to pin
+    /// provenance — but making `PaneSnapshot.init` public survived it, because
+    /// nothing here inspects who may construct one. That invariant is access
+    /// control, and a behavioural test cannot see access control; it is pinned by
+    /// `PaneSnapshotAccessTests` below instead.
+    func testASnapshotReplacesThePaneSetWholesale() throws {
         var state = try seeded(["p1", "p2", "p3"])
         XCTAssertEqual(state.knownPanes, ["p1", "p2", "p3"])
         recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
@@ -361,6 +362,41 @@ final class ResyncInvalidationTests: XCTestCase {
         XCTAssertEqual(
             afterResync["p1"], .fetch,
             "after a gap the pane must be refetched; identical counters are not evidence of no change"
+        )
+    }
+}
+
+
+/// Access control is the provenance guarantee, so it is checked as access
+/// control rather than through behaviour.
+///
+/// A behavioural test cannot observe who is *allowed* to call an initializer —
+/// the previous provenance test passed with `PaneSnapshot.init` made public,
+/// which is precisely the change that reopens the filtered-list path. Reading
+/// the declaration is crude, and it is the only thing here that fails when the
+/// invariant is broken.
+final class PaneSnapshotAccessTests: XCTestCase {
+    func testPaneSnapshotInitialiserIsNotPublic() throws {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // HerdrKitTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Sources/HerdrKit/SessionRecovery.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+
+        guard let declaration = text.range(of: "public struct PaneSnapshot") else {
+            return XCTFail("PaneSnapshot moved; this guard no longer looks where it thinks it does")
+        }
+        let body = text[declaration.lowerBound...]
+        guard let end = body.range(of: "\n}") else {
+            return XCTFail("could not delimit PaneSnapshot")
+        }
+        let snapshot = body[..<end.lowerBound]
+
+        XCTAssertTrue(snapshot.contains("init(agents:"), "the initialiser this guard exists for is gone")
+        XCTAssertFalse(
+            snapshot.contains("public init(agents:"),
+            "PaneSnapshot.init became public — code outside HerdrKit can now build one from a filtered list, which is the exact path observe() exists to close"
         )
     }
 }
