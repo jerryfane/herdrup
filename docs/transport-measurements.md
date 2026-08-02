@@ -53,19 +53,21 @@ said waiting "makes the cost vanish"; that overstates it.
 Because `roundTrip` opens a session per request and uses it immediately, every
 request lands inside the window where the delay appears.
 
-**Pooling alone does not fix this** — a pooled session handed out before it is
-ready pays the same. Something must make a session *ready* before it is handed
-out, and there are two candidates:
+**Pooling alone would not move this cost** — a pooled session handed out inside
+that window pays it too. *If the delay reproduces on the request path*, two
+candidate treatments are available:
 
 - **Age gate** — do not hand out a session until it is 100 ms old.
 - **Sacrificial channel** — open and free one channel on the session, then hand
   it out.
 
-**Neither is chosen here, and this document does not prescribe one.** Every
-measurement below varies *elapsed time*; not one opens a sacrificial channel, so
-there is no evidence bearing on the second candidate at all. Earlier versions
-named it as the design response anyway. The experiment further down selects
-between them, and until it is run the pool should treat both as open.
+**Neither is chosen here, and this document does not prescribe one — nor that
+one is needed.** Every measurement below varies *elapsed time*; not one opens a
+sacrificial channel, so there is no evidence bearing on the second candidate at
+all. Earlier versions named it as the design response anyway, and a later version
+said a transition was *required*, which is the conclusion the experiment exists to
+reach. The experiment records each arm's `p95` and may select B, C or **neither**;
+until it is run, the pool should treat all three outcomes as open.
 
 ## The method lesson — corrected twice
 
@@ -146,9 +148,9 @@ Three arms, each starting from a **fresh authenticated session**:
 
 | arm | treatment | what it isolates |
 |---|---|---|
-| **A** immediate | open the measured channel straight after auth | the cost as it stands today |
-| **B** age-only | idle 100 ms, then open the measured channel | whether merely waiting is enough |
-| **C** prewarmed | open and free a sacrificial `direct-streamlocal` channel, then open the measured channel | the actual proposed treatment |
+| **A** immediate | open the measured channel straight after auth | request `p95` with no treatment |
+| **B** age-only | idle 100 ms, then open the measured channel | request `p95` after a 100 ms idle |
+| **C** prewarmed | open and free a sacrificial `direct-streamlocal` channel, then open the measured channel | request `p95` after a sacrificial open |
 
 Method:
 
@@ -342,9 +344,18 @@ The correction stops there. A second version went on to say that C's added load
 is therefore "small" against the per-checkout probe — which requires knowing how
 many checkouts a session serves before eviction, and **that number is not
 measured anywhere in this document**. It depends on pool sizing, eviction and UI
-demand, none of which are settled. So: report the exact per-insertion cost, and
-report insertions and checkouts observed during the run. Their ratio is an output
-of the experiment, not an input to it.
+demand, none of which are settled. And this experiment **cannot supply that denominator either.** Each arm starts
+100 fresh sessions and issues one request per session, so its insertion-to-
+checkout ratio is mechanically 1:1 — there is no reuse, no eviction, no pool
+sizing and no UI demand in it. A previous version of this paragraph said the
+ratio was "an output of the experiment": it is not, and inventing a measurement
+the design cannot produce is the same error as the claim it was correcting,
+one step further along.
+
+So: report the exact **per-insertion** cost, which is one connection, and record
+the connection counts as exact treatment accounting — **not** as an observed reuse
+ratio. The denominator stays unknown until a pool prototype or a representative
+workload measures it.
 
 Both errors ran in the same direction that the writer already favoured, first
 against C and then for it, which is the reason the raw counts are required rather
