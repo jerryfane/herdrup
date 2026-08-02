@@ -1081,6 +1081,35 @@ final class ResyncInvalidationTests: XCTestCase {
 /// module, so formatting, access-level spelling and additional initialisers are
 /// all covered by construction rather than by enumeration.
 final class PaneSnapshotAccessTests: XCTestCase {
+    /// libssh2's header search path, from pkg-config.
+    ///
+    /// SwiftPM hands the CSSH target these flags automatically — but this test
+    /// spawns symbolgraph-extract ITSELF, so it inherits nothing. On Debian that
+    /// was invisible because /usr/include is a default search path; on macOS,
+    /// Homebrew's prefix is not, so the shim's `#include <libssh2.h>` failed and
+    /// the whole module could not be built for extraction.
+    ///
+    /// That is a defect the pkg-config fix CREATED: moving from a hardcoded path
+    /// to a resolved one fixed the build and broke every hand-rolled tool
+    /// invocation that had been relying on the hardcoded assumption.
+    static func libssh2ClangFlags() -> [String] {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["pkg-config", "--cflags-only-I", "libssh2"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return [] }
+        p.waitUntilExit()
+        let text = String(
+            data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return text.split(separator: " ").compactMap { flag -> [String]? in
+            let f = flag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard f.hasPrefix("-I"), f.count > 2 else { return nil }
+            return ["-Xcc", f]
+        }.flatMap { $0 }
+    }
+
     func testPaneSnapshotExposesNoInitialiserOutsideTheModule() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -1139,6 +1168,7 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "-include-spi-symbols",
             "-I", moduleDir.path,
             "-I", root.appendingPathComponent("Sources/CSSH").path,
+        ] + Self.libssh2ClangFlags() + [
             "-output-dir", output.path, "-minimum-access-level", "package",
         ]
         let stderrPipe = Pipe()
