@@ -376,9 +376,15 @@ public actor RecoveryExecutor {
         for pane in panes.sorted() {
             // NO pre-await binding check at the top of the iteration. The
             // invariant this loop keeps is stated once and held per site:
-            // EVERY SUSPENSION POINT IN THIS BODY IS FOLLOWED BY ITS OWN
-            // ATTEMPT RECHECK. There are exactly three, and each has a distinct
-            // correction because each leaves the world in a different state:
+            // EVERY SUSPENSION POINT THAT CAN REACH THE TOP OF THE NEXT
+            // ITERATION IS FOLLOWED BY ITS OWN ATTEMPT RECHECK.
+            //
+            // The qualifier is load-bearing. The body contains FOUR awaits; the
+            // fourth is `transport.closeAll` inside the reap below, which is
+            // followed unconditionally by `return`, so its resumption cannot
+            // reach the loop head and it needs no check. Three can, and each has
+            // a distinct correction because each leaves the world in a
+            // different state:
             //   1. the backoff `sleeper` below       -> plain return, nothing built yet
             //   2. `transport.openStream` succeeding  -> RECHECK-AND-REAP; a
             //      registration now exists past the teardown that would have
