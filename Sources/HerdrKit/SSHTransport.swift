@@ -176,7 +176,7 @@ public struct SSHTransport: HerdrTransport {
     /// Every channel it opens inherits this token, so a test can ask what THIS
     /// transport did without reading a process-wide tally that every other
     /// test also writes to.
-    final class AuditToken {}
+    final class AuditToken: Sendable {}
     let auditToken = AuditToken()
 
     /// Shared, bounded pool for blocking libssh2 work. Bounded because a thread
@@ -552,7 +552,7 @@ public struct SSHTransport: HerdrTransport {
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
-                _ = Glibc_close(fd)
+                DescriptorAudit.close(fd, owner: auditToken)
                 throw CancellationError()
             }
             do {
@@ -568,7 +568,7 @@ public struct SSHTransport: HerdrTransport {
                 // published number before closing it — otherwise `close()` closes
                 // it a second time, by which point it may name another socket.
                 live?.release()
-                _ = Glibc_close(fd)
+                DescriptorAudit.close(fd, owner: auditToken)
                 guard case SSHError.connectFailed(_, _, let failure) = error else {
                     // A deadline or an interrupt ends the attempt outright: both
                     // are global, and trying the next address cannot help.

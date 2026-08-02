@@ -496,6 +496,12 @@ final class SSHTransportTests: XCTestCase {
             setupTimeout: 30
         )
         let started = Date()
+        // The connect path's own closes are audited but nothing drove them:
+        // duplicating one compiled and every connect/cancellation regression
+        // still passed. Cancelling mid-connect is exactly the branch that
+        // closes the descriptor it just published, so this test is where it
+        // gets pinned.
+        let auditBaseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
         let task = Task { _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#) }
         try await Task.sleep(nanoseconds: 200_000_000)
         task.cancel()
@@ -513,6 +519,11 @@ final class SSHTransportTests: XCTestCase {
             error is CancellationError,
             "a cancelled connect surfaced as \(error) — a retrying caller cannot tell it from a peer reset"
         )
+
+        XCTAssertEqual(
+            DescriptorAudit.doubleCloses(by: transport.auditToken), auditBaseline,
+            "cancelling mid-connect closed a descriptor twice")
+        DescriptorAudit.forget(transport.auditToken)
     }
 
     /// AXIS: a cancellation landing in the poll-ready/`SO_ERROR` window is still
