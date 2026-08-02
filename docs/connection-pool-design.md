@@ -13,9 +13,12 @@ below because the wrong turns are more instructive than the answer.
 **Pool authenticated SSH sessions. Open a fresh channel per request. Do not pool
 channels.**
 
-- A session carries ~39 ms of real cryptographic work (18.6 ms key exchange +
-  20.4 ms public-key auth), paid once per pooled session instead of once per
-  request.
+- A session carries ~39 ms of setup latency (18.6 ms key exchange + 20.4 ms
+  public-key auth), paid once per pooled session instead of once per request.
+  These are *phase latencies*: the measurement times the API call and does not
+  establish that the time is computation rather than round trips or waiting.
+  Calling it "real cryptographic work" — as this memo did — asserted a cause the
+  measurement cannot see.
 - A session also has a **post-authentication readiness delay**. A channel opened
   immediately after auth costs ~96 ms (p50 of 30); a session aged just 100 ms
   first opens in 0.28–0.54 ms. This is **not** an intrinsic per-session cost, and
@@ -36,16 +39,22 @@ channels.**
   - **Age gate** — a session is eligible once it is 100 ms old. Has supporting
     data (0.28–0.54 ms against ~96 ms) and costs nothing at the server.
   - **Sacrificial channel** — a session is eligible once one channel has been
-    opened and freed on it. Exercises the exact operation being avoided, but
-    **doubles the connections herdr sees per checkout**, and herdr reaps
-    connections that open and go idle (`INITIAL_REQUEST_TIMEOUT`), so it
-    manufactures the condition the pool exists to avoid.
+    opened and freed on it. Exercises the exact operation being avoided, at the
+    cost of one extra herdr connection **per session insertion** — not per
+    checkout, as this memo previously said. The mandatory liveness probe below
+    costs one per *checkout*, and pooling exists so that checkouts outnumber
+    insertions, so the sacrificial channel's added load is the smaller of the
+    two. The wrong denominator made it look like the expensive option.
 
-  The rule fixed in advance: **the sacrificial channel is adopted only if it
-  beats the age gate by a margin worth its server-side cost.** If they tie, the
-  age gate wins on simplicity. Whichever is chosen, prewarm **on insertion**, not
-  on borrow, so the cost lands off the request path — that part holds either way,
-  because it follows from where the cost is paid rather than from what removes it.
+  **The selection rule lives in `docs/transport-measurements.md` and is not
+  restated here.** This memo previously carried its own phrasing — "beats the age
+  gate by a margin worth its server-side cost" — which had no threshold and
+  disagreed with the sibling document about the same numbers. One canonical rule,
+  referenced.
+
+  Whichever is chosen, apply it **on insertion**, not on borrow, so the cost
+  lands off the request path. That part holds either way, because it follows from
+  where the cost is paid rather than from what removes it.
 
   **Failure handling for the transition:** a session whose prewarm fails is
   discarded, never inserted, and never counted toward pool capacity. A prewarm
@@ -64,12 +73,12 @@ That asymmetry is the whole design. It was not obvious and was not guessable.
    echo socket with no herdr code paid more. `jerryfane/herdr#29` stays parked;
    its 190× claim was retracted as a comparison of two different programs.
 3. **"Session setup is a timer to be found and removed."** *Partly wrong:*
-   ~39 ms of it is real cryptography that will not go away. Only the
-   first-channel portion is anomalous.
+   ~39 ms of it is handshake and authentication latency that pooling amortises
+   but does not remove. Whether that time is computation is not established.
 4. **"The first channel costs 1.8 s."** *Wrong as stated:* the magnitude varies
-   ~100 ms to ~1900 ms between runs. The stable fact is the *shape* — first
-   readiness-gated, not position-gated. An *aged* session's first channel is
-   as cheap as its tenth.
+   ~100 ms to ~1900 ms between runs, with outliers to 2594 ms in a control that
+   should have been fast. There is no stable shape to state — an earlier version
+   claimed one here, and the varying magnitude is the reason it could not.
 
 ## Eviction
 
@@ -121,19 +130,40 @@ that already landed.
 So:
 
 - **A separate pre-send liveness probe**, not the user's request doubling as the
-  check. Specified, because "a probe" is not implementable:
-  - **Operation:** open a `direct-streamlocal` channel to herdr's socket and
-    send `{"id":"<probe>","method":"ping","params":{}}`.
-  - **Success:** a decodable response envelope carrying the same `id`. Not
-    "bytes arrived", and not "the channel opened" — herdr's socket accepts a
-    connection before it commits to answering, so a channel that opens proves
-    the tunnel and nothing about the server.
-  - **Timeout:** 1 s. Above herdr's observed round trip by a wide margin and far
-    below any interval a user would wait through. Stated as a chosen bound, not
-    a measured one.
-  - **On failure or timeout:** discard the session, close it, replace it. Never
-    probe twice, and never send the user's request down a session that failed —
-    a second probe is the same optimism the delivery rule below refuses.
+  check. Specified as a state machine, because "a probe" is not implementable and
+  every omission below changes behaviour against a real herdr:
+  - **Framing:** newline-delimited JSON, one line per message, in both
+    directions. herdr's server reads until a newline before it does anything, so
+    a probe that omits the terminator does not time out on the *response* — it
+    holds an accepted connection until `INITIAL_REQUEST_TIMEOUT` (5 s) and is
+    then reaped, which is the failure the probe exists to detect, manufactured by
+    the probe itself.
+  - **Operation:** open a `direct-streamlocal` channel to herdr's socket, write
+    `{"id":"<probe>","method":"ping","params":{}}\n`, read one complete line.
+  - **Success:** a decoded envelope whose `id` matches, carrying a **result**.
+    Verified against herdr `d293951f`: `ping` returns a matching-id pong.
+  - **A matching-id *error* envelope is also success** for liveness purposes and
+    must not discard the session. It proves the server read, parsed and answered
+    — which is the entire question. Treating it as failure would discard healthy
+    sessions whenever herdr changed its error surface.
+  - **Not success:** the channel opening. herdr accepts and spawns a handler
+    before reading the request, so an opened channel proves the tunnel and
+    nothing about the server.
+  - **Timeout: 1 s, covering the whole sequence** — channel open, complete write,
+    one complete response line, and decode. Not a per-call bound: four one-second
+    bounds is a four-second checkout, which is the mistake the SSH transport's
+    teardown timeout made. Stated as a chosen bound, not a measured one.
+  - **On failure or timeout:** close the probe channel, discard and close the
+    session, take another. Never probe the same session twice — a second probe
+    is the same optimism the delivery rule below refuses.
+  - **Close the probe channel before opening the request channel.** herdr's
+    command socket is single-shot, so the probe's channel is spent; leaving it
+    open holds a connection the reaper will come for.
+  - **Replacement is bounded: at most 3 attempts per checkout.** Then fail the
+    request with a distinct "backend unavailable" error rather than looping. An
+    unbounded replace-and-retry against a herdr that is down is an accidental
+    reconnect storm, and it fails at exactly the moment the server can least
+    afford it.
   - **`ping` specifically** because it changes nothing. A probe with a side
     effect would make every checkout an unlogged write.
 - **Discard and replace** a session that fails the probe; never nurse it.
@@ -174,8 +204,9 @@ So:
 
 - **Do not pool channels.** Free on a ready session, and single-shot at the
   herdr end.
-- **Do not size the pool against the 100–1900 ms figure.** Its cause is unknown
-  and its magnitude unstable. Size it against concurrency demand — how many
+- **Do not size the pool against the 100–1900 ms figure.** Its cause is unknown,
+  its magnitude unstable, and outliers reached 2594 ms even where the delay was
+  supposed to be absent. Size it against concurrency demand — how many
   simultaneous requests the UI actually issues — which is a product question,
   not a latency one.
 - **Do not assume a pooled session is alive.** See suspension, above.
