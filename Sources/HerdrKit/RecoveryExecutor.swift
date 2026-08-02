@@ -26,13 +26,15 @@ public protocol ExecutorTransport: Sendable {
     /// stream. The executor cannot detect that from outside, so it is a
     /// requirement here rather than a defence there.
     ///
-    /// `onTermination` SHOULD fire
-    /// exactly once when the stream dies; the executor enforces the once with a
-    /// latch regardless, because a double-fire would otherwise become a
-    /// permanent double-subscription — the policy deliberately treats every
-    /// admitted termination as a real death and cannot dedup without
-    /// swallowing real second deaths. A conformer whose stream is torn down by
-    /// `closeAll` should NOT fire termination for that teardown.
+    /// `onTermination` MUST fire for every terminal stream end that is not a
+    /// deliberate `closeAll`/`discard` teardown — at-least-once is the
+    /// conformer's binding obligation, because a missed notification IS the
+    /// silent pane this event exists to remove. The executor's latch supplies
+    /// at-most-once (a double-fire would otherwise become a permanent
+    /// double-subscription, since the policy treats every admitted termination
+    /// as a real death); together they make exactly-once. A stream torn down by
+    /// `closeAll` must NOT fire — that is the executor's own teardown, not a
+    /// death.
     func openStream(
         pane: String, for attempt: AttemptID,
         onTermination: @escaping @Sendable () -> Void
@@ -100,6 +102,38 @@ public actor RecoveryExecutor {
         let pane: String
     }
     private var openFailures: [FailureKey: Int] = [:]
+    private var lastOpenErrors: [FailureKey: String] = [:]
+    /// Panes whose stream ACTUALLY opened on the current attempt — the
+    /// executor's observation, distinct from the policy's admission ledger.
+    private var openPanes: Set<String> = []
+
+    /// What a caller asking "is this pane watched?" can actually know.
+    ///
+    /// Coordinator-mandated: the refusal must be readable from the same surface
+    /// the ledger is read from — not a log line. `admittedNotOpen` is the
+    /// silent-pane condition made visible: the policy admitted the pane, and no
+    /// stream exists. This ADDS an observation of what already happened; it
+    /// does not redefine admission (that boundary is task 7's policy round).
+    public enum PaneWatchStatus: Equatable, Sendable {
+        /// Admitted and a live stream exists.
+        case open
+        /// Admitted, but no stream could be opened: the pane is NOT watched,
+        /// whatever the ledger says. Carries the attempt count and last error.
+        case admittedNotOpen(attempts: Int, lastError: String?)
+        /// Not admitted at all.
+        case notAdmitted
+    }
+
+    /// The same query path as `subscribedPanes`, answering per pane.
+    public func paneStatus(_ pane: String) -> PaneWatchStatus {
+        guard state.subscribedPanes.contains(pane) else { return .notAdmitted }
+        if openPanes.contains(pane) { return .open }
+        let key = state.currentAttempt.map { FailureKey(attempt: $0, pane: pane) }
+        return .admittedNotOpen(
+            attempts: key.flatMap { openFailures[$0] } ?? 0,
+            lastError: key.flatMap { lastOpenErrors[$0] }
+        )
+    }
 
     /// Bounded diagnostics: the most recent refusals, plus how many were
     /// dropped. Append-only was a slow leak on a long-running client — stale
@@ -179,6 +213,8 @@ public actor RecoveryExecutor {
             case .cancelTransport:
                 pendingDial?.cancel()
                 pendingDial = nil
+                openPanes = []
+                retireCounters(keeping: nil)
                 if let owned = resourcedAttempt {
                     await transport.closeAll(for: owned)
                     // Conditional, because the closeAll await is a suspension
@@ -253,8 +289,21 @@ public actor RecoveryExecutor {
 
     private func dial(_ attempt: AttemptID, after delay: TimeInterval) {
         pendingDial?.cancel()
+        // Close the PREVIOUS holder's resources before the claim moves. The
+        // failure paths (connect throw, snapshot throw, external
+        // transportFailed) route through the policy, whose plan is reconnect
+        // ONLY — no cancelTransport — so without this, dialing the replacement
+        // overwrote the claim and the failed attempt's connection and any
+        // opened streams became unreachable forever. Reproduced by a
+        // snapshot-failure probe: B connected with no closeAll(A) anywhere.
+        let previous = resourcedAttempt
         resourcedAttempt = attempt
+        retireCounters(keeping: attempt)
+        openPanes = []
         pendingDial = Task { [transport] in
+            if let previous, previous != attempt {
+                await transport.closeAll(for: previous)
+            }
             if delay > 0 { await self.currentSleeper()(delay) }
             guard !Task.isCancelled else { return }
             do {
@@ -333,7 +382,7 @@ public actor RecoveryExecutor {
                         Task { await self?.recordDuplicateTermination(pane: pane) }
                         return
                     }
-                    Task { await self?.handle(.streamFailed(pane: pane, from: attempt)) }
+                    Task { await self?.streamDied(pane: pane, from: attempt) }
                 }
                 // RECHECK-AND-REAP after the await. The pre-await guard cannot
                 // cover the suspension itself: a teardown completing while
@@ -350,14 +399,36 @@ public actor RecoveryExecutor {
                     return
                 }
                 openFailures[FailureKey(attempt: attempt, pane: pane)] = nil
+                lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = nil
+                openPanes.insert(pane)
             } catch {
                 // A stream that cannot OPEN is a death the same as one that
                 // dies later; the policy decides whether to replace it, and the
                 // counter above bounds how often that replacement is attempted.
-                openFailures[FailureKey(attempt: attempt, pane: pane), default: 0] += 1
+                // Guarded: a late catch for a RETIRED attempt must not insert a
+                // key the retirement sweep already ran past.
+                if attempt == state.currentAttempt {
+                    openFailures[FailureKey(attempt: attempt, pane: pane), default: 0] += 1
+                    lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = String(describing: error)
+                }
                 await handle(.streamFailed(pane: pane, from: attempt))
             }
         }
+    }
+
+    /// Drops failure bookkeeping for every attempt except the one kept: the
+    /// counters were retained forever, one more unbounded structure — and a
+    /// late catch after retirement could insert a key for a dead attempt.
+    private func retireCounters(keeping attempt: AttemptID?) {
+        openFailures = openFailures.filter { $0.key.attempt == attempt }
+        lastOpenErrors = lastOpenErrors.filter { $0.key.attempt == attempt }
+    }
+
+    /// A stream's exactly-once death: the pane is no longer open, then the
+    /// policy decides about replacement.
+    private func streamDied(pane: String, from attempt: AttemptID) async {
+        openPanes.remove(pane)
+        await handle(.streamFailed(pane: pane, from: attempt))
     }
 
     private func recordDuplicateTermination(pane: String) {
@@ -365,6 +436,13 @@ public actor RecoveryExecutor {
             action: "termination(\(pane))",
             reason: "duplicate termination dropped by the once-latch"
         ))
+    }
+
+    // Internal observability for the retirement invariant — the mutation
+    // removing retirement survived the whole suite because nothing counted.
+    var openFailureEntryCount: Int { openFailures.count }
+    var openFailureEntryCountForRetiredAttempts: Int {
+        openFailures.keys.filter { $0.attempt != state.currentAttempt }.count
     }
 
     // MARK: - Read-only state, for tests and the UI layer

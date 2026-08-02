@@ -14,17 +14,30 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         case connect(AttemptID)
         case fetchSnapshot(AttemptID)
         case openStream(String, AttemptID)
+        /// Recorded for EVERY registration attempt, throwing or not — the
+        /// contract-violation test asserted opens == 0 while the fake returned
+        /// before recording failures, so the assertion was vacuous by
+        /// construction.
+        case openAttempt(String, AttemptID)
         case closeAll(AttemptID)
         case discard(AttemptID)
     }
 
     private let lock = NSLock()
     private var operations: [Operation] = []
-    private var terminators: [String: @Sendable () -> Void] = [:]
+    /// Per REGISTRATION, not per pane: overwriting by pane made an older
+    /// registration's closure unselectable, so orphan-callback probes could
+    /// never pick the stale one.
+    private var terminators: [String: [@Sendable () -> Void]] = [:]
     var panesToServe: [String]
     var failConnects = false
     /// Every openStream throws — a persistently broken conformer.
     var failOpens = false
+    /// Every fetchSnapshot throws — establishment fails after connect.
+    var failSnapshots = false
+    /// Panes whose opens always throw, for paired-control tests where one pane
+    /// is healthy and one is not.
+    var failingPanes: Set<String> = []
     /// Installs the callback and THEN throws: the ownership violation the seam
     /// now forbids, kept as a probe of what the executor does when a conformer
     /// breaks the contract anyway.
@@ -46,15 +59,37 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
 
     /// Kills a pane's stream from the outside, firing its termination exactly
     /// once — the contract the executor promises the policy.
+    /// Fires the NEWEST registration's termination.
     func killStream(_ pane: String) {
-        let terminate = lock.withLock { terminators.removeValue(forKey: pane) }
+        let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard var list = terminators[pane], !list.isEmpty else { return nil }
+            let last = list.removeLast()
+            terminators[pane] = list
+            return last
+        }
+        terminate?()
+    }
+
+    /// Fires the OLDEST registration's termination — the orphaned-callback case.
+    func killOldestRegistration(_ pane: String) {
+        let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard var list = terminators[pane], !list.isEmpty else { return nil }
+            let first = list.removeFirst()
+            terminators[pane] = list
+            return first
+        }
         terminate?()
     }
 
     /// A MISBEHAVING transport: fires the SAME registration's termination
     /// twice, which the executor's once-latch must reduce to one death.
     func killStreamTwice(_ pane: String) {
-        let terminate = lock.withLock { terminators.removeValue(forKey: pane) }
+        let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard var list = terminators[pane], !list.isEmpty else { return nil }
+            let last = list.removeLast()
+            terminators[pane] = list
+            return last
+        }
         terminate?()
         terminate?()
     }
@@ -83,6 +118,7 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
 
     func fetchSnapshot(for attempt: AttemptID) async throws -> PaneSnapshot {
         record(.fetchSnapshot(attempt))
+        if failSnapshots { throw TransportError.closedBeforeResponse }
         let served = lock.withLock { panesToServe }
         return PaneSnapshot(agents: try SessionRecoveryTests.decodePanes(served))
     }
@@ -92,12 +128,15 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         onTermination: @escaping @Sendable () -> Void
     ) async throws {
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
-        if failOpens {
-            if installsThenThrows { lock.withLock { terminators[pane] = onTermination } }
+        record(.openAttempt(pane, attempt))
+        if failOpens || lock.withLock({ failingPanes.contains(pane) }) {
+            if installsThenThrows {
+                lock.withLock { terminators[pane, default: []].append(onTermination) }
+            }
             throw TransportError.closedBeforeResponse
         }
         record(.openStream(pane, attempt))
-        lock.withLock { terminators[pane] = onTermination }
+        lock.withLock { terminators[pane, default: []].append(onTermination) }
     }
 
     func closeAll(for attempt: AttemptID) async {
@@ -527,19 +566,24 @@ actor SleepRecorder {
         _ = await waitUntil(8) {
             await executor.rejections.contains { $0.reason.contains("left unsubscribed") }
         }
+        let attemptsAtCap = transport.log().filter {
+            if case .openAttempt = $0 { return true }; return false
+        }.count
+        XCTAssertGreaterThan(attemptsAtCap, 0, "precondition: registrations were attempted")
+        XCTAssertLessThanOrEqual(attemptsAtCap, RecoveryExecutor.openFailureCap + 1,
+                                 "the cap did not bound registration attempts")
 
-        // The orphaned callback from a failed registration fires late.
-        transport.killStream("p1")
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // The OLDEST registration's orphaned callback fires late.
+        transport.killOldestRegistration("p1")
+        try? await Task.sleep(nanoseconds: 300_000_000)
 
-        // The decisive property: a contract-violating conformer cannot make
-        // the executor STACK streams. No open ever succeeded, so none may be
-        // recorded, whatever the orphaned callback does.
-        let opens = transport.log().filter { if case .openStream = $0 { return true }; return false }.count
-        XCTAssertEqual(opens, 0, "an orphaned callback caused an open; \(opens) recorded")
-        let rejections = await executor.rejections
-        XCTAssertTrue(rejections.contains { $0.reason.contains("left unsubscribed") },
-                      "the cap must still bound a contract-violating conformer")
+        let attemptsAfter = transport.log().filter {
+            if case .openAttempt = $0 { return true }; return false
+        }.count
+        XCTAssertEqual(attemptsAfter, attemptsAtCap,
+                       "an orphaned callback restarted registration attempts past the cap")
+        XCTAssertEqual(transport.log().filter { if case .openStream = $0 { return true }; return false }.count, 0,
+                       "no open ever succeeded, so none may be recorded")
     }
 
     /// AXIS: the diagnostics buffer is bounded and drainable — append-only was
@@ -569,6 +613,87 @@ actor SleepRecorder {
         XCTAssertEqual(drained.entries.count, held)
         let afterDrain = await executor.rejections.count
         XCTAssertEqual(afterDrain, 0, "drain must clear")
+    }
+
+    /// AXIS: failure counters are retired with their attempt — they were one
+    /// more unbounded structure, and the whole-suite mutation removing the
+    /// retirement SURVIVED because nothing observed the count.
+    func testFailureCountersAreRetiredWithTheirAttempt() async throws {
+        let transport = ScriptedTransport(panes: ["bad"])
+        transport.failingPanes = ["bad"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        _ = await waitUntil(8) { await executor.openFailureEntryCount > 0 }
+
+        await executor.handle(.networkChanged(at: Date()))
+        _ = await waitUntil { await executor.isConnected }
+        // The new attempt fails "bad" afresh; only ITS keys may exist.
+        _ = await waitUntil(8) {
+            await executor.rejections.contains { $0.reason.contains("left unsubscribed") }
+        }
+        let staleFree = await executor.openFailureEntryCountForRetiredAttempts == 0
+        XCTAssertTrue(staleFree, "retired attempts' failure counters were retained")
+    }
+
+    /// THE COORDINATOR'S PAIRED CONTROL: a healthy pane reports `.open` AND a
+    /// persistently-failing pane reports `.admittedNotOpen`, through the SAME
+    /// accessor in the same test. One control alone is satisfied by a
+    /// degenerate implementation answering the same thing for everything —
+    /// this is the discriminating-evidence requirement made executable.
+    func testPaneStatusDiscriminatesOpenFromAdmittedNotOpen() async throws {
+        let transport = ScriptedTransport(panes: ["healthy", "broken"])
+        transport.failingPanes = ["broken"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        _ = await waitUntil(8) {
+            await executor.rejections.contains { $0.reason.contains("left unsubscribed") }
+        }
+        let healthySettled = await waitUntil { await executor.paneStatus("healthy") == .open }
+        XCTAssertTrue(healthySettled, "the healthy pane must report open")
+
+        let brokenStatus = await executor.paneStatus("broken")
+        guard case .admittedNotOpen(let attempts, let lastError) = brokenStatus else {
+            return XCTFail("the unwatched pane reads as \(brokenStatus) — the silent-pane lie, unqueryable")
+        }
+        XCTAssertGreaterThan(attempts, 0, "the attempt count must be carried")
+        XCTAssertNotNil(lastError, "the last error must be carried")
+        let unknown = await executor.paneStatus("never-heard-of")
+        XCTAssertEqual(unknown, .notAdmitted)
+    }
+
+    /// AXIS: a failure while establishing (snapshot fetch throws) closes the
+    /// failed attempt's resources BEFORE the replacement's claim installs.
+    ///
+    /// The failure paths route through the policy, whose plan is reconnect
+    /// only — no cancelTransport — so the replacement dial overwrote the claim
+    /// and the failed attempt's connection and any opened streams became
+    /// unreachable forever. The reviewer's probe: B connected with no
+    /// closeAll(A) anywhere in the log.
+    func testAnEstablishmentFailureClosesTheFailedAttemptBeforeReplacement() async throws {
+        let transport = ScriptedTransport(panes: ["p1"])
+        transport.failSnapshots = true
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+
+        let secondConnect = await waitUntil {
+            transport.log().filter { if case .connect = $0 { return true }; return false }.count >= 2
+        }
+        XCTAssertTrue(secondConnect, "the snapshot failure never produced a replacement dial")
+
+        let ops = transport.log()
+        guard case .connect(let attemptA) = ops.first else { return XCTFail("no first dial") }
+        // XCTUnwrap, not `!`: the force-unwrap after a failing NotNil turned a
+        // real kill into signal 4 — the crash-instead-of-fail class, third
+        // instance today, caught by the mutation run reading INVALID.
+        let closeA = try XCTUnwrap(ops.firstIndex(of: .closeAll(attemptA)),
+                                   "the failed attempt's resources were never closed — unreachable forever")
+        let secondDial = try XCTUnwrap(ops.firstIndex { op in
+            if case .connect(let a) = op { return a != attemptA } else { return false }
+        })
+        XCTAssertLessThan(closeA, secondDial, "the close must precede the replacement's dial")
     }
 
     /// A dial that fails schedules the retry through the policy (backoff), and
