@@ -61,26 +61,12 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// The catch window has `releaseCatchWindow`.
     func release(_ pane: String) { lock.withLock { _ = stalledPanes.remove(pane) } }
 
-    /// Kill-on-registration: arms a flag so the pane's NEXT registered
-    /// terminator fires immediately, INSIDE openStream before it returns —
-    /// the termination-races-the-return interleaving made deterministic.
-    private var killOnRegister: Set<String> = []
-    func releaseAndKill(_ pane: String) {
-        lock.withLock {
-            _ = stalledPanes.remove(pane)
-            _ = killOnRegister.insert(pane)
-        }
-    }
-
-    /// The first open for this pane SUCCEEDS and fires its termination before
-    /// returning; every later one fails (via failingPanes). That is the
-    /// termination-races-the-return window with a deterministic aftermath:
-    /// replacements exhaust, so a false publish by the original call is the
-    /// only way the pane can ever read .open.
-    private var succeedOnceThenKill: Set<String> = []
-    func killDuringFirstSuccessfulOpen(_ pane: String) {
-        lock.withLock { _ = succeedOnceThenKill.insert(pane) }
-    }
+    // REMOVED: releaseAndKill / killDuringFirstSuccessfulOpen and their flags.
+    // Both had ZERO call sites — the tests that used them were rewritten to
+    // observe registrations directly. Dead seams in a fake are not inert: both
+    // fired a terminator INSIDE openStream before it returned, which is the
+    // contract-violating shape three rounds of review have been removing from
+    // this file, sitting armed behind a method nothing called.
     /// The pane's FIRST open throws; its SECOND open parks until released.
     /// Later opens pass through untouched.
     ///
@@ -106,36 +92,48 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// pane-keyed phase counter and a pane-keyed release latch, so neither a
     /// second window nor a window following an ordinary release could be
     /// represented at all.
-    private var catchArm: [String: Int] = [:]        // current generation
-    private var catchPhase: [String: Int] = [:]      // entries seen since this arm
-    private var catchParkedArm: [String: Int] = [:]  // generation currently parked
-    private var catchReleasedArm: [String: Int] = [:] // generation released
-    func armCatchPathWindow(_ pane: String) {
-        lock.withLock {
-            catchArm[pane] = (catchArm[pane] ?? 0) + 1
-            catchPhase[pane] = 0
-            // No `catchReleasedArm[pane] = nil` here. It was written, its
-            // mutation SURVIVED, and unlike the guard removal that failed
-            // review at round seven this one is exhaustively enumerable rather
-            // than argued: `catchArm` only ever increases, and
-            // `catchReleasedArm` is only ever assigned some value `catchArm`
-            // held at an earlier moment. A stale release is therefore strictly
-            // less than the new generation and can never match it. There is no
-            // suspension point in that argument — it is an invariant on a
-            // monotonic integer, not a claim about interleaving, which is
-            // exactly the distinction round seven's mistake turned on.
-        }
+    /// One armed window, holding its own gate.
+    ///
+    /// An OBJECT rather than a generation number keyed by pane, and that is the
+    /// second correction to this seam. Generation numbers still went through a
+    /// shared per-pane slot, so `releaseCatchWindow` read
+    /// `catchArm[pane]` AT CALL TIME: a release created for generation 1 but
+    /// delivered once generation 2 was current wrote `2` and opened the wrong
+    /// window. Reproduced 6/6.
+    ///
+    /// I had argued that could not happen — "catchReleasedArm only ever holds a
+    /// value catchArm held earlier" — and the argument was false in the same
+    /// way round seven's was: it enumerated where the value was WRITTEN and not
+    /// where it was READ. Twice now, on this file, reasoning about a shared
+    /// mutable slot has been wrong in a direction no test noticed. So the slot
+    /// is gone: a release names its own window and can reach nothing else. That
+    /// is a property of the shape, not an invariant anyone has to keep true.
+    final class CatchWindow: @unchecked Sendable {
+        private let lock = NSLock()
+        private var released = false
+        private var parked = false
+        var isParked: Bool { lock.withLock { parked } }
+        func release() { lock.withLock { released = true } }
+        fileprivate var isReleased: Bool { lock.withLock { released } }
+        fileprivate func setParked(_ value: Bool) { lock.withLock { parked = value } }
     }
-    /// Opens the gate for the CURRENT generation only. A release aimed at a
-    /// finished window cannot open the next one.
-    func releaseCatchWindow(_ pane: String) {
-        lock.withLock { catchReleasedArm[pane] = catchArm[pane] }
+
+    private var catchWindows: [String: CatchWindow] = [:]   // the CURRENT arm
+    private var catchPhase: [String: Int] = [:]             // entries since this arm
+
+    func armCatchPathWindow(_ pane: String) -> CatchWindow {
+        lock.withLock {
+            let window = CatchWindow()
+            catchWindows[pane] = window
+            catchPhase[pane] = 0
+            return window
+        }
     }
     /// 0 = not armed for this pane, 1 = the throwing first open, 2 = the retry
     /// that parks, 3+ = pass through.
     private func catchPathPhase(_ pane: String) -> Int {
         lock.withLock {
-            guard catchArm[pane] != nil else { return 0 }
+            guard catchWindows[pane] != nil else { return 0 }
             catchPhase[pane, default: 0] += 1
             return catchPhase[pane] ?? 0
         }
@@ -164,7 +162,9 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// nothing had entered yet. The open then parked forever and the test timed
     /// out having proven nothing (1 run in 5). Observing the gate itself cannot
     /// be early by construction.
-    func retryIsParked(_ pane: String) -> Bool { lock.withLock { catchParkedArm[pane] != nil } }
+    func retryIsParked(_ pane: String) -> Bool {
+        lock.withLock { catchWindows[pane] }?.isParked ?? false
+    }
 
     /// Drops the registration this call made, so a throwing open leaves none.
     /// Deliberately NOT applied on the `installsThenThrows` path: that one
@@ -306,30 +306,18 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             throw TransportError.closedBeforeResponse
         }
         if phase == 2 {
-            // Keyed to THIS ARM. No other call, on any attempt, and no release
-            // aimed at any other window, can enter or open it.
-            let arm = lock.withLock { catchArm[pane] }
-            lock.withLock { catchParkedArm[pane] = arm }
-            while lock.withLock({ catchReleasedArm[pane] != arm }) {
+            // The parked open holds a REFERENCE to its own window. Nothing
+            // consults per-pane state to decide whether it may proceed, so no
+            // later arm and no delayed release aimed elsewhere can reach it.
+            let window = lock.withLock { catchWindows[pane] }
+            window?.setParked(true)
+            while !(window?.isReleased ?? true) {
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }
-            lock.withLock { catchParkedArm[pane] = nil }
+            window?.setParked(false)
         }
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
         record(.openAttempt(pane, attempt))
-        let succeedThisOnce = lock.withLock { succeedOnceThenKill.remove(pane) != nil }
-        if succeedThisOnce {
-            record(.openStream(pane, attempt))
-            // Fires INSIDE the call: the executor's publish runs after this.
-            let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
-                guard var list = terminators[pane], !list.isEmpty else { return nil }
-                let last = list.removeLast()
-                terminators[pane] = list
-                return last
-            }
-            terminate?()
-            return
-        }
         if failOpens || lock.withLock({ failingPanes.contains(pane) }) {
             // The deliberate violation is RETAINING the entry registration, not
             // adding a second one. This used to append the identical closure
@@ -340,18 +328,6 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             throw TransportError.closedBeforeResponse
         }
         record(.openStream(pane, attempt))
-        let fireNow = lock.withLock { killOnRegister.remove(pane) != nil }
-        if fireNow {
-            // Fire BEFORE returning: the executor's success path runs after
-            // this, which is exactly the window under test.
-            let terminate = lock.withLock { () -> (@Sendable () -> Void)? in
-                guard var list = terminators[pane], !list.isEmpty else { return nil }
-                let last = list.removeLast()
-                terminators[pane] = list
-                return last
-            }
-            terminate?()
-        }
     }
 
     func closeAll(for attempt: AttemptID) async {
@@ -613,7 +589,7 @@ final class RecoveryExecutorTests: XCTestCase {
     func testARetirementDuringAFailedOpensHandlingStopsTheRemainingStreams() async throws {
         let transport = ScriptedTransport(panes: ["a-fails", "z-must-not-open"])
         let executor = RecoveryExecutor(transport: transport)
-        transport.armCatchPathWindow("a-fails")   // open 1 throws, open 2 stalls
+        let window = transport.armCatchPathWindow("a-fails")   // open 1 throws, open 2 parks
         await executor.start()
 
         // The window is ENTERED when the replacement open exists: entry 1 is the
@@ -645,7 +621,7 @@ final class RecoveryExecutorTests: XCTestCase {
 
         // The world moves while the loop is parked mid-catch.
         await executor.handle(.networkChanged(at: Date()))
-        transport.releaseCatchWindow("a-fails")
+        window.release()
 
         // Settle on an OUTCOME, not on elapsed time. A fixed sleep let the
         // guard-removal mutant pass 1 run in 9: the negative assertion was
@@ -683,7 +659,7 @@ final class RecoveryExecutorTests: XCTestCase {
     /// parked window, which is also the stronger invariant.
     func testOrdinaryReleaseCannotOpenAParkedCatchWindow() async throws {
         let transport = ScriptedTransport(panes: ["p"])
-        transport.armCatchPathWindow("p")
+        let window = transport.armCatchPathWindow("p")
 
         // Entry 1 throws (contract: leaves nothing live). Entry 2 must PARK.
         await expectThrow("entry 1 must throw; the window is armed on it") {
@@ -700,8 +676,46 @@ final class RecoveryExecutorTests: XCTestCase {
         let escaped = await waitUntil(0.5) { !transport.retryIsParked("p") }
         XCTAssertFalse(escaped, "an ordinary release opened the catch window it does not own")
 
-        transport.releaseCatchWindow("p")
+        window.release()
         _ = await second.result
+    }
+
+    /// AXIS: a release created for an EARLIER window cannot open a later one,
+    /// even when it is delivered while the later window is parked.
+    ///
+    /// This is the defect review found at round eleven, and it existed because
+    /// the release consulted per-pane state when it EXECUTED rather than
+    /// carrying the identity it was created with. My argument that it could not
+    /// happen enumerated where the value was written and not where it was read.
+    /// The regression is kept even though the shared slot is gone, because the
+    /// slot is the kind of thing that comes back.
+    func testAStaleReleaseCannotOpenALaterCatchWindow() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        let first = transport.armCatchPathWindow("p")
+        await expectThrow("entry 1 must throw") {
+            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
+        }
+        let firstRetry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
+        _ = await waitUntil { transport.retryIsParked("p") }
+        first.release()
+        _ = await firstRetry.result
+
+        // A second window, parked, with the FIRST window's release still in
+        // someone's hand.
+        let second = transport.armCatchPathWindow("p")
+        await expectThrow("entry 1 of the second window must throw") {
+            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
+        }
+        let secondRetry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
+        let parked = await waitUntil { transport.retryIsParked("p") }
+        XCTAssertTrue(parked, "the second window never parked; the test is not armed")
+
+        first.release()          // the STALE release, delivered late
+        let escaped = await waitUntil(0.5) { !transport.retryIsParked("p") }
+        XCTAssertFalse(escaped, "a release created for the first window opened the second")
+
+        second.release()
+        _ = await secondRetry.result
     }
 
     /// AXIS: two successive catch windows on one pane are each independently
@@ -710,14 +724,14 @@ final class RecoveryExecutorTests: XCTestCase {
         let transport = ScriptedTransport(panes: ["p"])
 
         for round in 1...2 {
-            transport.armCatchPathWindow("p")
+            let window = transport.armCatchPathWindow("p")
             await expectThrow("entry 1 must throw; the window is armed on it") {
             try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
         }
             let second = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
             let parked = await waitUntil { transport.retryIsParked("p") }
             XCTAssertTrue(parked, "window \(round) did not park; the previous arm's state leaked into it")
-            transport.releaseCatchWindow("p")
+            window.release()
             _ = await second.result
             let cleared = await waitUntil { !transport.retryIsParked("p") }
             XCTAssertTrue(cleared, "window \(round) never cleared its parked state")
@@ -951,9 +965,16 @@ actor SleepRecorder {
         let executor = RecoveryExecutor(transport: transport)
         transport.stall("only")                       // the open suspends
         await executor.start()
-        _ = await waitUntil {
-            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
-        }
+        // Wait for the STREAM'S REGISTRATION, not for fetchSnapshot. The fake
+        // logs the snapshot before returning it and well before openStream
+        // registers, so the old wait could settle with registrationCount 0 —
+        // the attempt then retired before any open was in flight and there was
+        // no late-open window at all. Reproduced 3/3. A baseline or an
+        // unrelated mutant failing for THAT reason corrupts kill attribution,
+        // which is worse than the flake: the harness would report a kill that
+        // had nothing to do with the mutation.
+        let inFlight = await waitUntil { transport.registrationCount("only") > 0 }
+        XCTAssertTrue(inFlight, "no open was in flight; the late-open window never existed")
         let retiredOptional = await executor.currentAttempt
         let retired = try XCTUnwrap(retiredOptional)
 
