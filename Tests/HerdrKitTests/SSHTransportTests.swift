@@ -168,9 +168,23 @@ final class SSHTransportTests: XCTestCase {
         // recent_unwrapped is the DEFAULT reading surface per the design panel,
         // and was untested over SSH until now.
         let unwrapped = try await client.read(pane: pane, lines: 40)
-        // A REAL ping, whose response is parsed rather than assumed.
-        let pong = try await transport.roundTrip(#"{"id":"contract-ping","method":"ping","params":{}}"#)
-        let pongOK = pong.contains("\"result\"") && pong.contains("contract-ping")
+        // A real ping, DECODED rather than substring-matched: a substring check
+        // passes on an error envelope that merely mentions the id.
+        let requestID = "contract-ping"
+        let pong = try await transport.roundTrip(
+            "{\"id\":\"\(requestID)\",\"method\":\"ping\",\"params\":{}}"
+        )
+        struct Empty: Decodable {}
+        let decoded = try? JSONDecoder().decode(
+            ResultEnvelope<Empty>.self, from: Data(pong.utf8)
+        )
+        let pongOK = decoded?.id == requestID
+
+        // Both reads must be non-empty: "no CSI" is trivially true of an empty
+        // string, so an empty plain read would satisfy the styling assertions
+        // while proving nothing.
+        XCTAssertFalse(styled.text.isEmpty, "styled read must return content")
+        XCTAssertFalse(plain.text.isEmpty, "plain read must return content")
 
         return ContractResult(
             paneCount: agents.count,
@@ -183,13 +197,15 @@ final class SSHTransportTests: XCTestCase {
         )
     }
 
-    /// The TOFU race the reviewer identified: with a split lookup-then-decide
-    /// interface, two concurrent first contacts can both observe no pin, trust
-    /// DIFFERENT keys, and overwrite each other — silently defeating
-    /// hard-stop-on-change at the moment pinning is meant to establish trust.
+    /// STRESS COVERAGE, not a determinism proof — labelled honestly after a
+    /// reviewer measured the previous version letting the racy implementation
+    /// survive 492 times out of 500.
     ///
-    /// Deterministic, not timing-dependent: many concurrent evaluations of two
-    /// different fingerprints must yield exactly one winner.
+    /// The real guarantee against the TOFU race is STRUCTURAL: `compareAndPin`
+    /// is the store's only write path, so the split lookup-then-store form
+    /// cannot be written. This test samples the contended window and would
+    /// occasionally catch a regression, but it cannot prove absence and must
+    /// not be cited as if it could.
     func testConcurrentFirstContactCannotBothWin() {
         let policy = PinningHostKeyPolicy()
         let a = String(repeating: "aa", count: 32)
@@ -234,6 +250,37 @@ final class SSHTransportTests: XCTestCase {
             policy.evaluate(host: "h", port: 22, presented: String(repeating: "dd", count: 32)),
             .reject,
             "the original endpoint's pin must still hold"
+        )
+    }
+
+    /// F1: cancellation must interrupt session ESTABLISHMENT, not only the read
+    /// loop. Uses the reviewer's instrument — a peer that accepts TCP and then
+    /// withholds its SSH banner, so the handshake blocks forever.
+    ///
+    /// Before the fix the socket was published only after connect, handshake,
+    /// host-key check and auth had all completed, so a cancel arriving during
+    /// establishment had nothing to shut down; the reviewer measured >4s. Four
+    /// such peers exhaust the whole 4-worker queue.
+    func testCancellationInterruptsSessionEstablishment() async throws {
+        let listener = SilentPeer()
+        try listener.start()
+        defer { listener.stop() }
+
+        SSHRuntime.start()
+        let transport = SSHTransport(credentials: SSHCredentials(
+            host: "127.0.0.1", port: listener.port, username: "nobody",
+            privateKeyPEM: "not-a-key", remoteSocketPath: "/tmp/unused.sock"))
+
+        let started = Date()
+        let task = Task { _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+        _ = await task.result
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(
+            elapsed, 3.0,
+            "cancel must interrupt a handshake blocked on a silent peer; took \(elapsed)s"
         )
     }
 
@@ -287,4 +334,50 @@ final class Locked<T>: @unchecked Sendable {
     init(_ initial: T) { storage = initial }
     var value: T { lock.lock(); defer { lock.unlock() }; return storage }
     func mutate(_ body: (inout T) -> Void) { lock.lock(); body(&storage); lock.unlock() }
+}
+
+
+/// Accepts TCP and never sends an SSH banner, so a handshake blocks.
+final class SilentPeer: @unchecked Sendable {
+    private var fd: Int32 = -1
+    private(set) var port: UInt16 = 0
+    private var thread: Thread?
+    private var held: [Int32] = []
+
+    func start() throws {
+        fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_port = 0
+        _ = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        port = UInt16(bigEndian: bound.sin_port)
+        listen(fd, 8)
+        let t = Thread { [weak self] in
+            guard let self else { return }
+            while true {
+                let c = accept(self.fd, nil, nil)
+                if c < 0 { return }
+                self.held.append(c)   // accept, then say nothing at all
+            }
+        }
+        t.start()
+        thread = t
+    }
+
+    func stop() {
+        for c in held { close(c) }
+        if fd >= 0 { shutdown(fd, Int32(SHUT_RDWR)); close(fd) }
+    }
 }
