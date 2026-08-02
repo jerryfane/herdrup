@@ -313,6 +313,17 @@ final class SessionRecoveryTests: XCTestCase {
         // The snapshot forgets p2; its subscription on this transport stays open.
         XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state).isEmpty)
 
+        // THE SHRINK MUST HAVE HAPPENED. Without this the test passed with the
+        // shrink deleted entirely: p2 begins subscribed, so both rediscovery
+        // operations below return empty whether or not it ever left. The
+        // divergence between the two sets IS the state under test — forgotten
+        // in knowledge, still subscribed on the wire — and asserting it is what
+        // makes the emptiness below mean "not re-subscribed" rather than
+        // "nothing changed".
+        XCTAssertFalse(state.knownPanes.contains("p2"), "the snapshot did not shrink")
+        XCTAssertTrue(state.subscribedPanes.contains("p2"),
+                      "the shrink dropped the subscription; there is no unsubscribe verb")
+
         // p2 reappears — via event and via snapshot. Neither may re-subscribe.
         XCTAssertTrue(plan(.paneCreated("p2", from: opened), &state).isEmpty,
                       "paneCreated re-subscribed a pane this transport already watches")
@@ -948,6 +959,15 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let first = connect(&state)
         _ = plan(.paneCreated("p2", from: first), &state)   // learned mid-session
+
+        // THE LEARNING MUST HAVE HAPPENED, and it is the whole subject of this
+        // test's name. Without it the test passed with the paneCreated deleted:
+        // the authoritative snapshot after reconnect supplies p2 independently,
+        // so the final assertion held for a reason unrelated to learning
+        // anything mid-session.
+        XCTAssertTrue(state.knownPanes.contains("p2"), "the mid-session pane was never learned")
+        XCTAssertTrue(state.subscribedPanes.contains("p2"),
+                      "the mid-session pane was learned but never subscribed")
 
         _ = plan(.networkChanged(at: Date()), &state)
         let second = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
