@@ -47,7 +47,12 @@ if ! swift build --build-tests >"$BUILD_LOG" 2>&1; then
 fi
 
 echo "--- mutation '$NAME' applied and compiles; expecting $FILTER to FAIL ---"
-timeout 300 swift test --filter "$FILTER" >"$RUN_LOG" 2>&1
+# --no-parallel IS PART OF THE PARSER CONTRACT, not a preference. Under
+# --parallel, XCTest emits neither "All tests" nor "Selected tests", so the
+# aggregate terminator the classifier requires never appears and every run
+# classifies INVALID. It was the default before and this made it explicit;
+# supporting the parallel format is a separate change.
+timeout 300 swift test --no-parallel --filter "$FILTER" >"$RUN_LOG" 2>&1
 STATUS=$?
 
 # CLASSIFICATION LIVES IN ITS OWN SCRIPT so it can be demonstrated without a

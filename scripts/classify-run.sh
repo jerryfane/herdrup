@@ -33,6 +33,17 @@ if grep -qE "Exited with unexpected signal code|Program crashed|Fatal error" "$R
     exit 2
 fi
 
+# A SIGNAL-DERIVED STATUS IS NOT A FAILURE, even when the log looks complete.
+# Shells report a signalled child as 128+N, so 137 is SIGKILL and 139 SIGSEGV.
+# SwiftPM keeps working AFTER XCTest prints its aggregate — its own footer comes
+# later — so a kill can land past the terminator with no crash text flushed. A
+# synthetic complete summary plus status 137 was classified KILLED before this.
+# 124 is the timeout, handled above as ESCAPED.
+if [ "$STATUS" -gt 128 ] && [ "$STATUS" -ne 124 ]; then
+    echo "INVALID: '$NAME' was terminated by signal $((STATUS - 128)) (status $STATUS). Not a kill."
+    exit 2
+fi
+
 # THE RUN MUST HAVE COMPLETED. XCTest closes with an AGGREGATE suite line —
 # "All tests" unfiltered, "Selected tests" under --filter — and without it the
 # run ended early however normal its earlier lines look.
