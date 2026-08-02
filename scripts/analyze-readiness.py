@@ -48,10 +48,34 @@ def main(path):
         count = sum(1 for r in rows if r["arm"] == arm)
         if count != rule.TRIALS_PER_ARM:
             problems.append(f"arm {arm} has {count} rows, expected {rule.TRIALS_PER_ARM}")
+    expected_sequences = {str(i) for i in range(3 * rule.TRIALS_PER_ARM)}
+    if set(sequences) != expected_sequences and len(rows) == 3 * rule.TRIALS_PER_ARM:
+        problems.append("sequence numbers are not exactly 0..299")
     for r in rows:
-        if not r["error"] and (not r["t_request_ms"] or not r["t_ready_ms"] and r["arm"] != "A"):
-            problems.append(f"row {r['sequence']} lacks a required numeric field")
-            break
+        if r["error"]:
+            continue
+        # Numeric VALIDITY, not just presence: a nan in one t_request survived
+        # the presence check, propagated to max=nan, and still produced an
+        # unqualified decision with exit 0. Every timing must parse finite and
+        # non-negative or the dataset is malformed.
+        for field in ("t_request_ms", "t_ready_ms", "session_age_ms", "started_at_ms"):
+            raw = r[field]
+            if not raw:
+                if field == "t_ready_ms" and r["arm"] == "A":
+                    continue
+                problems.append(f"row {r['sequence']} lacks {field}")
+                break
+            try:
+                value = float(raw)
+            except ValueError:
+                problems.append(f"row {r['sequence']} {field}={raw!r} does not parse")
+                break
+            if not math.isfinite(value) or value < 0:
+                problems.append(f"row {r['sequence']} {field}={raw} is not finite and non-negative")
+                break
+        else:
+            continue
+        break
     if problems:
         for problem in problems:
             print(f"DATASET SHAPE VIOLATION: {problem}")
@@ -87,7 +111,7 @@ def main(path):
         if s["p95"] is not None:
             print(f"        t_request p95={s['p95']:.2f}ms  median={s['median']:.2f}ms  "
                   f"max={s['max']:.2f}ms  outliers(>{rule.OUTLIER_MS:.0f}ms)={s['outliers']}")
-        if arm == "C" and s["t_ready_p95"] is not None:
+        if arm in ("B", "C") and s["t_ready_p95"] is not None:
             print(f"        t_ready p95={s['t_ready_p95']:.2f}ms  "
                   f"median={s['t_ready_median']:.2f}ms  max={s['t_ready_max']:.2f}ms")
 
@@ -125,6 +149,11 @@ def main(path):
     )
     print()
     print(f"decision (preregistered flat rule): {sorted(outcome)}")
+    b_ready = arms["B"]["t_ready_p95"] or 0.0
+    c_ready = arms["C"]["t_ready_p95"] or 0.0
+    print(f"sensitivity — replenishment cap applied to BOTH arms (not the preregistered rule): "
+          f"B t_ready p95={b_ready:.2f}ms, C={c_ready:.2f}ms vs cap {rule.READY_CAP}ms -> "
+          f"{'neither qualifies' if b_ready > rule.READY_CAP and c_ready > rule.READY_CAP else 'differs from preregistered outcome' if (b_ready > rule.READY_CAP) != (c_ready > rule.READY_CAP) else 'same outcome'}")
     if len(outcome) != 1:
         print("ERROR: the rule returned multiple outcomes; the enumeration guarantee is broken")
         return 1

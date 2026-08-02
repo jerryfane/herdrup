@@ -11,9 +11,10 @@ conclusions remain unverified.
 
 > **Batch note, added 2026-08-02:** the tables and figures in the next three
 > sections are the earlier 30-sample-era batches, kept as recorded history. The
-> 300-trial randomised run (Results, below) measured this run's immediate opens
-> at 140.2–177.9 ms — entirely outside the 89.6–102.1 ms range recorded here.
-> Batches differ; neither table corrects the other.
+> randomised runs (Results, below) measured immediate opens at 140.2–177.9 ms
+> (run 1) and 143.5–1855.4 ms with a 173.87 ms p95 (run 2, the validated run) —
+> both entirely outside the 89.6–102.1 ms range recorded here. Batches differ;
+> neither table corrects the other.
 
 ## Measured phase latencies
 
@@ -133,9 +134,9 @@ timeout or retry more than work, but that is a hypothesis and is untested.
 
 - Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
   once instead of per request.
-- **The request-path delay reproduced in the randomised runs, and the
-  experiment selected the age gate** (Results, below). Both runs cleared the
-  operational margin for B and blocked C on the replenishment cap. The
+- **The request-path delay reproduced in both randomised runs, and the
+  validated run selected the age gate under the preregistered rule** (Results,
+  below — including a cap-symmetry caveat found in review after the run). The
   single-run and non-causal limitations stand: a future run under the same
   preregistered rule could select differently, and no treatment effect has been
   estimated.
@@ -402,7 +403,10 @@ before any run. **n = 100 per arm, 0 error rows.** Every response was decoded
 and required to be a matching-id, non-error ping result — run 1's harness
 counted any newline as success, so its zero errors proved delivery, not
 success; run 1 is retained (`scripts/readiness-experiment-run1.csv`) with that
-limitation on record, and reached the same decision. Every number below is
+limitation on record. **Run 1 is not an independent confirmed decision**: its
+responses were not validated or retained, so under the current error rule its
+decision is unknowable — what is true is that a timing-only analysis of run 1's
+lines also outputs B. Every number below is
 printed by `scripts/analyze-readiness.py`, which now emits each statistic this
 section cites; the analyzer refuses to compute anything on a dataset that is
 not exactly the preregistered shape (3 × 100 complete arms).
@@ -420,11 +424,34 @@ C's `t_ready` (the sacrificial open-and-free): median 96.50 ms, p95
 record-the-blocker obligation:
 
 - B: p95 margin met (`A95 − B95` = 72.97 ms ≥ 20 ms); outlier count within
-  tolerance (0 vs A's 1 + 1).
+  tolerance (0 vs A's 1 + 1); no replenishment condition — the preregistered
+  rule applies the cap to C only.
 - C: p95 margin met (73.28 ms); outlier count within tolerance (0); **blocked
   by the replenishment cap** — `t_ready` p95 of 125.25 ms against the 50 ms
   cap. That is the whole of what was established about C; the mechanism behind
   its sacrificial-open cost is as unidentified as the rest.
+
+**The cap is asymmetric, and review caught the rationale claiming otherwise.**
+`t_ready` is defined as pool-slot-blocking cost for both arms, and B's is
+100.08 ms p95 — its idle *is* the treatment. Applying the stated affordability
+criterion symmetrically disqualifies **both** arms (the analyzer prints this
+sensitivity beside every decision). So, precisely:
+
+- The adoption of B is the outcome of the rule **as committed**, cap on C only.
+  It does not follow from the rationale as previously written, which stated a
+  criterion broader than the rule applied.
+- There is a real distinction the asymmetry can rest on — B's `t_ready` is idle
+  wall-clock, deterministic by construction (it is the treatment parameter, and
+  pool sizing absorbs it as known slot-occupancy), while C's is **active work**:
+  a real herdr connection opened and torn down per insertion, with observed
+  variance (96–185 ms). That distinction is *declared* here as the cap's basis
+  for future runs, with its post-run timing stated; it was not written down
+  before the run, and the 50 ms number remains operational, not derived.
+- Under the symmetric reading the outcome is adopt-neither: hand sessions out
+  immediately and pay A's request-path p95. Anyone consuming this decision
+  should know it is not robust to that reading; what IS robust across every
+  reading and both runs is that C's active per-insertion cost exceeds B's idle
+  cost, so no reading prefers C.
 
 Unconditional tail report (raw counts, all arms): 1 / 0 / 0 trials above
 500 ms — a single 1855.44 ms trial in **A** (sequence 296). No tail inference
@@ -457,9 +484,11 @@ after seeing run 1's data** — not preregistered, no decision weight:
 
 What this settles for `docs/connection-pool-design.md`: the eligibility rule,
 if the pool applies one, is **the 100 ms age gate on insertion** — selected by
-the preregistered rule in both runs, with the caveats above. The sacrificial
-channel is not adopted, so its per-insertion server cost does not arise **while
-C stays unadopted**; a future run under the same rule could select differently.
+the preregistered rule in the validated run, with the cap-symmetry caveat above
+and the deterministic ~100 ms slot-occupancy cost stated rather than hidden.
+The sacrificial channel is not adopted under any reading of either run, so its
+per-insertion server cost does not arise **while C stays unadopted**; a future
+run could select differently.
 
 A separate randomised-contrast analysis over the retained samples — effect
 sizes with uncertainty — remains possible and **has not been performed**;
