@@ -139,8 +139,42 @@ final class SessionRecoveryTests: XCTestCase {
         let restarted = recovery.beginInitialAttempt(state: &state)
         XCTAssertEqual(restarted.actions.first, .cancelTransport)
         XCTAssertNil(state.connectedSince, "stale adoption state leaks subscribes to a dead transport")
-        XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
-                      "no subscribe may target the transport that was just abandoned")
+
+        // FROM THE MINTED ATTEMPT, NAMED — not read back out of the state.
+        // `state.currentAttempt` forwards to `authority.current`, so reading it
+        // here silently retargets the test to whatever the transition left
+        // current. Binding it makes the premise a claim that can fail.
+        let minted = try XCTUnwrap(restarted.reconnectAttempt)
+        XCTAssertEqual(state.currentAttempt, minted,
+                       "the restart did not become current; the event below is not from the attempt under test")
+        XCTAssertTrue(plan(.paneCreated("p9", from: minted), &state).isEmpty,
+                      "an event from the CURRENT attempt, before its adoption is processed, admits nothing "
+                      + "— it needs nothing, because the post-adoption snapshot covers it via observe. "
+                      + "(This does NOT pin the abandoned-attempt path: `minted` IS current here, so "
+                      + "provenance passes and the cleared connectedSince is what rejects. The stale-attempt "
+                      + "path is pinned by testALatePaneEventFromAnAbandonedAttemptActsOnNothing.)")
+
+        // POSITIVE CONTROL. It establishes CAUSATION and nothing more, and the
+        // difference matters enough to write down.
+        //
+        // What it fixes: `.isEmpty` on its own is consistent with the event
+        // being inert for any reason at all. Adopting `minted` supplies the one
+        // missing condition and nothing else, so a subscribe appearing here
+        // proves the emptiness above was caused by the cleared adoption.
+        // Deleting the adoption below leaves no subscribe: KILLED, so this
+        // control is armed and adoption is its premise.
+        //
+        // What it does NOT fix, measured after adding it rather than assumed:
+        // substituting a stranger AttemptID for `minted` in the assertion ABOVE
+        // still SURVIVES. Provenance rejects a stranger to the identical
+        // observable, and the control below reads `minted` independently, so
+        // nothing binds the two lines to one attempt. The negative line is
+        // therefore not attempt-discriminating; attempt discrimination is
+        // pinned by testALatePaneEventFromAnAbandonedAttemptActsOnNothing.
+        _ = plan(.connected(minted, at: Date()), &state)
+        XCTAssertEqual(plan(.paneCreated("p9", from: minted), &state).subscribes, ["p9"],
+                       "the same event still admits nothing after adoption; the emptiness above was "
+                       + "never attributable to the cleared adoption")
     }
 
     /// AXIS: beginInitialAttempt while backgrounded dials nothing, matching
@@ -329,9 +363,27 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertFalse(state.knownPanes.contains("live-marker-3"),
                        "the saved copy was never restored; this test is not about replay")
 
-        // No incremental subscribe may target the cancelled transport.
-        XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
-                      "a replayed connectedSince let paneCreated subscribe onto a cancelled transport")
+        // NOT the cancelled transport — B, which is current but NOT YET ADOPTED.
+        // connectedSince is not value-stored (State.connectedSince forwards to
+        // authority.connectedSince), so `state = saved` cannot replay it into
+        // the gate at all, and currentAttempt likewise resolves to B, not A.
+        // The old message here claimed a replayed connectedSince subscribing
+        // onto a cancelled transport: neither half is reachable by this route.
+        XCTAssertEqual(state.currentAttempt, attemptB,
+                       "the restore retargeted currentAttempt; the event below is not from B")
+        XCTAssertTrue(plan(.paneCreated("p9", from: attemptB), &state).isEmpty,
+                      "an event from B before B's adoption is processed admits nothing")
+        // MEASURED LIMITATION, stated rather than implied: substituting a
+        // stranger AttemptID for `attemptB` here leaves this assertion true
+        // (SURVIVED), because provenance rejects a stranger to the same
+        // observable. So this line pins "nothing leaks before adoption" and
+        // does NOT discriminate which attempt was refused. A positive control
+        // of the kind used in
+        // testBeginInitialAttemptWhileConnectedCancelsAndClearsAdoption does
+        // not fit here without consuming p9's freshness and gutting the
+        // mid-replay-learning assertion at the end of this test, which is the
+        // stronger check. Attempt discrimination is pinned by
+        // testALatePaneEventFromAnAbandonedAttemptActsOnNothing.
 
         // And B's adoption must not be suppressed as a repeat.
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
