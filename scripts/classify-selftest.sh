@@ -70,8 +70,17 @@ Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 
 # 4b. AN INCOMPLETE RUN IS NOT A KILL. A genuine failure and a completed
 #     COMPONENT summary, then SIGKILL and no aggregate: previously KILLED.
-expect incomplete-run 2 "did not complete" 137 "Test Case 'A.testX' failed (0.0 seconds)
+# Status 1, NOT 137: a signalled status is caught by the signal check above, so
+# using one here would have tested that check twice and the aggregate check
+# never. Isolating it needs an ordinary failure exit with no terminator.
+expect incomplete-run 2 "did not complete" 1 "Test Case 'A.testX' failed (0.0 seconds)
 Test Suite 'A' failed at 2026-01-01 00:00:00.000
+	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+
+# 4c. A SIGNAL AFTER THE AGGREGATE IS NOT A KILL. SwiftPM keeps working after
+#     XCTest's terminator, so a SIGKILL can land past it with no crash text.
+expect signal-after-aggregate 2 "terminated by signal 9" 137 "Test Case 'A.testX' failed (0.0 seconds)
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds"
 
 # 5. THE ESTABLISHED CASES, so this file also pins what already worked.
@@ -109,15 +118,25 @@ Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 PROBE="$TMP/restore-probe.txt"
 printf 'before\n' > "$PROBE"
 BEFORE_HASH="$(cksum < "$PROBE")"
-scripts/mutate.sh restore-probe 'before' 'after' \
-    'NoSuchTestFilterExistsHere' "$PROBE" >/dev/null 2>&1
+RESTORE_OUT="$(scripts/mutate.sh restore-probe 'before' 'after' \
+    'NoSuchTestFilterExistsHere' "$PROBE" 2>&1)"
 AFTER_HASH="$(cksum < "$PROBE")"
-if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
+# THE MUTATION MUST HAVE BEEN APPLIED FOR THE BYTE COMPARISON TO MEAN ANYTHING.
+# The first version discarded mutate.sh's output and status, so pointing it at
+# an ABSENT target made it exit before touching the file — and "restored
+# byte-for-byte" passed on a file nothing had ever changed. A restoration test
+# that passes when there was nothing to restore is the vacuous-precondition
+# shape, in the file written to catch vacuous preconditions.
+if ! printf '%s' "$RESTORE_OUT" | grep -q "applied and compiles"; then
+    echo "FAIL restore-trap: the mutation was never applied — the byte comparison proves nothing"
+    printf '%s\n' "$RESTORE_OUT" | sed 's/^/      /' | head -3
+    FAILURES=$((FAILURES+1))
+elif [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
     echo "FAIL restore-trap: mutate.sh left its target modified — the EXIT trap did not restore it"
     echo "      content now: $(cat "$PROBE")"
     FAILURES=$((FAILURES+1))
 else
-    echo "ok   restore-trap (behavioural: target restored byte-for-byte)"
+    echo "ok   restore-trap (applied, then restored byte-for-byte)"
 fi
 
 echo
