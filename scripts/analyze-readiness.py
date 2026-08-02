@@ -23,9 +23,6 @@ spec = importlib.util.spec_from_file_location(
 rule = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rule)
 
-OUTLIER_MS = 500.0
-
-
 def nearest_rank_p95(values):
     ordered = sorted(values)
     return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
@@ -33,6 +30,34 @@ def nearest_rank_p95(values):
 
 def main(path):
     rows = list(csv.DictReader(open(path)))
+
+    # The rule is defined for complete arms of exactly TRIALS_PER_ARM — enforce
+    # the preregistered dataset shape before computing anything. A truncated CSV
+    # previously produced n=99 and an unqualified decision; a three-trial smoke
+    # printed a decision too. Shape violations get no numbers at all.
+    problems = []
+    sequences = [r["sequence"] for r in rows]
+    if len(set(sequences)) != len(sequences):
+        problems.append("duplicate sequence numbers")
+    if len(rows) != 3 * rule.TRIALS_PER_ARM:
+        problems.append(f"{len(rows)} rows, expected {3 * rule.TRIALS_PER_ARM}")
+    unknown = sorted({r["arm"] for r in rows} - {"A", "B", "C"})
+    if unknown:
+        problems.append(f"unknown arms {unknown}")
+    for arm in ("A", "B", "C"):
+        count = sum(1 for r in rows if r["arm"] == arm)
+        if count != rule.TRIALS_PER_ARM:
+            problems.append(f"arm {arm} has {count} rows, expected {rule.TRIALS_PER_ARM}")
+    for r in rows:
+        if not r["error"] and (not r["t_request_ms"] or not r["t_ready_ms"] and r["arm"] != "A"):
+            problems.append(f"row {r['sequence']} lacks a required numeric field")
+            break
+    if problems:
+        for problem in problems:
+            print(f"DATASET SHAPE VIOLATION: {problem}")
+        print("the preregistered rule is defined for complete arms only — NO DECISION")
+        return 1
+
     arms = {}
     for arm in ("A", "B", "C"):
         mine = [r for r in rows if r["arm"] == arm]
@@ -46,7 +71,7 @@ def main(path):
             "p95": nearest_rank_p95(t_request) if t_request else None,
             "median": statistics.median(t_request) if t_request else None,
             "max": max(t_request) if t_request else None,
-            "outliers": sum(1 for v in t_request if v > OUTLIER_MS),
+            "outliers": sum(1 for v in t_request if v > rule.OUTLIER_MS),
             "t_ready_p95": nearest_rank_p95(t_ready) if t_ready else None,
             "t_ready_median": statistics.median(t_ready) if t_ready else None,
             "t_ready_max": max(t_ready) if t_ready else None,
@@ -54,14 +79,14 @@ def main(path):
         }
 
     print(f"raw file: {path}  ({len(rows)} rows)")
-    print(f"cutoffs (preregistered): margin={rule.MARGIN}ms  outlier>{OUTLIER_MS:.0f}ms  "
+    print(f"cutoffs (preregistered): margin={rule.MARGIN}ms  outlier>{rule.OUTLIER_MS:.0f}ms  "
           f"tail tolerance=+{rule.TAIL_TOLERANCE}  t_ready cap={rule.READY_CAP}ms")
     print()
     for arm, s in arms.items():
         print(f"arm {arm}: n={s['n']} ok={s['ok']} errors={s['errors']} {s['error_kinds'] or ''}")
         if s["p95"] is not None:
             print(f"        t_request p95={s['p95']:.2f}ms  median={s['median']:.2f}ms  "
-                  f"max={s['max']:.2f}ms  outliers(>{OUTLIER_MS:.0f}ms)={s['outliers']}")
+                  f"max={s['max']:.2f}ms  outliers(>{rule.OUTLIER_MS:.0f}ms)={s['outliers']}")
         if arm == "C" and s["t_ready_p95"] is not None:
             print(f"        t_ready p95={s['t_ready_p95']:.2f}ms  "
                   f"median={s['t_ready_median']:.2f}ms  max={s['t_ready_max']:.2f}ms")
@@ -110,6 +135,11 @@ def main(path):
     print()
     print("descriptive (post-hoc, no decision weight):")
     total = len(rows)
+    span = max(float(r["started_at_ms"]) for r in rows) / 1000
+    print(f"  run span: {span:.1f}s")
+    for r in rows:
+        if not r["error"] and float(r["t_request_ms"]) > rule.OUTLIER_MS:
+            print(f"  outlier row: seq={r['sequence']} arm={r['arm']} t_request={float(r['t_request_ms']):.1f}ms")
     for arm, s in arms.items():
         mine = [r for r in rows if r["arm"] == arm and not r["error"]]
         tr = [float(r["t_request_ms"]) for r in mine]
@@ -120,7 +150,11 @@ def main(path):
         half = statistics.median(float(r["sequence"]) for r in rows)
         early = [float(r["t_request_ms"]) for r in mine if float(r["sequence"]) <= half]
         late = [float(r["t_request_ms"]) for r in mine if float(r["sequence"]) > half]
-        print(f"  {arm}: >90ms={sum(1 for v in tr if v > 90)}/{len(tr)}  "
+        slow = sorted(v for v in tr if v > 90)
+        in_band = [v for v in slow if 100.0 <= v <= 102.0]
+        print(f"  {arm}: >90ms={len(slow)}/{len(tr)}  "
+              f"slow-range=[{slow[0]:.1f}..{slow[-1]:.1f}]ms  "
+              f"in 100-102ms band: {len(in_band)}/{len(slow)}  "
               f"mean_start={sum(starts)/len(starts)/1000:.2f}s  quarters={quarters}  "
               f"p95(early half)={nearest_rank_p95(early):.2f}ms  p95(late half)={nearest_rank_p95(late):.2f}ms")
 

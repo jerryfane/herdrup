@@ -15,6 +15,8 @@ import sys
 
 MARGIN = 20
 READY_CAP = 50
+OUTLIER_MS = 500.0        # t_request above this is an outlier
+TRIALS_PER_ARM = 100      # the rule is defined for complete arms of exactly this size
 TAIL_TOLERANCE = 1   # preregistered operational cutoff, NOT an evidence threshold.
                      # n=100 does not justify THIS boundary (0 vs 2 is Fisher
                      # two-sided p~0.50). Whether n=100 would support some OTHER

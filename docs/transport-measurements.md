@@ -133,16 +133,15 @@ timeout or retry more than work, but that is a hypothesis and is untested.
 
 - Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
   once instead of per request.
-- **If the delay reproduces on the request path, an eligibility rule or a
-  validation step belongs before checkout** — pooling alone would leave the delay
-  there. Stated conditionally: the experiment below can adopt neither arm, and
-  the existing measurements show an association with multi-second outliers even
-  in the control, so *that a transition is needed* is not established here. Which
-  transition, if any, is what the experiment decides. Do not implement one before
-  running it.
+- **The request-path delay reproduced in the randomised runs, and the
+  experiment selected the age gate** (Results, below). Both runs cleared the
+  operational margin for B and blocked C on the replenishment cap. The
+  single-run and non-causal limitations stand: a future run under the same
+  preregistered rule could select differently, and no treatment effect has been
+  estimated.
 - Channels are not worth pooling: they are *typically* cheap on an aged
-  session — sub-millisecond at the median, but 33 of 100 aged opens in the
-  randomised run still cost ~100 ms, so "consistently" was falsified — and herdr's command socket is single-shot, so each request needs its
+  session — sub-millisecond at the median, but 43 of 100 aged opens in the
+  validated run still cost ~100 ms, so "consistently" was falsified — and herdr's command socket is single-shot, so each request needs its
   own regardless.
 - The eviction threshold **needs its own basis.** The original plan inherited
   ~3 s from herdr's `INITIAL_REQUEST_TIMEOUT`, which governs herdr's socket, not
@@ -395,74 +394,72 @@ exists and the experiment has been run**: `scripts/readiness-experiment.swift`
 claims to apply), and `scripts/readiness-experiment-results.csv` (all 300 raw
 trials). Results below.
 
-### Results — 2026-08-02, loopback, this box
+### Results — 2026-08-02, loopback, this box (run 2, validated harness)
 
 Environment: local `sshd`, live herdr socket, fresh authenticated session per
-trial, 300 trials in randomised order over 51.5 s. The decision cutoffs were
-committed before the run. **n = 100 per arm, 0 error rows in any arm.** Every
-number below is printed by `scripts/analyze-readiness.py` from the raw CSV — no
-figure in this section originates outside that pipeline. Medians are
-`statistics.median` (mean of the middle pair at even n).
+trial, 300 trials in randomised order over 53.8 s. Decision cutoffs committed
+before any run. **n = 100 per arm, 0 error rows.** Every response was decoded
+and required to be a matching-id, non-error ping result — run 1's harness
+counted any newline as success, so its zero errors proved delivery, not
+success; run 1 is retained (`scripts/readiness-experiment-run1.csv`) with that
+limitation on record, and reached the same decision. Every number below is
+printed by `scripts/analyze-readiness.py`, which now emits each statistic this
+section cites; the analyzer refuses to compute anything on a dataset that is
+not exactly the preregistered shape (3 × 100 complete arms).
 
 | arm | median `t_request` | p95 | max | > 500 ms |
 |---|---|---|---|---|
-| A immediate | 155.40 ms | 165.37 ms | 177.86 ms | 0 |
-| B age-only | 0.70 ms | 100.91 ms | 1375.92 ms | 1 |
-| C prewarmed | 0.42 ms | 100.52 ms | 140.79 ms | 0 |
+| A immediate | 156.23 ms | 173.87 ms | 1855.44 ms | 1 |
+| B age-only | 0.73 ms | 100.90 ms | 101.74 ms | 0 |
+| C prewarmed | 0.41 ms | 100.59 ms | 140.85 ms | 0 |
 
-C's `t_ready` (the sacrificial open-and-free): median 96.03 ms, p95
-**105.16 ms**, max 113.18 ms.
+C's `t_ready` (the sacrificial open-and-free): median 96.50 ms, p95
+**125.25 ms**, max 184.99 ms.
 
 **Decision under the preregistered rule: adopt B (the age gate).** Per the
 record-the-blocker obligation:
 
-- B: p95 margin met (`A95 − B95` = 64.46 ms ≥ 20 ms); outlier count within
-  tolerance (1 vs A's 0 + 1).
-- C: p95 margin met (`A95 − C95` = 64.85 ms); outlier count within tolerance
-  (0); **blocked by the replenishment cap** — `t_ready` p95 of 105.16 ms exceeds
-  50 ms. That is the whole of what was established about C; why its sacrificial
-  open costs what it costs is not identified, like the rest of the mechanism.
+- B: p95 margin met (`A95 − B95` = 72.97 ms ≥ 20 ms); outlier count within
+  tolerance (0 vs A's 1 + 1).
+- C: p95 margin met (73.28 ms); outlier count within tolerance (0); **blocked
+  by the replenishment cap** — `t_ready` p95 of 125.25 ms against the 50 ms
+  cap. That is the whole of what was established about C; the mechanism behind
+  its sacrificial-open cost is as unidentified as the rest.
 
-Unconditional tail report (raw counts, all arms): 0 / 1 / 0 trials above
-500 ms. B's one outlier was a single 1375.92 ms trial (sequence 228). No tail
-inference is made from any of this, per the procedure.
+Unconditional tail report (raw counts, all arms): 1 / 0 / 0 trials above
+500 ms — a single 1855.44 ms trial in **A** (sequence 296). No tail inference
+is made, per the procedure.
 
 **Descriptive observations.** These use a **post-hoc cutoff (90 ms), chosen
-after seeing the data** — it is *not* among the preregistered cutoffs, feeds no
-decision, and is reported as description only:
+after seeing run 1's data** — not preregistered, no decision weight:
 
-- Counts of measured opens above 90 ms: A **100**/100, B **33**/100, C
-  **16**/100. The slow opens are not one population: A's occupy 140.2–177.9 ms,
-  while B's and C's residual slow opens cluster tightly at ~100.4–101.4 ms —
-  visibly distinct ranges. Whether these are the same phenomenon at different
-  magnitudes or different phenomena is a mechanism question this experiment
-  does not answer. The consequence for the pool stands on the counts alone: a
-  substantial minority of aged-session opens still cost ~100 ms in this run, so
-  an age-gated session's first open is *typically* sub-millisecond, not
-  reliably so, and a UI latency budget should assume the ~100 ms case.
-- **Batches differ.** This run's immediate-open range (140.2–177.9 ms) sits
-  entirely outside the earlier batch's stated immediate range (89.6–102.1 ms).
-  Same box, same path, different day. A single batch is not the number — and
-  the earlier tables in this document are that earlier batch, kept as recorded
-  history rather than corrected to match this run.
-- **Temporal placement was not balanced in this run, and the decision survives
-  inspection anyway.** B — the adopted arm — ran early: per-quarter counts by
-  sequence [30, 25, 26, 19] against C's [23, 22, 24, 31]; mean start times
-  26.17 s / 22.73 s / 27.22 s. Splitting by run half: B's p95 is 100.91 ms in
-  *both* halves, A's is 165.85 / 164.99 ms, C's 100.48 / 100.54 ms — so the
-  qualifying margin holds within each half separately, including B's late half
-  alone. The preregistration promised imbalance would be inspected rather than
-  assumed away; this is that inspection, and "balance held" (an earlier draft's
-  phrasing, from means alone) was not a supported summary of it.
-- **Treatment accounting** (not a reuse ratio): A opened 100 herdr connections,
-  B 100, C 200.
+- Opens above 90 ms: A **100**/100 spanning 143.5–1855.4 ms; B **43**/100, all
+  43 inside 100.6–101.7 ms; C **20**/100, 17 of 20 inside 100.4–102 ms with
+  exceptions up to 140.8 ms. B's and C's slow opens form a tight ~100–102 ms
+  band that A's range does not enter; the bands overlap A's range only through
+  C's three exceptions. Whether any of these are "the same event" is a
+  mechanism question this experiment does not answer. The consequence for the
+  pool stands on the counts alone: an age-gated open is *typically*
+  sub-millisecond, and a substantial minority still cost ~100 ms in both runs
+  (33% then 43%), so a UI latency budget should assume the ~100 ms case.
+- **Batches differ, again.** Run 1: A p95 165.37 ms, no A outlier, B carried
+  the single >500 ms trial, C `t_ready` p95 105.16 ms. Run 2: A p95 173.87 ms
+  with a 1855 ms outlier, B's worst open 101.74 ms, C `t_ready` p95 125.25 ms.
+  Same box, same hour. The multi-second event moved arms between runs — one
+  more reason no single batch, including this one, is the number.
+- **Temporal placement, inspected rather than asserted**: B again ran early
+  (quarter counts [33, 24, 23, 20], mean starts 28.07 / 23.79 / 27.01 s).
+  Half-split p95s: A 173.87 / 176.65 ms, B 100.89 / 100.97 ms, C
+  100.70 / 100.57 ms — the qualifying margin holds within each half
+  separately.
+- **Treatment accounting** (not a reuse ratio): A opened 100 herdr
+  connections, B 100, C 200.
 
 What this settles for `docs/connection-pool-design.md`: the eligibility rule,
 if the pool applies one, is **the 100 ms age gate on insertion** — selected by
-the preregistered rule, with the caveats above. The sacrificial channel is not
-adopted, so its per-insertion server cost does not arise **while C stays
-unadopted**; a future run under the same rule could select differently, per the
-non-adoption disclaimer.
+the preregistered rule in both runs, with the caveats above. The sacrificial
+channel is not adopted, so its per-insertion server cost does not arise **while
+C stays unadopted**; a future run under the same rule could select differently.
 
 A separate randomised-contrast analysis over the retained samples — effect
 sizes with uncertainty — remains possible and **has not been performed**;
