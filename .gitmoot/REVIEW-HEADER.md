@@ -124,6 +124,21 @@ a live race.
   flag, make the hazard unreachable — and if the test still passes it was never
   armed. This caught three vacuous preconditions on #13 that nineteen rounds of
   production-side mutation could not, and that I had looked for twice myself.
+- **Aim it by asking: does the assertion pin the REASON, or only the OUTCOME?**
+  A test asserting "refused" is vacuous whenever the code would refuse anything;
+  one asserting "refused BECAUSE the attachment was cross-site" cannot pass on an
+  empty fixture. This is the definition. Absence-shaped conclusions ("no
+  failures", "not ok", "empty", "unchanged", "still passes") are a useful GREP —
+  where the class clusters — not what it is. Direction is irrelevant: refusing
+  attacks are equally vulnerable, because production may refuse the empty case
+  for a different reason and an outcome-only assertion cannot tell them apart.
+- **The fix is to assert the PREMISE alongside the CONCLUSION**, so "nothing
+  failed" cannot stand in for "nothing ran" — keeping the guard and making it
+  arm, rather than trading an inert test for no test.
+- **Passing the production-mutation run does NOT exempt a test from this one.**
+  Orthogonal: one asks whether the guard catches wrong behaviour, the other
+  whether it notices NO behaviour. A test can do the first and fail the second,
+  and that combination is invisible in every report format this lane uses.
 - **Prefer POSITIVE preconditions.** A wait on an absence, a zero, or a nil
   matches the t=0 default, so it cannot distinguish "not yet" from "never" — and
   it reads as correct, because the state the window PRODUCES looks like the state
