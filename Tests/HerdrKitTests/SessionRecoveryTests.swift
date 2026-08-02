@@ -147,7 +147,15 @@ final class SessionRecoveryTests: XCTestCase {
         let minted = try XCTUnwrap(restarted.reconnectAttempt)
         XCTAssertEqual(state.currentAttempt, minted,
                        "the restart did not become current; the event below is not from the attempt under test")
-        XCTAssertTrue(plan(.paneCreated("p9", from: minted), &state).isEmpty,
+        // ONE EVENT VALUE, DELIVERED TWICE — the reviewer's construction, and the
+        // thing that makes the negative line attempt-discriminating. Built
+        // separately, the before and after events shared nothing, so swapping a
+        // stranger into the negative line alone left it empty (provenance
+        // rejects a stranger to the identical observable) and SURVIVED. Sharing
+        // the value means a stranger substituted here must also be a stranger
+        // below, where the post-adoption subscribe then fails to appear.
+        let probe = ClientEvent.paneCreated("p9", from: minted)
+        XCTAssertTrue(plan(probe, &state).isEmpty,
                       "an event from the CURRENT attempt, before its adoption is processed, admits nothing "
                       + "— it needs nothing, because the post-adoption snapshot covers it via observe. "
                       + "(This does NOT pin the abandoned-attempt path: `minted` IS current here, so "
@@ -172,7 +180,7 @@ final class SessionRecoveryTests: XCTestCase {
         // therefore not attempt-discriminating; attempt discrimination is
         // pinned by testALatePaneEventFromAnAbandonedAttemptActsOnNothing.
         _ = plan(.connected(minted, at: Date()), &state)
-        XCTAssertEqual(plan(.paneCreated("p9", from: minted), &state).subscribes, ["p9"],
+        XCTAssertEqual(plan(probe, &state).subscribes, ["p9"],
                        "the same event still admits nothing after adoption; the emptiness above was "
                        + "never attributable to the cleared adoption")
     }
@@ -371,7 +379,12 @@ final class SessionRecoveryTests: XCTestCase {
         // onto a cancelled transport: neither half is reachable by this route.
         XCTAssertEqual(state.currentAttempt, attemptB,
                        "the restore retargeted currentAttempt; the event below is not from B")
-        XCTAssertTrue(plan(.paneCreated("p9", from: attemptB), &state).isEmpty,
+        // THE SAME SHARED-VALUE CONSTRUCTION as site 1. I judged it did not fit
+        // here without consuming p9's freshness and gutting the mid-replay
+        // snapshot assertion below; the reviewer showed a distinct pane carries
+        // it with p9 left untouched, so the stronger check survives intact.
+        let probe = ClientEvent.paneCreated("adoption-probe", from: attemptB)
+        XCTAssertTrue(plan(probe, &state).isEmpty,
                       "an event from B before B's adoption is processed admits nothing")
         // MEASURED LIMITATION, stated rather than implied: substituting a
         // stranger AttemptID for `attemptB` here leaves this assertion true
@@ -389,6 +402,13 @@ final class SessionRecoveryTests: XCTestCase {
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
         XCTAssertEqual(adoptedB.actions, [.resyncAllPanes(attemptB)],
                        "the replayed connectedSince classified B's adoption as a repeat and suppressed it")
+        // The other half of the shared-value pair: the SAME event, once B is
+        // adopted, does admit. A stranger substituted into `probe` above is
+        // killed here.
+        XCTAssertEqual(plan(probe, &state).subscribes, ["adoption-probe"],
+                       "the same event still admits nothing after B's adoption; the emptiness above "
+                       + "was never attributable to B being unadopted")
+
         let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p9"])), from: attemptB, state: &state)
         XCTAssertEqual(subscribed.subscribes, ["p1", "p9"],
                        "B subscribes what the authoritative snapshot says, including the pane learned mid-replay")
