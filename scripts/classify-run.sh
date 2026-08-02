@@ -86,6 +86,22 @@ if [ "$AGGREGATE" = "failed" ] && [ "$STATUS" -eq 0 ]; then
     exit 2
 fi
 
+# THE AGGREGATE AND THE CASE DETAIL MUST DESCRIBE THE SAME RUN. The two checks
+# above compare the aggregate to the exit STATUS; these compare it to the log's
+# own contents. Probes got confident verdicts out of logs XCTest cannot emit: a
+# failed case under a passed aggregate with status 0 returned SURVIVED, and one
+# terminal case line against "Executed 3" returned SURVIVED with a denominator
+# of 3.
+#
+# NOT compared: the aggregate's FAILURE COUNT against the number of failed case
+# lines. One case with two failing assertions reports "2 failures", so those
+# numbers legitimately differ — the boolean "any failure at all" is the only
+# safe comparison on that axis.
+if [ "$AGGREGATE" = "passed" ] && grep -q "^Test Case .* failed" "$RUN_LOG"; then
+    echo "INVALID: '$NAME' — aggregate says PASSED but a test case FAILED. Contradictory; no verdict."
+    exit 2
+fi
+
 # From the AGGREGATE summary — the Executed line following that terminator — not
 # the largest component and not merely the last line. A filter spanning two
 # suites reports each separately and then a total.
@@ -106,6 +122,23 @@ fi
 SKIPPED=$(grep -oE "^Test Case '[^']+' skipped" "$RUN_LOG" \
           | sed -E "s/^Test Case '([^']+)' skipped/\1/" | sort -u)
 SKIP_COUNT=$(printf '%s\n' "$SKIPPED" | grep -c . || true)
+
+# EVERY EXECUTED TEST MUST HAVE A TERMINAL LINE, and the aggregate's skip count
+# must match the skipped lines. Without this the denominator came from one
+# surface and the numerator from another, and neither noticed the other was
+# describing a different run.
+TERMINAL_CASES=$(grep -cE "^Test Case '[^']+' (passed|failed|skipped)" "$RUN_LOG" || true)
+if [ "$TERMINAL_CASES" -ne "$EXECUTED" ]; then
+    echo "INVALID: '$NAME' — aggregate says $EXECUTED executed but the log has $TERMINAL_CASES terminal case lines. Contradictory; no verdict."
+    exit 2
+fi
+AGG_SKIPS=$(awk "/^Test Suite '(All tests|Selected tests)' (passed|failed)/{f=1;next} f&&/Executed [0-9]+ tests?/{print;exit}" "$RUN_LOG" \
+            | grep -oE "[0-9]+ tests? skipped" | grep -oE "^[0-9]+")
+AGG_SKIPS=${AGG_SKIPS:-0}
+if [ "$AGG_SKIPS" -ne "$SKIP_COUNT" ]; then
+    echo "INVALID: '$NAME' — aggregate says $AGG_SKIPS skipped but the log has $SKIP_COUNT skipped case lines. Contradictory; no verdict."
+    exit 2
+fi
 report_skips() {
     [ -n "$SKIPPED" ] || return 0
     echo "  SKIPPED (did not run — arm these before reading this result):"
