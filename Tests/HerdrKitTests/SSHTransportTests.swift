@@ -12,6 +12,14 @@ import XCTest
 ///
 /// Skips when the local SSH prerequisites are absent so other environments stay
 /// honest about what they did not cover, rather than failing for the wrong reason.
+/// A set-once flag a @Sendable seam can raise for its test.
+final class UncheckedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var isSet: Bool { lock.withLock { flag } }
+}
+
 final class SSHTransportTests: XCTestCase {
     private static let keyPath = "\(NSHomeDirectory())/.ssh/id_ed25519"
 
@@ -486,6 +494,45 @@ final class SSHTransportTests: XCTestCase {
     ///
     /// So the error type is the assertion, and the budget is set far beyond the
     /// timing bound so nothing but cancellation can end the attempt at all.
+    /// AXIS: the adopt-rejection cleanup closes its descriptor exactly once.
+    ///
+    /// The last unaudited-then-unpinned branch in tcpConnect. It runs only when
+    /// the channel is already closed AT THE INSTANT adoption is offered, and no
+    /// ordinary cancellation reaches it — interrupting earlier is caught at the
+    /// resolution claim, interrupting later lands in the catch cleanup. So a
+    /// deliberate double close there survived all 23 SSH tests, and the branch
+    /// needed a seam inside the window rather than a cleverer cancellation.
+    func testAdoptionRejectionClosesItsDescriptorExactlyOnce() async throws {
+        guard FileManager.default.fileExists(atPath: Self.keyPath),
+              let pem = try? String(contentsOfFile: Self.keyPath, encoding: .utf8)
+        else { throw XCTSkip("no local SSH key") }
+
+        var transport = SSHTransport(credentials: SSHCredentials(
+            host: "127.0.0.1", username: NSUserName(),
+            privateKeyPEM: pem, remoteSocketPath: socketPath))
+        let reached = UncheckedFlag()
+        transport.afterDescriptorPublished = { live in
+            guard let live else { return }
+            reached.set()
+            live.interrupt()          // closed BEFORE adoption is offered
+        }
+        let baseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
+
+        do {
+            for try await _ in transport.stream(#"{"id":"x","method":"events.subscribe","params":{}}"#) {
+                XCTFail("the stream must not deliver after an interrupted adoption")
+            }
+        } catch { /* cancelled or refused; either way the branch ran */ }
+
+        XCTAssertTrue(reached.isSet,
+                      "the seam never fired; the adoption window was not entered and the "
+                      + "assertion below would be vacuous")
+        XCTAssertEqual(
+            DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
+            "the adopt-rejection cleanup closed its descriptor twice")
+        DescriptorAudit.forget(transport.auditToken)
+    }
+
     func testCancellationInterruptsConnectAndReportsItAsCancellation() async throws {
         try XCTSkipUnless(Self.blackholeSwallowsSYN(), "no silent address available here")
 
