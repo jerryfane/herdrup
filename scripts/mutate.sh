@@ -50,94 +50,15 @@ echo "--- mutation '$NAME' applied and compiles; expecting $FILTER to FAIL ---"
 timeout 300 swift test --filter "$FILTER" >"$RUN_LOG" 2>&1
 STATUS=$?
 
-if [ "$STATUS" -eq 124 ]; then
-    echo "ESCAPED: '$NAME' made $FILTER hang. A hang is not a kill."
-    exit 3
-fi
-
-# "Executed 0 tests" means the filter matched nothing, which exits 0 and would
-# otherwise be indistinguishable from a survivor.
-# A CRASH ANYWHERE IN THE RUN IS NOT A KILL, even when an earlier suite already
-# recorded a failure. A two-suite probe made suite 1 fail one assertion and
-# suite 2 die with signal 4; the failure line and suite 1's count were both
-# present, so this reported "KILLED (1 tests)" and hid the crash entirely. That
-# is the exact rule this harness exists to enforce, broken by the harness.
-if grep -qE "Exited with unexpected signal code|Program crashed|Fatal error" "$RUN_LOG"; then
-    echo "INVALID: '$NAME' crashed the run. A crash is not a kill, even after a failure."
-    grep -m2 -E "Exited with unexpected signal code|Program crashed|Fatal error" "$RUN_LOG"
-    exit 2
-fi
-
-# From the TERMINAL summary, not the largest component suite. A filter spanning
-# two suites reports each separately and then a final total; taking the largest
-# component silently made the denominator a partial count whenever a later suite
-# was bigger or never finished.
-EXECUTED=$(grep -E "^\s+Executed [0-9]+ tests?" "$RUN_LOG" | tail -1 | grep -oE "[0-9]+" | head -1)
-EXECUTED=${EXECUTED:-0}
-if [ "$EXECUTED" -eq 0 ]; then
-    echo "INVALID: filter '$FILTER' matched no tests — nothing was exercised"
-    exit 2
-fi
-
-# SKIPS ARE EXTRACTED BEFORE EITHER VERDICT, not on the kill path only.
+# CLASSIFICATION LIVES IN ITS OWN SCRIPT so it can be demonstrated without a
+# Swift run — see scripts/classify-selftest.sh, which feeds it the exact logs it
+# used to misread. Three mis-reports were fixed here with no evidence they fired.
 #
-# The first version of this printed skips after the KILLED branch, so the
-# SURVIVED branch exited before ever looking. A filter matching ONE test that
-# immediately XCTSkips then reported "SURVIVED — the test does not guard it",
-# which is the worst possible misreport: SURVIVED sends someone to rewrite a
-# guard that never executed. Same shape as the crash defect fixed above — one
-# branch corrected and the other left alone — and it is the second time in this
-# file, so the extraction now happens where BOTH paths must pass through it.
-SKIPPED=$(grep -oE "^Test Case '[^']+' skipped" "$RUN_LOG" \
-          | sed -E "s/^Test Case '([^']+)' skipped/\1/" | sort -u)
-SKIP_COUNT=$(printf '%s\n' "$SKIPPED" | grep -c . || true)
-report_skips() {
-    [ -n "$SKIPPED" ] || return 0
-    echo "  SKIPPED (did not run — arm these before reading this result):"
-    printf '%s\n' "$SKIPPED" | sed 's/^/    /'
-}
-RAN=$((EXECUTED - SKIP_COUNT))
-if [ "$RAN" -le 0 ]; then
-    echo "INVALID: every matched test SKIPPED — nothing ran, so '$NAME' is unverified, not survived."
-    report_skips
-    exit 2
-fi
-
-if [ "$STATUS" -eq 0 ]; then
-    echo "SURVIVED: $FILTER ($RAN of $EXECUTED ran) still passes with '$NAME' broken. The test does not guard it."
-    report_skips
-    exit 1
-fi
-
-if ! grep -q "^Test Case .* failed" "$RUN_LOG"; then
-    echo "INVALID: $FILTER exited $STATUS with no test-case failure — the run broke, it did not fail"
-    tail -3 "$RUN_LOG"
-    exit 2
-fi
-
-echo "KILLED: $FILTER ($EXECUTED tests) fails when '$NAME' is broken."
-grep -m3 -E "^/.*error: .*XCTAssert|^Test Case .* failed" "$RUN_LOG"
-
-# WHICH tests killed it, not just that something did.
-#
-# A kill is a PATTERN, not a verdict. On herdr-ios #13 a compiling no-op
-# survived the two tests written for it and was killed by an unrelated one —
-# and that SPLIT was the evidence those two tests were vacuous, available a
-# full round before anyone ran a premise mutation. Reading the outcome as
-# pass/fail threw it away. Named here so an uneven split is visible without
-# re-reading the log.
-#
-# If a mutation is killed only by tests OTHER than the one written for it,
-# that named test is a premise-mutation suspect (run 4).
-KILLERS=$(grep -oE "^Test Case '[^']+' failed" "$RUN_LOG" \
-          | sed -E "s/^Test Case '([^']+)' failed/\1/" | sort -u)
-KILL_COUNT=$(printf '%s\n' "$KILLERS" | grep -c . || true)
-echo "  killed by $KILL_COUNT of $RAN that ran:"
-printf '%s\n' "$KILLERS" | sed 's/^/    /'
-
-# SKIPPED TESTS ARE NOT PASSING TESTS: a probe where the INTENDED regression
-# skipped and an unrelated test killed the mutant printed "killed by 1 of 2",
-# indistinguishable from the premise-suspect pattern while the intended test
-# never ran its body. This repo has conditional live-server and descriptor-canary
-# skips, so it is not hypothetical.
-report_skips
+# NOT `exec`. The first rewire used it, which REPLACES this shell and therefore
+# skips the EXIT trap that restores the file — the mutation was left applied in
+# the working tree, silently, and every later run would have measured mutated
+# source. Caught by checking `git status` after the very first rewired run, which
+# is the check worth keeping: a harness that edits the tree must be verified to
+# have un-edited it.
+scripts/classify-run.sh "$NAME" "$FILTER" "$STATUS" "$RUN_LOG"
+exit $?
