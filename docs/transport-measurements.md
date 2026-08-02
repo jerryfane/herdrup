@@ -247,11 +247,22 @@ imply; naming a sample size without them is the same kind of unbacked number thi
 paragraph exists to stop. If the tail turns out to matter more than the p95, that
 calculation is the next piece of work, and it is a different experiment.
 
-**If A has outliers and the adopted arm does not reduce them, the tail stays an
-open question** and must not be reported as solved: the arm was adopted on its
-**p95**, which is the only metric this procedure decides on, and the multi-second
-hangs are still unexplained. That is a reporting
-obligation, not a veto — vetoing it was what produced the hole above.
+**This procedure makes no inference about the tail, in any outcome.** Not when
+the adopted arm's count is higher, not when it is lower, not when both are zero.
+It decides on `p95`; the outlier cutoff is an admission gate, not a measurement
+of anything.
+
+So the reporting obligation is unconditional: **always report the raw outlier
+count for all three arms alongside the decision**, and never describe an adoption
+as having addressed the tail. An earlier version made the obligation conditional
+— it fired only when A had outliers and the adopted arm did not reduce them —
+which left two ways to read a result causally that it does not support: a
+baseline of zero followed by one in the adopted arm produced no warning at all,
+and an apparent reduction among tiny counts escaped the obligation entirely and
+read as "tail solved".
+
+If the tail matters, it needs its own experiment. That is stated under the
+cutoffs above and is not this one.
 
 Then, in order:
 
