@@ -188,7 +188,7 @@ A candidate **qualifies** when all of the following hold:
 | | B (age gate) | C (sacrificial channel) |
 |---|---|---|
 | effective | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
-| tail not worsened | outlier count ≤ A's + 1 | outlier count ≤ A's + 1 |
+| outlier count within tolerance | ≤ A's + 1 | ≤ A's + 1 |
 | replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
 
 The tail condition is **non-regression, not strict improvement**. Requiring
@@ -198,19 +198,29 @@ a treatment that removed the delay entirely would be rejected and the readiness
 hypothesis declared failed. `A95` = 100, `B95` = `C95` = 5, all outlier counts
 zero was a real input that adopted neither.
 
-Sampling is why there is a **tolerance of one**, and why it is counts rather than
-rates. At n = 100 a single sample is 1%; a one-outlier difference is not evidence
-of anything in either direction, so making one extra observed outlier a hard veto
-contradicted the very rationale stated for using counts. It did, in the previous
-version: `A95` = 100, `B95` = 5, `C95` = 100 with counts A = 0 and B = 1 rejected
-the only effective treatment over a single event.
+**The `+1` is a preregistered operational tolerance, not an evidence
+threshold**, and the distinction is the whole of what this paragraph is for.
 
-**What this tolerance cannot do, stated so it is not mistaken for safety:** at
-n = 100 a genuine tail regression of a percentage point or two is invisible. This
-condition rejects *gross* regressions and nothing finer. It does not certify that
-an adopted arm leaves the tail alone — it only ensures the tail is not obviously
-worse. Certifying that would need a much larger n, and this experiment is
-deliberately cheap.
+Two versions of this rule have now dressed an arbitrary cutoff in statistical
+language. The first required exact non-regression while arguing that one sample
+in 100 proves nothing — a contradiction in the same section. The fix moved the
+cutoff to two and called that a *clear* regression, which is the identical
+overclaim one step along: at n = 100, 0 against 2 observed outliers is
+**two-sided Fisher exact p ≈ 0.50**. Nothing about 2 is clear.
+
+So the honest statement is that **n = 100 cannot support an evidence-based tail
+criterion at all**, in either direction. What the rule needs is a cutoff fixed
+*before* the run so the choice cannot be made after seeing the numbers, and `+1`
+is that cutoff — chosen for decidability, not derived from the data. It is
+declared here rather than defended.
+
+**What follows, so the tolerance is not mistaken for safety:** this condition
+neither establishes that an adopted arm improves the tail nor that it leaves it
+alone. It rejects only regressions gross enough to clear an arbitrary line. An
+inference rule — non-inferiority at a stated power — would need an n far above
+100, and this experiment is deliberately cheap. If the tail turns out to matter
+more than the p95, that is the experiment to run next, and it is a different
+experiment.
 
 **If A has outliers and the adopted arm does not reduce them, the tail stays an
 open question** and must not be reported as solved: the arm was adopted on its
@@ -229,7 +239,7 @@ Then, in order:
 4. **Both qualify → adopt C if `B95 − C95` ≥ 20 ms, otherwise B.** Ties and
    near-ties go to B, which costs herdr nothing. This is the only tie-break.
 
-The "tail improved" condition is a qualification rather than a veto applied
+The outlier-tolerance condition is a qualification rather than a veto applied
 afterwards, and that is deliberate: **an earlier version of this section stated
 the vetoes as fallback steps** — *"fall back to the other effective arm"* —
 without saying whether the vetoes re-applied to the fallback. Both readings were
