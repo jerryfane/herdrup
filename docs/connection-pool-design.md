@@ -14,9 +14,16 @@ below because the wrong turns are more instructive than the answer.
 channels.**
 
 - A session carries ~39 ms of real cryptographic work (18.6 ms key exchange +
-  20.4 ms public-key auth) **and** a once-per-session first-channel cost of
-  100–1900 ms. Both are paid once per pooled session instead of once per
+  20.4 ms public-key auth), paid once per pooled session instead of once per
   request.
+- A session also has a **post-authentication readiness delay**. A channel opened
+  immediately after auth costs ~96 ms (p50 of 30); a session aged just 100 ms
+  first opens in 0.28–0.54 ms. This is **not** an intrinsic per-session cost, and
+  an earlier version of this memo wrongly described it as one.
+
+  **Consequence: pooling alone is insufficient.** A freshly authenticated session
+  handed straight out still pays. Pooled objects must be **authenticated *and*
+  prewarmed or readiness-validated** before checkout.
 - Channels cost 0.1 ms after the first on a session — there is nothing to
   amortise — and herdr's command socket is **single-shot**, so every request
   needs its own channel regardless.
@@ -59,6 +66,44 @@ evict-on-age**: a session that fails is discarded and replaced, which is correct
 whatever the true idle lifetime turns out to be. Age eviction can be added later
 as an optimisation once there is a number to justify it.
 
+## Leasing — exclusive, one in-flight request per session
+
+libssh2 permits only one thread at a time in a session. The memo previously
+sized a pool against concurrent demand without saying whether a session is held
+exclusively, which left the most important concurrency question unanswered.
+
+- **One in-flight request per pooled session.** Lease exclusively; return only
+  after the channel is freed.
+- **A persistent stream gets its own dedicated session**, never one shared with
+  request traffic — an `events.subscribe` holds its channel for the life of the
+  subscription, so a shared session would be leased indefinitely.
+- Multiplexing several channels across one session is **not** specified here and
+  must not be assumed. If it is ever wanted, it needs complete per-session
+  serialisation designed deliberately, not inherited by accident.
+
+## Validation and retry — delivery ambiguity is the hazard
+
+**Validate-on-borrow is not inherently safe**, and the earlier memo recommended
+it without qualification.
+
+If the validation *is* the user's request, a failure after the bytes may already
+have been written has **ambiguous delivery** — and automatic retry then
+duplicates the action. That is precisely the failure class herdr#26 and #31 are
+about: a prompt whose delivery cannot be established, retried on top of a draft
+that already landed.
+
+So:
+
+- **A separate pre-send liveness probe**, not the user's request doubling as the
+  check.
+- **Discard and replace** a session that fails the probe; never nurse it.
+- **Error phases must distinguish definitely-not-sent from possibly-sent.** Only
+  the first is safe to retry automatically.
+- **Never replay a possibly-sent mutation** without an idempotency or attempt
+  identifier. herdr's `agent.prompt` has no idempotency key today
+  (`jerryfane/herdr#16`), so for now a possibly-sent prompt must surface to the
+  reader rather than being retried silently.
+
 ## What it must not do
 
 - **Do not pool channels.** Free after the first, and single-shot at the herdr
@@ -71,15 +116,18 @@ as an optimisation once there is a number to justify it.
 
 ## Open question carried forward
 
-**Why the first channel of a session costs what it does, and why the magnitude
-varies by an order of magnitude.** Not herdr, not `UseDNS`, not GSSAPI. It
-resembles a timeout more than work, but that is untested.
+**Why the post-authentication readiness delay exists.** Not herdr, not `UseDNS`,
+not GSSAPI. It resembles a settling period more than work, but that is untested.
 
-The design does not depend on the answer — the cost is per-session either way —
-which is why the investigation stopped. If it is ever explained and turns out to
-be per-*connection* rather than per-*session*, **this design changes and this
-memo is wrong**. That is the fifth revision, and it is recorded here so the
-condition is visible rather than discovered.
+The design does not depend on the cause — prewarming addresses it either way —
+which is why the investigation stopped.
+
+**The falsifier is cheap and already available.** The earlier version of this
+memo proposed a falsifier that required implementation. It does not: compare
+first-channel cost on an *immediate* session against one *aged* by a short
+interval. If ageing stops helping, prewarming is not the answer and this design
+needs revising. That control costs one test and can be run before any pool
+exists.
 
 ## Verification, when implemented
 
