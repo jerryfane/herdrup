@@ -54,14 +54,16 @@ and they shape the transport design:
 
 ```
 Sources/HerdrKit/
-  Transport.swift        HerdrTransport protocol + AF_UNIX implementation
-  SSHTransport.swift     libssh2 direct-streamlocal tunnel to a remote herdr socket
-  SessionRecovery.swift  reconnect/resync policy: attempt identity, the subscription ledger
-  RecoveryExecutor.swift drives that policy against a real transport
-  PlatformSocket.swift   the C symbols whose Swift spelling differs on Glibc vs Darwin
-  Wire.swift             request/response envelopes, models, subscription types
-  HerdrClient.swift      typed API: agentList, read, prompt, sendKeys, subscribe
-Sources/CSSH/            libssh2 system-library target (shim.h + module map)
+  HerdrClient.swift       typed API: agentList, read, prompt, sendKeys, subscribe
+  InputIntent.swift       keystroke/gesture intent, decoupled from any UI framework
+  PlatformSocket.swift    the C symbols whose Swift spelling differs on Glibc vs Darwin
+  RecoveryExecutor.swift  drives that policy against a real transport
+  RefreshPolicy.swift     when cached agent state is stale enough to refetch
+  SSHTransport.swift      libssh2 direct-streamlocal tunnel to a remote herdr socket
+  SessionRecovery.swift   reconnect/resync policy: attempt identity, the subscription ledger
+  Transport.swift         HerdrTransport protocol + AF_UNIX implementation
+  Wire.swift              request/response envelopes, models, subscription types
+Sources/CSSH/             libssh2 system-library target (shim.h + module map)
 ```
 
 **Done**: the SSH transport (`direct-streamlocal@openssh.com` — plain `direct-tcpip` cannot
