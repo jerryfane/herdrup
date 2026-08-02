@@ -432,14 +432,22 @@ public actor RecoveryExecutor {
                     await transport.closeAll(for: attempt)
                     return
                 }
-                openFailures[FailureKey(attempt: attempt, pane: pane)] = nil
-                lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = nil
                 // Published only if the stream is still alive: a termination
                 // firing while openStream was suspended already processed the
                 // death, and publishing here anyway reported a dead stream as
                 // .open — after exhaustion, permanently.
+                //
+                // The bookkeeping clears INSIDE the successful branch, not
+                // before the decision: clearing first erased exhausted retry
+                // state, so a pane that had burned every attempt reported
+                // admittedNotOpen(attempts: 0, lastError: nil) — the status
+                // surface telling the truth about openness while lying about
+                // WHY — and a retained orphan callback could then restart
+                // registration past the supposedly exhausted cap.
                 if once.publishIfUnterminated() {
                     openStreams[pane] = OpenRegistration(attempt: attempt, registration: registration)
+                    openFailures[FailureKey(attempt: attempt, pane: pane)] = nil
+                    lastOpenErrors[FailureKey(attempt: attempt, pane: pane)] = nil
                 }
             } catch {
                 // A stream that cannot OPEN is a death the same as one that
