@@ -1081,6 +1081,32 @@ final class ResyncInvalidationTests: XCTestCase {
 /// module, so formatting, access-level spelling and additional initialisers are
 /// all covered by construction rather than by enumeration.
 final class PaneSnapshotAccessTests: XCTestCase {
+    /// The SDK path, on Apple platforms only.
+    ///
+    /// Without it symbolgraph-extract cannot find the standard library at all —
+    /// "missing required modules: 'Swift', '_Concurrency', ..." — because on
+    /// Darwin the stdlib lives inside the SDK rather than beside the compiler.
+    /// Linux needs nothing here, which is why the invocation worked for months
+    /// without it.
+    static func sdkFlags() -> [String] {
+        #if canImport(Darwin)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        p.arguments = ["--show-sdk-path"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return [] }
+        p.waitUntilExit()
+        let path = String(
+            data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.isEmpty ? [] : ["-sdk", path]
+        #else
+        return []
+        #endif
+    }
+
     /// libssh2's header search path, from pkg-config.
     ///
     /// SwiftPM hands the CSSH target these flags automatically — but this test
@@ -1168,7 +1194,7 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "-include-spi-symbols",
             "-I", moduleDir.path,
             "-I", root.appendingPathComponent("Sources/CSSH").path,
-        ] + Self.libssh2ClangFlags() + [
+        ] + Self.libssh2ClangFlags() + Self.sdkFlags() + [
             "-output-dir", output.path, "-minimum-access-level", "package",
         ]
         let stderrPipe = Pipe()
