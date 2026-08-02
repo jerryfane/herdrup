@@ -1677,6 +1677,19 @@ actor SleepRecorder {
         XCTAssertTrue(parked, "the dial never parked; there was no handle to lose")
 
         await executor.handle(.streamFailed(pane: "p", from: attempt))   // the note
+
+        // LIVENESS HANDSHAKE BEFORE THE TEARDOWN. Without it this proved only
+        // that the dial was EVENTUALLY cancelled, and a mutation adding
+        // `pendingDial?.cancel()` to the note survived: the note killed a
+        // legitimate reconnect and the networkChanged immediately after masked
+        // it, with the gate crediting teardown for a cancellation the note had
+        // already caused. In production that leaves the executor with no
+        // scheduled reconnect until some other event arrives.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let cancelledByTheNote = await gate.wasCancelled
+        XCTAssertFalse(cancelledByTheNote,
+                       "the NOTE cancelled the pending dial; only teardown may do that")
+
         await executor.handle(.networkChanged(at: Date()))               // supersedes the dial
 
         let cancelled = await waitUntil { await gate.wasCancelled }
@@ -1684,6 +1697,66 @@ actor SleepRecorder {
         XCTAssertTrue(cancelled,
                       "the superseded dial was never cancelled: the note dropped pendingDial, and "
                       + "the orphan keeps its connection resources until it completes")
+    }
+
+    /// AXIS: the note disturbs neither the reconnect backoff streak nor the
+    /// jitter generator — pinned by a PAIRED CONTROL on identical seeds.
+    ///
+    /// Two more executor-owned surfaces the every-surface assertion missed.
+    /// `state.consecutiveFailures = 0` in the note's branch compiled and
+    /// survived everything: an ignored stale death mid-streak would reset the
+    /// next failure to first-attempt backoff, defeating exponential backoff and
+    /// potentially sustaining a reconnect storm. `_ = generator.next()`
+    /// likewise survived, shifting every subsequent jitter draw.
+    ///
+    /// Neither is readable from outside, so the observable is the DELAY the
+    /// policy computes next. Two executors on the same seed, one given the note
+    /// and one not: identical inputs must produce identical delays, and any
+    /// state the note touched shows up as a divergence.
+    func testTheNoteDisturbsNeitherTheBackoffStreakNorTheJitter() async throws {
+        func delaysAfterAStreak(withNote: Bool) async throws -> [TimeInterval] {
+            let transport = ScriptedTransport(panes: ["p"])
+            let recorder = SleepRecorder()
+            let executor = RecoveryExecutor(
+                recovery: SessionRecovery(), transport: transport,
+                generator: SeededGenerator(seed: 42))
+            await executor.setSleeper { delay in await recorder.record(delay) }
+            await executor.start()
+            _ = await waitUntil { await executor.isConnected }
+
+            // Build a streak, so consecutiveFailures is well past its default.
+            for _ in 0..<3 {
+                let current = await executor.currentAttempt
+                guard let current else { break }
+                await executor.handle(.transportFailed(current, at: Date()))
+                _ = await waitUntil { await executor.currentAttempt != current }
+            }
+            let beforeNote = await recorder.recorded().count
+
+            if withNote {
+                let current = await executor.currentAttempt
+                await executor.handle(.streamFailed(pane: "never-admitted",
+                                                    from: try XCTUnwrap(current)))
+            }
+
+            // One more failure: its delay is a function of the streak length and
+            // the generator's position, which is exactly what the note must not
+            // have moved.
+            let current = await executor.currentAttempt
+            await executor.handle(.transportFailed(try XCTUnwrap(current), at: Date()))
+            _ = await waitUntil { await recorder.recorded().count > beforeNote }
+            return await recorder.recorded()
+        }
+
+        let control = try await delaysAfterAStreak(withNote: false)
+        let withNote = try await delaysAfterAStreak(withNote: true)
+
+        XCTAssertFalse(control.isEmpty, "no delays were recorded; the comparison would be vacuous")
+        XCTAssertGreaterThan(control.count, 1,
+                             "only one delay recorded; the streak never built and the assertion is weak")
+        XCTAssertEqual(withNote, control,
+                       "the note moved the backoff streak or the jitter generator: "
+                       + "delays \(withNote) against a control of \(control)")
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
