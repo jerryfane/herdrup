@@ -157,12 +157,27 @@ final class AttemptAuthority: @unchecked Sendable {
     /// only thing that can reject it — and without this gate, a probe admitted
     /// an abandoned attempt's closed pane onto the replacement's ledger,
     /// irretractably.
-    func admitWhileConnected(_ panes: Set<String>, from attempt: AttemptID) -> Set<String>? {
+    /// The admission verdict, carrying the attempt it was decided under.
+    ///
+    /// The attempt travels OUT of the critical section with the verdict so the
+    /// caller constructs actions exclusively from it. Returning panes alone
+    /// left a window: admission's lock releases before the caller builds the
+    /// subscribe, a concurrent retirement can mint a replacement inside that
+    /// gap, and an emission that consulted anything OTHER than this verdict
+    /// (the review's probe: `authority.current ?? attempt`) would tag A's
+    /// admitted panes as B's — accepted by B's executor, the exact
+    /// misdirection provenance exists to prevent.
+    struct Admission {
+        let fresh: Set<String>
+        let attempt: AttemptID
+    }
+
+    func admitWhileConnected(_ panes: Set<String>, from attempt: AttemptID) -> Admission? {
         lock.lock(); defer { lock.unlock() }
         guard attempt == _current, _connectedSince != nil else { return nil }
         let fresh = panes.subtracting(_subscribedPanes)
         _subscribedPanes.formUnion(fresh)
-        return fresh
+        return Admission(fresh: fresh, attempt: attempt)
     }
 
     /// True iff the attempt is current — for gating KNOWLEDGE mutations from
@@ -342,6 +357,14 @@ public struct SessionRecovery: Sendable {
     /// "succeeded" long enough to reset the counter. A connection has to *last*
     /// to prove anything.
     public var stabilityInterval: TimeInterval
+
+    /// Test seam: runs after admission returns and before the subscribe action
+    /// is constructed — the exact interval where a concurrent retirement can
+    /// mint a replacement. Exists because a mutant consulting live authority
+    /// state at emission time (`current ?? attempt`) is only distinguishable
+    /// from the verdict-bound construction INSIDE this window, and a review
+    /// probe proved the window reachable. `nil` on every production path.
+    var afterAdmissionHook: (@Sendable () -> Void)?
 
     public init(
         baseDelay: TimeInterval = 0.5,
@@ -529,12 +552,13 @@ public struct SessionRecovery: Sendable {
             // knowledge either. An event arriving from the CURRENT attempt
             // before its adoption is processed also admits nothing, and needs
             // nothing — the post-adoption snapshot covers it via observe.
-            guard let fresh = state.authority.admitWhileConnected([pane], from: from) else {
+            guard let admitted = state.authority.admitWhileConnected([pane], from: from) else {
                 return RecoveryPlan()
             }
+            afterAdmissionHook?()
             state.knownPanes.insert(pane)
-            guard !fresh.isEmpty else { return RecoveryPlan() }
-            return RecoveryPlan([.subscribe(fresh, on: from)])
+            guard !admitted.fresh.isEmpty else { return RecoveryPlan() }
+            return RecoveryPlan([.subscribe(admitted.fresh, on: admitted.attempt)])
 
         case .paneClosed(let pane, let from):
             guard state.authority.isCurrent(from) else { return RecoveryPlan() }
@@ -578,12 +602,13 @@ public struct SessionRecovery: Sendable {
         // verdict and write leaves knowledge stale-but-bounded (the next
         // current snapshot replaces it) — the documented, tolerable class,
         // unlike a stale subscription, which nothing can retract.
-        guard let fresh = state.authority.admitWhileConnected(snapshot.paneIDs, from: attempt) else {
+        guard let admitted = state.authority.admitWhileConnected(snapshot.paneIDs, from: attempt) else {
             return RecoveryPlan()
         }
+        afterAdmissionHook?()
         state.knownPanes = snapshot.paneIDs
-        guard !fresh.isEmpty else { return RecoveryPlan() }
-        return RecoveryPlan([.subscribe(fresh, on: attempt)])
+        guard !admitted.fresh.isEmpty else { return RecoveryPlan() }
+        return RecoveryPlan([.subscribe(admitted.fresh, on: admitted.attempt)])
     }
 }
 

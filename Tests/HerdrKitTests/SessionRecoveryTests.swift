@@ -380,6 +380,63 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertNotEqual(plansA.subscribesOn, plansB.subscribesOn)
     }
 
+    /// AXIS: retirement INSIDE the admission-to-emission window cannot relabel
+    /// the action — it stays bound to the attempt that admitted it.
+    ///
+    /// The reviewer's ninth probe, which also refuted my equivalence claim: I
+    /// argued binding to `authority.current ?? attempt` was equivalent because
+    /// admission guarantees the two coincide — but admission's lock releases
+    /// before emission constructs the action, and a concurrent retirement in
+    /// that gap makes them diverge. The action is now constructed exclusively
+    /// from the admission VERDICT (which carries its attempt out of the
+    /// critical section), and this test drives the exact interleaving through
+    /// the seam: pause A after admission, retire A and adopt B, resume.
+    func testRetirementInsideTheEmissionWindowCannotRelabelTheAction() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptA, at: Date()), &state)
+
+        let paused = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        var instrumented = recovery
+        instrumented.afterAdmissionHook = {
+            paused.signal()
+            _ = resume.wait(timeout: .now() + 5.0)
+        }
+
+        let emitted = NSLock()
+        var plansA: RecoveryPlan?
+        var lane = state                       // shares the lineage's authority
+        let worker = Thread { [instrumented] in
+            var laneState = lane
+            var generator = SeededGenerator(seed: 7)
+            _ = generator                       // observe takes no generator
+            let plan = instrumented.observe(
+                PaneSnapshot(agents: try! self.panes(["p1", "pnew"])), from: attemptA, state: &laneState)
+            emitted.lock(); plansA = plan; emitted.unlock()
+        }
+        worker.start()
+        XCTAssertEqual(paused.wait(timeout: .now() + 5.0), .success, "never reached the window")
+
+        // Inside A's window: retire A, adopt B.
+        _ = plan(.networkChanged(at: Date()), &state)
+        let attemptB = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptB, at: Date()), &state)
+
+        resume.signal()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            emitted.lock(); let done = plansA != nil; emitted.unlock()
+            if done { break }
+            usleep(10_000)
+        }
+
+        emitted.lock(); let final = plansA; emitted.unlock()
+        let boundTo = try XCTUnwrap(final).subscribesOn
+        XCTAssertEqual(boundTo, attemptA,
+                       "the action admitted under A was relabeled \(boundTo == attemptB ? "as B" : "unexpectedly") inside the emission window")
+    }
+
     /// AXIS: a delayed snapshot from an abandoned attempt admits nothing onto
     /// its replacement.
     ///
