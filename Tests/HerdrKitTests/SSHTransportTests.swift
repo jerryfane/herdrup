@@ -333,7 +333,7 @@ final class SSHTransportTests: XCTestCase {
     /// lands.
     func testReleasedDescriptorIsNotClosedOntoARecycledNumber() throws {
         let live = LiveChannel()
-        let published = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let published = socket(AF_UNIX, sockStream, 0)
         try XCTSkipIf(published < 0, "could not open a descriptor")
         XCTAssertTrue(live.adopt(rawSocket: published))
 
@@ -342,7 +342,7 @@ final class SSHTransportTests: XCTestCase {
         XCTAssertEqual(close(published), 0)
         live.release()
 
-        let canary = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let canary = socket(AF_UNIX, sockStream, 0)
         try XCTSkipIf(
             canary != published,
             "another thread took the freed descriptor; the canary would prove nothing"
@@ -369,7 +369,7 @@ final class SSHTransportTests: XCTestCase {
     func testRejectedSessionAdoptionStopsPublishingTheDescriptor() throws {
         try SSHRuntime.ensureStarted()
         let live = LiveChannel()
-        let published = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let published = socket(AF_UNIX, sockStream, 0)
         try XCTSkipIf(published < 0, "could not open a descriptor")
         XCTAssertTrue(live.adopt(rawSocket: published))
 
@@ -386,7 +386,7 @@ final class SSHTransportTests: XCTestCase {
         // the descriptor.
         session.close()
 
-        let canary = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let canary = socket(AF_UNIX, sockStream, 0)
         try XCTSkipIf(
             canary != published,
             "another thread took the freed descriptor; the canary would prove nothing"
@@ -526,6 +526,15 @@ final class SSHTransportTests: XCTestCase {
         do {
             let retired = SSHTransport.AuditToken()
             retired.closer = { _ in intercepted.bump(); return 0 }
+            // PROVE THE CLOSER IS INSTALLED before releasing the token. Without
+            // this, replacing the assignment with `_ = retired` left the test
+            // GREEN: address reuse still happened, so nothing skipped, but the
+            // hazard was never armed and "the replacement did not inherit it"
+            // was true because there was nothing to inherit.
+            _ = retired.closer(-1)
+            XCTAssertEqual(intercepted.value, 1,
+                           "the retired token's closer was never installed; the inheritance "
+                           + "check below would be vacuous")
             addresses.append(ObjectIdentifier(retired))
         }   // released WITHOUT any cleanup call
 
@@ -539,8 +548,9 @@ final class SSHTransportTests: XCTestCase {
         let generation = DescriptorAudit.opened(fd)
         DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: replacement)
 
-        XCTAssertEqual(intercepted.value, 0,
-                       "the replacement inherited a retired token's closer")
+        XCTAssertEqual(intercepted.value, 1,
+                       "the replacement inherited a retired token's closer: the count rose past "
+                       + "the one invocation that armed it")
         XCTAssertEqual(replacement.adoptionRejections, 1,
                        "the replacement's own close did not run")
     }
@@ -727,7 +737,7 @@ final class SSHTransportTests: XCTestCase {
     /// goes EINPROGRESS and then fails for real, which is the one thing a
     /// blackhole cannot provide.
     static func boundButNotListening() throws -> (Int32, UInt16) {
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_INET, sockStream, 0)
         guard fd >= 0 else { throw XCTSkip("could not open a socket") }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
@@ -735,7 +745,7 @@ final class SSHTransportTests: XCTestCase {
         addr.sin_port = 0
         _ = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                platformBind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         var bound = sockaddr_in()
@@ -1011,7 +1021,7 @@ final class SSHTransportTests: XCTestCase {
     /// Container networks often answer ENETUNREACH at once, which would turn
     /// every bound assertion below into a test of nothing.
     static func blackholeSwallowsSYN() -> Bool {
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_INET, sockStream, 0)
         guard fd >= 0 else { return false }
         defer { _ = close(fd) }
         let flags = fcntl(fd, F_GETFL, 0)
@@ -1108,7 +1118,7 @@ final class SilentPeer: @unchecked Sendable {
     private var held: [Int32] = []
 
     func start() throws {
-        fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        fd = socket(AF_INET, sockStream, 0)
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
@@ -1117,7 +1127,7 @@ final class SilentPeer: @unchecked Sendable {
         addr.sin_port = 0
         _ = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                platformBind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         var bound = sockaddr_in()
@@ -1189,7 +1199,7 @@ final class PausableRelay: @unchecked Sendable {
     private func notePark(_ id: Int) { lock.lock(); parked.insert(id); lock.unlock() }
 
     func start() throws {
-        listenFD = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        listenFD = socket(AF_INET, sockStream, 0)
         guard listenFD >= 0 else { throw XCTSkip("relay socket unavailable") }
         var on: Int32 = 1
         setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
@@ -1199,7 +1209,7 @@ final class PausableRelay: @unchecked Sendable {
         addr.sin_port = 0
         _ = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                platformBind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         var bound = sockaddr_in()
@@ -1225,7 +1235,7 @@ final class PausableRelay: @unchecked Sendable {
     }
 
     private func connectUpstream() -> Int32? {
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_INET, sockStream, 0)
         guard fd >= 0 else { return nil }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)

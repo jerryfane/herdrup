@@ -449,7 +449,7 @@ public struct SSHTransport: HerdrTransport {
                 gate?()
                 var hints = addrinfo()
                 hints.ai_family = AF_UNSPEC
-                hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+                hints.ai_socktype = sockStream
                 var info: UnsafeMutablePointer<addrinfo>?
                 let rc = getaddrinfo(host, String(port), &hints, &info)
 
