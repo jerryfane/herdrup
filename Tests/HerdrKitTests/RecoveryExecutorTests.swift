@@ -1488,11 +1488,20 @@ actor SleepRecorder {
         let executor = RecoveryExecutor(transport: transport)
         await executor.setSleeper { _ in }
         await executor.start()
-        let exhausted = await waitUntil {
-            if case .admittedNotOpen = await executor.paneStatus("p") { return true }
-            return false
-        }
-        XCTAssertTrue(exhausted, "the pane never reached exhaustion; the test is not armed")
+        // Through the helper, NOT a bare `.admittedNotOpen` match. The bare
+        // match accepted `attempts: 0` — the state of a pane admitted a
+        // moment ago and not yet opened — so this test asserted that counters
+        // retire across attempts without ever requiring a counter to exist. A
+        // premise mutation replacing the failing pane with a stalled one, so
+        // nothing ever failed, left it passing.
+        //
+        // Same class as round one's two, and the third time: the wait matched a
+        // state that is ALSO reachable before the window opens. There the
+        // early value was an empty set; here it is a zero count inside an
+        // otherwise-correct case, which is harder to see and no different.
+        await waitForExhaustion(executor, "p")
+        let retracted = await !executor.subscribedPanes.contains("p")
+        XCTAssertTrue(retracted, "exhaustion did not retract before the attempt rolled")
 
         // Roll the attempt with the pane STALLED rather than failing, so on the
         // new connection it is admitted and not yet open — the state in which
