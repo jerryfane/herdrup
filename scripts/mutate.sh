@@ -47,33 +47,23 @@ if ! swift build --build-tests >"$BUILD_LOG" 2>&1; then
 fi
 
 echo "--- mutation '$NAME' applied and compiles; expecting $FILTER to FAIL ---"
-timeout 300 swift test --filter "$FILTER" >"$RUN_LOG" 2>&1
+# --no-parallel IS PART OF THE PARSER CONTRACT, not a preference. Under
+# --parallel, XCTest emits neither "All tests" nor "Selected tests", so the
+# aggregate terminator the classifier requires never appears and every run
+# classifies INVALID. It was the default before and this made it explicit;
+# supporting the parallel format is a separate change.
+timeout 300 swift test --no-parallel --filter "$FILTER" >"$RUN_LOG" 2>&1
 STATUS=$?
 
-if [ "$STATUS" -eq 124 ]; then
-    echo "ESCAPED: '$NAME' made $FILTER hang. A hang is not a kill."
-    exit 3
-fi
-
-# "Executed 0 tests" means the filter matched nothing, which exits 0 and would
-# otherwise be indistinguishable from a survivor.
-EXECUTED=$(grep -oE "Executed [0-9]+ tests?" "$RUN_LOG" | grep -oE "[0-9]+" | sort -rn | head -1)
-EXECUTED=${EXECUTED:-0}
-if [ "$EXECUTED" -eq 0 ]; then
-    echo "INVALID: filter '$FILTER' matched no tests — nothing was exercised"
-    exit 2
-fi
-
-if [ "$STATUS" -eq 0 ]; then
-    echo "SURVIVED: $FILTER ($EXECUTED tests) still passes with '$NAME' broken. The test does not guard it."
-    exit 1
-fi
-
-if ! grep -q "^Test Case .* failed" "$RUN_LOG"; then
-    echo "INVALID: $FILTER exited $STATUS with no test-case failure — the run broke, it did not fail"
-    tail -3 "$RUN_LOG"
-    exit 2
-fi
-
-echo "KILLED: $FILTER ($EXECUTED tests) fails when '$NAME' is broken."
-grep -m3 -E "^/.*error: .*XCTAssert|^Test Case .* failed" "$RUN_LOG"
+# CLASSIFICATION LIVES IN ITS OWN SCRIPT so it can be demonstrated without a
+# Swift run — see scripts/classify-selftest.sh, which feeds it the exact logs it
+# used to misread. Three mis-reports were fixed here with no evidence they fired.
+#
+# NOT `exec`. The first rewire used it, which REPLACES this shell and therefore
+# skips the EXIT trap that restores the file — the mutation was left applied in
+# the working tree, silently, and every later run would have measured mutated
+# source. Caught by checking `git status` after the very first rewired run, which
+# is the check worth keeping: a harness that edits the tree must be verified to
+# have un-edited it.
+scripts/classify-run.sh "$NAME" "$FILTER" "$STATUS" "$RUN_LOG"
+exit $?
