@@ -1,12 +1,26 @@
 import Foundation
 
-/// Something that happened to the connection or the app, which the client must
-/// react to.
+/// Identifies one connection attempt.
+///
+/// Without this, recovery cannot tell a completion it asked for from one it
+/// cancelled. A network change that abandons attempt A and starts B does not
+/// stop A from finishing: `connected(A)` would be adopted, emit a resync and
+/// subscriptions, and then `connected(B)` would do it all again — and a late
+/// `transportFailed(A)` would tear down the B that had already been adopted.
+///
+/// Ordering the actions did not fix that, and could not: order is about the
+/// steps inside one plan, and this is about which *attempt* a callback belongs
+/// to.
+public struct AttemptID: Equatable, Hashable, Sendable {
+    let value: UInt64
+}
+
+/// Something that happened to the connection or the app.
 public enum ClientEvent: Equatable, Sendable {
-    /// A transport finished establishing and is usable.
-    case connected(at: Date)
-    /// The transport dropped, or a request failed in a way that ends the session.
-    case transportFailed(at: Date)
+    /// The attempt with this identifier finished establishing.
+    case connected(AttemptID, at: Date)
+    /// The attempt with this identifier dropped or failed.
+    case transportFailed(AttemptID, at: Date)
     /// The interface changed — Wi-Fi to cellular, a VPN came up, the address moved.
     case networkChanged(at: Date)
     case backgrounded(at: Date)
@@ -30,7 +44,9 @@ public enum RecoveryAction: Equatable, Sendable {
     /// rather than adopting it: adopting means opening subscriptions on a
     /// transport nobody is going to read.
     case discardConnection
-    case reconnect(after: TimeInterval)
+    /// Open a new transport, tagging it with this identifier. Every later
+    /// `connected` or `transportFailed` must carry it back.
+    case reconnect(AttemptID, after: TimeInterval)
     /// Drop every cached pane generation and refetch.
     case resyncAllPanes
     /// Open subscriptions for these panes. herdr's subscriptions are pane-scoped
@@ -59,7 +75,13 @@ public struct RecoveryPlan: Equatable, Sendable {
     public func contains(_ action: RecoveryAction) -> Bool { actions.contains(action) }
 
     public var reconnectDelay: TimeInterval? {
-        for case .reconnect(let after) in actions { return after }
+        for case .reconnect(_, let after) in actions { return after }
+        return nil
+    }
+
+    /// The attempt this plan opens, if it opens one.
+    public var reconnectAttempt: AttemptID? {
+        for case .reconnect(let attempt, _) in actions { return attempt }
         return nil
     }
 
@@ -127,6 +149,13 @@ public struct SessionRecovery: Sendable {
         public internal(set) var consecutiveFailures: Int = 0
         public internal(set) var connectedSince: Date?
         public internal(set) var isForeground: Bool = true
+        /// The only attempt whose callbacks are still wanted. Cleared by
+        /// cancellation, backgrounding and network changes, so anything that
+        /// completes afterwards is recognisably stale.
+        public internal(set) var currentAttempt: AttemptID?
+        /// Monotonic, so an identifier is never reused and a late callback can
+        /// never be mistaken for a current one.
+        internal var nextAttemptValue: UInt64 = 0
         /// Every pane the client believes exists. Subscriptions are pane-scoped,
         /// so this is also the re-subscribe list.
         public internal(set) var knownPanes: Set<String> = []
@@ -151,16 +180,37 @@ public struct SessionRecovery: Sendable {
         return TimeInterval.random(in: 0..<capped, using: &generator)
     }
 
+    /// Issues the next attempt identifier and makes it the only current one.
+    ///
+    /// Every prior attempt becomes stale at this point, which is what makes a
+    /// late callback recognisable rather than plausible.
+    private func nextAttempt(_ state: inout State) -> AttemptID {
+        state.nextAttemptValue += 1
+        let id = AttemptID(value: state.nextAttemptValue)
+        state.currentAttempt = id
+        return id
+    }
+
+    /// Starts the first attempt of a cold launch, where no event triggered it.
+    public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
+        RecoveryPlan([.reconnect(nextAttempt(&state), after: 0)])
+    }
+
     public func plan(
         for event: ClientEvent,
         state: inout State,
         using generator: inout some RandomNumberGenerator
     ) -> RecoveryPlan {
         switch event {
-        case .connected(let at):
-            // A connection that completes after the client backgrounded is not
-            // wanted: adopting it opens persistent subscriptions on a transport
-            // nobody will read, and iOS is about to suspend the process anyway.
+        case .connected(let attempt, let at):
+            // Stale completions are the reason attempts are identified at all: a
+            // cancelled attempt still finishes, and adopting it opens persistent
+            // subscriptions on a transport the client already replaced.
+            guard attempt == state.currentAttempt else {
+                return RecoveryPlan([.discardConnection])
+            }
+            // A connection completing after the client backgrounded is not wanted
+            // either — iOS is about to suspend the process.
             guard state.isForeground else { return RecoveryPlan([.discardConnection]) }
             state.connectedSince = at
             // THE ONLY PLACE resync and subscription are emitted. Every
@@ -168,7 +218,11 @@ public struct SessionRecovery: Sendable {
             // than also on `foregrounded` is what makes it exactly once.
             return RecoveryPlan([.resyncAllPanes, .subscribe(state.knownPanes)])
 
-        case .transportFailed(let at):
+        case .transportFailed(let attempt, let at):
+            // A stale failure must not tear down the attempt that replaced it,
+            // nor count against the backoff — it is news about a connection
+            // nobody is using.
+            guard attempt == state.currentAttempt else { return RecoveryPlan() }
             // A connection that lasted counts as healthy, so the next failure
             // starts from a short delay rather than inheriting an old streak.
             if let since = state.connectedSince, at.timeIntervalSince(since) >= stabilityInterval {
@@ -176,10 +230,12 @@ public struct SessionRecovery: Sendable {
             }
             state.connectedSince = nil
             state.consecutiveFailures += 1
-            guard state.isForeground else { return RecoveryPlan() }
-            return RecoveryPlan([
-                .reconnect(after: backoff(failures: state.consecutiveFailures, using: &generator))
-            ])
+            guard state.isForeground else {
+                state.currentAttempt = nil
+                return RecoveryPlan()
+            }
+            let delay = backoff(failures: state.consecutiveFailures, using: &generator)
+            return RecoveryPlan([.reconnect(nextAttempt(&state), after: delay)])
 
         case .networkChanged:
             // Reconnect, not migrate. Cancel first: the old socket is bound to an
@@ -187,12 +243,14 @@ public struct SessionRecovery: Sendable {
             // dead interface fails by timing out rather than by erroring.
             state.connectedSince = nil
             state.consecutiveFailures = 0
+            state.currentAttempt = nil
             guard state.isForeground else { return RecoveryPlan([.cancelTransport]) }
-            return RecoveryPlan([.cancelTransport, .reconnect(after: 0)])
+            return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
 
         case .backgrounded:
             state.isForeground = false
             state.connectedSince = nil
+            state.currentAttempt = nil
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
             // between closing it deliberately and discovering it dead later.
@@ -205,7 +263,7 @@ public struct SessionRecovery: Sendable {
             // Reconnect ONLY. The resync and subscriptions follow on `connected`,
             // because there is no transport yet to run them on — emitting them
             // here as well is what produced duplicate subscriptions.
-            return RecoveryPlan([.reconnect(after: 0)])
+            return RecoveryPlan([.reconnect(nextAttempt(&state), after: 0)])
 
         case .paneCreated(let pane):
             let isNew = state.knownPanes.insert(pane).inserted
@@ -220,18 +278,31 @@ public struct SessionRecovery: Sendable {
         }
     }
 
-    /// Replaces the known-pane set from an **authoritative** listing.
+    /// Replaces the known-pane set from an authoritative snapshot.
     ///
-    /// Takes `AgentInfo` rather than `[String]` deliberately. The previous
-    /// signature accepted any array and replaced the set wholesale, so a caller
-    /// passing a filtered or paged listing silently forgot every omitted pane —
-    /// and those panes stayed unwatched after the next reconnect, their silence
-    /// indistinguishable from having no output. `agent.list` returns the whole
-    /// set, so requiring its result makes a partial listing something you have to
-    /// construct on purpose rather than something you pass by accident.
+    /// Takes `PaneSnapshot`, which callers outside this module **cannot
+    /// construct**, rather than an array they can filter. The previous signature
+    /// took `[AgentInfo]` and was described as making a partial listing hard to
+    /// pass — it did not: `result.filter { … }` is exactly as easy to write as
+    /// `result`, and the test written to defend it in fact demonstrated a
+    /// one-element array silently deleting two known panes.
     ///
     /// Incremental discovery goes through `.paneCreated` / `.paneClosed`.
-    public func observe(agentList: [AgentInfo], state: inout State) {
-        state.knownPanes = Set(agentList.map(\.paneID))
+    public func observe(_ snapshot: PaneSnapshot, state: inout State) {
+        state.knownPanes = snapshot.paneIDs
+    }
+}
+
+/// The complete pane set as the server reported it.
+///
+/// Only `HerdrClient` can make one, so "this is the whole set" is enforced by
+/// where the value came from rather than by asking callers to be careful.
+public struct PaneSnapshot: Equatable, Sendable {
+    public let paneIDs: Set<String>
+
+    /// Internal on purpose: a caller outside the module cannot mint one from a
+    /// filtered list, which is the entire guarantee.
+    init(agents: [AgentInfo]) {
+        self.paneIDs = Set(agents.map(\.paneID))
     }
 }

@@ -1,6 +1,14 @@
 import XCTest
 @testable import HerdrKit
 
+/// A generator that always yields the same bits, so `random(in:)` returns a
+/// fixed fraction of its range. Jitter then cannot hide whether the RANGE grew,
+/// which is what the growth test needs and what the previous one lacked.
+private struct ConstantGenerator: RandomNumberGenerator {
+    let bits: UInt64
+    mutating func next() -> UInt64 { bits }
+}
+
 /// Deterministic generator, so a jitter test asserts a distribution property
 /// rather than hoping.
 private struct SeededGenerator: RandomNumberGenerator {
@@ -31,8 +39,18 @@ final class SessionRecoveryTests: XCTestCase {
 
     private func seeded(_ ids: [String]) throws -> SessionRecovery.State {
         var state = SessionRecovery.State()
-        recovery.observe(agentList: try panes(ids), state: &state)
+        recovery.observe(PaneSnapshot(agents: try panes(ids)), state: &state)
         return state
+    }
+
+    /// Opens an attempt the way production does, and hands back its identifier
+    /// so a test can answer with the right one — or deliberately the wrong one.
+    private func connect(
+        _ state: inout SessionRecovery.State, at when: Date = Date()
+    ) -> AttemptID {
+        let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(opened, at: when), &state)
+        return opened
     }
 
     /// THE AXIS for task 4: a client that missed events resyncs rather than
@@ -52,10 +70,11 @@ final class SessionRecoveryTests: XCTestCase {
         // Short enough that "surely nothing was missed" is tempting — which is
         // exactly the reasoning this must not embody.
         let resumed = plan(.foregrounded(at: Date().addingTimeInterval(0.2)), &state)
-        XCTAssertEqual(resumed.actions, [.reconnect(after: 0)],
-                       "foregrounding has no transport to resync on yet")
+        XCTAssertEqual(resumed.actions.count, 1, "foregrounding has no transport to resync on yet")
+        XCTAssertEqual(resumed.reconnectDelay, 0)
 
-        let connected = plan(.connected(at: Date().addingTimeInterval(0.3)), &state)
+        let attempt = resumed.reconnectAttempt!
+        let connected = plan(.connected(attempt, at: Date().addingTimeInterval(0.3)), &state)
         XCTAssertEqual(connected.actions, [.resyncAllPanes, .subscribe(["p1", "p2"])],
                        "resync must precede subscription, and both happen once")
 
@@ -74,10 +93,46 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         _ = plan(.backgrounded(at: Date()), &state)
 
-        let late = plan(.connected(at: Date().addingTimeInterval(0.1)), &state)
+        let late = plan(.connected(AttemptID(value: 99), at: Date().addingTimeInterval(0.1)), &state)
         XCTAssertEqual(late.actions, [.discardConnection])
         XCTAssertFalse(late.contains(.resyncAllPanes), "no work may start on an unwanted connection")
         XCTAssertNil(late.subscribes, "no subscription may open on an unwanted connection")
+    }
+
+    /// AXIS: a network change mid-attempt yields EXACTLY ONE adoption, however
+    /// the abandoned attempt's callbacks arrive afterwards.
+    ///
+    /// Ordering the actions did not fix this and could not: order governs steps
+    /// within one plan, and this is about which *attempt* a callback belongs to.
+    /// Attempt A is abandoned by the network change, but nothing stops it
+    /// finishing — so `connected(A)` must be discarded, `connected(B)` adopted,
+    /// and a late `transportFailed(A)` must not tear down the B already in use.
+    func testStaleAttemptCallbacksNeitherAdoptNorTearDown() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+
+        let changed = plan(.networkChanged(at: Date()), &state)
+        let attemptB = changed.reconnectAttempt!
+        XCTAssertNotEqual(attemptA, attemptB, "a new attempt must not reuse the abandoned identifier")
+
+        // A finishes anyway.
+        let lateA = plan(.connected(attemptA, at: Date()), &state)
+        XCTAssertEqual(lateA.actions, [.discardConnection], "an abandoned attempt must not be adopted")
+
+        let adoptedB = plan(.connected(attemptB, at: Date()), &state)
+        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes, .subscribe(["p1"])])
+
+        // ...and then A reports its failure, after B is already in use.
+        let failedA = plan(.transportFailed(attemptA, at: Date()), &state)
+        XCTAssertTrue(failedA.isEmpty, "a stale failure must not schedule a reconnect")
+        XCTAssertEqual(state.consecutiveFailures, 0, "a stale failure must not count against the backoff")
+        XCTAssertNotNil(state.connectedSince, "a stale failure must not tear down the adopted connection")
+
+        let everything = lateA.actions + adoptedB.actions + failedA.actions
+        XCTAssertEqual(everything.filter { $0 == .resyncAllPanes }.count, 1,
+                       "exactly one adoption may resync")
+        XCTAssertEqual(everything.filter { if case .subscribe = $0 { return true }; return false }.count, 1,
+                       "exactly one adoption may subscribe")
     }
 
     /// AXIS: no field on `State` can hold a resume position.
@@ -89,21 +144,55 @@ final class SessionRecoveryTests: XCTestCase {
     func testRecoveryStateHasNoFieldThatCouldHoldAResumePosition() {
         let fields = Mirror(reflecting: SessionRecovery.State())
             .children.compactMap(\.label).sorted()
+        // Updated once, deliberately, when attempt identity was added — and that
+        // is the guard working. `currentAttempt` and `nextAttemptValue` identify
+        // a LOCAL connection attempt, a counter this client mints and compares
+        // only against itself. Neither is a server position: nothing puts them on
+        // the wire, and no herdr API would accept one. The point of this list is
+        // that a new field forces that judgement out loud instead of arriving
+        // unexamined.
         XCTAssertEqual(
-            fields, ["connectedSince", "consecutiveFailures", "isForeground", "knownPanes"],
+            fields,
+            ["connectedSince", "consecutiveFailures", "currentAttempt",
+             "isForeground", "knownPanes", "nextAttemptValue"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
     }
 
-    /// AXIS: backoff grows, and is capped.
-    func testBackoffGrowsAndIsCapped() {
-        var generator = SeededGenerator(seed: 7)
+    /// AXIS: the backoff RANGE grows exponentially until the cap, then stops.
+    ///
+    /// The previous version asserted only that each random draw was ≤ the cap.
+    /// That is true of a schedule with no growth at all — the reviewer replaced
+    /// the exponential ceiling with `maximumDelay` at every failure count and the
+    /// test stayed green, so the implementation could lose exponential backoff
+    /// while the axis it claimed remained "covered".
+    ///
+    /// Holding the generator constant makes each draw a fixed fraction of the
+    /// range, so growth in the delays IS growth in the range.
+    func testBackoffRangeGrowsExponentiallyThenHoldsAtTheCap() {
+        var delays: [TimeInterval] = []
         for failures in 1...12 {
-            let delay = recovery.backoff(failures: failures, using: &generator)
-            XCTAssertGreaterThanOrEqual(delay, 0)
-            XCTAssertLessThanOrEqual(delay, recovery.maximumDelay,
-                                     "delay \(delay)s at failure \(failures) exceeded the cap")
+            var generator = ConstantGenerator(bits: UInt64.max / 2)
+            delays.append(recovery.backoff(failures: failures, using: &generator))
         }
+
+        // Doubling while below the cap.
+        for index in 1..<delays.count where delays[index] < recovery.maximumDelay * 0.4 {
+            XCTAssertEqual(
+                delays[index], delays[index - 1] * 2, accuracy: delays[index] * 0.02,
+                "delay \(index + 1) did not double: \(delays[index - 1]) -> \(delays[index])"
+            )
+        }
+        // Growth actually happened, rather than every value sitting at the cap.
+        XCTAssertGreaterThan(delays[3], delays[0], "the range never grew")
+        XCTAssertLessThan(delays[0], recovery.maximumDelay * 0.1, "the first delay is already at the cap")
+        // Constant once capped.
+        XCTAssertEqual(delays[11], delays[10], accuracy: 0.001, "delays must stop growing at the cap")
+        for delay in delays {
+            XCTAssertLessThanOrEqual(delay, recovery.maximumDelay)
+        }
+
+        var generator = ConstantGenerator(bits: 0)
         XCTAssertEqual(recovery.backoff(failures: 0, using: &generator), 0, "no failures, no delay")
     }
 
@@ -129,10 +218,12 @@ final class SessionRecoveryTests: XCTestCase {
     func testFlappingConnectionDoesNotResetTheBackoff() {
         var state = SessionRecovery.State()
         let start = Date()
+        var opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         for attempt in 0..<5 {
             let at = start.addingTimeInterval(Double(attempt) * 0.1)
-            _ = plan(.connected(at: at), &state)
-            _ = plan(.transportFailed(at: at.addingTimeInterval(0.05)), &state, seed: 99)
+            _ = plan(.connected(opened, at: at), &state)
+            let failed = plan(.transportFailed(opened, at: at.addingTimeInterval(0.05)), &state, seed: 99)
+            opened = failed.reconnectAttempt ?? opened
         }
         XCTAssertEqual(state.consecutiveFailures, 5,
                        "five flaps counted \(state.consecutiveFailures) failures; a short-lived connection must not count as healthy")
@@ -142,13 +233,14 @@ final class SessionRecoveryTests: XCTestCase {
     func testAHealthyConnectionResetsTheBackoff() {
         var state = SessionRecovery.State()
         let start = Date()
-        _ = plan(.connected(at: start), &state)
-        _ = plan(.transportFailed(at: start.addingTimeInterval(0.05)), &state)
+        let first = connect(&state, at: start)
+        let retry = plan(.transportFailed(first, at: start.addingTimeInterval(0.05)), &state)
         XCTAssertEqual(state.consecutiveFailures, 1)
 
         let recovered = start.addingTimeInterval(1)
-        _ = plan(.connected(at: recovered), &state)
-        _ = plan(.transportFailed(at: recovered.addingTimeInterval(recovery.stabilityInterval + 1)), &state)
+        let second = retry.reconnectAttempt!
+        _ = plan(.connected(second, at: recovered), &state)
+        _ = plan(.transportFailed(second, at: recovered.addingTimeInterval(recovery.stabilityInterval + 1)), &state)
         XCTAssertEqual(state.consecutiveFailures, 1,
                        "a connection that lasted past the stability window must clear the streak")
     }
@@ -161,7 +253,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty, "no connection, nothing to subscribe on")
         XCTAssertTrue(state.knownPanes.contains("p9"), "but it must still be remembered")
 
-        _ = plan(.connected(at: Date()), &state)
+        _ = connect(&state)
         XCTAssertEqual(plan(.paneCreated("p8"), &state).subscribes, ["p8"])
         XCTAssertTrue(plan(.paneCreated("p8"), &state).isEmpty, "a repeat must not re-subscribe")
     }
@@ -173,7 +265,8 @@ final class SessionRecoveryTests: XCTestCase {
     func testPanesLearnedDuringASessionAreResubscribedAfterReconnect() throws {
         var state = try seeded(["p1"])
         _ = plan(.paneCreated("p2"), &state)
-        XCTAssertEqual(plan(.connected(at: Date()), &state).subscribes, ["p1", "p2"],
+        let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        XCTAssertEqual(plan(.connected(opened, at: Date()), &state).subscribes, ["p1", "p2"],
                        "a pane discovered mid-session must be re-subscribed, not forgotten")
     }
 
@@ -185,18 +278,21 @@ final class SessionRecoveryTests: XCTestCase {
     func testClosedPanesAreDroppedIncrementally() throws {
         var state = try seeded(["p1", "p2"])
         _ = plan(.paneClosed("p2"), &state)
-        XCTAssertEqual(plan(.connected(at: Date()), &state).subscribes, ["p1"])
+        let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        XCTAssertEqual(plan(.connected(opened, at: Date()), &state).subscribes, ["p1"])
     }
 
-    /// AXIS: observation takes an authoritative listing, not any array.
+    /// AXIS: only an authoritative snapshot can replace the pane set.
     ///
-    /// The old signature accepted `[String]` and replaced the set wholesale, so a
-    /// filtered listing silently forgot the rest. Requiring `agent.list`'s own
-    /// result makes a partial set something you construct deliberately.
-    func testObservationTakesTheAuthoritativeListing() throws {
+    /// Two earlier signatures failed this. `[String]` replaced wholesale, so a
+    /// filtered listing silently forgot the rest; `[AgentInfo]` was described as
+    /// making that hard and did not — `result.filter { … }` is exactly as easy to
+    /// write as `result`. `PaneSnapshot` cannot be constructed outside the
+    /// module, so provenance is enforced by the type rather than by care.
+    func testOnlyAnAuthoritativeSnapshotCanReplaceThePaneSet() throws {
         var state = try seeded(["p1", "p2", "p3"])
         XCTAssertEqual(state.knownPanes, ["p1", "p2", "p3"])
-        recovery.observe(agentList: try panes(["p1"]), state: &state)
+        recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
         XCTAssertEqual(state.knownPanes, ["p1"], "an authoritative listing is still authoritative")
     }
 
@@ -205,7 +301,7 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         _ = plan(.backgrounded(at: Date()), &state)
 
-        XCTAssertNil(plan(.transportFailed(at: Date()), &state).reconnectDelay)
+        XCTAssertNil(plan(.transportFailed(AttemptID(value: 1), at: Date()), &state).reconnectDelay)
         XCTAssertNil(plan(.networkChanged(at: Date()), &state).reconnectDelay)
 
         let resumed = plan(.foregrounded(at: Date()), &state)
@@ -221,13 +317,14 @@ final class SessionRecoveryTests: XCTestCase {
     /// discovering it by timeout, which is the slowest possible way.
     func testNetworkChangeCancelsThenReconnectsImmediately() throws {
         var state = try seeded(["p1"])
-        _ = plan(.connected(at: Date()), &state)
-        _ = plan(.transportFailed(at: Date().addingTimeInterval(0.01)), &state)
+        let opened = connect(&state)
+        _ = plan(.transportFailed(opened, at: Date().addingTimeInterval(0.01)), &state)
         XCTAssertEqual(state.consecutiveFailures, 1)
 
         let changed = plan(.networkChanged(at: Date()), &state)
-        XCTAssertEqual(changed.actions, [.cancelTransport, .reconnect(after: 0)],
+        XCTAssertEqual(changed.actions.first, .cancelTransport,
                        "the dead transport must be cancelled before a new one opens")
+        XCTAssertEqual(changed.reconnectDelay, 0, "a network change must not back off")
         XCTAssertEqual(state.consecutiveFailures, 0)
     }
 }
