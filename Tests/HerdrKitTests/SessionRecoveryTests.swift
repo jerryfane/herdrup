@@ -39,7 +39,7 @@ final class SessionRecoveryTests: XCTestCase {
 
     private func seeded(_ ids: [String]) throws -> SessionRecovery.State {
         var state = SessionRecovery.State()
-        recovery.observe(PaneSnapshot(agents: try panes(ids)), state: &state)
+        _ = recovery.observe(PaneSnapshot(agents: try panes(ids)), state: &state)
         return state
     }
 
@@ -51,6 +51,137 @@ final class SessionRecoveryTests: XCTestCase {
         let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         _ = plan(.connected(opened, at: when), &state)
         return opened
+    }
+
+    /// AXIS: a second `connected` for the SAME adopted attempt is a no-op — no
+    /// duplicate resync/subscribe, and the stability clock keeps the ORIGINAL
+    /// establishment time.
+    ///
+    /// Reachable on real platforms: a connection can go ready -> waiting ->
+    /// ready across a viability blip without failing, so nothing guarantees one
+    /// connected per attempt. Before the fix the repeat re-emitted both actions
+    /// and overwrote connectedSince — observed streak of 3 instead of 1 in the
+    /// sweep's reproduction, because the restarted clock made an 11-second-old
+    /// connection look 2 seconds old.
+    func testRepeatConnectedForTheAdoptedAttemptIsANoOp() throws {
+        var state = try seeded(["p1"])
+        let start = Date()
+        let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(opened, at: start), &state)
+
+        let repeated = plan(.connected(opened, at: start.addingTimeInterval(3)), &state)
+        XCTAssertTrue(repeated.isEmpty, "a repeat ready is news, not a new adoption")
+        XCTAssertEqual(state.connectedSince, start, "the stability clock must keep the original time")
+
+        // The stability consequence, concretely: a failure past the window
+        // still clears the streak, because the clock was not restarted.
+        _ = plan(.transportFailed(opened, at: start.addingTimeInterval(recovery.stabilityInterval + 1)), &state)
+        XCTAssertEqual(state.consecutiveFailures, 1, "the restarted clock would have inherited the streak")
+    }
+
+    /// AXIS: foregrounding cancels whatever transport exists BEFORE dialing.
+    ///
+    /// A foregrounded with a connection still live (the OS never suspended us,
+    /// or no backgrounded was delivered) previously minted a replacement while
+    /// the old transport stayed open and subscribed — and no later plan ever
+    /// closed it: two sockets reading the same panes, forever.
+    func testForegroundingWhileConnectedCancelsTheOldTransportFirst() throws {
+        var state = try seeded(["p1"])
+        let old = connect(&state)
+
+        let resumed = plan(.foregrounded(at: Date()), &state)
+        XCTAssertEqual(resumed.actions.first, .cancelTransport,
+                       "the live transport must be torn down before a new one dials")
+        XCTAssertNotNil(resumed.reconnectAttempt)
+
+        // And the abandoned attempt's late callbacks are stale, both ways.
+        XCTAssertEqual(plan(.connected(old, at: Date()), &state).actions, [.discardConnection])
+        XCTAssertTrue(plan(.transportFailed(old, at: Date()), &state).isEmpty)
+    }
+
+    /// AXIS: beginInitialAttempt is safe to call mid-session — it cancels, and
+    /// the stale connectedSince cannot leak subscribes to an abandoned transport.
+    ///
+    /// The observed composition: begin-while-connected left connectedSince set,
+    /// so paneCreated emitted a subscribe for a transport the policy had just
+    /// walked away from.
+    func testBeginInitialAttemptWhileConnectedCancelsAndClearsAdoption() throws {
+        var state = try seeded(["p1"])
+        _ = connect(&state)
+
+        let restarted = recovery.beginInitialAttempt(state: &state)
+        XCTAssertEqual(restarted.actions.first, .cancelTransport)
+        XCTAssertNil(state.connectedSince, "stale adoption state leaks subscribes to a dead transport")
+        XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty,
+                      "no subscribe may target the transport that was just abandoned")
+    }
+
+    /// AXIS: beginInitialAttempt while backgrounded dials nothing, matching
+    /// every other path's refusal to dial while suspended.
+    ///
+    /// This was the ONE mint that ignored backgrounding — which also made it
+    /// the only route by which the since-removed redundant background guards
+    /// were reachable at all.
+    func testBeginInitialAttemptWhileBackgroundedDialsNothing() throws {
+        var state = try seeded(["p1"])
+        _ = plan(.backgrounded(at: Date()), &state)
+        XCTAssertTrue(recovery.beginInitialAttempt(state: &state).isEmpty)
+
+        let resumed = plan(.foregrounded(at: Date()), &state)
+        XCTAssertNotNil(resumed.reconnectAttempt, "foregrounding must still dial")
+    }
+
+    /// AXIS: a pane that first appears in a post-reconnect snapshot gets a
+    /// subscription NOW, not at the next reconnect.
+    ///
+    /// The sweep's reproduction: a pane created during a disconnection gap
+    /// arrives via the snapshot (paneCreated never fires for it — the event
+    /// stream was down). The old Void observe() recorded it, and it sat on the
+    /// "re-subscribe list" unsubscribed for the whole session. Even the
+    /// app-layer workaround was closed: paneCreated for it returned nothing,
+    /// because the pane was already known.
+    func testSnapshotGrowthWhileConnectedSubscribesTheAddedPanes() throws {
+        var state = try seeded(["p1"])
+        _ = connect(&state)
+
+        let grown = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p3"])), state: &state)
+        XCTAssertEqual(grown.subscribes, ["p3"], "exactly the added panes, not the whole set")
+
+        // While disconnected the snapshot only records; the next adoption's
+        // full-set subscribe covers it.
+        var offline = try seeded(["p1"])
+        let recorded = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), state: &offline)
+        XCTAssertTrue(recorded.isEmpty, "no transport, nothing to subscribe on")
+        let opened = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
+        XCTAssertEqual(plan(.connected(opened, at: Date()), &offline).subscribes, ["p1", "p4"])
+    }
+
+    /// AXIS: the stability window measures EVENT time, not wall-clock time.
+    ///
+    /// Every prior test used event times near Date(), so `connectedSince =
+    /// Date()` — ignoring the event's own timestamp — survived all of them.
+    /// Replayed or delayed event delivery is exactly when the two diverge.
+    func testStabilityWindowUsesEventTimeNotWallClock() throws {
+        var state = try seeded(["p1"])
+        // A pre-existing streak, because resetting a streak of ZERO is
+        // invisible: the first version of this test started from zero and the
+        // wall-clock mutation survived it — 0-reset-then-increment and
+        // no-reset-then-increment both land on 1.
+        let past = Date().addingTimeInterval(-100)
+        let first = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(first, at: past), &state)
+        let retry = plan(.transportFailed(first, at: past.addingTimeInterval(0.05)), &state)
+        XCTAssertEqual(state.consecutiveFailures, 1, "precondition: a flap on the books")
+
+        // The second connection lasts 15s of EVENT time — past the window, so
+        // the streak resets before the increment. Under the wall-clock bug the
+        // interval computes as negative and the old streak is inherited.
+        let second = retry.reconnectAttempt!
+        _ = plan(.connected(second, at: past.addingTimeInterval(1)), &state)
+        _ = plan(.transportFailed(
+            second, at: past.addingTimeInterval(1 + recovery.stabilityInterval + 5)), &state)
+        XCTAssertEqual(state.consecutiveFailures, 1,
+                       "a connection that lasted past the window in EVENT time must clear the streak; 2 means the clock was wall time")
     }
 
     /// THE AXIS for task 4: a client that missed events resyncs rather than
@@ -70,8 +201,11 @@ final class SessionRecoveryTests: XCTestCase {
         // Short enough that "surely nothing was missed" is tempting — which is
         // exactly the reasoning this must not embody.
         let resumed = plan(.foregrounded(at: Date().addingTimeInterval(0.2)), &state)
-        XCTAssertEqual(resumed.actions.count, 1, "foregrounding has no transport to resync on yet")
+        XCTAssertEqual(resumed.actions.first, .cancelTransport,
+                       "whatever transport may exist is torn down before dialing")
         XCTAssertEqual(resumed.reconnectDelay, 0)
+        XCTAssertFalse(resumed.contains(.resyncAllPanes), "no transport yet to resync on")
+        XCTAssertNil(resumed.subscribes, "no transport yet to subscribe on")
 
         let attempt = resumed.reconnectAttempt!
         let connected = plan(.connected(attempt, at: Date().addingTimeInterval(0.3)), &state)
@@ -85,11 +219,14 @@ final class SessionRecoveryTests: XCTestCase {
                        "subscriptions are persistent; emitting them twice opens each pane twice")
     }
 
-    /// AXIS: a connection completing after backgrounding is discarded, not adopted.
+    /// AXIS: a connection completing after backgrounding is discarded — BY THE
+    /// STALENESS GUARD, which is the one mechanism covering it.
     ///
-    /// Adopting it opens persistent subscriptions on a transport nobody will
-    /// read, on a process about to be suspended.
-    func testConnectionCompletingWhileBackgroundedIsDiscarded() throws {
+    /// Backgrounding clears `currentAttempt`, so the late completion cannot
+    /// match; a separate isForeground guard once sat behind that check and was
+    /// unreachable — the sweep showed this test pinned the staleness path all
+    /// along while its name credited the redundant guard.
+    func testConnectionCompletingWhileBackgroundedIsDiscardedAsStale() throws {
         var state = try seeded(["p1"])
         _ = plan(.backgrounded(at: Date()), &state)
 
@@ -157,6 +294,12 @@ final class SessionRecoveryTests: XCTestCase {
              "isForeground", "knownPanes", "nextAttemptValue"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
+        // One level down too: State stores AttemptID, so a position smuggled
+        // into AttemptID's fields would be invisible to the check above.
+        let attemptFields = Mirror(reflecting: AttemptID(value: 0))
+            .children.compactMap(\.label).sorted()
+        XCTAssertEqual(attemptFields, ["value"],
+                       "AttemptID grew a field; a stream position could hide inside State through it")
     }
 
     /// AXIS: the backoff RANGE grows exponentially until the cap, then stops.
@@ -208,6 +351,14 @@ final class SessionRecoveryTests: XCTestCase {
         }
         XCTAssertGreaterThan(delays.count, 30,
                              "40 clients drew only \(delays.count) distinct delays; they would reconnect in lockstep")
+        // Distinctness alone survives a 1ms jitter band, which is still a
+        // lockstep storm to the server. The draws must SPREAD across the
+        // window: at failure 6 the range is 0..<16s, so 40 draws confined to
+        // less than half of it would mean the generator is not doing what
+        // full jitter is for.
+        let spread = delays.max()! - delays.min()!
+        XCTAssertGreaterThan(spread, 8.0,
+                             "40 draws span only \(spread)s of a 16s window; that is a band, not jitter")
     }
 
     /// AXIS: a connection that drops immediately does not reset the backoff.
@@ -297,12 +448,21 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(state.knownPanes, ["p1"], "an authoritative listing is still authoritative")
     }
 
-    /// AXIS: a backgrounded client schedules no reconnect.
+    /// AXIS: a backgrounded client schedules no reconnect — including when the
+    /// failing attempt was CURRENT until the backgrounding.
+    ///
+    /// The previous version fed a never-minted AttemptID(value: 1), so it only
+    /// ever exercised an arbitrary-stale failure and could not notice if a
+    /// current attempt's failure dialed while suspended.
     func testBackgroundedClientSchedulesNoReconnect() throws {
         var state = try seeded(["p1"])
+        let current = connect(&state)
         _ = plan(.backgrounded(at: Date()), &state)
 
-        XCTAssertNil(plan(.transportFailed(AttemptID(value: 1), at: Date()), &state).reconnectDelay)
+        XCTAssertNil(plan(.transportFailed(current, at: Date()), &state).reconnectDelay,
+                     "the just-backgrounded attempt's failure must not dial")
+        XCTAssertEqual(state.consecutiveFailures, 0,
+                       "backgrounding made that failure stale; it is not a streak")
         XCTAssertNil(plan(.networkChanged(at: Date()), &state).reconnectDelay)
 
         let resumed = plan(.foregrounded(at: Date()), &state)
@@ -396,9 +556,15 @@ final class PaneSnapshotAccessTests: XCTestCase {
         )
         let triple = moduleDir.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
 
+        // A FRESH directory per run, removed afterwards. The first version wrote
+        // to a persistent per-triple directory and ignored the process exit
+        // status, so a FAILED extraction quietly reused the previous run's graph
+        // and passed — the reviewer reproduced it by breaking the subcommand.
+        // Stale evidence is worse than no evidence: it looks identical to fresh.
         let output = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("herdrkit-symbolgraph-\(triple)")
-        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            .appendingPathComponent("herdrkit-symbolgraph-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: output) }
 
         let swift = ["/opt/swift/usr/bin/swift", "/usr/bin/swift"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
@@ -412,14 +578,22 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "-I", root.appendingPathComponent("Sources/CSSH").path,
             "-output-dir", output.path, "-minimum-access-level", "package",
         ]
+        let stderrPipe = Pipe()
         process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        process.standardError = stderrPipe
         try process.run()
         process.waitUntilExit()
+        let stderrText = String(
+            data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "<none>"
+        guard process.terminationStatus == 0 else {
+            return XCTFail(
+                "symbolgraph-extract exited \(process.terminationStatus); the access invariant "
+                + "went UNCHECKED. stderr: \(stderrText)")
+        }
 
         let graph = output.appendingPathComponent("HerdrKit.symbols.json")
         guard let data = try? Data(contentsOf: graph) else {
-            return XCTFail("symbolgraph-extract produced no graph; the access invariant went UNCHECKED")
+            return XCTFail("extraction exited 0 but produced no graph; the access invariant went UNCHECKED")
         }
         let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let symbols = try XCTUnwrap(decoded?["symbols"] as? [[String: Any]])
@@ -431,12 +605,22 @@ final class PaneSnapshotAccessTests: XCTestCase {
         }
         XCTAssertFalse(snapshotSymbols.isEmpty, "PaneSnapshot is not in the surface at all; wrong module or stale build")
 
-        let initialisers = snapshotSymbols.filter {
-            (($0["kind"] as? [String: Any])?["identifier"] as? String)?.hasPrefix("swift.init") == true
-        }
-        XCTAssertTrue(
-            initialisers.isEmpty,
-            "PaneSnapshot exposes \(initialisers.count) initialiser(s) at package access or above; code outside HerdrKit can now build one from a filtered list, which is the exact path observe() exists to close"
+        // The WHOLE surface, not just initialisers. The init-only version let a
+        // `public static func make(...) -> PaneSnapshot` reopen outside-module
+        // construction without failing anything — construction is what the type
+        // forbids, and a factory constructs. Whitelisting every symbol means any
+        // new member at package access or above must be judged here, out loud.
+        let surface = snapshotSymbols.compactMap { symbol -> String? in
+            guard let kind = (symbol["kind"] as? [String: Any])?["identifier"] as? String,
+                  let path = symbol["pathComponents"] as? [String] else { return nil }
+            return "\(kind) \(path.joined(separator: "."))"
+        }.sorted()
+        XCTAssertEqual(
+            surface,
+            ["swift.func.op PaneSnapshot.!=(_:_:)",
+             "swift.property PaneSnapshot.paneIDs",
+             "swift.struct PaneSnapshot"],
+            "PaneSnapshot's package-visible surface changed; anything that can CONSTRUCT one from caller data reopens the filtered-list path observe() exists to close"
         )
     }
 }
