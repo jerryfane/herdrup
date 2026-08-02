@@ -170,6 +170,50 @@ public enum SSHError: Error, CustomStringConvertible {
 /// `events.subscribe` holds its connection open. Each `roundTrip` and each
 /// `stream` therefore opens its own SSH channel.
 public struct SSHTransport: HerdrTransport {
+    /// Identity for descriptor auditing, and the reason it is a reference in a
+    /// value type: the audit needs to attribute a double close to ONE logical
+    /// transport, and copies of this struct are the same logical transport.
+    /// Every channel it opens inherits this token, so a test can ask what THIS
+    /// transport did without reading a process-wide tally that every other
+    /// test also writes to.
+    /// Carries its own audit state, so nothing is keyed by an ADDRESS.
+    ///
+    /// The counters and the injectable closer used to live in
+    /// `[ObjectIdentifier: ...]` maps, which are keyed by a pointer value that
+    /// the allocator reuses: review released a token WITHOUT calling forget(),
+    /// obtained a replacement at the same address, and watched the retired
+    /// token's closer run for it. Manual cleanup is not a lifetime; holding the
+    /// state on the object IS one, and it deletes the whole class of hazard
+    /// rather than adding a rule people must remember.
+    final class AuditToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _closer: @Sendable (Int32) -> Int32 = { DescriptorAudit.realClose($0) }
+        private var _doubleCloses = 0
+        private var _rejections = 0
+
+        var closer: @Sendable (Int32) -> Int32 {
+            get { lock.withLock { _closer } }
+            set { lock.withLock { _closer = newValue } }
+        }
+        var doubleCloses: Int { lock.withLock { _doubleCloses } }
+        var adoptionRejections: Int { lock.withLock { _rejections } }
+        fileprivate func recordDoubleClose() { lock.withLock { _doubleCloses += 1 } }
+        fileprivate func recordRejection() { lock.withLock { _rejections += 1 } }
+    }
+    let auditToken = AuditToken()
+
+    /// Internal seam: fires once a descriptor exists and BEFORE it is offered to
+    /// the LiveChannel for adoption.
+    ///
+    /// It exists to reach one branch and nothing else. The adopt-rejection
+    /// cleanup runs only when a channel is already closed at that instant, and
+    /// no ordinary cancellation lands there: interrupting BEFORE connect is
+    /// caught earlier, at the resolution claim, and interrupting later lands in
+    /// the catch cleanup instead. Without a hook inside the window the branch is
+    /// unreachable from a test, and a deliberate double close in it survived the
+    /// whole SSH suite.
+    var afterDescriptorPublished: (@Sendable (LiveChannel?) -> Void)?
+
     /// Shared, bounded pool for blocking libssh2 work. Bounded because a thread
     /// per request grows without limit under concurrency; shared because each
     /// request needs its own connection but not its own operating-system thread.
@@ -281,6 +325,8 @@ public struct SSHTransport: HerdrTransport {
     final class Session {
         let sock: Int32
         let handle: OpaquePointer
+        /// Who a double close here is attributed to. See DescriptorAudit.
+        var auditOwner: SSHTransport.AuditToken?
 
         init(sock: Int32, handle: OpaquePointer) {
             self.sock = sock
@@ -301,7 +347,16 @@ public struct SSHTransport: HerdrTransport {
         }
 
         func closeSocket() {
-            _ = Glibc_close(sock)
+            // THROUGH THE AUDIT. This closed the descriptor directly, so the
+            // one test asserting "LiveChannel never closes a descriptor
+            // openSession already closed" drove a path the audit could not see:
+            // on any route where a session exists — host-key rejection among
+            // them — teardown comes here, not to the audited branch. A
+            // deliberate double close in that branch SURVIVED the test.
+            // The assertion was vacuous, and its process-wide counter then made
+            // it flaky on other tests' noise: a meter measuring nothing,
+            // wobbling.
+            DescriptorAudit.close(sock, owner: auditOwner)
         }
 
         func close() {
@@ -529,10 +584,12 @@ public struct SSHTransport: HerdrTransport {
         for address in addresses {
             let fd = socket(address.family, address.socketType, address.protocolNumber)
             guard fd >= 0 else { lastErrno = errno; continue }
+            let generation = DescriptorAudit.opened(fd)
+            afterDescriptorPublished?(live)
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
-                _ = Glibc_close(fd)
+                DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: auditToken)
                 throw CancellationError()
             }
             do {
@@ -548,7 +605,7 @@ public struct SSHTransport: HerdrTransport {
                 // published number before closing it — otherwise `close()` closes
                 // it a second time, by which point it may name another socket.
                 live?.release()
-                _ = Glibc_close(fd)
+                DescriptorAudit.close(fd, owner: auditToken)
                 guard case SSHError.connectFailed(_, _, let failure) = error else {
                     // A deadline or an interrupt ends the attempt outright: both
                     // are global, and trying the next address cannot help.
@@ -694,7 +751,7 @@ public struct SSHTransport: HerdrTransport {
         let sock = try tcpConnect(by: deadline, publishingTo: live)
         if let live, live.isInterrupted {
             live.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw CancellationError()
         }
         // SO_RCVTIMEO/SO_SNDTIMEO do NOT bound libssh2 in blocking mode — a
@@ -705,7 +762,7 @@ public struct SSHTransport: HerdrTransport {
         // long-lived subscription.
         guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
             live?.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw SSHError.sessionInitFailed
         }
         libssh2_session_set_blocking(handle, 1)
@@ -713,7 +770,7 @@ public struct SSHTransport: HerdrTransport {
         func fail(_ error: SSHError) -> SSHError {
             libssh2_session_free(handle)
             live?.release()          // we close it here; LiveChannel must not repeat it
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             return error
         }
 
@@ -726,7 +783,7 @@ public struct SSHTransport: HerdrTransport {
         } catch {
             libssh2_session_free(handle)
             live?.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw error
         }
 
@@ -760,7 +817,9 @@ public struct SSHTransport: HerdrTransport {
         // minutes, and the interrupt path (LiveChannel shutting the socket down)
         // is what bounds those operations instead of a timer.
         libssh2_session_set_timeout(handle, 0)
-        return Session(sock: sock, handle: handle)
+        let session = Session(sock: sock, handle: handle)
+        session.auditOwner = auditToken
+        return session
     }
 
     /// Opens a direct-streamlocal channel to herdr's socket on the host.
@@ -852,6 +911,7 @@ public struct SSHTransport: HerdrTransport {
         // So: a shared bounded queue, plus a cancellation handle that publishes
         // the socket so an in-flight blocking read can actually be interrupted.
         let live = LiveChannel()
+        live.auditOwner = auditToken
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 SSHTransport.blockingQueue.addOperation {
@@ -889,6 +949,7 @@ public struct SSHTransport: HerdrTransport {
     public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let live = LiveChannel()
+        live.auditOwner = auditToken
             // Same reasoning as roundTrip: a detached task is not a thread, and
             // this loop blocks for the life of the subscription.
             let work = Thread {
@@ -936,6 +997,11 @@ public struct SSHTransport: HerdrTransport {
 /// Owns a session and channel shared between a blocking reader and a cancelling
 /// caller, so cancellation can interrupt a read that is already in progress.
 final class LiveChannel: @unchecked Sendable {
+    /// Who to attribute a double close to. The channel is created per stream
+    /// and never held by a caller, so attributing to `self` gives a test
+    /// nothing it can ask about; the TRANSPORT outlives every channel it makes
+    /// and is what a test actually holds.
+    var auditOwner: SSHTransport.AuditToken?
     private let lock = NSLock()
     private var session: SSHTransport.Session?
     private var channel: OpaquePointer?
@@ -1070,7 +1136,7 @@ final class LiveChannel: @unchecked Sendable {
         if let session {
             session.closeSocket()
         } else if raw >= 0 {
-            DescriptorAudit.close(raw)
+            DescriptorAudit.close(raw, owner: auditOwner)
         }
     }
 }
@@ -1085,18 +1151,53 @@ final class LiveChannel: @unchecked Sendable {
 enum DescriptorAudit {
     private static let lock = NSLock()
     private static var doubleCloseCount = 0
+    private static var generations: [Int32: Int] = [:]
 
-    /// Closes, and records the close of a descriptor that was not open.
-    static func close(_ fd: Int32) {
-        guard Glibc_close(fd) != 0, errno == EBADF else { return }
+    static func realClose(_ fd: Int32) -> Int32 { Glibc_close(fd) }
+
+    /// Closes, and records a double close against the token that owned it.
+    static func close(_ fd: Int32, owner: SSHTransport.AuditToken?) {
+        guard (owner?.closer ?? realClose)(fd) != 0, errno == EBADF else { return }
         lock.lock(); doubleCloseCount += 1; lock.unlock()
+        owner?.recordDoubleClose()
     }
 
-    /// Process-wide tally. Compared against a baseline rather than zero, since
-    /// tests share a process.
+    /// Process-wide tally. NOT sound for a test assertion — any concurrent
+    /// teardown lands inside the window. Ask a token instead.
     static var doubleCloses: Int {
         lock.lock(); defer { lock.unlock() }
         return doubleCloseCount
+    }
+
+    /// Records that a descriptor NUMBER has just been opened, returning the
+    /// generation that identifies this particular use of it. Numbers recycle,
+    /// so EBADF alone can never say which opening a close belonged to.
+    static func opened(_ fd: Int32) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        generations[fd, default: 0] += 1
+        return generations[fd] ?? 0
+    }
+
+    /// Closes the descriptor an adoption refused, and records the rejection
+    /// only because the close ran.
+    ///
+    /// Verified rather than assumed: the GENERATION still matches, so a
+    /// recycled number cannot be closed in the original's place; and the close
+    /// goes through the token's injectable closer, so a test can witness that
+    /// this site invoked it. An earlier version probed the descriptor with
+    /// fcntl AFTER closing — racy, because by then the number may belong to
+    /// someone else, and it failed under load on unchanged code.
+    ///
+    /// Both a success-shaped substitute for the call and deleting it outright
+    /// leave the injected closer uninvoked, so both are caught.
+    static func closeRejectedAdoption(
+        _ fd: Int32, generation: Int, owner: SSHTransport.AuditToken?
+    ) {
+        let current = lock.withLock { generations[fd] ?? 0 }
+        guard current == generation else { return }   // recycled: not ours to close
+        if (owner?.closer ?? realClose)(fd) == 0 {
+            owner?.recordRejection()
+        }
     }
 }
 
