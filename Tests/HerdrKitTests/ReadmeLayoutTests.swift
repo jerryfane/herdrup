@@ -12,8 +12,14 @@ import XCTest
 /// in the repository at all.
 ///
 /// A guard that lives in someone's terminal history is not a guard. This one
-/// runs with `swift test`, so a file added without a README entry fails the
-/// suite rather than silently narrowing an inventory that reads as exhaustive.
+/// runs with `swift test`.
+///
+/// It checks ONE DIRECTION ONLY: every path the README names must exist. Adding
+/// a source file without a README entry does NOT fail — that completeness claim
+/// was dropped deliberately, because enforcing it meant maintaining a second,
+/// worse copy of the package manifest and would have false-failed the iOS app
+/// target. This sentence previously said the opposite, which is the fourth time
+/// tonight a comment outlived the guard it described.
 final class ReadmeLayoutTests: XCTestCase {
     private func repoRoot() -> URL {
         URL(fileURLWithPath: #filePath)
