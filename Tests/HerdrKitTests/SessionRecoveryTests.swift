@@ -178,6 +178,29 @@ final class SessionRecoveryTests: XCTestCase {
                        "a callback from the discarded state was adopted as current")
     }
 
+    /// AXIS: restoring a SAVED COPY of State and minting again cannot
+    /// reproduce a previously minted identity.
+    ///
+    /// The epoch design survived a rebuilt State and fell to this: State is a
+    /// value, so save -> mint A -> restore the save -> mint replays the same
+    /// (epoch, counter) and A's late callback impersonated the current
+    /// attempt. Identity is now a per-mint UUID derived from nothing State
+    /// stores, so no replay of stored contents can reproduce it.
+    func testMintingAfterASavedCopyRestoreCannotReproduceAnIdentity() throws {
+        var state = try seeded(["p1"])
+        let saved = state
+        let minted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+
+        state = saved   // the replay
+        let reminted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        XCTAssertNotEqual(minted, reminted,
+                          "a saved-copy restore reproduced a previously minted identity")
+
+        let late = plan(.connected(minted, at: Date()), &state)
+        XCTAssertEqual(late.actions, [.discardConnection],
+                       "the pre-restore attempt's callback was adopted as current")
+    }
+
     /// AXIS: a pane forgotten by a snapshot shrink and later rediscovered is
     /// NOT subscribed a second time on the same transport.
     ///
@@ -279,7 +302,7 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         _ = plan(.backgrounded(at: Date()), &state)
 
-        let late = plan(.connected(AttemptID(epoch: 0, value: 99), at: Date().addingTimeInterval(0.1)), &state)
+        let late = plan(.connected(AttemptID(uuid: UUID()), at: Date().addingTimeInterval(0.1)), &state)
         XCTAssertEqual(late.actions, [.discardConnection])
         XCTAssertFalse(late.contains(.resyncAllPanes), "no work may start on an unwanted connection")
         XCTAssertNil(late.subscribes, "no subscription may open on an unwanted connection")
@@ -343,16 +366,15 @@ final class SessionRecoveryTests: XCTestCase {
         // whole job.
         XCTAssertEqual(
             fields,
-            ["attemptEpoch", "connectedSince", "consecutiveFailures",
-             "currentAttempt", "isForeground", "knownPanes", "nextAttemptValue",
-             "subscribedPanes"],
+            ["connectedSince", "consecutiveFailures", "currentAttempt",
+             "isForeground", "knownPanes", "subscribedPanes"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
         // One level down too: State stores AttemptID, so a position smuggled
         // into AttemptID's fields would be invisible to the check above.
-        let attemptFields = Mirror(reflecting: AttemptID(epoch: 0, value: 0))
+        let attemptFields = Mirror(reflecting: AttemptID(uuid: UUID()))
             .children.compactMap(\.label).sorted()
-        XCTAssertEqual(attemptFields, ["epoch", "value"],
+        XCTAssertEqual(attemptFields, ["uuid"],
                        "AttemptID grew a field; a stream position could hide inside State through it")
     }
 
@@ -677,22 +699,29 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "PaneSnapshot's package-visible surface changed; anything that can CONSTRUCT one from caller data reopens the filtered-list path observe() exists to close"
         )
 
-        // The WHOLE module, not just PaneSnapshot's members. The member-only
-        // version let a package-level `public func makeSnapshot([AgentInfo]) ->
-        // PaneSnapshot` compile and pass — construction laundered through a free
-        // function is still construction. Any visible symbol anywhere in
-        // HerdrKit whose signature RETURNS a PaneSnapshot is a construction
-        // path, and exactly one is intended.
-        let returners = symbols.compactMap { symbol -> String? in
-            guard let signature = symbol["functionSignature"] as? [String: Any],
-                  let returns = signature["returns"] as? [[String: Any]],
-                  returns.contains(where: { ($0["spelling"] as? String)?.contains("PaneSnapshot") == true }),
-                  let path = symbol["pathComponents"] as? [String] else { return nil }
+        // Every symbol whose DECLARATION mentions the type, not just function
+        // returns. Two narrower versions each let a construction path through:
+        // member-only missed a free function, and returns-only missed a public
+        // computed property (`public var empty: PaneSnapshot` yields instances
+        // without having a functionSignature at all). Closures, subscripts and
+        // variables would slip the same net, so the check is: any visible
+        // symbol that mentions PaneSnapshot in its declaration is judged here,
+        // out loud, against an exact whitelist — producers AND consumers,
+        // because telling them apart per-kind is precisely the fragile part.
+        let mentioners = symbols.compactMap { symbol -> String? in
+            guard let path = symbol["pathComponents"] as? [String] else { return nil }
+            if path.first == "PaneSnapshot" { return nil }   // members audited above
+            let fragments = ((symbol["declarationFragments"] as? [[String: Any]]) ?? [])
+                + (((symbol["functionSignature"] as? [String: Any])?["returns"] as? [[String: Any]]) ?? [])
+            guard fragments.contains(where: {
+                ($0["spelling"] as? String)?.contains("PaneSnapshot") == true
+            }) else { return nil }
             return path.joined(separator: ".")
         }.sorted()
         XCTAssertEqual(
-            returners, ["HerdrClient.paneSnapshot()"],
-            "a new package-visible symbol returns PaneSnapshot; every such symbol is a construction path, and only HerdrClient.paneSnapshot() is the authoritative source"
+            mentioners,
+            ["HerdrClient.paneSnapshot()", "SessionRecovery.observe(_:state:)"],
+            "a new package-visible symbol mentions PaneSnapshot; if it can yield one from caller data it is a construction path, and only HerdrClient.paneSnapshot() may produce"
         )
     }
 }
