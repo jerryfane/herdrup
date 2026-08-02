@@ -30,6 +30,23 @@ final class SessionRecoveryTests: XCTestCase {
         return recovery.plan(for: event, state: &state, using: &generator)
     }
 
+    /// Lock-protected result carrier: the compiler cannot verify a captured
+    /// mutable local across threads, and under strict concurrency the pattern
+    /// is a build error even when an NSLock makes it operationally sound.
+    final class PlanBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var plan: RecoveryPlan?
+        func set(_ value: RecoveryPlan) { lock.lock(); plan = value; lock.unlock() }
+        func snapshot() -> RecoveryPlan? { lock.lock(); defer { lock.unlock() }; return plan }
+    }
+
+    static func decodePanes(_ ids: [String]) throws -> [AgentInfo] {
+        let entries = ids.map { "{\"pane_id\":\"\($0)\",\"agent\":\"claude\"}" }.joined(separator: ",")
+        let json = "{\"id\":\"x\",\"result\":{\"agents\":[\(entries)]}}"
+        return try JSONDecoder()
+            .decode(ResultEnvelope<AgentListResult>.self, from: Data(json.utf8)).result.agents
+    }
+
     private func panes(_ ids: [String]) throws -> [AgentInfo] {
         let entries = ids.map { "{\"pane_id\":\"\($0)\",\"agent\":\"claude\"}" }.joined(separator: ",")
         let json = "{\"id\":\"x\",\"result\":{\"agents\":[\(entries)]}}"
@@ -404,16 +421,13 @@ final class SessionRecoveryTests: XCTestCase {
             _ = resume.wait(timeout: .now() + 5.0)
         }
 
-        let emitted = NSLock()
-        var plansA: RecoveryPlan?
-        var lane = state                       // shares the lineage's authority
-        let worker = Thread { [instrumented] in
+        let box = PlanBox()
+        let lane = state                       // shares the lineage's authority
+        let worker = Thread { [instrumented, lane] in
             var laneState = lane
-            var generator = SeededGenerator(seed: 7)
-            _ = generator                       // observe takes no generator
             let plan = instrumented.observe(
-                PaneSnapshot(agents: try! self.panes(["p1", "pnew"])), from: attemptA, state: &laneState)
-            emitted.lock(); plansA = plan; emitted.unlock()
+                PaneSnapshot(agents: try! Self.decodePanes(["p1", "pnew"])), from: attemptA, state: &laneState)
+            box.set(plan)
         }
         worker.start()
         XCTAssertEqual(paused.wait(timeout: .now() + 5.0), .success, "never reached the window")
@@ -425,14 +439,9 @@ final class SessionRecoveryTests: XCTestCase {
 
         resume.signal()
         let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            emitted.lock(); let done = plansA != nil; emitted.unlock()
-            if done { break }
-            usleep(10_000)
-        }
+        while Date() < deadline, box.snapshot() == nil { usleep(10_000) }
 
-        emitted.lock(); let final = plansA; emitted.unlock()
-        let boundTo = try XCTUnwrap(final).subscribesOn
+        let boundTo = try XCTUnwrap(box.snapshot()).subscribesOn
         XCTAssertEqual(boundTo, attemptA,
                        "the action admitted under A was relabeled \(boundTo == attemptB ? "as B" : "unexpectedly") inside the emission window")
     }

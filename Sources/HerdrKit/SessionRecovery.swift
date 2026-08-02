@@ -366,6 +366,19 @@ public struct SessionRecovery: Sendable {
     /// probe proved the window reachable. `nil` on every production path.
     var afterAdmissionHook: (@Sendable () -> Void)?
 
+    /// THE emission site — the only place a subscribe action is built.
+    ///
+    /// One implementation, shared by `observe` and `paneCreated`, deliberately:
+    /// they briefly had one emission expression EACH, which meant one window
+    /// each — the review pinned observe's and the identical paneCreated mutation
+    /// still survived, a real gap wearing a duplicate. With a single site, the
+    /// pinned test guards every caller.
+    private func subscriptionPlan(for admitted: AttemptAuthority.Admission) -> RecoveryPlan {
+        afterAdmissionHook?()
+        guard !admitted.fresh.isEmpty else { return RecoveryPlan() }
+        return RecoveryPlan([.subscribe(admitted.fresh, on: admitted.attempt)])
+    }
+
     public init(
         baseDelay: TimeInterval = 0.5,
         maximumDelay: TimeInterval = 30,
@@ -555,10 +568,8 @@ public struct SessionRecovery: Sendable {
             guard let admitted = state.authority.admitWhileConnected([pane], from: from) else {
                 return RecoveryPlan()
             }
-            afterAdmissionHook?()
             state.knownPanes.insert(pane)
-            guard !admitted.fresh.isEmpty else { return RecoveryPlan() }
-            return RecoveryPlan([.subscribe(admitted.fresh, on: admitted.attempt)])
+            return subscriptionPlan(for: admitted)
 
         case .paneClosed(let pane, let from):
             guard state.authority.isCurrent(from) else { return RecoveryPlan() }
@@ -605,10 +616,8 @@ public struct SessionRecovery: Sendable {
         guard let admitted = state.authority.admitWhileConnected(snapshot.paneIDs, from: attempt) else {
             return RecoveryPlan()
         }
-        afterAdmissionHook?()
         state.knownPanes = snapshot.paneIDs
-        guard !admitted.fresh.isEmpty else { return RecoveryPlan() }
-        return RecoveryPlan([.subscribe(admitted.fresh, on: admitted.attempt)])
+        return subscriptionPlan(for: admitted)
     }
 }
 
