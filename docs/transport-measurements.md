@@ -176,37 +176,48 @@ Write `A95`, `B95`, `C95` for each arm's p95 `t_request`.
 
 ### Decision procedure, fixed before running
 
-Ordered and exhaustive: take the first step that applies and stop. **20 ms** is
-the margin throughout — roughly the floor for a difference a person notices —
-and it is **inclusive on the effective side**, so a difference of exactly 20 ms
-counts as effective.
+**20 ms** is the margin throughout — roughly the floor for a difference a person
+notices — and it is **inclusive on the qualifying side**, so a difference of
+exactly 20 ms qualifies.
 
-1. **If `A95` ≤ 20 ms — adopt neither.** The delay did not reproduce, so there
-   is nothing for a readiness transition to remove. Hand sessions out directly.
-2. Otherwise classify each candidate: **B is effective if `A95 − B95` ≥ 20 ms**;
-   **C is effective if `A95 − C95` ≥ 20 ms**.
-3. **Neither effective — adopt neither**, and record that the readiness
-   hypothesis failed. The mechanism is then genuinely unknown and the open
-   question below is the next work, not a pool feature.
-4. **Exactly one effective — adopt that one.**
-5. **Both effective — adopt C only if `B95 − C95` ≥ 20 ms; otherwise adopt B.**
-   Ties and near-ties go to B because B costs herdr nothing (see below). This is
-   the single tie-break; there is no separate "approximately equal" test.
-6. **Outlier veto.** If the arm selected above does not have a *lower* outlier
-   rate than A, do not adopt it — it moved the median and left the tail, and the
-   tail is what gets reported as "it hangs sometimes". Fall back to the other
-   effective arm if there is one, otherwise adopt neither.
-7. **Replenishment veto, C only.** If C survives to here but its `t_ready` p95
-   exceeds **50 ms**, reject C and take B if B is effective, otherwise adopt
-   neither. A transition that blocks a pool slot longer than the delay it hides
-   has moved the cost rather than removed it.
+A candidate **qualifies** when all of the following hold:
 
-Worked, against the two cases that broke the previous rules:
+| | B (age gate) | C (sacrificial channel) |
+|---|---|---|
+| effective | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
+| tail improved | outlier rate < A's | outlier rate < A's |
+| replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
 
-- `A95` = 100, `B95` = 80, `C95` = 80 → both effective (step 2); `B95 − C95` = 0
-  < 20 → **adopt B** (step 5). One answer.
-- `A95` = 100, `B95` = 50, `C95` = 70 → both effective; `B95 − C95` = −20 < 20 →
-  **adopt B**, regardless of C's outlier rate. One answer.
+Then, in order:
+
+1. **`A95` ≤ 20 ms → adopt neither.** The delay did not reproduce; there is
+   nothing to remove. Hand sessions out directly.
+2. **Neither qualifies → adopt neither**, and record that the readiness
+   hypothesis failed. The mechanism is then genuinely unknown, and the open
+   question below becomes the next work rather than a pool feature.
+3. **Exactly one qualifies → adopt it.**
+4. **Both qualify → adopt C if `B95 − C95` ≥ 20 ms, otherwise B.** Ties and
+   near-ties go to B, which costs herdr nothing. This is the only tie-break.
+
+The "tail improved" condition is a qualification rather than a veto applied
+afterwards, and that is deliberate: **an earlier version of this section stated
+the vetoes as fallback steps** — *"fall back to the other effective arm"* —
+without saying whether the vetoes re-applied to the fallback. Both readings were
+defensible and they disagree, so the procedure was not single-valued despite
+being labelled exhaustive.
+
+That was found by **enumerating it** (`scripts/check-decision-rule.py`, 23,328
+input combinations): the fallback form was ambiguous on 13.2% of them, and this
+form on none. The claim of exhaustiveness had been made by reading the rule over
+and agreeing with myself, which is the weakest check available and does not
+survive 23,328 cases.
+
+Worked, against the two cases that broke the version before that:
+
+- `A95` = 100, `B95` = 80, `C95` = 80 → both qualify; `B95 − C95` = 0 < 20 →
+  **adopt B**.
+- `A95` = 100, `B95` = 50, `C95` = 70 → both qualify; `B95 − C95` = −20 < 20 →
+  **adopt B**, whatever C's outlier rate.
 
 ### The cost side, with the right denominators
 
