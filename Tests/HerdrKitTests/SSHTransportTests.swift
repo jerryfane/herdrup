@@ -433,7 +433,7 @@ final class SSHTransportTests: XCTestCase {
         // that window. Other tests' async teardown does, so this failed about
         // one run in ten under full-suite load and never in isolation. The
         // assertion was reporting other tests' work as this transport's defect.
-        let baseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
+        let baseline = transport.auditToken.doubleCloses
         var rejections = 0
         for _ in 0..<25 {
             do {
@@ -450,10 +450,9 @@ final class SSHTransportTests: XCTestCase {
         }
         XCTAssertEqual(rejections, 25, "every attempt must have reached the rejection path")
         XCTAssertEqual(
-            DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
+            transport.auditToken.doubleCloses, baseline,
             "LiveChannel closed a descriptor openSession had already closed"
         )
-        DescriptorAudit.forget(transport.auditToken)
     }
 
     /// AXIS: `setupTimeout` bounds the *connect*, not only the handshake.
@@ -502,6 +501,45 @@ final class SSHTransportTests: XCTestCase {
     ///
     /// So the error type is the assertion, and the budget is set far beyond the
     /// timing bound so nothing but cancellation can end the attempt at all.
+    /// AXIS: a released token's closer cannot be inherited by a replacement that
+    /// lands at the same address.
+    ///
+    /// The closer and the counters used to live in `[ObjectIdentifier: ...]`
+    /// maps. ObjectIdentifier is a POINTER VALUE and the allocator reuses it, so
+    /// review released a token without calling forget(), got a replacement at
+    /// the same address, and watched the retired token's closer run for it —
+    /// which could intercept or suppress a real close in an unrelated test.
+    ///
+    /// Now the state lives ON the token, so this is structurally impossible
+    /// rather than merely tested for. The test remains because "structurally
+    /// impossible" is a claim, and this is the cheapest way to keep it honest
+    /// if anyone reintroduces a map.
+    func testAReplacementTokenDoesNotInheritARetiredTokensCloser() throws {
+        var addresses: [ObjectIdentifier] = []
+        var intercepted = 0
+
+        do {
+            let retired = SSHTransport.AuditToken()
+            retired.closer = { _ in intercepted += 1; return 0 }
+            addresses.append(ObjectIdentifier(retired))
+        }   // released WITHOUT any cleanup call
+
+        let replacement = SSHTransport.AuditToken()
+        addresses.append(ObjectIdentifier(replacement))
+        try XCTSkipUnless(addresses[0] == addresses[1],
+                          "the allocator did not reuse the address; the hazard is not staged")
+
+        let fd = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(fd < 0, "could not open a descriptor")
+        let generation = DescriptorAudit.opened(fd)
+        DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: replacement)
+
+        XCTAssertEqual(intercepted, 0,
+                       "the replacement inherited a retired token's closer")
+        XCTAssertEqual(replacement.adoptionRejections, 1,
+                       "the replacement's own close did not run")
+    }
+
     /// AXIS: a RECYCLED descriptor number is not closed in place of the one the
     /// caller meant.
     ///
@@ -530,11 +568,10 @@ final class SSHTransportTests: XCTestCase {
 
         DescriptorAudit.closeRejectedAdoption(second, generation: staleGeneration, owner: token)
 
-        XCTAssertEqual(DescriptorAudit.adoptionRejections(by: token), 0,
+        XCTAssertEqual(token.adoptionRejections, 0,
                        "a stale generation was accepted as a successful rejection")
         XCTAssertEqual(fcntl(second, F_GETFD) == -1 && errno == EBADF, false,
                        "the audit closed a descriptor that was not the one it was given")
-        DescriptorAudit.forget(token)
     }
 
     /// AXIS: the adopt-rejection cleanup closes its descriptor exactly once.
@@ -559,7 +596,7 @@ final class SSHTransportTests: XCTestCase {
             reached.set()
             live.interrupt()          // closed BEFORE adoption is offered
         }
-        let baseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
+        let baseline = transport.auditToken.doubleCloses
 
         // WITNESS THE CLOSE ITSELF, through an injected closer that delegates to
         // the real one. Both a success-shaped substitute for the syscall and
@@ -568,8 +605,7 @@ final class SSHTransportTests: XCTestCase {
         // then the number may belong to someone else. I had accepted that as an
         // unclosable gap; review built this.
         let closes = UncheckedCounter()
-        DescriptorAudit.setCloser({ fd in closes.bump(); return DescriptorAudit.realClose(fd) },
-                                  for: transport.auditToken)
+        transport.auditToken.closer = { fd in closes.bump(); return DescriptorAudit.realClose(fd) }
 
         do {
             for try await _ in transport.stream(#"{"id":"x","method":"events.subscribe","params":{}}"#) {
@@ -584,14 +620,13 @@ final class SSHTransportTests: XCTestCase {
         // once, the tally matched, and the error was swallowed. Proving the
         // branch RAN needs something only the branch produces.
         XCTAssertEqual(
-            DescriptorAudit.adoptionRejections(by: transport.auditToken), 1,
+            transport.auditToken.adoptionRejections, 1,
             "the adopt-rejection branch never ran; the tally comparison below proves nothing")
         XCTAssertEqual(closes.value, 1,
                        "the rejection branch did not invoke the close: \(closes.value) calls")
         XCTAssertEqual(
-            DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
+            transport.auditToken.doubleCloses, baseline,
             "the adopt-rejection cleanup closed its descriptor twice")
-        DescriptorAudit.forget(transport.auditToken)
     }
 
     func testCancellationInterruptsConnectAndReportsItAsCancellation() async throws {
@@ -609,7 +644,7 @@ final class SSHTransportTests: XCTestCase {
         // still passed. Cancelling mid-connect is exactly the branch that
         // closes the descriptor it just published, so this test is where it
         // gets pinned.
-        let auditBaseline = DescriptorAudit.doubleCloses(by: transport.auditToken)
+        let auditBaseline = transport.auditToken.doubleCloses
         let task = Task { _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#) }
         try await Task.sleep(nanoseconds: 200_000_000)
         task.cancel()
@@ -629,9 +664,8 @@ final class SSHTransportTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            DescriptorAudit.doubleCloses(by: transport.auditToken), auditBaseline,
+            transport.auditToken.doubleCloses, auditBaseline,
             "cancelling mid-connect closed a descriptor twice")
-        DescriptorAudit.forget(transport.auditToken)
     }
 
     /// AXIS: a cancellation landing in the poll-ready/`SO_ERROR` window is still

@@ -176,7 +176,30 @@ public struct SSHTransport: HerdrTransport {
     /// Every channel it opens inherits this token, so a test can ask what THIS
     /// transport did without reading a process-wide tally that every other
     /// test also writes to.
-    final class AuditToken: Sendable {}
+    /// Carries its own audit state, so nothing is keyed by an ADDRESS.
+    ///
+    /// The counters and the injectable closer used to live in
+    /// `[ObjectIdentifier: ...]` maps, which are keyed by a pointer value that
+    /// the allocator reuses: review released a token WITHOUT calling forget(),
+    /// obtained a replacement at the same address, and watched the retired
+    /// token's closer run for it. Manual cleanup is not a lifetime; holding the
+    /// state on the object IS one, and it deletes the whole class of hazard
+    /// rather than adding a rule people must remember.
+    final class AuditToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _closer: @Sendable (Int32) -> Int32 = { DescriptorAudit.realClose($0) }
+        private var _doubleCloses = 0
+        private var _rejections = 0
+
+        var closer: @Sendable (Int32) -> Int32 {
+            get { lock.withLock { _closer } }
+            set { lock.withLock { _closer = newValue } }
+        }
+        var doubleCloses: Int { lock.withLock { _doubleCloses } }
+        var adoptionRejections: Int { lock.withLock { _rejections } }
+        fileprivate func recordDoubleClose() { lock.withLock { _doubleCloses += 1 } }
+        fileprivate func recordRejection() { lock.withLock { _rejections += 1 } }
+    }
     let auditToken = AuditToken()
 
     /// Internal seam: fires once a descriptor exists and BEFORE it is offered to
@@ -303,7 +326,7 @@ public struct SSHTransport: HerdrTransport {
         let sock: Int32
         let handle: OpaquePointer
         /// Who a double close here is attributed to. See DescriptorAudit.
-        var auditOwner: AnyObject?
+        var auditOwner: SSHTransport.AuditToken?
 
         init(sock: Int32, handle: OpaquePointer) {
             self.sock = sock
@@ -978,7 +1001,7 @@ final class LiveChannel: @unchecked Sendable {
     /// and never held by a caller, so attributing to `self` gives a test
     /// nothing it can ask about; the TRANSPORT outlives every channel it makes
     /// and is what a test actually holds.
-    var auditOwner: AnyObject?
+    var auditOwner: SSHTransport.AuditToken?
     private let lock = NSLock()
     private var session: SSHTransport.Session?
     private var channel: OpaquePointer?
@@ -1113,7 +1136,7 @@ final class LiveChannel: @unchecked Sendable {
         if let session {
             session.closeSocket()
         } else if raw >= 0 {
-            DescriptorAudit.close(raw, owner: auditOwner ?? self)
+            DescriptorAudit.close(raw, owner: auditOwner)
         }
     }
 }
@@ -1128,148 +1151,53 @@ final class LiveChannel: @unchecked Sendable {
 enum DescriptorAudit {
     private static let lock = NSLock()
     private static var doubleCloseCount = 0
-    private static var byOwner: [ObjectIdentifier: Int] = [:]
+    private static var generations: [Int32: Int] = [:]
 
-    /// Closes, and records the close of a descriptor that was not open.
-    ///
-    /// `owner` attributes the double close to the object whose teardown caused
-    /// it. Without it the tally was PROCESS-WIDE, and the only test reading it
-    /// bracketed a window with a baseline — which is safe only if nothing else
-    /// in the process closes a descriptor during that window. Other tests'
-    /// async teardown does exactly that, so the assertion failed roughly one
-    /// run in ten under full-suite load and never in isolation. The comment
-    /// here used to say the baseline handled sharing a process; it handled
-    /// SEQUENTIAL sharing, not concurrent.
-    static func close(_ fd: Int32, owner: AnyObject? = nil) {
-        guard Glibc_close(fd) != 0, errno == EBADF else { return }
-        lock.lock()
-        doubleCloseCount += 1
-        if let owner { byOwner[ObjectIdentifier(owner), default: 0] += 1 }
-        lock.unlock()
+    static func realClose(_ fd: Int32) -> Int32 { Glibc_close(fd) }
+
+    /// Closes, and records a double close against the token that owned it.
+    static func close(_ fd: Int32, owner: SSHTransport.AuditToken?) {
+        guard (owner?.closer ?? realClose)(fd) != 0, errno == EBADF else { return }
+        lock.lock(); doubleCloseCount += 1; lock.unlock()
+        owner?.recordDoubleClose()
     }
 
-    /// Process-wide tally. Kept for diagnostics; NOT sound for a test
-    /// assertion, because any concurrent teardown lands inside the window.
+    /// Process-wide tally. NOT sound for a test assertion — any concurrent
+    /// teardown lands inside the window. Ask a token instead.
     static var doubleCloses: Int {
         lock.lock(); defer { lock.unlock() }
         return doubleCloseCount
     }
 
-    /// Double closes attributable to ONE object — the only form a test can
-    /// assert on without depending on what the rest of the process is doing.
-    static func doubleCloses(by owner: AnyObject) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        return byOwner[ObjectIdentifier(owner)] ?? 0
-    }
-
-    /// Adoption rejections, attributed. The rejection branch closes its
-    /// descriptor and throws — and BOTH of those are indistinguishable from what
-    /// the ordinary cleanup does one level down, so a test could not tell the
-    /// branch had run at all. Bypassing it entirely compiled and left its own
-    /// regression green. A path with no success signal cannot be armed by any
-    /// test; this is that signal.
-    private static var rejectionsByOwner: [ObjectIdentifier: Int] = [:]
-    /// Closes a descriptor whose adoption was refused, and records the rejection
-    /// ONLY BECAUSE the close happened.
-    ///
-    /// ONE operation, because two independent ones diverge. Recording and
-    /// closing were separate calls, so deleting the close compiled and left the
-    /// counter incrementing: the test saw "one rejection, zero double closes"
-    /// and passed, while the descriptor LEAKED. A positive observable that does
-    /// not originate from the act it witnesses is just a second claim.
-    /// Records that a descriptor number has just been opened, and returns the
-    /// GENERATION that identifies this particular use of it.
-    ///
-    /// Descriptor numbers are recycled: close 7, open a socket, and the kernel
-    /// hands back 7. `EBADF` therefore distinguishes only the NUMBER'S current
-    /// state, never which opening it belonged to — a probe closed a descriptor,
-    /// opened another that reused the number, and the audit reported the second
-    /// one's close as the first one's success. A generation is the only thing
-    /// that can tell those apart.
-    /// The close used for an owner's descriptors — real by default, injectable
-    /// so a test can witness that a site invoked it.
-    private static var closers: [ObjectIdentifier: @Sendable (Int32) -> Int32] = [:]
-    static func setCloser(_ closer: @escaping @Sendable (Int32) -> Int32, for owner: AnyObject) {
-        lock.lock(); closers[ObjectIdentifier(owner)] = closer; lock.unlock()
-    }
-    static func realClose(_ fd: Int32) -> Int32 { Glibc_close(fd) }
-    private static func closer(for owner: AnyObject?) -> @Sendable (Int32) -> Int32 {
-        guard let owner else { return { Glibc_close($0) } }
-        lock.lock(); defer { lock.unlock() }
-        return closers[ObjectIdentifier(owner)] ?? { Glibc_close($0) }
-    }
-
+    /// Records that a descriptor NUMBER has just been opened, returning the
+    /// generation that identifies this particular use of it. Numbers recycle,
+    /// so EBADF alone can never say which opening a close belonged to.
     static func opened(_ fd: Int32) -> Int {
         lock.lock(); defer { lock.unlock() }
         generations[fd, default: 0] += 1
         return generations[fd] ?? 0
     }
-    private static var generations: [Int32: Int] = [:]
 
-    /// Closes the descriptor an adoption refused, and records the rejection only
-    /// on PROOF that THIS generation of THAT descriptor is now gone.
+    /// Closes the descriptor an adoption refused, and records the rejection
+    /// only because the close ran.
     ///
-    /// Two things are verified rather than assumed, because both were exploited:
-    ///   - the GENERATION still matches, so a recycled number cannot be closed
-    ///     in place of the one the caller meant;
-    ///   - the close goes through an INJECTABLE, owner-scoped closer, so a test
-    ///     can prove this site actually invoked it. That replaces an earlier
-    ///     post-close `fcntl(F_GETFD)` check which was itself racy — once close
-    ///     returns the number is free, another thread can reuse it, and a
-    ///     healthy rejection then went unrecorded under load.
+    /// Verified rather than assumed: the GENERATION still matches, so a
+    /// recycled number cannot be closed in the original's place; and the close
+    /// goes through the token's injectable closer, so a test can witness that
+    /// this site invoked it. An earlier version probed the descriptor with
+    /// fcntl AFTER closing — racy, because by then the number may belong to
+    /// someone else, and it failed under load on unchanged code.
     ///
-    /// The seam is what makes "did this site close anything?" answerable without
-    /// inspecting a number that no longer belongs to us. I had accepted that gap
-    /// as unclosable; review built the construction that closes it.
-    static func closeRejectedAdoption(_ fd: Int32, generation: Int, owner: AnyObject?) {
+    /// Both a success-shaped substitute for the call and deleting it outright
+    /// leave the injected closer uninvoked, so both are caught.
+    static func closeRejectedAdoption(
+        _ fd: Int32, generation: Int, owner: SSHTransport.AuditToken?
+    ) {
         let current = lock.withLock { generations[fd] ?? 0 }
         guard current == generation else { return }   // recycled: not ours to close
-        // NO POST-CLOSE PROBE. A previous version closed and then verified with
-        // fcntl(fd, F_GETFD) that the descriptor was gone. That check is
-        // ITSELF RACY: once close returns, the number is free and another
-        // thread can reuse it before the fcntl runs, whereupon a HEALTHY
-        // rejection goes unrecorded. Review measured it — unchanged code failed
-        // this regression under live full-suite load while passing 20/20 in
-        // isolation, which is the same load-dependent shape as the flake this
-        // whole PR set out to remove. I replaced one flaky observation with
-        // another and called it evidence.
-        //
-        // An unreliable guard is worse than a named gap. So the fact recorded
-        // is close's own return, which is the KERNEL'S answer about this
-        // descriptor at the moment it acted — the last point at which the
-        // number still means what the caller meant.
-        //
-        // KNOWN AND ACCEPTED: a source mutation replacing the syscall with a
-        // success-shaped expression is not caught here. That attack rewrites
-        // the audit's own body rather than the code under audit, and catching
-        // it in-process requires exactly the racy probe removed above. The
-        // adjacent mutation — deleting the call entirely — IS caught, because
-        // then nothing is recorded.
-        // THROUGH THE OWNER'S CLOSER. Both a success-shaped substitute for the
-        // syscall and outright deletion of the close leave the injected closer
-        // UNINVOKED, so a test that installs one and counts it catches either —
-        // without looking at the descriptor number after close, which is what
-        // made the previous attempt racy.
-        //
-        // (The comment that stood here claimed deletion would fail to compile.
-        // It does not: `if let owner {` is valid Swift, as review demonstrated.)
-        if closer(for: owner)(fd) == 0, let owner {
-            lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+        if (owner?.closer ?? realClose)(fd) == 0 {
+            owner?.recordRejection()
         }
-    }
-    static func adoptionRejections(by owner: AnyObject) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        return rejectionsByOwner[ObjectIdentifier(owner)] ?? 0
-    }
-
-    /// Drops an owner's entry once it is gone, so the map does not grow for the
-    /// life of the process.
-    static func forget(_ owner: AnyObject) {
-        lock.lock()
-        byOwner[ObjectIdentifier(owner)] = nil
-        rejectionsByOwner[ObjectIdentifier(owner)] = nil
-        closers[ObjectIdentifier(owner)] = nil
-        lock.unlock()
     }
 }
 
