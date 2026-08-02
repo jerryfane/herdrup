@@ -284,6 +284,67 @@ final class SSHTransportTests: XCTestCase {
         )
     }
 
+    /// REGRESSION for the double-close. 46bb658 fixed it in production code and
+    /// shipped no test, so nothing would notice its return.
+    ///
+    /// A host-key rejection is the deterministic path the reviewer used: it fails
+    /// AFTER the descriptor is published, which is exactly the window where a
+    /// failure path that closes without releasing leaves LiveChannel holding a
+    /// number the process may reuse. Repeat it many times — a double-close only
+    /// bites once the descriptor has been recycled — and require every attempt to
+    /// fail cleanly rather than corrupting an unrelated socket.
+    func testRepeatedPostPublicationFailuresDoNotDoubleClose() async throws {
+        SSHRuntime.start()
+        guard FileManager.default.fileExists(atPath: Self.keyPath),
+              let pem = try? String(contentsOfFile: Self.keyPath, encoding: .utf8),
+              FileManager.default.fileExists(atPath: socketPath)
+        else { throw XCTSkip("no local SSH key or herdr socket") }
+
+        let store = PinningHostKeyPolicy.PinStore()
+        store.pin(host: "127.0.0.1", port: 22, fingerprint: String(repeating: "00", count: 32))
+        let transport = SSHTransport(
+            credentials: SSHCredentials(
+                host: "127.0.0.1", username: NSUserName(),
+                privateKeyPEM: pem, remoteSocketPath: socketPath),
+            hostKeyPolicy: PinningHostKeyPolicy(store: store)
+        )
+
+        // A canary descriptor: if a double-close lands on a recycled number, this
+        // is what gets clobbered, and the read afterwards fails.
+        for _ in 0..<25 {
+            do {
+                _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#)
+                XCTFail("a pinned-mismatch host key must be refused")
+            } catch let err as SSHError {
+                guard case .hostKeyRejected = err else {
+                    return XCTFail("expected hostKeyRejected, got \(err)")
+                }
+            }
+        }
+
+        // The process must still be able to use descriptors normally afterwards.
+        let ok = try await SSHTransport(
+            credentials: SSHCredentials(
+                host: "127.0.0.1", username: NSUserName(),
+                privateKeyPEM: pem, remoteSocketPath: socketPath)
+        ).roundTrip(#"{"id":"after","method":"ping","params":{}}"#)
+        XCTAssertFalse(ok.isEmpty, "descriptor space must be intact after repeated failures")
+    }
+
+    /// REGRESSION for the timeout floor. libssh2 takes milliseconds and reads 0
+    /// as NO timeout, so a sub-millisecond request would truncate to unbounded —
+    /// silently inverting what the caller asked for.
+    func testSubMillisecondSetupTimeoutIsClampedNotInverted() {
+        let t = SSHTransport(credentials: SSHCredentials(
+            host: "h", username: "u", privateKeyPEM: "k", remoteSocketPath: "/s"),
+            setupTimeout: 0.0005)
+        XCTAssertGreaterThanOrEqual(
+            t.setupTimeout, SSHTransport.minimumSetupTimeout,
+            "a sub-ms timeout must clamp to the floor, not truncate to unbounded"
+        )
+        XCTAssertGreaterThanOrEqual(Int(t.setupTimeout * 1000), 1, "must not truncate to 0ms")
+    }
+
     /// A changed host key must hard-stop. Pin a deliberately wrong fingerprint
     /// and require the connection to be refused — the failure mode this guards
     /// is interception, so "it connected anyway" is the defect.

@@ -191,8 +191,14 @@ public struct SSHTransport: HerdrTransport {
     ) {
         self.credentials = credentials
         self.hostKeyPolicy = hostKeyPolicy
-        self.setupTimeout = setupTimeout
+        // libssh2 takes milliseconds and reads 0 as NO TIMEOUT, so a value under
+        // 1ms truncates to unbounded — the exact opposite of what a small value
+        // asks for. Clamp to a floor rather than silently inverting the request.
+        self.setupTimeout = max(setupTimeout, SSHTransport.minimumSetupTimeout)
     }
+
+    /// Below this, millisecond truncation would turn a bound into no bound.
+    public static let minimumSetupTimeout: TimeInterval = 0.001
 
     // MARK: - Session
 
@@ -340,7 +346,12 @@ public struct SSHTransport: HerdrTransport {
         }
         guard auth == 0 else { throw fail(.authenticationFailed(code: auth)) }
 
-        // Cleared: the setup bound must not truncate an idle event stream.
+        // Cleared so an intentionally idle event stream is not truncated. This
+        // DOES reopen unbounded blocking for channel open, write and read — the
+        // reviewer confirmed it against libssh2's own documentation. That is
+        // accepted deliberately: a subscription must be able to sit silent for
+        // minutes, and the interrupt path (LiveChannel shutting the socket down)
+        // is what bounds those operations instead of a timer.
         libssh2_session_set_timeout(handle, 0)
         return Session(sock: sock, handle: handle)
     }
