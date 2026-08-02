@@ -188,7 +188,7 @@ A candidate **qualifies** when all of the following hold:
 | | B (age gate) | C (sacrificial channel) |
 |---|---|---|
 | effective | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
-| tail not worsened | outlier count ≤ A's | outlier count ≤ A's |
+| tail not worsened | outlier count ≤ A's + 1 | outlier count ≤ A's + 1 |
 | replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
 
 The tail condition is **non-regression, not strict improvement**. Requiring
@@ -198,13 +198,24 @@ a treatment that removed the delay entirely would be rejected and the readiness
 hypothesis declared failed. `A95` = 100, `B95` = `C95` = 5, all outlier counts
 zero was a real input that adopted neither.
 
-Sampling is why it is counts and not rates: at n = 100 a single sample is 1%, so
-a one-outlier difference is not evidence of anything in either direction. The
-condition therefore asks only that a candidate not make the tail worse.
+Sampling is why there is a **tolerance of one**, and why it is counts rather than
+rates. At n = 100 a single sample is 1%; a one-outlier difference is not evidence
+of anything in either direction, so making one extra observed outlier a hard veto
+contradicted the very rationale stated for using counts. It did, in the previous
+version: `A95` = 100, `B95` = 5, `C95` = 100 with counts A = 0 and B = 1 rejected
+the only effective treatment over a single event.
+
+**What this tolerance cannot do, stated so it is not mistaken for safety:** at
+n = 100 a genuine tail regression of a percentage point or two is invisible. This
+condition rejects *gross* regressions and nothing finer. It does not certify that
+an adopted arm leaves the tail alone — it only ensures the tail is not obviously
+worse. Certifying that would need a much larger n, and this experiment is
+deliberately cheap.
 
 **If A has outliers and the adopted arm does not reduce them, the tail stays an
-open question** and must not be reported as solved: the arm was adopted for its
-median, and the multi-second hangs are still unexplained. That is a reporting
+open question** and must not be reported as solved: the arm was adopted on its
+**p95**, which is the only metric this procedure decides on, and the multi-second
+hangs are still unexplained. That is a reporting
 obligation, not a veto — vetoing it was what produced the hole above.
 
 Then, in order:

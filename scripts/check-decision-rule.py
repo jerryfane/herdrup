@@ -15,18 +15,21 @@ import sys
 
 MARGIN = 20
 READY_CAP = 50
+TAIL_TOLERANCE = 1   # one outlier in n=100 is not evidence in either direction
 
 
 def flat(A, B, C, oa, ob, oc, ready_c):
     """Current rule: qualification per candidate, then an ordered selection.
 
-    Tail is NON-REGRESSION (<=), not strict improvement: a zero-outlier baseline
-    would otherwise reject a treatment that removed the delay entirely.
+    Tail is NON-REGRESSION WITH A TOLERANCE OF ONE. Strict improvement rejects a
+    perfect treatment against a zero-outlier baseline; exact non-regression makes
+    a single extra observed outlier a hard veto, which contradicts the stated
+    reason for using counts at all (one sample in 100 is not evidence).
     """
     if A <= MARGIN:
         return {"neither"}
-    qb = (A - B) >= MARGIN and ob <= oa
-    qc = (A - C) >= MARGIN and oc <= oa and ready_c <= READY_CAP
+    qb = (A - B) >= MARGIN and ob <= oa + TAIL_TOLERANCE
+    qc = (A - C) >= MARGIN and oc <= oa + TAIL_TOLERANCE and ready_c <= READY_CAP
     if not qb and not qc:
         return {"neither"}
     if qb and not qc:
@@ -112,11 +115,24 @@ def main():
             f"superseded ambiguity is {superseded_ambiguous}, not the 3072 the document states"
         )
 
-    # The zero-outlier hole the strict-improvement version had, kept as a
-    # regression case: a treatment that removes the delay entirely must be
-    # adopted even when the baseline has no tail to improve on.
-    if flat(100, 5, 5, 0, 0, 0, 10) != {"B"}:
-        failures.append("a zero-outlier baseline still rejects a perfect treatment")
+    # Boundary cases, each a rule bug that shipped or was one edit away.
+    boundaries = [
+        # zero-outlier baseline must not reject a perfect treatment
+        ((100, 5, 5, 0, 0, 0, 10), "B", "zero-outlier baseline rejects a perfect treatment"),
+        # one extra outlier is inside the tolerance the rationale requires
+        ((100, 5, 100, 0, 1, 0, 10), "B", "a single extra outlier vetoes the only effective arm"),
+        # two extra is outside it
+        ((100, 5, 100, 0, 2, 0, 10), "neither", "a clear tail regression is accepted"),
+        # tolerance applies against a non-zero baseline too
+        ((100, 5, 100, 3, 4, 0, 10), "B", "tolerance does not apply against a non-zero baseline"),
+        ((100, 5, 100, 3, 5, 0, 10), "neither", "a regression past tolerance is accepted"),
+        # replenishment cap still bites
+        ((100, 100, 5, 0, 0, 0, 51), "neither", "replenishment cap does not reject a slow prewarm"),
+    ]
+    for case, want, message in boundaries:
+        got = flat(*case)
+        if got != {want}:
+            failures.append(f"{message}: {case} gave {got}, expected {{{want}}}")
     # Both cases the ordered version resolved two ways.
     for case, want in ((100, 80, 80, 1, 0, 0, 10), "B"), ((100, 50, 70, 1, 0, 0, 10), "B"):
         got = flat(*case)
