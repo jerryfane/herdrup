@@ -55,6 +55,11 @@ public enum HostKeyDecision: Sendable, Equatable {
 /// policy is asked separately for first-contact and for change, and a change
 /// defaults to refusal at the call site rather than here.
 public protocol HostKeyPolicy: Sendable {
+    /// The fingerprint previously accepted for this host, if any. Part of the
+    /// protocol so `changed` is reachable for every implementation, not only
+    /// for the bundled pinning one.
+    func pinnedFingerprint(for host: String) -> String?
+
     /// First time this host has been seen. `fingerprint` is SHA-256, hex.
     func firstContact(host: String, fingerprint: String) -> HostKeyDecision
     /// The host's key differs from what was pinned. Refusing is the safe answer.
@@ -111,6 +116,8 @@ public enum SSHError: Error, CustomStringConvertible {
     case authenticationFailed(code: Int32)
     case channelOpenFailed(socket: String, code: Int32)
     case writeFailed(code: Int32)
+    case runtimeInitFailed(code: Int32)
+    case readFailed(code: Int32)
 
     public var description: String {
         switch self {
@@ -124,6 +131,8 @@ public enum SSHError: Error, CustomStringConvertible {
         case .channelOpenFailed(let s, let c):
             return "direct-streamlocal to \(s) failed (\(c))"
         case .writeFailed(let c): return "channel write failed (\(c))"
+        case .runtimeInitFailed(let c): return "libssh2_init failed (\(c))"
+        case .readFailed(let c): return "channel read failed (\(c))"
         }
     }
 }
@@ -205,10 +214,15 @@ public struct SSHTransport: HerdrTransport {
         // places, which made the first branch redundant — and a mutation of it
         // left the test green, because the second branch was doing the work.
         // Two guards for one property means neither is pinned by its test.
+        // Pinning is asked of the POLICY, not of a concrete type. The previous
+        // version downcast to PinningHostKeyPolicy, so every custom policy — a
+        // Keychain-backed one on iOS, say — was sent through firstContact on
+        // every connection and its documented `changed` callback was
+        // unreachable. A policy that cannot be told its key changed cannot
+        // protect anything.
         let decision: HostKeyDecision
         var reason = "policy refused"
-        if let pinning = hostKeyPolicy as? PinningHostKeyPolicy,
-           let pinned = pinning.pinnedFingerprint(for: credentials.host) {
+        if let pinned = hostKeyPolicy.pinnedFingerprint(for: credentials.host) {
             if pinned == presented {
                 decision = .trust
             } else {
@@ -226,6 +240,7 @@ public struct SSHTransport: HerdrTransport {
     }
 
     func openSession() throws -> Session {
+        try SSHRuntime.ensureStarted()
         let sock = try tcpConnect()
         guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
             _ = Glibc_close(sock)
@@ -310,7 +325,7 @@ public struct SSHTransport: HerdrTransport {
     }
 
     /// Reads to the next newline. Returns nil at channel EOF with nothing buffered.
-    private func readLine(_ channel: OpaquePointer, carry: inout [UInt8]) -> String? {
+    private func readLine(_ channel: OpaquePointer, carry: inout [UInt8]) throws -> String? {
         while true {
             if let idx = carry.firstIndex(of: UInt8(ascii: "\n")) {
                 let line = Array(carry[carry.startIndex..<idx])
@@ -325,11 +340,18 @@ public struct SSHTransport: HerdrTransport {
                 carry.append(contentsOf: buf[0..<n].map { UInt8(bitPattern: $0) })
             } else if n == Int(LIBSSH2_ERROR_EAGAIN) {
                 continue
-            } else {
+            } else if n == 0 {
+                // Genuine EOF. Any buffered tail is a final unterminated line.
                 if carry.isEmpty { return nil }
                 let rest = String(decoding: carry, as: UTF8.self)
                 carry.removeAll()
                 return rest
+            } else {
+                // A negative code other than EAGAIN is a failure, not a clean
+                // close. Treating it as EOF turned network and protocol errors
+                // into normal stream completion, so a broken connection looked
+                // like a server that had finished talking.
+                throw SSHError.readFailed(code: Int32(n))
             }
         }
     }
@@ -337,17 +359,25 @@ public struct SSHTransport: HerdrTransport {
     // MARK: - HerdrTransport
 
     public func roundTrip(_ requestLine: String) async throws -> String {
-        let session = try openSession()
-        defer { session.close() }
-        let channel = try openChannel(session)
-        defer { libssh2_channel_free(channel) }
+        // Connect, handshake, auth, open, write and read are all BLOCKING. Run
+        // them on a detached task rather than directly in the async function:
+        // done inline they block the calling cooperative thread for the whole
+        // exchange, which on a width-limited pool stalls unrelated work. The
+        // PR's original risk note claimed this was already the case; it was
+        // true only of `stream`.
+        try await Task.detached(priority: .userInitiated) { () throws -> String in
+            let session = try openSession()
+            defer { session.close() }
+            let channel = try openChannel(session)
+            defer { libssh2_channel_free(channel) }
 
-        try write(channel, requestLine)
-        var carry: [UInt8] = []
-        guard let line = readLine(channel, carry: &carry) else {
-            throw TransportError.closedBeforeResponse
-        }
-        return line
+            try write(channel, requestLine)
+            var carry: [UInt8] = []
+            guard let line = try readLine(channel, carry: &carry) else {
+                throw TransportError.closedBeforeResponse
+            }
+            return line
+        }.value
     }
 
     public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
@@ -366,7 +396,7 @@ public struct SSHTransport: HerdrTransport {
                     try write(channel, requestLine)
 
                     var carry: [UInt8] = []
-                    while !Task.isCancelled, let line = readLine(channel, carry: &carry) {
+                    while !Task.isCancelled, let line = try readLine(channel, carry: &carry) {
                         continuation.yield(line)
                     }
                     live.close()
@@ -437,12 +467,28 @@ private func Glibc_close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
 private func Glibc_shutdownSocket(_ fd: Int32) -> Int32 { Darwin.shutdown(fd, Int32(SHUT_RDWR)) }
 #endif
 
-/// Process-wide libssh2 init. Idempotent and cheap; iOS callers get it for free
-/// by constructing any `SSHTransport`.
+/// Process-wide libssh2 init.
+///
+/// libssh2 requires this before any session call. It was previously only ever
+/// invoked by tests while a comment claimed callers got it "for free" — a
+/// documented behaviour that did not exist, so production paths ran
+/// uninitialised. `openSession` now calls it, and the return code is preserved
+/// rather than discarded.
 public enum SSHRuntime {
-    private static let once: Void = {
-        _ = libssh2_init(0)
-    }()
+    private static let lock = NSLock()
+    private static var started = false
+    private static var result: Int32 = 0
 
-    public static func start() { _ = once }
+    /// Idempotent and thread-safe. Throws if libssh2 refused to initialise.
+    public static func ensureStarted() throws {
+        lock.lock(); defer { lock.unlock() }
+        if !started {
+            result = libssh2_init(0)
+            started = true
+        }
+        guard result == 0 else { throw SSHError.runtimeInitFailed(code: result) }
+    }
+
+    /// Retained for callers that want to initialise eagerly.
+    public static func start() { try? ensureStarted() }
 }
