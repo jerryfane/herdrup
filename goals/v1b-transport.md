@@ -231,9 +231,43 @@ When review returns findings:
 4. Report the new head SHA and per-finding what changed, with file:line.
 5. Repeat until clean.
 
-## Definition of done
+## Definition of done — SCOPED TO WHAT THIS SEAT CONTROLS
 
-The full suite passes **through `SSHTransport`** rather than
-`UnixSocketTransport` — that is the real proof the tunnel carries herdr traffic
-— with the pool, reconnect, and resync behaviours tested on their own axes, and
-all five PRs merged by the coordinator.
+**Done when all five tasks are open as PRs with a clean review verdict at their
+current head.** Merging is explicitly NOT part of this condition.
+
+This is a correction, and the reason matters. v1 of this file defined done as
+"all five PRs merged by the coordinator" — a state this seat cannot reach, since
+merge authority sits with the coordinator by design. A goal whose completion
+depends on someone else's action can never be satisfied by working harder, so an
+automated completion check can only re-fire forever. It did: roughly thirty
+turns were spent re-reading unchanged state to report that nothing had changed.
+
+The merges still happen and are still tracked — by the coordinator, who holds
+them. They are simply not this goal's finish line, because a finish line you
+cannot cross is not a finish line.
+
+**Corollary:** never write a goal condition that depends on another actor's
+action. If a goal needs one, the goal is scoped wrong.
+
+## When blocked — DO NOT POLL
+
+A task is blocked when it waits on a review verdict, a merge, or a coordinator
+ruling. When that happens:
+
+1. **State the hold once**, naming exactly what would unblock it.
+2. **Stop.** Do not re-read job state, PR state, or CI on a timer. A re-check
+   that finds no change spends real tokens to learn nothing.
+3. **Wait for the wake.** Verdicts, directives, and replies all arrive as
+   events. The alarm machinery exists precisely so this seat never has to poll.
+4. **Resume the moment actionable work exists** — a verdict landing is
+   actionable, because it starts a fix round.
+
+If a check is genuinely warranted — an external system with no event, say —
+**wait at least 30 minutes between checks**, and say what changed since last
+time. Two checks in a row reporting "unchanged" means stop checking.
+
+**A goal hook firing is not a reason to poll.** If a hook re-wakes this seat
+while it is blocked on someone else, the correct response is to end the hook,
+not to satisfy it — and this seat cannot end it alone, so it must say so plainly
+and immediately rather than answering each firing.
