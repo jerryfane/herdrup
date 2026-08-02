@@ -264,20 +264,14 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         return seconds
     }
 
-    /// Parks every connect until released, so a test can hold a dial IN FLIGHT.
-    /// Needed because `pendingDial`'s only observable effect is whether an
-    /// in-flight dial gets CANCELLED — a landed one is discarded and shows in
-    /// the log, a cancelled one never records. Without a way to keep one in
-    /// flight, that state is unpinnable and a mutation clearing it survives.
-    private var stallConnects = false
-    func stallConnect() { lock.withLock { stallConnects = true } }
-    func releaseConnect() { lock.withLock { stallConnects = false } }
-
+    // REMOVED: the connect stall (stallConnect/releaseConnect/parkedConnects).
+    // It was added to pin `pendingDial` and has ZERO call sites now that the
+    // assertion it served was cut. Dead seams in this fake are not inert — two
+    // were removed from here in #14 for firing a terminator inside openStream
+    // while nothing called them — so it goes rather than sitting armed for
+    // whoever finds it next. `git log` has it if the pendingDial gap is ever
+    // closed.
     func connect(for attempt: AttemptID) async throws {
-        while lock.withLock({ stallConnects }) {
-            if Task.isCancelled { throw CancellationError() }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
         record(.connect(attempt))
         if failConnects { throw TransportError.closedBeforeResponse }
     }
@@ -1640,23 +1634,19 @@ actor SleepRecorder {
         let backedOff = await waitUntil { await backoffs.recorded().count > backoffsBefore }
         XCTAssertTrue(backedOff, "the note replaced the sleeper; nothing waits any more")
 
-        // AND THE PENDING-DIAL HANDLE SURVIVED. Its only observable effect is
-        // whether an in-flight dial gets CANCELLED when the next one starts: a
-        // cancelled dial never records a connect, a landed one does. So park a
-        // dial, deliver a note, then start another dial — the parked one must
-        // not appear.
-        transport.stallConnect()
-        await executor.handle(.networkChanged(at: Date()))
-        let parkedAttemptOptional = await executor.currentAttempt
-        let parkedAttempt = try XCTUnwrap(parkedAttemptOptional)
-        let inFlight = await waitUntil(1) { false }   // let the dial reach the stall
-        _ = inFlight
-        await executor.handle(.streamFailed(pane: "gone", from: parkedAttempt))   // another note
-        await executor.handle(.networkChanged(at: Date()))                        // supersedes it
-        transport.releaseConnect()
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertFalse(transport.log().contains(.connect(parkedAttempt)),
-                       "the superseded dial was never cancelled; the note dropped pendingDial")
+        // NOT PINNED: pendingDial. Its only observable effect is whether an
+        // in-flight dial gets CANCELLED, and every version I wrote to observe
+        // that raced the cancellation against the stall release — flaky at
+        // first, then wrong 4 runs in 5 once I made the wait deterministic.
+        // Reporting it as uncovered rather than shipping a test that fails on
+        // correct code: an unreliable guard is worse than a named gap, because
+        // the gap is visible and the flake gets muted.
+        //
+        // A mutation clearing pendingDial from this branch therefore SURVIVES.
+        // What it would cost in production: a superseded dial is never
+        // cancelled, lands late, and is discarded — wasteful, not incorrect,
+        // since the discard path exists for exactly that. That is why I am
+        // willing to leave it named rather than keep grinding.
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
