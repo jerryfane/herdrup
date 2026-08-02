@@ -156,18 +156,36 @@ public actor RecoveryExecutor {
 
     /// What a caller asking "is this pane watched?" can actually know.
     ///
-    /// Coordinator-mandated: the refusal must be readable from the same surface
-    /// the ledger is read from — not a log line. `admittedNotOpen` is the
-    /// silent-pane condition made visible: the policy admitted the pane, and no
-    /// stream exists. This ADDS an observation of what already happened; it
-    /// does not redefine admission (that boundary is task 7's policy round).
+    /// **The answer is about WATCHING, not about ledger membership**, and since
+    /// task 7 those are genuinely different questions. #11 introduced this
+    /// surface as an observation that explicitly did NOT redefine admission —
+    /// that sentence stood here and is now wrong, because task 7's policy round
+    /// made exhaustion RETRACT the admission. A caller can no longer infer
+    /// ledger membership from a case, and should not try to: ask
+    /// `subscribedPanes` for membership and this for whether anything is
+    /// actually watching.
+    ///
+    /// The three answers partition WATCHED / WANTED-BUT-UNWATCHED /
+    /// NOT-WANTED, which is what a caller needs and what ledger membership
+    /// alone can no longer express.
     public enum PaneWatchStatus: Equatable, Sendable {
-        /// Admitted and a live stream exists.
+        /// A live stream exists. Necessarily admitted.
         case open
-        /// Admitted, but no stream could be opened: the pane is NOT watched,
-        /// whatever the ledger says. Carries the attempt count and last error.
+
+        /// The pane is WANTED and NOT WATCHED — no stream exists.
+        ///
+        /// Two situations reach it and callers are not expected to
+        /// distinguish them, because the actionable fact is the same:
+        ///   - still in the ledger, opening or between retries;
+        ///   - RETRACTED after exhausting its attempts on this connection —
+        ///     absent from the ledger, but retained here because the intent
+        ///     survives the retraction and a new connection will retry it.
+        /// `attempts` at `openFailureCap` identifies the second.
         case admittedNotOpen(attempts: Int, lastError: String?)
-        /// Not admitted at all.
+
+        /// Not wanted: no admission and no exhausted attempt on this
+        /// connection. NOT the same as "absent from the ledger" — an exhausted
+        /// pane is also absent and reports `admittedNotOpen`.
         case notAdmitted
     }
 
