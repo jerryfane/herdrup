@@ -34,8 +34,25 @@ mklog() {
     for i in $(seq 1 "$ns"); do out="${out}Test Case 'S.testSkip$i' skipped (0.0 seconds)\n"; done
     local total=$((np + nf + ns))
     local verdict=passed; [ "$nf" -gt 0 ] && verdict=failed
+    # XCTest's ACTUAL grammar, not a convenient uniform one. It uses singular at
+    # 1 ("Executed 1 test", "1 test skipped", "1 failure") and OMITS the skip
+    # clause entirely at zero. Emitting plural everywhere made every generated
+    # fixture agree with a parser that only handled plural: mutating the parser
+    # from `tests?` to `tests` left all 18 fixtures passing while a real
+    # one-test log classified INVALID. A generator that is wrong is wrong in
+    # every fixture at once — which I named as the risk when I introduced it,
+    # and then shipped anyway.
+    local t="tests"; [ "$total" -eq 1 ] && t="test"
+    local fl="failures"; [ "$nf" -eq 1 ] && fl="failure"
+    local skipclause=""
+    if [ "$ns" -gt 0 ]; then
+        local st="tests"; [ "$ns" -eq 1 ] && st="test"
+        skipclause="with $ns $st skipped and "
+    else
+        skipclause="with "
+    fi
     out="${out}Test Suite 'Selected tests' $verdict at 2026-01-01 00:00:00.000\n"
-    out="${out}\t Executed $total tests, with $ns tests skipped and $nf failures (0 unexpected) in 0.1 seconds"
+    out="${out}\t Executed $total $t, ${skipclause}$nf $fl (0 unexpected) in 0.1 seconds"
     printf '%b' "$out"
 }
 
@@ -106,13 +123,36 @@ Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 # 4d. A STATUS ABOVE THE SIGNAL RANGE IS NOT A SIGNAL.
 expect status-above-signal-range 2 "above the range" 200 "$(mklog 0 1 0)"
 
+# 4e. EACH GRAMMAR BRANCH. Singular at one, the omitted zero-skip clause, and
+#     singular "failure" — the forms a plural-only parser silently breaks on.
+expect singular-one-test 1 "1 of 1 ran" 0 "$(mklog 1 0 0)"
+expect singular-one-failure 0 "killed by 1 of 1 that ran" 1 "$(mklog 0 1 0)"
+expect singular-one-skip 2 "every matched test SKIPPED" 0 "$(mklog 0 0 1)"
+
+# 4f. THE AGGREGATE MUST AGREE WITH ITS OWN FAILURE COUNT.
+expect passed-aggregate-nonzero-failures 2 "reports 1 failures" 0 "Test Case 'S.testPass1' passed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.1 seconds"
+
+expect failed-aggregate-zero-failures 2 "reports 0 failures" 1 "Test Case 'S.testFail1' failed (0.0 seconds)
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds"
+
 # 5. THE ESTABLISHED CASES, so this file pins what already worked.
 expect hang 3 "A hang is not a kill" 124 "Test Case 'S.testA' started"
 expect no-tests-matched 2 "matched no tests" 0 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 	 Executed 0 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.0 seconds"
-expect broke-not-failed 2 "the run broke, it did not fail" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
+# Previously "broke-not-failed", expecting the no-failure-line branch. The
+# failure-count check now catches this log FIRST and says something more precise,
+# so the expectation moves rather than the log. Worth recording: with the
+# consistency checks in place, the no-failure-line branch is unreachable for any
+# internally consistent log — an aggregate can only say FAILED with a nonzero
+# count, and a nonzero count with no failed case line is itself rejected. It is
+# kept as a backstop for logs no check anticipated, not because a fixture can
+# still reach it.
+expect failed-aggregate-no-failures 2 "reports 0 failures" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 1 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.1 seconds"
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds"
 expect plain-survived 1 "still passes" 0 "$(mklog 3 0 0)"
 expect plain-killed 0 "killed by 1 of 3 that ran" 1 "$(mklog 2 1 0)"
 

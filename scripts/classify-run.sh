@@ -102,6 +102,23 @@ if [ "$AGGREGATE" = "passed" ] && grep -q "^Test Case .* failed" "$RUN_LOG"; the
     exit 2
 fi
 
+# AND THE AGGREGATE MUST AGREE WITH ITS OWN FAILURE COUNT. I wrote the comment
+# describing this check and did not write the check: a passed aggregate saying
+# "1 failure" classified SURVIVED and a failed one saying "0 failures"
+# classified KILLED. Boolean only — a single case with two failing assertions
+# reports "2 failures", so the exact value cannot be compared to anything.
+AGG_FAILS=$(awk "/^Test Suite '(All tests|Selected tests)' (passed|failed)/{f=1;next} f&&/Executed [0-9]+ tests?/{print;exit}" "$RUN_LOG" \
+            | grep -oE "[0-9]+ failures?" | grep -oE "^[0-9]+")
+AGG_FAILS=${AGG_FAILS:-0}
+if [ "$AGGREGATE" = "passed" ] && [ "$AGG_FAILS" -ne 0 ]; then
+    echo "INVALID: '$NAME' — aggregate says PASSED but reports $AGG_FAILS failures. Contradictory; no verdict."
+    exit 2
+fi
+if [ "$AGGREGATE" = "failed" ] && [ "$AGG_FAILS" -eq 0 ]; then
+    echo "INVALID: '$NAME' — aggregate says FAILED but reports 0 failures. Contradictory; no verdict."
+    exit 2
+fi
+
 # From the AGGREGATE summary — the Executed line following that terminator — not
 # the largest component and not merely the last line. A filter spanning two
 # suites reports each separately and then a total.
