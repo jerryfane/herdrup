@@ -116,9 +116,13 @@ timeout or retry more than work, but that is a hypothesis and is untested.
 
 - Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
   once instead of per request.
-- **A readiness transition is required before checkout** — pooling alone leaves
-  the delay on the request path — but *which* transition is undecided. See the
-  experiment below; do not implement one before running it.
+- **If the delay reproduces on the request path, a readiness transition or a
+  validation step belongs before checkout** — pooling alone would leave the delay
+  there. Stated conditionally: the experiment below can adopt neither arm, and
+  the existing measurements show an association with multi-second outliers even
+  in the control, so *that a transition is needed* is not established here. Which
+  transition, if any, is what the experiment decides. Do not implement one before
+  running it.
 - Channels are not worth pooling: they are consistently cheap on a ready
   session, and herdr's command socket is single-shot, so each request needs its
   own regardless.
@@ -179,6 +183,17 @@ Write `A95`, `B95`, `C95` for each arm's p95 `t_request`.
 
 ### Decision procedure, fixed before running
 
+**This procedure selects; it does not measure a treatment effect — in either
+direction.** Adoption means an arm cleared preregistered cutoffs *in this batch*.
+It is not evidence that the treatment works, exactly as non-adoption is not
+evidence that it fails. An earlier version attached that disclaimer only to
+non-adoption, which left adoption readable as a finding; the asymmetry was the
+whole leak.
+
+The vocabulary follows: candidates are **p95-qualified** or not. Nothing here is
+"effective", because effectiveness is a causal property and no analysis in this
+document could establish one.
+
 **Every threshold in this procedure is a preregistered operational cutoff.**
 None is derived from data or from a cited result. They are fixed here, before the
 run, so they cannot be chosen after seeing the numbers — that is the entire claim
@@ -186,7 +201,7 @@ being made for them:
 
 | cutoff | value | what it is not |
 |---|---|---|
-| effectiveness margin | 20 ms | *not* a measured perceptual threshold. Earlier drafts called it "roughly the floor a person notices"; nothing here supports that, and no source was cited. |
+| p95 margin | 20 ms | *not* a measured perceptual threshold. Earlier drafts called it "roughly the floor a person notices"; nothing here supports that, and no source was cited. |
 | outlier definition | `t_request` > 500 ms | *not* a boundary between two established regimes. |
 | tail cutoff | A's count + 1 | *not* an evidence threshold — see below. |
 | replenishment cap | `t_ready` p95 ≤ 50 ms | *not* a measured budget. |
@@ -203,7 +218,7 @@ A candidate **qualifies** when all of the following hold:
 
 | | B (age gate) | C (sacrificial channel) |
 |---|---|---|
-| effective | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
+| p95 margin met | `A95 − B95` ≥ 20 ms | `A95 − C95` ≥ 20 ms |
 | outlier count within tolerance | ≤ A's + 1 | ≤ A's + 1 |
 | replenishment affordable | — | `t_ready` p95 ≤ 50 ms |
 
@@ -271,7 +286,7 @@ Then, in order:
    about whether the delay exists. Hand sessions out directly, and say which
    condition ended it.
 2. **Neither qualifies → adopt neither**, and **record which condition blocked
-   each arm** — effectiveness, tail cutoff, or replenishment cap. Non-adoption is
+   each arm** — p95 margin, tail cutoff, or replenishment cap. Non-adoption is
    an operational outcome, not a finding: an arm can improve `p95` substantially
    and still fail on an arbitrary cutoff, and that says nothing about whether the
    treatment works. Do **not** conclude from this step that the readiness
@@ -283,7 +298,7 @@ Then, in order:
 
 The outlier-tolerance condition is a qualification rather than a veto applied
 afterwards, and that is deliberate: **an earlier version of this section stated
-the vetoes as fallback steps** — *"fall back to the other effective arm"* —
+the vetoes as fallback steps** — *"fall back to the other qualifying arm"* —
 without saying whether the vetoes re-applied to the fallback. Both readings were
 defensible and they disagree, so the procedure was not single-valued despite
 being labelled exhaustive.
@@ -320,10 +335,19 @@ Reported alongside, and load-bearing only where a step above says so:
 | liveness probe | one **per checkout** — required either way, so not part of this comparison |
 
 An earlier version of this document said the sacrificial channel "doubles the
-connections herdr sees per checkout." **That was wrong, and wrong in the
-direction that made C look worse than it is:** C's cost is per *insertion*, and
-pooling exists precisely so that checkouts outnumber insertions. Against the
-mandatory per-checkout probe, C's added load is small. The denominator was the
-error, and it would have biased the decision before the experiment ran.
+connections herdr sees per checkout." **That was wrong:** C's cost is one
+connection per *insertion*, not per checkout.
+
+The correction stops there. A second version went on to say that C's added load
+is therefore "small" against the per-checkout probe — which requires knowing how
+many checkouts a session serves before eviction, and **that number is not
+measured anywhere in this document**. It depends on pool sizing, eviction and UI
+demand, none of which are settled. So: report the exact per-insertion cost, and
+report insertions and checkouts observed during the run. Their ratio is an output
+of the experiment, not an input to it.
+
+Both errors ran in the same direction that the writer already favoured, first
+against C and then for it, which is the reason the raw counts are required rather
+than the conclusion.
 
 No pool implementation is required — only a measurement harness.

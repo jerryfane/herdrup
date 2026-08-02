@@ -28,7 +28,8 @@ def flat(A, B, C, oa, ob, oc, ready_c):
     """Current rule: qualification per candidate, then an ordered selection.
 
     The tail condition is an OPERATIONAL CUTOFF, not an inference. Strict
-    improvement rejects a perfect treatment against a zero-outlier baseline;
+    improvement rejects an arm that cleared every cutoff, against a zero-outlier
+    baseline;
     a cutoff of zero vetoes on a single event. Neither +1 nor +2 is justified by
     n=100 — the cutoff exists to be decidable and fixed in advance, not to be
     defensible as evidence.
@@ -124,10 +125,10 @@ def main():
 
     # Boundary cases, each a rule bug that shipped or was one edit away.
     boundaries = [
-        # zero-outlier baseline must not reject a perfect treatment
-        ((100, 5, 5, 0, 0, 0, 10), "B", "zero-outlier baseline rejects a perfect treatment"),
+        # zero-outlier baseline must not reject an arm that cleared every cutoff
+        ((100, 5, 5, 0, 0, 0, 10), "B", "zero-outlier baseline rejects an arm that cleared every cutoff"),
         # one extra outlier is inside the preregistered cutoff
-        ((100, 5, 100, 0, 1, 0, 10), "B", "a single extra outlier vetoes the only effective arm"),
+        ((100, 5, 100, 0, 1, 0, 10), "B", "a single extra outlier vetoes the only p95-qualified arm"),
         # two extra is outside it
         ((100, 5, 100, 0, 2, 0, 10), "neither", "an outlier count beyond tolerance is accepted"),
         # tolerance applies against a non-zero baseline too
