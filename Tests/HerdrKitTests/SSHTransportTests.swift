@@ -493,6 +493,79 @@ final class SSHTransportTests: XCTestCase {
         )
     }
 
+    /// AXIS: a cancellation landing in the poll-ready/`SO_ERROR` window is still
+    /// reported as a cancellation, not as the peer's refusal.
+    ///
+    /// I said this could not be staged deterministically and left it uncovered.
+    /// That was wrong, and the reviewer supplied the missing half: a
+    /// **bound-but-not-listening** loopback port gives EINPROGRESS, then poll
+    /// readiness, then a genuine `SO_ERROR = ECONNREFUSED` — a real failure
+    /// rather than our own shutdown. Verified 5/5 before writing this.
+    ///
+    /// With a real post-connect failure available, only a hook was missing. The
+    /// distinction matters because a caller that retries connection failures but
+    /// not cancellations would, in this window, re-send a request the user
+    /// cancelled.
+    func testCancellationInsideTheClassificationWindowIsStillCancellation() async throws {
+        let (listener, port) = try Self.boundButNotListening()
+        defer { _ = close(listener) }
+
+        let reachedWindow = DispatchSemaphore(value: 0)
+        let releaseWindow = DispatchSemaphore(value: 0)
+
+        var configured = SSHTransport(
+            credentials: SSHCredentials(
+                host: "127.0.0.1", port: port, username: "nobody",
+                privateKeyPEM: "not-a-key", remoteSocketPath: "/tmp/unused.sock"),
+            setupTimeout: 30
+        )
+        configured.afterConnectReadyHook = {
+            reachedWindow.signal()
+            _ = releaseWindow.wait(timeout: .now() + 5.0)
+        }
+        let transport = configured
+
+        let task = Task { _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#) }
+        XCTAssertEqual(
+            reachedWindow.wait(timeout: .now() + 10.0), .success,
+            "never reached the classification window"
+        )
+        task.cancel()
+        releaseWindow.signal()
+        let outcome = await task.result
+
+        guard case .failure(let error) = outcome else {
+            return XCTFail("a connection to a non-listening port must not succeed")
+        }
+        XCTAssertTrue(
+            error is CancellationError,
+            "cancellation inside the classification window surfaced as \(error)"
+        )
+    }
+
+    /// A loopback port that is bound but never listened on: connecting to it
+    /// goes EINPROGRESS and then fails for real, which is the one thing a
+    /// blackhole cannot provide.
+    static func boundButNotListening() throws -> (Int32, UInt16) {
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { throw XCTSkip("could not open a socket") }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_port = 0
+        _ = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        var bound = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        return (fd, UInt16(bigEndian: bound.sin_port))
+    }
+
     /// AXIS: stalled connects do not occupy the bounded queue.
     ///
     /// Six against four workers: if a stalled connect held its worker for the
@@ -543,37 +616,38 @@ final class SSHTransportTests: XCTestCase {
         }
     }
 
-    /// AXIS: concurrent requests for one endpoint share a single resolver, so a
-    /// wedged DNS server costs one thread rather than one per request.
+    /// AXIS: sixteen overlapping requests for one endpoint construct exactly
+    /// ONE resolver, so a wedged DNS server costs one thread rather than one per
+    /// request.
     ///
-    /// Abandoning a stalled resolver on its own only *relocates* exhaustion: the
-    /// worker is freed and a detached thread takes its place, so a retrying
-    /// client against wedged DNS grows threads without limit. Sharing is what
-    /// bounds it, and this transport has a single endpoint.
+    /// The previous version of this test counted the `Resolution` objects
+    /// callers received and allowed up to eight. That cannot see the bug it
+    /// names: a check-create-check registry hands every caller the same shared
+    /// object while having started and discarded fifteen threads. The reviewer
+    /// restored exactly that shape and the mutation SURVIVED — the test passed
+    /// against the broken construction it was written to catch.
     ///
-    /// A name in `.invalid` is used because it takes a real resolver round trip
-    /// (~1.3 ms measured here) — long enough for a burst to overlap. A numeric
-    /// address returns in microseconds and nothing would overlap.
-    func testConcurrentRequestsForOneEndpointShareOneResolver() throws {
-        let host = "resolver-bound-probe.invalid"
-        let lock = NSLock()
-        var distinct = Set<ObjectIdentifier>()
+    /// So this counts constructions, and holds the first resolution in flight
+    /// with a gate so the callers genuinely overlap rather than hoping they do.
+    func testOverlappingRequestsConstructExactlyOneResolver() {
+        let gate = DispatchSemaphore(value: 0)
+        // Each held thread self-releases, so a failure leaves nothing wedged.
+        SSHTransport.Resolution.startGate = { _ = gate.wait(timeout: .now() + 2.0) }
+        defer { SSHTransport.Resolution.startGate = nil }
 
+        let before = SSHTransport.Resolution.constructionCount
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
-            let resolution = SSHTransport.ResolutionRegistry.resolution(host: host, port: 22)
-            lock.lock(); distinct.insert(ObjectIdentifier(resolution)); lock.unlock()
+            _ = SSHTransport.ResolutionRegistry.resolution(
+                host: "resolver-construction-probe.invalid", port: 22
+            )
         }
+        let constructed = SSHTransport.Resolution.constructionCount - before
 
-        // Sequential completions legitimately start a fresh lookup, so a few
-        // distinct resolvers are expected. Sixteen means none were shared.
-        try XCTSkipIf(
-            distinct.count == 16,
-            "no two of 16 requests overlapped; sharing is unobservable on this machine"
+        XCTAssertEqual(
+            constructed, 1,
+            "16 overlapping requests started \(constructed) resolver threads; a wedged resolver would cost one each"
         )
-        XCTAssertLessThanOrEqual(
-            distinct.count, 8,
-            "16 concurrent requests started \(distinct.count) resolvers; a wedged resolver would cost one thread each"
-        )
+        for _ in 0..<16 { gate.signal() }
     }
 
     /// AXIS: teardown against a peer that has stopped answering returns, rather

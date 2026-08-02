@@ -197,6 +197,19 @@ public struct SSHTransport: HerdrTransport {
     /// nothing here should be read as a tuned number.
     public let setupTimeout: TimeInterval
 
+    /// Test seam: runs after `poll` reports the connect finished and before
+    /// `SO_ERROR` is classified.
+    ///
+    /// That interval is a few instructions wide and is where a cancellation gets
+    /// misread as a peer reset. I claimed it could not be reached deterministically
+    /// and left it uncovered; the reviewer supplied the missing half — a
+    /// bound-but-not-listening loopback port yields EINPROGRESS, then poll
+    /// readiness, then a genuine `SO_ERROR = ECONNREFUSED` (reproduced 5/5). With
+    /// a real post-connect failure available, a hook is all that was missing.
+    ///
+    /// `nil` on every production path.
+    var afterConnectReadyHook: (@Sendable () -> Void)?
+
     public init(
         credentials: SSHCredentials,
         hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(),
@@ -338,8 +351,31 @@ public struct SSHTransport: HerdrTransport {
         private var code: Int32 = 0
         private var finished = false
 
+        /// How many resolver threads this process has started.
+        ///
+        /// Counting *constructions* rather than the objects callers receive is
+        /// the whole point: a check-create-check registry returns one shared
+        /// object while having started and discarded fifteen threads, so a test
+        /// that counts what callers got cannot see the bug. One did not, and the
+        /// mutation restoring that shape survived it.
+        private static let auditLock = NSLock()
+        private static var constructions = 0
+
+        static var constructionCount: Int {
+            auditLock.lock(); defer { auditLock.unlock() }
+            return constructions
+        }
+
+        /// Test seam: runs on the resolver thread before `getaddrinfo`, so a
+        /// test can hold a resolution in flight and force callers to overlap.
+        nonisolated(unsafe) static var startGate: (@Sendable () -> Void)?
+
         init(host: String, port: UInt16, onFinish: @escaping @Sendable (Resolution) -> Void) {
+            Resolution.auditLock.lock()
+            Resolution.constructions += 1
+            Resolution.auditLock.unlock()
             let thread = Thread { [self] in
+                Resolution.startGate?()
                 var hints = addrinfo()
                 hints.ai_family = AF_UNSPEC
                 hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
@@ -531,6 +567,7 @@ public struct SSHTransport: HerdrTransport {
             let pending = errno
             guard pending == EINPROGRESS || pending == EINTR else { throw failed(pending) }
             try waitWritable(fd, by: deadline, live: live)
+            afterConnectReadyHook?()
             // poll() reporting the socket writable says the attempt finished,
             // not that it succeeded — a refusal is also a completion. SO_ERROR
             // carries which one it was.
@@ -539,15 +576,15 @@ public struct SSHTransport: HerdrTransport {
             guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &pendingError, &size) == 0 else {
                 throw failed(errno)
             }
-            guard pendingError == 0 else {
-                // A cancellation landing between the readiness check and here
-                // shows up as ECONNRESET, because shutting the socket down is
-                // how the cancellation is delivered. Ask before classifying:
-                // the error is what a retrying caller keys off, and this window
-                // is narrow rather than absent.
-                if live?.isInterrupted == true { throw CancellationError() }
-                throw failed(pendingError)
-            }
+            // Deliberately does NOT recheck interruption here, though a
+            // cancellation landing in this window does make SO_ERROR report a
+            // failure. The recheck at the end of `tcpConnect` already covers it,
+            // and mutation showed neither guard was individually pinned: either
+            // one alone passed the test, and only removing both failed it. That
+            // is the same trap `verifyHostKey` above records — two guards for one
+            // property means the test pins neither, and a mutation of the
+            // redundant one reports a coverage gap that does not exist.
+            guard pendingError == 0 else { throw failed(pendingError) }
         }
 
         // libssh2 is used in blocking mode, so hand it back a blocking
