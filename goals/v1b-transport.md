@@ -34,7 +34,11 @@ speculatively.
 - Work one task at a time in the listed order. Tasks 1–4 are strictly
   dependent; task 5 is independent and may run in parallel on its own branch.
 - Do not start dependent work until the prerequisite task has passed checks,
-  been pushed, opened as a PR, and merged.
+  been pushed, opened as a PR, and **received a clean review verdict at its
+  current head**. Not until it is merged — merging is the coordinator's and
+  gating on it reintroduces exactly the unreachable-condition bug that this
+  file's Definition of Done section corrects. A clean verdict means the design
+  is settled enough to build on; the merge is bookkeeping that follows.
 - Do not commit build artifacts, `.build/`, logs, generated data, credentials,
   or SSH keys.
 - Preserve existing behaviour unless the task explicitly changes it.
@@ -231,9 +235,54 @@ When review returns findings:
 4. Report the new head SHA and per-finding what changed, with file:line.
 5. Repeat until clean.
 
-## Definition of done
+## Definition of done — SCOPED TO WHAT THIS SEAT CONTROLS
 
-The full suite passes **through `SSHTransport`** rather than
-`UnixSocketTransport` — that is the real proof the tunnel carries herdr traffic
-— with the pool, reconnect, and resync behaviours tested on their own axes, and
-all five PRs merged by the coordinator.
+**Done when each of the five tasks has EITHER a clean review verdict at its
+current head, OR has been merged.** Merging is not required — but a merged task
+obviously counts, and the first wording ("open as PRs with a clean verdict")
+literally excluded merged ones, so task 5 landing made it stop counting toward
+the goal it had just satisfied.
+
+That is the third scoping error in this file, all the same shape: a condition
+written so that legitimate progress fails to satisfy it. First "all merged"
+(unreachable — merge authority is elsewhere). Then dependent work gated on merge
+(same bug one level down). Now "open" excluding "merged". The lesson is not
+about wording: **a completion condition must be checked against the states real
+progress actually produces**, not against the one state imagined while writing
+it.
+
+This is a correction, and the reason matters. v1 of this file defined done as
+"all five PRs merged by the coordinator" — a state this seat cannot reach, since
+merge authority sits with the coordinator by design. A goal whose completion
+depends on someone else's action can never be satisfied by working harder, so an
+automated completion check can only re-fire forever. It did: roughly thirty
+turns were spent re-reading unchanged state to report that nothing had changed.
+
+The merges still happen and are still tracked — by the coordinator, who holds
+them. They are simply not this goal's finish line, because a finish line you
+cannot cross is not a finish line.
+
+**Corollary:** never write a goal condition that depends on another actor's
+action. If a goal needs one, the goal is scoped wrong.
+
+## When blocked — DO NOT POLL
+
+A task is blocked when it waits on a review verdict, a merge, or a coordinator
+ruling. When that happens:
+
+1. **State the hold once**, naming exactly what would unblock it.
+2. **Stop.** Do not re-read job state, PR state, or CI on a timer. A re-check
+   that finds no change spends real tokens to learn nothing.
+3. **Wait for the wake.** Verdicts, directives, and replies all arrive as
+   events. The alarm machinery exists precisely so this seat never has to poll.
+4. **Resume the moment actionable work exists** — a verdict landing is
+   actionable, because it starts a fix round.
+
+If a check is genuinely warranted — an external system with no event, say —
+**wait at least 30 minutes between checks**, and say what changed since last
+time. Two checks in a row reporting "unchanged" means stop checking.
+
+**A goal hook firing is not a reason to poll.** If a hook re-wakes this seat
+while it is blocked on someone else, the correct response is to end the hook,
+not to satisfy it — and this seat cannot end it alone, so it must say so plainly
+and immediately rather than answering each firing.
