@@ -149,21 +149,34 @@ So:
   - **Not success:** the channel opening. herdr accepts and spawns a handler
     before reading the request, so an opened channel proves the tunnel and
     nothing about the server.
-  - **Timeout: 1 s, covering the whole sequence** — channel open, complete write,
-    one complete response line, and decode. Not a per-call bound: four one-second
-    bounds is a four-second checkout, which is the mistake the SSH transport's
-    teardown timeout made. Stated as a chosen bound, not a measured one.
+  - **One 1 s deadline for the WHOLE pre-send checkout** — validation,
+    replacement acquisition, and every probe together. Not per probe. A 1 s probe
+    deadline with a 3-attempt cap composes to 3 s before the user's request even
+    starts, and acquiring the replacement is not inside either bound, so the real
+    figure was worse than 3 s and unstated. Bounding what the user experiences,
+    rather than bounding a proxy and composing it, is the same correction the SSH
+    transport's teardown timeout needed.
+  - **At most 2 attempts: the initial session plus one already-ready
+    replacement.** The reasoning is asymmetric on purpose. A *fast* failure is a
+    stale session and recovers on the second attempt; a *slow* failure has
+    already spent the shared budget, and it is likelier to be a backend-wide
+    outage where retrying adds load precisely when the server can least afford
+    it. So the budget, not the attempt count, is what actually stops the loop.
+  - **If no ready replacement exists, fail immediately with "backend
+    unavailable" and replenish asynchronously.** Waiting for a session to be
+    created and prewarmed is the checkout paying the readiness cost it exists to
+    avoid.
   - **On failure or timeout:** close the probe channel, discard and close the
-    session, take another. Never probe the same session twice — a second probe
-    is the same optimism the delivery rule below refuses.
+    session. Never probe the same session twice — a second probe is the same
+    optimism the delivery rule below refuses.
   - **Close the probe channel before opening the request channel.** herdr's
     command socket is single-shot, so the probe's channel is spent; leaving it
     open holds a connection the reaper will come for.
-  - **Replacement is bounded: at most 3 attempts per checkout.** Then fail the
-    request with a distinct "backend unavailable" error rather than looping. An
-    unbounded replace-and-retry against a herdr that is down is an accidental
-    reconnect storm, and it fails at exactly the moment the server can least
-    afford it.
+  - **The user's request gets its OWN deadline, separate from checkout.** Its
+    delivery semantics differ: a checkout that runs out of budget has sent
+    nothing and is always safe to abandon, whereas a request that runs out may
+    have been delivered — which is the definitely-not-sent / possibly-sent
+    distinction below. One deadline spanning both would erase it.
   - **`ping` specifically** because it changes nothing. A probe with a side
     effect would make every checkout an unlogged write.
 - **Discard and replace** a session that fails the probe; never nurse it.
@@ -213,8 +226,10 @@ So:
 
 ## Open question carried forward
 
-**Why the post-authentication readiness delay exists.** Not herdr, not `UseDNS`,
-not GSSAPI. It resembles a settling period more than work, but that is untested.
+**Why the post-authentication readiness delay exists.** Not `UseDNS`, not
+GSSAPI. **herdr is not *necessary* for it** — a trivial echo socket with no herdr
+code in the path produced a large delay — but that does not establish that herdr
+cannot contribute to it, and this memo previously wrote the stronger "not herdr". It resembles a settling period more than work, but that is untested.
 
 The design does not depend on the *cause*: whichever readiness transition wins,
 it moves the cost off the request path without needing to know why the cost is
