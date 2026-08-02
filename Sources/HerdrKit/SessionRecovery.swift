@@ -12,6 +12,13 @@ import Foundation
 /// steps inside one plan, and this is about which *attempt* a callback belongs
 /// to.
 public struct AttemptID: Equatable, Hashable, Sendable {
+    /// Random per `State` lifetime. A bare counter restarts at 1 when a caller
+    /// replaces the State value — `state = SessionRecovery.State()` — after
+    /// which a late callback minted by the DISCARDED state matched the new
+    /// state's first attempt and was adopted, defeating the stale-callback
+    /// protection entirely. Identity must survive the identity-holder being
+    /// rebuilt, so it carries an epoch the rebuild cannot reproduce.
+    let epoch: UInt64
     let value: UInt64
 }
 
@@ -157,12 +164,11 @@ public struct SessionRecovery: Sendable {
     /// Stated at that strength and no more, after a sweep refuted the stronger
     /// claim ("every transition goes through plan()"): two other methods mutate
     /// state, and value semantics plus the public initialiser mean a caller can
-    /// still REPLACE the whole value — `state = SessionRecovery.State()` resets
-    /// the attempt counter, after which a pre-reset attempt's identifier can be
-    /// re-minted and a late callback mistaken for current. Wholesale
-    /// replacement is the caller destroying their own session tracking, and no
-    /// access level on fields prevents it; hold one `State` per client and
-    /// never rebuild it mid-session.
+    /// still REPLACE the whole value. Attempt identity survives that: each
+    /// State draws a random epoch at init and every AttemptID carries it, so a
+    /// callback minted before a replacement cannot match anything minted after
+    /// — it goes stale instead of being adopted. Replacement still discards
+    /// pane and connection bookkeeping; hold one `State` per client.
     public struct State: Equatable, Sendable {
         public internal(set) var consecutiveFailures: Int = 0
         public internal(set) var connectedSince: Date?
@@ -171,14 +177,24 @@ public struct SessionRecovery: Sendable {
         /// cancellation, backgrounding and network changes, so anything that
         /// completes afterwards is recognisably stale.
         public internal(set) var currentAttempt: AttemptID?
-        /// Monotonic within one `State` value's lifetime, so an identifier is
-        /// not reused and a late callback is not mistaken for a current one —
-        /// see the type doc for the wholesale-replacement caveat that bounds
-        /// this claim.
+        /// Counter within this State's epoch; the pair (epoch, value) is what
+        /// identifies an attempt, so replacing the State value changes the
+        /// epoch and every callback minted before the replacement goes stale.
         internal var nextAttemptValue: UInt64 = 0
+        /// Drawn at init. Two State values agreeing by chance is a 1-in-2^64
+        /// event, not a caller mistake away.
+        internal var attemptEpoch: UInt64 = UInt64.random(in: UInt64.min...UInt64.max)
         /// Every pane the client believes exists. Subscriptions are pane-scoped,
-        /// so this is also the re-subscribe list.
+        /// so this is also the re-subscribe list on the next adoption.
         public internal(set) var knownPanes: Set<String> = []
+        /// Panes with an open subscription on the CURRENT transport. Distinct
+        /// from `knownPanes`, and the distinction is load-bearing: a snapshot
+        /// that shrinks removes a pane from knowledge while its subscription
+        /// stays open (there is no unsubscribe verb on the wire — subscriptions
+        /// end when their connection does). Without this ledger, that pane
+        /// REAPPEARING got an incremental second subscription on top of its
+        /// still-open first.
+        public internal(set) var subscribedPanes: Set<String> = []
 
         public init() {}
 
@@ -206,7 +222,7 @@ public struct SessionRecovery: Sendable {
     /// late callback recognisable rather than plausible.
     private func nextAttempt(_ state: inout State) -> AttemptID {
         state.nextAttemptValue += 1
-        let id = AttemptID(value: state.nextAttemptValue)
+        let id = AttemptID(epoch: state.attemptEpoch, value: state.nextAttemptValue)
         state.currentAttempt = id
         return id
     }
@@ -225,6 +241,7 @@ public struct SessionRecovery: Sendable {
     public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
         guard state.isForeground else { return RecoveryPlan() }
         state.connectedSince = nil
+        state.subscribedPanes = []
         return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
     }
 
@@ -257,6 +274,7 @@ public struct SessionRecovery: Sendable {
             // restarting the stability clock.
             guard state.connectedSince == nil else { return RecoveryPlan() }
             state.connectedSince = at
+            state.subscribedPanes = state.knownPanes
             // The only emitter of `.resyncAllPanes`, and the only emitter of the
             // FULL-SET subscribe. Not the only `.subscribe` site: `paneCreated`
             // and `observe` emit incremental single-pane/added-pane subscribes
@@ -282,6 +300,7 @@ public struct SessionRecovery: Sendable {
                 state.consecutiveFailures = 0
             }
             state.connectedSince = nil
+            state.subscribedPanes = []
             state.consecutiveFailures += 1
             let delay = backoff(failures: state.consecutiveFailures, using: &generator)
             return RecoveryPlan([.reconnect(nextAttempt(&state), after: delay)])
@@ -291,6 +310,7 @@ public struct SessionRecovery: Sendable {
             // address that may no longer exist, and a half-open connection on a
             // dead interface fails by timing out rather than by erroring.
             state.connectedSince = nil
+            state.subscribedPanes = []
             state.consecutiveFailures = 0
             state.currentAttempt = nil
             guard state.isForeground else { return RecoveryPlan([.cancelTransport]) }
@@ -299,6 +319,7 @@ public struct SessionRecovery: Sendable {
         case .backgrounded:
             state.isForeground = false
             state.connectedSince = nil
+            state.subscribedPanes = []
             state.currentAttempt = nil
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
@@ -309,6 +330,7 @@ public struct SessionRecovery: Sendable {
             state.isForeground = true
             state.consecutiveFailures = 0
             state.connectedSince = nil
+            state.subscribedPanes = []
             // Cancel FIRST. Foregrounding is not guaranteed to find a dead
             // transport: a foregrounded event with a connection still live (the
             // OS never suspended us, or a lifecycle bug delivered no
@@ -321,10 +343,16 @@ public struct SessionRecovery: Sendable {
             return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
 
         case .paneCreated(let pane):
-            let isNew = state.knownPanes.insert(pane).inserted
-            // Only worth subscribing now if there is a connection to subscribe
-            // on; otherwise the next `connected` picks it up in the full set.
-            guard isNew, state.isConnected else { return RecoveryPlan() }
+            state.knownPanes.insert(pane)
+            // Subscribe only if there is a connection AND this transport does
+            // not already hold a subscription for the pane. The second check is
+            // the reappearing-pane case: a snapshot shrink forgets a pane while
+            // its subscription stays open (no unsubscribe verb exists), so
+            // "newly known" is not "unwatched".
+            guard state.isConnected, !state.subscribedPanes.contains(pane) else {
+                return RecoveryPlan()
+            }
+            state.subscribedPanes.insert(pane)
             return RecoveryPlan([.subscribe([pane])])
 
         case .paneClosed(let pane):
@@ -353,10 +381,16 @@ public struct SessionRecovery: Sendable {
     /// nothing, since the pane was already known. Subscriptions are pane-scoped
     /// with no wildcard, so nothing else would ever cover it.
     public func observe(_ snapshot: PaneSnapshot, state: inout State) -> RecoveryPlan {
-        let added = snapshot.paneIDs.subtracting(state.knownPanes)
         state.knownPanes = snapshot.paneIDs
-        guard state.isConnected, !added.isEmpty else { return RecoveryPlan() }
-        return RecoveryPlan([.subscribe(added)])
+        // Diffed against the SUBSCRIPTION ledger, not prior knowledge: a pane
+        // this transport already watches must not be subscribed twice however
+        // many times snapshots forget and rediscover it, and a shrink leaves
+        // its open subscriptions in place because nothing on the wire can close
+        // one short of the connection itself.
+        let unwatched = snapshot.paneIDs.subtracting(state.subscribedPanes)
+        guard state.isConnected, !unwatched.isEmpty else { return RecoveryPlan() }
+        state.subscribedPanes.formUnion(unwatched)
+        return RecoveryPlan([.subscribe(unwatched)])
     }
 }
 
