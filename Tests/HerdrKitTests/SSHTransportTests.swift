@@ -524,9 +524,15 @@ final class SSHTransportTests: XCTestCase {
             }
         } catch { /* cancelled or refused; either way the branch ran */ }
 
-        XCTAssertTrue(reached.isSet,
-                      "the seam never fired; the adoption window was not entered and the "
-                      + "assertion below would be vacuous")
+        XCTAssertTrue(reached.isSet, "the seam never fired; the window was not entered")
+        // BRANCH-SPECIFIC EVIDENCE. `reached` proves only that the SEAM ran.
+        // Replacing the whole guard with a bare `_ = live?.adopt(...)` compiled
+        // and left this test green: the later cleanup closed the descriptor
+        // once, the tally matched, and the error was swallowed. Proving the
+        // branch RAN needs something only the branch produces.
+        XCTAssertEqual(
+            DescriptorAudit.adoptionRejections(by: transport.auditToken), 1,
+            "the adopt-rejection branch never ran; the tally comparison below proves nothing")
         XCTAssertEqual(
             DescriptorAudit.doubleCloses(by: transport.auditToken), baseline,
             "the adopt-rejection cleanup closed its descriptor twice")
