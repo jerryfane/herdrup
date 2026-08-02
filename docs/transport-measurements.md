@@ -179,9 +179,25 @@ Write `A95`, `B95`, `C95` for each arm's p95 `t_request`.
 
 ### Decision procedure, fixed before running
 
-**20 ms** is the margin throughout — roughly the floor for a difference a person
-notices — and it is **inclusive on the qualifying side**, so a difference of
-exactly 20 ms qualifies.
+**Every threshold in this procedure is a preregistered operational cutoff.**
+None is derived from data or from a cited result. They are fixed here, before the
+run, so they cannot be chosen after seeing the numbers — that is the entire claim
+being made for them:
+
+| cutoff | value | what it is not |
+|---|---|---|
+| effectiveness margin | 20 ms | *not* a measured perceptual threshold. Earlier drafts called it "roughly the floor a person notices"; nothing here supports that, and no source was cited. |
+| outlier definition | `t_request` > 500 ms | *not* a boundary between two established regimes. |
+| tail cutoff | A's count + 1 | *not* an evidence threshold — see below. |
+| replenishment cap | `t_ready` p95 ≤ 50 ms | *not* a measured budget. |
+| samples | n = 100 per arm | chosen for cost. |
+
+The margin is **inclusive on the qualifying side**, so a difference of exactly
+20 ms qualifies.
+
+This table exists because these cutoffs were corrected one at a time, three
+rounds running, each round leaving the others still dressed as evidence. Declaring
+them together is the only version that does not leak.
 
 A candidate **qualifies** when all of the following hold:
 
@@ -213,11 +229,13 @@ correcting the last and introducing the next:
    in the opposite direction — a **large enough** difference is perfectly
    detectable at n = 100.
 
-The accurate limitation is narrower than any of them: **n = 100 does not justify
-the `+1` boundary specifically, and does not support a useful non-inferiority
-guarantee for events this rare.** A cutoff has to be fixed *before* the run so it
-cannot be chosen after seeing the numbers, and `+1` is that cutoff — picked for
-decidability. It is declared here rather than defended.
+The accurate limitation is narrower than any of them, and is the only one
+stated: **n = 100 does not justify the `+1` boundary.** Whether n = 100 would
+support some *other* tail criterion is not asserted either way — that depends on
+a baseline rate, a margin, an alpha and a power, none of which are defined here,
+so any claim about adequacy would be the same unbacked kind this paragraph exists
+to stop. `+1` is fixed before the run so it cannot be chosen after seeing the
+numbers. It is declared, not defended.
 
 **What follows, so the tolerance is not mistaken for safety:** this condition
 establishes neither that an adopted arm improves the tail nor that it leaves it
@@ -237,11 +255,17 @@ obligation, not a veto — vetoing it was what produced the hole above.
 
 Then, in order:
 
-1. **`A95` ≤ 20 ms → adopt neither.** The delay did not reproduce; there is
-   nothing to remove. Hand sessions out directly.
-2. **Neither qualifies → adopt neither**, and record that the readiness
-   hypothesis failed. The mechanism is then genuinely unknown, and the open
-   question below becomes the next work rather than a pool feature.
+1. **`A95` ≤ 20 ms → adopt neither.** The delay did not reproduce *above the
+   operational margin, in this run*. That is a statement about this batch, not
+   about whether the delay exists. Hand sessions out directly, and say which
+   condition ended it.
+2. **Neither qualifies → adopt neither**, and **record which condition blocked
+   each arm** — effectiveness, tail cutoff, or replenishment cap. Non-adoption is
+   an operational outcome, not a finding: an arm can improve `p95` substantially
+   and still fail on an arbitrary cutoff, and that says nothing about whether the
+   treatment works. Do **not** conclude from this step that the readiness
+   hypothesis failed or that the mechanism is unknown; establishing either needs
+   a separate analysis of treatment effect, which this procedure does not perform.
 3. **Exactly one qualifies → adopt it.**
 4. **Both qualify → adopt C if `B95 − C95` ≥ 20 ms, otherwise B.** Ties and
    near-ties go to B, which costs herdr nothing. This is the only tie-break.
