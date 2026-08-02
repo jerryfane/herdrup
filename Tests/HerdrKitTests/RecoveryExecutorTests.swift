@@ -9,6 +9,18 @@ import XCTest
 /// snapshot that races a reconnect. The log is the test surface — assertions
 /// read the ORDER of operations, because ordering is what the coordinator made
 /// an acceptance criterion.
+/// A lock-guarded mutable cell, so a @Sendable hook can hand a value back to the
+/// test that installed it.
+final class UncheckedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T
+    init(_ value: T) { stored = value }
+    var value: T {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
 final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     enum Operation: Equatable {
         case connect(AttemptID)
@@ -131,13 +143,33 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     }
     /// 0 = not armed for this pane, 1 = the throwing first open, 2 = the retry
     /// that parks, 3+ = pass through.
-    private func catchPathPhase(_ pane: String) -> Int {
+    /// Classifies the entry AND captures the window it belongs to, under ONE
+    /// lock acquisition.
+    ///
+    /// They were two operations, and that was the last shared-slot race in this
+    /// seam: an invocation could classify as phase 2 against arm N, lose the
+    /// lock, and then look up `catchWindows[pane]` after arm N+1 had replaced
+    /// it — parking the NEW window. `retryIsParked` then answered true for a
+    /// window nothing had legitimately parked, so the seam tests could report
+    /// armed while the parked open belonged to a dead arm. Probe failed 6/6.
+    ///
+    /// Third variant of one mistake on this seam: shared per-pane state read at
+    /// a different moment than it was decided on. Generation numbers fixed the
+    /// value, objects fixed the identity, and this fixes the ATOMICITY — the
+    /// phase decision and the thing it applies to now cannot be separated.
+    private func catchPathStep(_ pane: String) -> (phase: Int, window: CatchWindow?) {
         lock.withLock {
-            guard catchWindows[pane] != nil else { return 0 }
+            guard let window = catchWindows[pane] else { return (0, nil) }
             catchPhase[pane, default: 0] += 1
-            return catchPhase[pane] ?? 0
+            return (catchPhase[pane] ?? 0, window)
         }
     }
+
+    /// Fires between phase classification and the park, so a test can re-arm in
+    /// that gap. Exists only to prove the classification and the window are
+    /// bound atomically — without it, the binding is untestable, because a
+    /// correct implementation has no observable gap to aim at.
+    var afterPhaseClassification: (@Sendable (Int) -> Void)?
 
     /// How many times `openStream` has been ENTERED for this pane, counted
     /// independently of how many terminators are live.
@@ -300,16 +332,18 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         // dead third outcome 1 in 11 — a mutant escaping into a timeout is
         // indistinguishable from a mutant that was killed, so the race
         // corrupted the mutation evidence, not just the test.
-        let phase = catchPathPhase(pane)
+        let step = catchPathStep(pane)
+        afterPhaseClassification?(step.phase)
+        let phase = step.phase
         if phase == 1 {
             dropOwnRegistration(pane)      // the contract: a throwing open leaves nothing live
             throw TransportError.closedBeforeResponse
         }
         if phase == 2 {
-            // The parked open holds a REFERENCE to its own window. Nothing
-            // consults per-pane state to decide whether it may proceed, so no
-            // later arm and no delayed release aimed elsewhere can reach it.
-            let window = lock.withLock { catchWindows[pane] }
+            // The window came back WITH the phase decision, from the same lock
+            // acquisition. Re-reading `catchWindows[pane]` here is the defect
+            // this replaced — by this point a re-arm may have swapped it.
+            let window = step.window
             window?.setParked(true)
             while !(window?.isReleased ?? true) {
                 try? await Task.sleep(nanoseconds: 10_000_000)
@@ -678,6 +712,53 @@ final class RecoveryExecutorTests: XCTestCase {
 
         window.release()
         _ = await second.result
+    }
+
+    /// AXIS: an invocation that classified against one arm parks THAT arm's
+    /// window, even if a replacement is armed before it reaches the park.
+    ///
+    /// The last of three shared-slot defects in this seam, and the one that
+    /// made the other seam tests untrustworthy rather than merely wrong: with
+    /// the classification and the window read separately, an open belonging to
+    /// a dead arm could park the live window, so `retryIsParked` answered true
+    /// for a window nothing had legitimately parked. Every test asserting "a
+    /// window parks" was satisfiable that way.
+    ///
+    /// Needs the `afterPhaseClassification` hook, because a correct
+    /// implementation has no observable gap between the two operations — the
+    /// hook manufactures the only moment at which the question can be asked.
+    func testAnInFlightOpenParksItsOwnArmNotAReplacement() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        let first = transport.armCatchPathWindow("p")
+
+        let replacement = UncheckedBox<ScriptedTransport.CatchWindow?>(nil)
+        transport.afterPhaseClassification = { @Sendable phase in
+            guard phase == 2, replacement.value == nil else { return }
+            replacement.value = transport.armCatchPathWindow("p")   // re-armed mid-flight
+        }
+
+        await expectThrow("entry 1 must throw") {
+            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
+        }
+        let retry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
+
+        let parkedItsOwn = await waitUntil { first.isParked }
+        XCTAssertTrue(parkedItsOwn, "the in-flight open did not park the arm it classified against")
+        let second = try XCTUnwrap(replacement.value, "the hook never re-armed; the race was not staged")
+        XCTAssertFalse(second.isParked, "the in-flight open parked a window armed after it")
+        XCTAssertFalse(transport.retryIsParked("p"),
+                       "retryIsParked reported the CURRENT window as parked; it is not, and every "
+                       + "seam test asserting 'a window parks' would pass for this wrong reason")
+
+        // Release EVERY window this test armed, not just the one it expects to
+        // be parked. Releasing only `first` made the mutant HANG instead of
+        // fail: with the defect the open parks the replacement, so the awaited
+        // task never returned and the harness reported ESCAPED. A hang is not a
+        // kill — same lesson as a crash not being a kill, one axis over. A test
+        // that stages a race has to be able to tear down either outcome.
+        first.release()
+        replacement.value?.release()
+        _ = await retry.result
     }
 
     /// AXIS: a release created for an EARLIER window cannot open a later one,
