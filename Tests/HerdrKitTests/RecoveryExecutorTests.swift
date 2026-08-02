@@ -1361,6 +1361,34 @@ actor SleepRecorder {
     // correct across the transitions that now depend on it. A signal promoted
     // without a matching rise in its guards is how a class gets reopened later.
 
+    /// Waits for POSITIVE evidence that a pane exhausted its attempts, and
+    /// asserts it.
+    ///
+    /// `!subscribedPanes.contains(pane)` is NOT that evidence, and both
+    /// transition tests were armed on it: absence is true immediately at
+    /// start, before the first connection and snapshot have admitted anything,
+    /// so the wait returned instantly and the tests ran with no exhaustion
+    /// having occurred. A compiling no-op replacing the whole retraction
+    /// SURVIVED both. Seventh instance in this file of a precondition
+    /// observing something that PRECEDES the window it names — and the first
+    /// where the observable was the very state the window is supposed to
+    /// produce, which is what made it look right.
+    ///
+    /// Exhaustion at the cap is positive and cannot be true early.
+    private func waitForExhaustion(
+        _ executor: RecoveryExecutor, _ pane: String
+    ) async {
+        let exhausted = await waitUntil {
+            if case .admittedNotOpen(let attempts, _) = await executor.paneStatus(pane) {
+                return attempts >= RecoveryExecutor.openFailureCap
+            }
+            return false
+        }
+        XCTAssertTrue(exhausted,
+                      "\(pane) never reached the failure cap; the test is not armed and any "
+                      + "assertion about retraction below is vacuous")
+    }
+
     /// AXIS: exhaustion arriving DURING adoption cannot retract from the new
     /// attempt's ledger — the retraction is bound to the attempt that exhausted.
     func testExhaustionDuringAdoptionCannotRetractTheNewAttemptsAdmission() async throws {
@@ -1371,10 +1399,11 @@ actor SleepRecorder {
         await executor.start()
         let oldOptional = await executor.currentAttempt
         let old = try XCTUnwrap(oldOptional)
-        // Wait for the first attempt to have exhausted and retracted, so the
-        // late event below is genuinely a RETIRED attempt's exhaustion.
-        let firstRetracted = await waitUntil { await !executor.subscribedPanes.contains("bad") }
-        XCTAssertTrue(firstRetracted, "the first attempt never exhausted; the test is not armed")
+        // POSITIVE evidence of exhaustion first, then absence — so the late
+        // event below is genuinely a RETIRED attempt's exhaustion.
+        await waitForExhaustion(executor, "bad")
+        let firstRetracted = await !executor.subscribedPanes.contains("bad")
+        XCTAssertTrue(firstRetracted, "exhaustion did not retract the first attempt's admission")
 
         // A new attempt adopts and re-admits from a fresh snapshot. The pane
         // is STALLED rather than failing now, so the new attempt holds a live
@@ -1432,8 +1461,9 @@ actor SleepRecorder {
         let executor = RecoveryExecutor(transport: transport)
         await executor.setSleeper { _ in }
         await executor.start()
-        let retracted = await waitUntil { await !executor.subscribedPanes.contains("p") }
-        XCTAssertTrue(retracted, "the pane was never retracted; the test is not armed")
+        await waitForExhaustion(executor, "p")
+        let retracted = await !executor.subscribedPanes.contains("p")
+        XCTAssertTrue(retracted, "exhaustion did not retract the admission")
 
         // A new connection is a genuine fresh chance: counters retire with the
         // attempt and adoption re-admits from the snapshot.
