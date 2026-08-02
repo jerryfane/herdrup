@@ -179,7 +179,15 @@ final class SessionRecoveryTests: XCTestCase {
         // discovery has no other path: snapshots only arrive over transports.
         var offline = try seeded(["p1"])
         let stale = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
+        // CONNECT IT FIRST. Without this the attempt is current-but-unconnected,
+        // which rejects snapshots for a DIFFERENT reason — so deleting the
+        // networkChanged below left the test green and it pinned the connection
+        // gate rather than abandonment.
+        XCTAssertEqual(plan(.connected(stale, at: Date()), &offline).actions,
+                       [.resyncAllPanes(stale)],
+                       "the attempt never adopted; the abandonment below is not the gate under test")
         _ = plan(.networkChanged(at: Date()), &offline)   // stale is abandoned
+        XCTAssertNotEqual(offline.currentAttempt, stale, "the attempt was not abandoned")
         let ignored = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), from: stale, state: &offline)
         XCTAssertTrue(ignored.isEmpty, "an abandoned attempt's snapshot must admit nothing")
         XCTAssertEqual(offline.knownPanes, ["p1"], "nor may it mutate knowledge")
@@ -203,7 +211,14 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let preReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
 
-        state = try seeded(["p1"])   // the caller rebuilds their state
+        // A MARKER THAT CROSSES THE ASSIGNMENT. Deleting the rebuild left this
+        // green: both attempts are minted from the same lineage either way and
+        // the identities still differ, so "not equal" proved nothing about
+        // replacement. knownPanes is value-stored, so it travels with the
+        // rebuilt State and distinguishes it from the original.
+        state = try seeded(["p1", "replacement-marker"])   // the caller rebuilds their state
+        XCTAssertTrue(state.knownPanes.contains("replacement-marker"),
+                      "the state was never replaced; every assertion below is about the original")
         let postReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertNotEqual(preReplacement, postReplacement,
                           "a rebuilt State reminted an identical attempt identity")
@@ -224,9 +239,18 @@ final class SessionRecoveryTests: XCTestCase {
     func testMintingAfterASavedCopyRestoreCannotReproduceAnIdentity() throws {
         var state = try seeded(["p1"])
         let saved = state
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-1")
         let minted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
 
         state = saved   // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-1"),
+                       "the saved copy was never restored; this test is not about replay")
         let reminted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertNotEqual(minted, reminted,
                           "a saved-copy restore reproduced a previously minted identity")
@@ -250,11 +274,20 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         let saved = state                      // A is current in this copy
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-2")
 
         let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
         let attemptB = changed.reconnectAttempt!
 
         state = saved                          // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-2"),
+                       "the saved copy was never restored; this test is not about replay")
         let lateA = plan(.connected(attemptA, at: Date()), &state)
         XCTAssertEqual(lateA.actions, [.discardConnection],
                        "a cancelled attempt was reauthorized by value restoration")
@@ -281,11 +314,20 @@ final class SessionRecoveryTests: XCTestCase {
         let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         _ = plan(.connected(attemptA, at: Date()), &state)
         let saved = state                       // connected bookkeeping aboard
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-3")
 
         let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
         let attemptB = changed.reconnectAttempt!
 
         state = saved                           // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-3"),
+                       "the saved copy was never restored; this test is not about replay")
 
         // No incremental subscribe may target the cancelled transport.
         XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
@@ -353,14 +395,32 @@ final class SessionRecoveryTests: XCTestCase {
     /// target p2.
     func testReplayedKnowledgeCannotSubscribeAClosedPane() throws {
         var state = try seeded(["p1", "p2"])
-        _ = connect(&state)
+        let opened = connect(&state)
+        // p2 MUST BE IN THE SAVED COPY, or "replayed knowledge cannot subscribe
+        // it" is true because there was nothing to replay. The test passed both
+        // with the close deleted AND with p2 never present: the authoritative
+        // ["p1"] snapshot at the end supplies the closed-pane state on its own.
+        XCTAssertTrue(state.knownPanes.contains("p2"),
+                      "p2 is not in the state being saved; the replay has nothing to carry")
         let saved = state
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-4")
 
-        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
+        _ = plan(.paneClosed("p2", from: opened), &state)
+        XCTAssertFalse(state.knownPanes.contains("p2"),
+                       "the close did not take effect; the replay below carries a pane the "
+                       + "live state never dropped, so nothing distinguishes replay from truth")
         let changed = plan(.networkChanged(at: Date()), &state)
         let attemptB = changed.reconnectAttempt!
 
         state = saved                           // the replay: memory says p2 exists
+        XCTAssertFalse(state.knownPanes.contains("live-marker-4"),
+                       "the saved copy was never restored; this test is not about replay")
 
         let adopted = plan(.connected(attemptB, at: Date()), &state)
         XCTAssertEqual(adopted.actions, [.resyncAllPanes(attemptB)],
@@ -578,9 +638,18 @@ final class SessionRecoveryTests: XCTestCase {
     func testASavedForegroundedCopyCannotDialAfterBackgrounding() throws {
         var state = try seeded(["p1"])
         let saved = state                       // foregrounded copy
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-5")
 
         _ = plan(.backgrounded(at: Date()), &state)
         state = saved                           // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-5"),
+                       "the saved copy was never restored; this test is not about replay")
 
         XCTAssertTrue(recovery.beginInitialAttempt(state: &state).isEmpty,
                       "a replayed foreground bit let a backgrounded client dial")
