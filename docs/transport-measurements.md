@@ -9,6 +9,12 @@ conclusions remain unverified.
 
 **Loopback is a floor, not a prediction for cellular.**
 
+> **Batch note, added 2026-08-02:** the tables and figures in the next three
+> sections are the earlier 30-sample-era batches, kept as recorded history. The
+> 300-trial randomised run (Results, below) measured this run's immediate opens
+> at 140.2–177.9 ms — entirely outside the 89.6–102.1 ms range recorded here.
+> Batches differ; neither table corrects the other.
+
 ## Measured phase latencies
 
 | phase | latency | what it is |
@@ -16,8 +22,8 @@ conclusions remain unverified.
 | TCP connect | 0.1 ms | negligible |
 | SSH handshake / key exchange | 18.6 ms | measured latency of the handshake phase |
 | public-key authentication | 20.4 ms | measured latency of the auth phase |
-| channel opened immediately after auth | ~96 ms (p50 of one 30-sample batch) | readiness delay |
-| channel on a session aged 100 ms | 0.28–0.54 ms | ready |
+| channel opened immediately after auth | ~96 ms (p50 of one 30-sample batch) | the immediate-open case |
+| channel on a session aged 100 ms | 0.28–0.54 ms | the aged-open case |
 | missing `TCP_NODELAY` | ~30 ms | fixed, recovered |
 
 These are **phase latencies**, not proof of where the time goes inside each
@@ -25,7 +31,15 @@ phase. The handshake and auth figures are plausibly dominated by cryptographic
 work, but this measurement times the API call — it does not establish that the
 latency is computation rather than round trips or waiting.
 
-## The finding: a post-authentication readiness delay
+## The finding: immediate opens cost more than aged opens
+
+Naming note, after review: earlier versions called this a "readiness delay" and
+called aged sessions "ready". Those are **state words for a state nothing here
+observed** — the batches establish an association between elapsed time since
+authentication and channel-open latency, and no measurement distinguishes "a
+session becoming ready" from any other explanation of that association. The
+observational vocabulary is used from here on; "readiness experiment" survives
+below only as the experiment's proper name.
 
 An earlier version claimed *"the first channel of a session is expensive; every
 channel after it is free."* **That is false** — the controls below show a first
@@ -61,13 +75,13 @@ candidate treatments are available:
 - **Sacrificial channel** — open and free one channel on the session, then hand
   it out.
 
-**Neither is chosen here, and this document does not prescribe one — nor that
-one is needed.** Every measurement below varies *elapsed time*; not one opens a
-sacrificial channel, so there is no evidence bearing on the second candidate at
-all. Earlier versions named it as the design response anyway, and a later version
-said a transition was *required*, which is the conclusion the experiment exists to
-reach. The experiment records each arm's `p95` and may select B, C or **neither**;
-until it is run, the pool should treat all three outcomes as open.
+**The experiment below has now been run and selected the age gate** (see
+Results). Before it ran, this section refused to choose — earlier versions named
+the sacrificial channel as the design response with no measurement bearing on
+it, and a later one said a transition was *required*, which was the conclusion
+the experiment existed to reach. The 100-trial C arm is now the first evidence
+about the sacrificial channel at all: it cleared the latency margin and was
+blocked by the replenishment cap.
 
 ## The method lesson — corrected twice
 
@@ -101,9 +115,10 @@ instead of reconstructed.
 
 ## What remains unknown
 
-**Why a freshly authenticated session is not immediately ready.** The effect is
+**What explains the immediate-versus-aged latency difference.** The effect is
 associated with the period just after authentication, but its mechanism is not
-identified, and this document should not be read as locating it in any
+identified — and "the session was not yet ready" is a restatement of the
+observation, not an explanation of it, and this document should not be read as locating it in any
 particular layer — earlier versions placed it in "the first
 `direct-streamlocal` forward of a session," which the measurements do not
 support.
@@ -118,15 +133,16 @@ timeout or retry more than work, but that is a hypothesis and is untested.
 
 - Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
   once instead of per request.
-- **If the delay reproduces on the request path, a readiness transition or a
+- **If the delay reproduces on the request path, an eligibility rule or a
   validation step belongs before checkout** — pooling alone would leave the delay
   there. Stated conditionally: the experiment below can adopt neither arm, and
   the existing measurements show an association with multi-second outliers even
   in the control, so *that a transition is needed* is not established here. Which
   transition, if any, is what the experiment decides. Do not implement one before
   running it.
-- Channels are not worth pooling: they are consistently cheap on a ready
-  session, and herdr's command socket is single-shot, so each request needs its
+- Channels are not worth pooling: they are *typically* cheap on an aged
+  session — sub-millisecond at the median, but 33 of 100 aged opens in the
+  randomised run still cost ~100 ms, so "consistently" was falsified — and herdr's command socket is single-shot, so each request needs its
   own regardless.
 - The eviction threshold **needs its own basis.** The original plan inherited
   ~3 s from herdr's `INITIAL_REQUEST_TIMEOUT`, which governs herdr's socket, not
@@ -155,11 +171,15 @@ Three arms, each starting from a **fresh authenticated session**:
 Method:
 
 - **n = 100 per arm**, 300 sessions total, arms **interleaved in randomised
-  order** so machine load and thermal drift hit all three alike. A blocked run
-  of A followed by a blocked run of C would confound the treatment with time.
+  order**. This balances machine load and thermal drift across arms **in
+  expectation only** — one 300-session run can still land drift unevenly. A
+  blocked run of A followed by a blocked run of C would confound treatment with
+  time outright; randomisation removes the systematic version of that, not the
+  sampled one. The realised order and a per-trial start timestamp are retained
+  so temporal imbalance can be inspected rather than assumed away.
 - **Retain every raw sample**: arm, **`t_request`**, **`t_ready`** (the full
   sacrificial open-and-free duration for C, the idle interval for B, zero for A),
-  session age at open, and sequence index. Both durations, because the
+  session age at open, sequence index, and **start timestamp**. Both durations, because the
   replenishment condition is stated in terms of `t_ready` and a contract that
   retains one latency cannot recompute it. Summaries are what made the earlier
   `p50 = 40.7 ms` unexplainable after the fact.
@@ -185,16 +205,22 @@ Write `A95`, `B95`, `C95` for each arm's p95 `t_request`.
 
 ### Decision procedure, fixed before running
 
-**This procedure selects; it does not measure a treatment effect — in either
-direction.** Adoption means an arm cleared preregistered cutoffs *in this batch*.
-It is not evidence that the treatment works, exactly as non-adoption is not
-evidence that it fails. An earlier version attached that disclaimer only to
-non-adoption, which left adoption readable as a finding; the asymmetry was the
-whole leak.
+**The selector selects; it does not estimate a treatment effect or quantify
+uncertainty — in either direction.** Adoption means an arm cleared preregistered
+cutoffs *in this batch*; non-adoption means it did not. Neither is, by itself,
+evidence about the treatment. An earlier version attached that disclaimer only
+to non-adoption, which left adoption readable as a finding; the asymmetry was
+the whole leak.
+
+Scoped to the selector deliberately, because a previous version overcorrected
+into "no analysis in this document could establish effectiveness" — too
+absolute. The experiment *randomises* concrete interventions across fresh
+sessions, so the retained per-trial samples can support a separate randomised
+contrast analysis, with uncertainty stated. This document does not perform that
+analysis; it only refuses to let the cutoff rule impersonate one.
 
 The vocabulary follows: candidates are **p95-qualified** or not. Nothing here is
-"effective", because effectiveness is a causal property and no analysis in this
-document could establish one.
+"effective", because the selector cannot establish effectiveness.
 
 **Every threshold in this procedure is a preregistered operational cutoff.**
 None is derived from data or from a cited result. They are fixed here, before the
@@ -361,4 +387,93 @@ Both errors ran in the same direction that the writer already favoured, first
 against C and then for it, which is the reason the raw counts are required rather
 than the conclusion.
 
-No pool implementation is required — only a measurement harness.
+No pool implementation is required — only a measurement harness. **The harness
+exists and the experiment has been run**: `scripts/readiness-experiment.swift`
+(the three arms, randomised, per-trial raw retention),
+`scripts/analyze-readiness.py` (which imports `flat()` from
+`scripts/check-decision-rule.py`, so the analysis cannot drift from the rule it
+claims to apply), and `scripts/readiness-experiment-results.csv` (all 300 raw
+trials). Results below.
+
+### Results — 2026-08-02, loopback, this box
+
+Environment: local `sshd`, live herdr socket, fresh authenticated session per
+trial, 300 trials in randomised order over 51.5 s. The decision cutoffs were
+committed before the run. **n = 100 per arm, 0 error rows in any arm.** Every
+number below is printed by `scripts/analyze-readiness.py` from the raw CSV — no
+figure in this section originates outside that pipeline. Medians are
+`statistics.median` (mean of the middle pair at even n).
+
+| arm | median `t_request` | p95 | max | > 500 ms |
+|---|---|---|---|---|
+| A immediate | 155.40 ms | 165.37 ms | 177.86 ms | 0 |
+| B age-only | 0.70 ms | 100.91 ms | 1375.92 ms | 1 |
+| C prewarmed | 0.42 ms | 100.52 ms | 140.79 ms | 0 |
+
+C's `t_ready` (the sacrificial open-and-free): median 96.03 ms, p95
+**105.16 ms**, max 113.18 ms.
+
+**Decision under the preregistered rule: adopt B (the age gate).** Per the
+record-the-blocker obligation:
+
+- B: p95 margin met (`A95 − B95` = 64.46 ms ≥ 20 ms); outlier count within
+  tolerance (1 vs A's 0 + 1).
+- C: p95 margin met (`A95 − C95` = 64.85 ms); outlier count within tolerance
+  (0); **blocked by the replenishment cap** — `t_ready` p95 of 105.16 ms exceeds
+  50 ms. That is the whole of what was established about C; why its sacrificial
+  open costs what it costs is not identified, like the rest of the mechanism.
+
+Unconditional tail report (raw counts, all arms): 0 / 1 / 0 trials above
+500 ms. B's one outlier was a single 1375.92 ms trial (sequence 228). No tail
+inference is made from any of this, per the procedure.
+
+**Descriptive observations.** These use a **post-hoc cutoff (90 ms), chosen
+after seeing the data** — it is *not* among the preregistered cutoffs, feeds no
+decision, and is reported as description only:
+
+- Counts of measured opens above 90 ms: A **100**/100, B **33**/100, C
+  **16**/100. The slow opens are not one population: A's occupy 140.2–177.9 ms,
+  while B's and C's residual slow opens cluster tightly at ~100.4–101.4 ms —
+  visibly distinct ranges. Whether these are the same phenomenon at different
+  magnitudes or different phenomena is a mechanism question this experiment
+  does not answer. The consequence for the pool stands on the counts alone: a
+  substantial minority of aged-session opens still cost ~100 ms in this run, so
+  an age-gated session's first open is *typically* sub-millisecond, not
+  reliably so, and a UI latency budget should assume the ~100 ms case.
+- **Batches differ.** This run's immediate-open range (140.2–177.9 ms) sits
+  entirely outside the earlier batch's stated immediate range (89.6–102.1 ms).
+  Same box, same path, different day. A single batch is not the number — and
+  the earlier tables in this document are that earlier batch, kept as recorded
+  history rather than corrected to match this run.
+- **Temporal placement was not balanced in this run, and the decision survives
+  inspection anyway.** B — the adopted arm — ran early: per-quarter counts by
+  sequence [30, 25, 26, 19] against C's [23, 22, 24, 31]; mean start times
+  26.17 s / 22.73 s / 27.22 s. Splitting by run half: B's p95 is 100.91 ms in
+  *both* halves, A's is 165.85 / 164.99 ms, C's 100.48 / 100.54 ms — so the
+  qualifying margin holds within each half separately, including B's late half
+  alone. The preregistration promised imbalance would be inspected rather than
+  assumed away; this is that inspection, and "balance held" (an earlier draft's
+  phrasing, from means alone) was not a supported summary of it.
+- **Treatment accounting** (not a reuse ratio): A opened 100 herdr connections,
+  B 100, C 200.
+
+What this settles for `docs/connection-pool-design.md`: the eligibility rule,
+if the pool applies one, is **the 100 ms age gate on insertion** — selected by
+the preregistered rule, with the caveats above. The sacrificial channel is not
+adopted, so its per-insertion server cost does not arise **while C stays
+unadopted**; a future run under the same rule could select differently, per the
+non-adoption disclaimer.
+
+A separate randomised-contrast analysis over the retained samples — effect
+sizes with uncertainty — remains possible and **has not been performed**;
+nothing above estimates a treatment effect.
+
+**Error-row rule, added after this run and binding on future ones:** this run
+had zero error rows, and only after it did review notice the procedure defined
+no rule for them at all — the analyzer excluded error rows from every statistic
+and still emitted a decision, warning only above 5%. The analyzer now **refuses
+to emit a decision if any arm contains any error row**, or if C's retained
+`t_ready` count falls short of its trial count (a missing column previously
+defaulted to 0.0 and passed the 50 ms cap vacuously). Declared here with its
+timing stated, because a rule quietly added after a clean run would otherwise
+read as having governed it.
