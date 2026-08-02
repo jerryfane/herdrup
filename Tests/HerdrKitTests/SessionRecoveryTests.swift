@@ -291,6 +291,64 @@ final class SessionRecoveryTests: XCTestCase {
                        "the replacement transport must open the full current set")
     }
 
+    /// AXIS: a saved foregrounded copy cannot dial after backgrounding.
+    ///
+    /// The reviewer's replay probe: isForeground was value-stored, so saving a
+    /// foregrounded State, processing backgrounded, restoring the copy and
+    /// calling beginInitialAttempt emitted cancel+reconnect — dialing while
+    /// suspended, against the explicit rule. Foreground is a decision input and
+    /// lives in the shared authority now.
+    func testASavedForegroundedCopyCannotDialAfterBackgrounding() throws {
+        var state = try seeded(["p1"])
+        let saved = state                       // foregrounded copy
+
+        _ = plan(.backgrounded(at: Date()), &state)
+        state = saved                           // the replay
+
+        XCTAssertTrue(recovery.beginInitialAttempt(state: &state).isEmpty,
+                      "a replayed foreground bit let a backgrounded client dial")
+        XCTAssertFalse(state.isForeground, "the restored copy must read the lineage's foreground state")
+
+        let resumed = plan(.foregrounded(at: Date()), &state)
+        XCTAssertNotNil(resumed.reconnectAttempt, "a real foregrounding must still dial")
+    }
+
+    /// AXIS: retirement and replacement are one fact — duplicate failures earn
+    /// ONE reconnect, and the failed attempt is never current once its failure
+    /// begins processing.
+    ///
+    /// The reviewer's gated probes: the split fail-then-mint left the failed
+    /// attempt current in the backoff window, where connected(A) re-adopted the
+    /// failed transport, and eight concurrent transportFailed(A) each passed
+    /// the current-attempt check and earned eight reconnects.
+    func testDuplicateFailuresEarnOneReconnectAndNoReadoption() throws {
+        var state = try seeded(["p1"])
+        let attemptA = connect(&state)
+
+        // Sequential half: after ONE failure is processed, the failed attempt
+        // is already retired — its own late connected must be stale.
+        let first = plan(.transportFailed(attemptA, at: Date()), &state)
+        XCTAssertNotNil(first.reconnectDelay, "the real failure schedules the retry")
+        XCTAssertEqual(plan(.connected(attemptA, at: Date()), &state).actions, [.discardConnection],
+                       "the failed attempt was re-adopted inside the backoff window")
+
+        // Concurrent half: eight duplicate failure callbacks, one reconnect.
+        var fresh = try seeded(["p1"])
+        let attemptB = connect(&fresh)
+        let counted = NSLock()
+        var reconnects = 0
+        DispatchQueue.concurrentPerform(iterations: 8) { lane in
+            var copy = fresh
+            var generator = SeededGenerator(seed: UInt64(lane) + 40)
+            let outcome = recovery.plan(for: .transportFailed(attemptB, at: Date()), state: &copy, using: &generator)
+            if outcome.reconnectAttempt != nil {
+                counted.lock(); reconnects += 1; counted.unlock()
+            }
+        }
+        XCTAssertEqual(reconnects, 1,
+                       "\(reconnects) of 8 duplicate failure callbacks earned a reconnect; retirement must be one fact")
+    }
+
     /// AXIS: concurrent discoveries neither lose ledger entries nor emit a
     /// pane's subscription twice.
     ///
@@ -478,9 +536,14 @@ final class SessionRecoveryTests: XCTestCase {
         // connectedSince and subscribedPanes left the stored list: both are
         // computed through the shared authority now, precisely so a value copy
         // cannot replay them. Mirror sees stored fields only.
+        // isForeground moved INTO the authority: it is a decision input
+        // (whether to dial), and value-stored it was replayable — a saved
+        // foregrounded copy dialed while backgrounded. Stored value fields are
+        // down to accounting (streak) and knowledge (panes), both documented as
+        // replayable with bounded consequence.
         XCTAssertEqual(
             fields,
-            ["authority", "consecutiveFailures", "isForeground", "knownPanes"],
+            ["authority", "consecutiveFailures", "knownPanes"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
         // One level down too: State stores AttemptID, so a position smuggled
