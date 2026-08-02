@@ -402,35 +402,18 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let opened = connect(&state)
 
-        // INERT MEANS "NOTHING ACTED ON", NOT "NOTHING RETURNED". These three
-        // asserted `.isEmpty`, which is an outcome-shaped claim: it could not
-        // distinguish an inert plan from an event that never reached the
-        // policy. The plan now carries a `noteIgnoredDeath` marker precisely so
-        // that difference is observable, so each case asserts BOTH — no acting
-        // action, and the path ran.
-        func inert(_ plan: RecoveryPlan, _ what: String) {
-            XCTAssertFalse(plan.actions.contains { action in
-                if case .noteIgnoredDeath = action { return false }
-                return true
-            }, "\(what): the plan acted")
-            XCTAssertTrue(plan.actions.contains { action in
-                if case .noteIgnoredDeath = action { return true }
-                return false
-            }, "\(what): the death was never processed; inertness proves nothing")
-        }
-
         // Stale attempt: not even a drop.
         let foreign = AttemptID(uuid: UUID())
-        inert(plan(.streamFailed(pane: "p1", from: foreign), &state), "stale attempt")
+        XCTAssertTrue(plan(.streamFailed(pane: "p1", from: foreign), &state).isEmpty)
         XCTAssertTrue(state.subscribedPanes.contains("p1"), "a stale failure must not drop a live entry")
 
         // A pane with no ledger entry: no stream existed to die.
-        inert(plan(.streamFailed(pane: "never-subscribed", from: opened), &state), "unknown pane")
+        XCTAssertTrue(plan(.streamFailed(pane: "never-subscribed", from: opened), &state).isEmpty)
 
         // A pane closed before its stream death arrives: dropped, not replaced.
         _ = plan(.paneClosed("p1", from: opened), &state)
         let afterClose = plan(.streamFailed(pane: "p1", from: opened), &state)
-        inert(afterClose, "closed pane")
+        XCTAssertTrue(afterClose.isEmpty, "a closed pane must not be re-subscribed")
         XCTAssertFalse(state.subscribedPanes.contains("p1"), "the dead entry is dropped")
     }
 

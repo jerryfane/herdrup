@@ -338,23 +338,6 @@ public actor RecoveryExecutor {
             case .resyncAllPanes(let attempt):
                 await resync(for: attempt)
 
-            case .noteIgnoredDeath(let pane, let from):
-                // The ONLY effect is that the no-op becomes observable. See the
-                // case's own documentation: ignoring was already correct, and
-                // was also indistinguishable from the event never arriving.
-                // The reason names the CLASS, not a cause. `dropAndReadmit`
-                // returns nil for three distinct situations — a stale attempt,
-                // no live connection, or no ledger entry — and this note cannot
-                // tell them apart. Claiming one would be the three-states-into-
-                // one flattening this lane has spent the day removing; the note
-                // exists to prove the path RAN, which does not require knowing
-                // which of the three it was.
-                record(rejection: (
-                    action: "streamFailed(\(pane))",
-                    reason: "death not actionable (stale attempt, disconnected, or no ledger entry)"
-                ))
-                _ = from
-
             case .subscribe(let panes, let on):
                 // THE binding check. A plan can sit queued while the world
                 // moves; an action bound to a retired attempt must be refused
