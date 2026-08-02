@@ -34,7 +34,11 @@ speculatively.
 - Work one task at a time in the listed order. Tasks 1–4 are strictly
   dependent; task 5 is independent and may run in parallel on its own branch.
 - Do not start dependent work until the prerequisite task has passed checks,
-  been pushed, opened as a PR, and merged.
+  been pushed, opened as a PR, and **received a clean review verdict at its
+  current head**. Not until it is merged — merging is the coordinator's and
+  gating on it reintroduces exactly the unreachable-condition bug that this
+  file's Definition of Done section corrects. A clean verdict means the design
+  is settled enough to build on; the merge is bookkeeping that follows.
 - Do not commit build artifacts, `.build/`, logs, generated data, credentials,
   or SSH keys.
 - Preserve existing behaviour unless the task explicitly changes it.
