@@ -180,6 +180,26 @@ final class AttemptAuthority: @unchecked Sendable {
         return Admission(fresh: fresh, attempt: attempt)
     }
 
+    /// Drops a dead stream's ledger entry and re-admits it, ONE section.
+    ///
+    /// The inverse of admission fused with a fresh admission, because as two
+    /// operations the gap between them is the split-section class: a concurrent
+    /// discovery could re-admit the pane between the drop and the re-admission
+    /// and the re-subscribe would then double it. Rules, all decided under the
+    /// one lock: a stale attempt touches nothing; a pane that was NOT in the
+    /// ledger has no stream to have died (a duplicate or late failure) and
+    /// neither drops nor re-admits; `readmit: false` (the pane no longer exists
+    /// in knowledge) drops without re-admitting. Exactly-once re-subscription
+    /// per real stream death falls out of the was-in-the-ledger check.
+    func dropAndReadmit(_ pane: String, from attempt: AttemptID, readmit: Bool) -> Admission? {
+        lock.lock(); defer { lock.unlock() }
+        guard attempt == _current, _connectedSince != nil else { return nil }
+        guard _subscribedPanes.remove(pane) != nil else { return nil }
+        guard readmit else { return nil }
+        _subscribedPanes.insert(pane)
+        return Admission(fresh: [pane], attempt: attempt)
+    }
+
     /// True iff the attempt is current — for gating KNOWLEDGE mutations from
     /// transport-delivered data (snapshots, pane events) the same way
     /// subscriptions are gated. Reading it and acting is two steps for
@@ -230,6 +250,13 @@ public enum ClientEvent: Equatable, Sendable {
     /// event, the only way to remove one is a wholesale replacement, which is
     /// what made partial listings dangerous.
     case paneClosed(String, from: AttemptID)
+    /// ONE pane's event stream died while its connection's other streams live
+    /// on. The wire is N independent per-pane persistent connections, so this
+    /// is a routine cellular event — a server reap, a NAT timeout — and before
+    /// this case existed it was INEXPRESSIBLE: the pane went silent while the
+    /// client believed itself connected, the herdres-class silence. Carries the
+    /// attempt whose transport lost the stream.
+    case streamFailed(pane: String, from: AttemptID)
 }
 
 /// One step of recovery, in the order it must happen.
@@ -575,6 +602,18 @@ public struct SessionRecovery: Sendable {
             guard state.authority.isCurrent(from) else { return RecoveryPlan() }
             state.knownPanes.remove(pane)
             return RecoveryPlan()
+
+        case .streamFailed(let pane, let from):
+            // Drop and conditionally re-admit in one authority section; the
+            // re-subscribe goes through THE emission site, so exactly-once and
+            // attempt-binding cover re-subscription with no separate machinery.
+            // A pane no longer in knowledge is dropped without replacement —
+            // its stream dying and its closure racing is resolved in closure's
+            // favour, and a later snapshot corrects any miss.
+            guard let readmitted = state.authority.dropAndReadmit(
+                pane, from: from, readmit: state.knownPanes.contains(pane)
+            ) else { return RecoveryPlan() }
+            return subscriptionPlan(for: readmitted)
         }
     }
 
