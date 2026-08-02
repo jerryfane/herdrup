@@ -37,7 +37,7 @@ expect() {
 #    reported KILLED, hiding the crash and taking its denominator from the one
 #    suite that finished.
 expect crash-after-failure 2 "A crash is not a kill" 1 "Test Case 'S.testA' failed (0.1 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 1 test, with 1 failure (0 unexpected) in 0.1 seconds
 error: Exited with unexpected signal code 4"
 
@@ -55,7 +55,7 @@ Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 
 expect killed-with-skip 0 "killed by 1 of 1 that ran" 1 "Test Case 'S.testKills' failed (0.0 seconds)
 Test Case 'S.testSkips' skipped (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 2 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.0 seconds"
 
 # 4. THE PARTIAL-SUITE DENOMINATOR. Two suites report separately and then a
@@ -83,23 +83,40 @@ expect signal-after-aggregate 2 "terminated by signal 9" 137 "Test Case 'A.testX
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds"
 
+# 4d. CONTRADICTORY INPUTS ARE NOT VERDICTS. XCTest cannot report a passed
+#     aggregate over a failed test, nor a failed aggregate with exit 0. Seeing
+#     one means log and status came from different places.
+expect aggregate-passed-status-nonzero 2 "Contradictory" 1 "Test Case 'A.testX' failed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+
+expect aggregate-failed-status-zero 2 "Contradictory" 0 "Test Case 'A.testX' passed (0.0 seconds)
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
+
+# 4e. A STATUS ABOVE THE SIGNAL RANGE IS NOT A SIGNAL. 193+ is not 128+N on this
+#     host, and GNU timeout propagates the command's own status.
+expect status-above-signal-range 2 "above the range" 200 "Test Case 'A.testX' failed (0.0 seconds)
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
+	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+
 # 5. THE ESTABLISHED CASES, so this file also pins what already worked.
 expect hang 3 "A hang is not a kill" 124 "Test Case 'S.testA' started"
 expect no-tests-matched 2 "matched no tests" 0 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 seconds"
-expect broke-not-failed 2 "the run broke, it did not fail" 1 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+expect broke-not-failed 2 "the run broke, it did not fail" 1 "Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
 expect plain-survived 1 "still passes" 0 "Test Case 'S.testA' passed (0.0 seconds)
 Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
 expect plain-killed 0 "killed by 1 of 3 that ran" 1 "Test Case 'S.testA' failed (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
 
 # 6. THE KILLER SET IS NAMED, not just counted — the split is the finding.
 expect names-its-killers 0 "S.testSecond" 1 "Test Case 'S.testFirst' failed (0.0 seconds)
 Test Case 'S.testSecond' failed (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
 	 Executed 4 tests, with 2 failures (0 unexpected) in 0.1 seconds"
 
 # 7. THE HARNESS MUST UN-EDIT THE TREE — ASSERTED BY RUNNING IT.
