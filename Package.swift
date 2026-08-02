@@ -12,7 +12,14 @@ let package = Package(
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],
     targets: [
-        .systemLibrary(name: "CSSH", path: "Sources/CSSH"),
+        // pkgConfig, not a hardcoded header path: libssh2 lives at
+        // /usr/include on Debian, /opt/homebrew/include on Apple Silicon and
+        // /usr/local/include on Intel macs. providers only advise on how to
+        // install it; pkgConfig is what actually supplies the flags.
+        .systemLibrary(
+            name: "CSSH", path: "Sources/CSSH",
+            pkgConfig: "libssh2",
+            providers: [.brew(["libssh2"]), .apt(["libssh2-1-dev"])]),
         .target(name: "HerdrKit", dependencies: ["CSSH"]),
         // CSSH so tests can build a real Session to drive LiveChannel's
         // ownership handoff directly, rather than only through a live server.
