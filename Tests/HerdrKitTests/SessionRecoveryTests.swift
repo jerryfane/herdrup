@@ -1094,7 +1094,24 @@ final class PaneSnapshotAccessTests: XCTestCase {
         let moduleDir = try XCTUnwrap(
             modules, "no built HerdrKit.swiftmodule; the access invariant went UNCHECKED"
         )
-        let triple = moduleDir.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        let buildTriple = moduleDir.deletingLastPathComponent()
+            .deletingLastPathComponent().lastPathComponent
+        // APPLE TRIPLES NEED THE DEPLOYMENT VERSION. SwiftPM names the build
+        // directory with an UNVERSIONED triple ("arm64-apple-macosx"), and
+        // symbolgraph-extract then defaults to macOS 10.4 — older than the
+        // module's floor, so it refuses to load it and the invariant goes
+        // unchecked. Invisible on Linux, which has no deployment-target concept.
+        //
+        // The running OS version is used rather than mirroring Package.swift's
+        // floor: it is >= the floor by construction (the module could not have
+        // been built otherwise), so it cannot drift out of step with the
+        // manifest the way a duplicated constant would.
+        let triple: String = {
+            guard buildTriple.contains("apple"),
+                  buildTriple.last.map({ !$0.isNumber }) ?? true else { return buildTriple }
+            let v = ProcessInfo.processInfo.operatingSystemVersion
+            return "\(buildTriple)\(v.majorVersion).\(v.minorVersion)"
+        }()
 
         // A FRESH directory per run, removed afterwards. The first version wrote
         // to a persistent per-triple directory and ignored the process exit
