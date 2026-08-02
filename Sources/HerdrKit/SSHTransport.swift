@@ -565,6 +565,7 @@ public struct SSHTransport: HerdrTransport {
             // Published before the first call that can block on it, so an
             // interrupt arriving mid-connect has a real descriptor to shut down.
             guard live?.adopt(rawSocket: fd) ?? true else {
+                DescriptorAudit.recordAdoptionRejection(owner: auditToken)
                 DescriptorAudit.close(fd, owner: auditToken)
                 throw CancellationError()
             }
@@ -1161,10 +1162,29 @@ enum DescriptorAudit {
         return byOwner[ObjectIdentifier(owner)] ?? 0
     }
 
+    /// Adoption rejections, attributed. The rejection branch closes its
+    /// descriptor and throws — and BOTH of those are indistinguishable from what
+    /// the ordinary cleanup does one level down, so a test could not tell the
+    /// branch had run at all. Bypassing it entirely compiled and left its own
+    /// regression green. A path with no success signal cannot be armed by any
+    /// test; this is that signal.
+    private static var rejectionsByOwner: [ObjectIdentifier: Int] = [:]
+    static func recordAdoptionRejection(owner: AnyObject?) {
+        guard let owner else { return }
+        lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
+    }
+    static func adoptionRejections(by owner: AnyObject) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return rejectionsByOwner[ObjectIdentifier(owner)] ?? 0
+    }
+
     /// Drops an owner's entry once it is gone, so the map does not grow for the
     /// life of the process.
     static func forget(_ owner: AnyObject) {
-        lock.lock(); byOwner[ObjectIdentifier(owner)] = nil; lock.unlock()
+        lock.lock()
+        byOwner[ObjectIdentifier(owner)] = nil
+        rejectionsByOwner[ObjectIdentifier(owner)] = nil
+        lock.unlock()
     }
 }
 
