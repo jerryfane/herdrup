@@ -115,13 +115,19 @@ final class AttemptAuthority: @unchecked Sendable {
         case adopted
     }
 
-    /// Staleness check, repeat check, adoption and ledger seed in one section.
-    func adopt(_ attempt: AttemptID, at: Date, subscribing panes: Set<String>) -> AdoptOutcome {
+    /// Staleness check, repeat check and adoption in one section. The ledger
+    /// seeds EMPTY, deliberately: it used to seed from the caller's remembered
+    /// panes, and a replayed copy's memory could contain a pane the server had
+    /// closed — adoption then subscribed the fresh transport to it, and no
+    /// later snapshot could retract that (the wire has no unsubscribe).
+    /// Subscriptions on a new transport derive only from post-adoption
+    /// authoritative data, admitted through `admitWhileConnected`.
+    func adopt(_ attempt: AttemptID, at: Date) -> AdoptOutcome {
         lock.lock(); defer { lock.unlock() }
         guard attempt == _current else { return .stale }
         guard _connectedSince == nil else { return .repeated }
         _connectedSince = at
-        _subscribedPanes = panes
+        _subscribedPanes = []
         return .adopted
     }
 
@@ -224,11 +230,15 @@ public enum RecoveryAction: Equatable, Sendable {
 /// following both plans literally opened every persistent subscription twice and
 /// could start work on a transport that was already stale.
 ///
-/// `.resyncAllPanes` and the FULL-SET subscribe are emitted in exactly one
-/// place: on adoption of a current attempt. `paneCreated` and `observe` emit
-/// incremental subscribes for newly discovered panes while connected — so the
-/// invariant is not "one emission site" but **no pane's persistent
-/// subscription is opened twice within one recovery**.
+/// `.resyncAllPanes` is emitted in exactly one place: on adoption of a current
+/// attempt — and adoption emits NOTHING else. Every subscription derives from
+/// post-adoption authoritative data: the executor resyncs, then hands the
+/// fresh `PaneSnapshot` to `observe`, whose atomic admission subscribes what
+/// the server says exists; `paneCreated` admits event-driven discoveries the
+/// same way. The invariants: **no pane's persistent subscription is opened
+/// twice within one recovery**, and **no remembered pane is ever a
+/// subscription target** — remembered knowledge subscribed a closed pane onto
+/// a fresh transport once, irretractably, since the wire has no unsubscribe.
 public struct RecoveryPlan: Equatable, Sendable {
     public var actions: [RecoveryAction]
 
@@ -411,13 +421,22 @@ public struct SessionRecovery: Sendable {
             // guard was unreachable); a repeat ready for the adopted attempt is
             // news, not a new adoption, because platforms deliver
             // ready -> waiting -> ready without a failure between.
-            switch state.authority.adopt(attempt, at: at, subscribing: state.knownPanes) {
+            switch state.authority.adopt(attempt, at: at) {
             case .stale:
                 return RecoveryPlan([.discardConnection])
             case .repeated:
                 return RecoveryPlan()
             case .adopted:
-                return RecoveryPlan([.resyncAllPanes, .subscribe(state.knownPanes)])
+                // Resync ONLY — no subscribe. Adoption used to subscribe the
+                // remembered pane set, which turned replayed knowledge into
+                // transport misdirection: a copy saved before paneClosed(p2)
+                // re-subscribed the NEW transport to the closed pane, the
+                // ledger recorded it, and no snapshot could retract it. The
+                // executor resyncs, then feeds the authoritative snapshot to
+                // `observe`, whose atomic admission subscribes exactly what the
+                // server says exists. Remembered panes are never subscription
+                // targets — knowledge is not a decision input any more.
+                return RecoveryPlan([.resyncAllPanes])
             }
 
         case .transportFailed(let attempt, let at):
