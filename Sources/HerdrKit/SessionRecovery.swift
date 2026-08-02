@@ -257,6 +257,21 @@ public enum ClientEvent: Equatable, Sendable {
     /// client believed itself connected, the herdres-class silence. Carries the
     /// attempt whose transport lost the stream.
     case streamFailed(pane: String, from: AttemptID)
+
+    /// ONE pane's stream could not be opened at all, after every permitted
+    /// attempt. Distinct from `streamFailed`, which is a stream that EXISTED
+    /// and died: this one never existed, and the executor has stopped trying on
+    /// this attempt.
+    ///
+    /// Before this case, admission recorded INTENT and nothing retracted it, so
+    /// an unopenable pane stayed listed while nothing watched it — the pane
+    /// read as subscribed with no stream behind it. That is the herdres-class
+    /// silence one level further in, and it is why issue #12 exists.
+    ///
+    /// Exhaustion IS a death that happened before the stream existed, which is
+    /// why it retracts through the SAME authority section as a real death
+    /// rather than a mechanism of its own.
+    case streamExhausted(pane: String, from: AttemptID)
 }
 
 /// One step of recovery, in the order it must happen.
@@ -614,6 +629,27 @@ public struct SessionRecovery: Sendable {
                 pane, from: from, readmit: state.knownPanes.contains(pane)
             ) else { return RecoveryPlan() }
             return subscriptionPlan(for: readmitted)
+
+        case .streamExhausted(let pane, let from):
+            // RETRACT, and do not re-admit. The same authority section as a real
+            // death, with `readmit: false` — the primitive already expresses
+            // exactly this and is already reviewed, which is why exhaustion
+            // needs no machinery of its own.
+            //
+            // Re-admitting here would be a spin: the executor's failure counter
+            // is keyed by (attempt, pane) and is NOT cleared by any ledger
+            // operation, so a re-admitted pane on the SAME attempt hits the cap
+            // guard again and is refused without a transport call. Correct, but
+            // it would churn a plan per resync for a pane already known
+            // hopeless on this connection.
+            //
+            // The pane is NOT abandoned. A new attempt retires the counters and
+            // adoption's `.resyncAllPanes` re-admits everything from a fresh
+            // snapshot, so a new connection is a genuine fresh chance. That is
+            // the whole recovery schedule and it is deliberately global — there
+            // is no per-pane retry queue and this case does not add one.
+            _ = state.authority.dropAndReadmit(pane, from: from, readmit: false)
+            return RecoveryPlan()
         }
     }
 

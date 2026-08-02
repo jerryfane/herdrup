@@ -124,6 +124,22 @@ public actor RecoveryExecutor {
         let attempt: AttemptID
         let pane: String
     }
+    /// LOAD-BEARING, NOT INCIDENTAL — read this before changing when it clears.
+    ///
+    /// It bounds retries, and since task 7 it is also the ONLY thing that
+    /// distinguishes a never-wanted pane from a wanted-but-unreachable one.
+    /// Exhaustion RETRACTS the ledger admission, so `paneStatus` can no longer
+    /// learn that from ledger membership; at cap this counter is what makes an
+    /// absent pane report `.admittedNotOpen` instead of `.notAdmitted`.
+    ///
+    /// Two properties are therefore contractual rather than convenient:
+    ///   - NO LEDGER OPERATION MAY TOUCH IT. It has to survive the retraction
+    ///     that removes the entry, or the distinction dies with the entry.
+    ///   - IT IS KEYED BY (attempt, pane) AND RETIRES WITH ITS ATTEMPT, so a
+    ///     pane exhausted on one connection gets a genuine fresh chance on the
+    ///     next and does not report unreachable before it has been tried.
+    /// Clearing it earlier, or keying it by pane alone, silently breaks a
+    /// reported status rather than a retry bound.
     private var openFailures: [FailureKey: Int] = [:]
     private var lastOpenErrors: [FailureKey: String] = [:]
     /// Streams ACTUALLY open, keyed by pane and carrying the REGISTRATION that
@@ -157,11 +173,31 @@ public actor RecoveryExecutor {
 
     /// The same query path as `subscribedPanes`, answering per pane.
     public func paneStatus(_ pane: String) -> PaneWatchStatus {
-        guard state.subscribedPanes.contains(pane) else { return .notAdmitted }
-        if openPanes.contains(pane) { return .open }
         let key = state.currentAttempt.map { FailureKey(attempt: $0, pane: pane) }
+        let failures = key.flatMap { openFailures[$0] } ?? 0
+        guard state.subscribedPanes.contains(pane) else {
+            // ABSENCE IS NOT ONE FACT. Since exhaustion RETRACTS the admission,
+            // an absent pane is either never-wanted or wanted-but-unreachable,
+            // and reporting `.notAdmitted` for both would delete the very
+            // distinction this accessor exists to make.
+            //
+            // The failure counter is the discriminator, and no second store was
+            // needed for it: it is keyed by (attempt, pane) and NO ledger
+            // operation touches it, so it survives the retraction that removed
+            // the ledger entry. At cap it means "admitted, could not be opened,
+            // and will be retried on the next attempt".
+            //
+            // A pane exhausted on attempt N has NO failures on attempt N+1, so
+            // after a reconnect it reports `.notAdmitted` until resync
+            // re-admits it. That is correct — a new connection is a genuine
+            // fresh chance and the pane has not failed on it — and it is
+            // correct BY THE KEYING, which is why it is tested explicitly.
+            guard failures >= Self.openFailureCap else { return .notAdmitted }
+            return .admittedNotOpen(attempts: failures, lastError: key.flatMap { lastOpenErrors[$0] })
+        }
+        if openPanes.contains(pane) { return .open }
         return .admittedNotOpen(
-            attempts: key.flatMap { openFailures[$0] } ?? 0,
+            attempts: failures,
             lastError: key.flatMap { lastOpenErrors[$0] }
         )
     }
@@ -406,6 +442,22 @@ public actor RecoveryExecutor {
                     action: "openStream(\(pane))",
                     reason: "open failed \(failures) times; pane left unsubscribed"
                 ))
+                // RETRACT THE ADMISSION. Before this, the pane stayed in the
+                // ledger with nothing watching it — subscribed in name, silent
+                // in fact. The policy owns the ledger, so exhaustion is an
+                // EVENT, not a reach-in.
+                //
+                // Suspension point: `handle` re-enters the policy. It is
+                // followed by its own attempt recheck, per this loop's
+                // invariant — see the enumeration at the top of the body.
+                await handle(.streamExhausted(pane: pane, from: attempt))
+                guard attempt == state.currentAttempt else {
+                    record(rejection: (
+                        action: "openStream(\(pane))",
+                        reason: "attempt retired while retracting an exhausted pane; remaining panes abandoned"
+                    ))
+                    return
+                }
                 continue
             }
             if failures > 0 {
