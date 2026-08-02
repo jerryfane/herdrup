@@ -18,6 +18,27 @@ CLASSIFY=scripts/classify-run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FAILURES=0
 
+# Builds an INTERNALLY CONSISTENT XCTest log: one terminal line per test, an
+# aggregate whose counts match those lines, and a verdict matching whether any
+# failed. Hand-written fixtures drifted — several described logs XCTest cannot
+# emit (a failed case under a passed aggregate, one case line against "Executed
+# 3"), which taught the classifier those were normal. A fixture is a
+# SPECIFICATION of what the tool really produces, so the consistent shape is
+# generated and only the deliberate contradictions are written by hand.
+#
+# mklog <passed> <failed> <skipped>
+mklog() {
+    local np="$1" nf="$2" ns="$3" i out=""
+    for i in $(seq 1 "$np"); do out="${out}Test Case 'S.testPass$i' passed (0.0 seconds)\n"; done
+    for i in $(seq 1 "$nf"); do out="${out}Test Case 'S.testFail$i' failed (0.0 seconds)\n"; done
+    for i in $(seq 1 "$ns"); do out="${out}Test Case 'S.testSkip$i' skipped (0.0 seconds)\n"; done
+    local total=$((np + nf + ns))
+    local verdict=passed; [ "$nf" -gt 0 ] && verdict=failed
+    out="${out}Test Suite 'Selected tests' $verdict at 2026-01-01 00:00:00.000\n"
+    out="${out}\t Executed $total tests, with $ns tests skipped and $nf failures (0 unexpected) in 0.1 seconds"
+    printf '%b' "$out"
+}
+
 # expect <case> <expected-exit> <expected-substring> <status> <log-body>
 expect() {
     local case_name="$1" want_exit="$2" want_text="$3" status="$4" body="$5"
@@ -36,88 +57,67 @@ expect() {
 # 1. THE HIGH FROM ROUND ONE. A completed failure followed by a crash was
 #    reported KILLED, hiding the crash and taking its denominator from the one
 #    suite that finished.
-expect crash-after-failure 2 "A crash is not a kill" 1 "Test Case 'S.testA' failed (0.1 seconds)
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 1 test, with 1 failure (0 unexpected) in 0.1 seconds
+expect crash-after-failure 2 "A crash is not a kill" 1 "$(mklog 0 1 0)
 error: Exited with unexpected signal code 4"
 
 # 2. THE HIGH FROM ROUND TWO. Every matched test skipped was reported SURVIVED —
 #    'the test does not guard it' — about a guard that never ran.
-expect all-skipped 2 "every matched test SKIPPED" 0 "Test Case 'S.testOnly' skipped (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
-	 Executed 1 test, with 1 test skipped and 0 failures (0 unexpected) in 0.0 seconds"
+expect all-skipped 2 "every matched test SKIPPED" 0 "$(mklog 0 0 1)"
 
 # 3. THE DENOMINATOR. A skip must not be counted as a test that ran.
-expect survived-with-skip 1 "1 of 2 ran" 0 "Test Case 'S.testRuns' passed (0.0 seconds)
-Test Case 'S.testSkips' skipped (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
-	 Executed 2 tests, with 1 test skipped and 0 failures (0 unexpected) in 0.0 seconds"
+expect survived-with-skip 1 "1 of 2 ran" 0 "$(mklog 1 0 1)"
+expect killed-with-skip 0 "killed by 1 of 1 that ran" 1 "$(mklog 0 1 1)"
 
-expect killed-with-skip 0 "killed by 1 of 1 that ran" 1 "Test Case 'S.testKills' failed (0.0 seconds)
-Test Case 'S.testSkips' skipped (0.0 seconds)
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 2 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.0 seconds"
-
-# 4. THE PARTIAL-SUITE DENOMINATOR. Two suites report separately and then a
-#    total; the largest COMPONENT is not the total.
-expect terminal-denominator 0 "killed by 1 of 5 that ran" 1 "Test Case 'A.testX' failed (0.0 seconds)
-Test Suite 'A' failed at 2026-01-01 00:00:00.000
-	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds
-Test Suite 'B' passed at 2026-01-01 00:00:00.000
-	 Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 5 tests, with 1 failure (0 unexpected) in 0.2 seconds"
-
-# 4b. AN INCOMPLETE RUN IS NOT A KILL. A genuine failure and a completed
-#     COMPONENT summary, then SIGKILL and no aggregate: previously KILLED.
-# Status 1, NOT 137: a signalled status is caught by the signal check above, so
-# using one here would have tested that check twice and the aggregate check
-# never. Isolating it needs an ordinary failure exit with no terminator.
+# 4. AN INCOMPLETE RUN IS NOT A KILL. A genuine failure and a completed
+#    COMPONENT summary, then no aggregate: previously KILLED. Status 1, not 137,
+#    or the signal check catches it first and this never reaches the aggregate
+#    requirement it was written for.
 expect incomplete-run 2 "did not complete" 1 "Test Case 'A.testX' failed (0.0 seconds)
 Test Suite 'A' failed at 2026-01-01 00:00:00.000
 	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds"
 
-# 4c. A SIGNAL AFTER THE AGGREGATE IS NOT A KILL. SwiftPM keeps working after
+# 4b. A SIGNAL AFTER THE AGGREGATE IS NOT A KILL. SwiftPM keeps working after
 #     XCTest's terminator, so a SIGKILL can land past it with no crash text.
-expect signal-after-aggregate 2 "terminated by signal 9" 137 "Test Case 'A.testX' failed (0.0 seconds)
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 4 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+expect signal-after-aggregate 2 "terminated by signal 9" 137 "$(mklog 0 1 0)"
 
-# 4d. CONTRADICTORY INPUTS ARE NOT VERDICTS. XCTest cannot report a passed
-#     aggregate over a failed test, nor a failed aggregate with exit 0. Seeing
-#     one means log and status came from different places.
-expect aggregate-passed-status-nonzero 2 "Contradictory" 1 "Test Case 'A.testX' failed (0.0 seconds)
+# 4c. CONTRADICTORY INPUTS ARE NOT VERDICTS — written by hand, because these are
+#     precisely the logs XCTest cannot emit.
+expect aggregate-passed-status-nonzero 2 "Contradictory" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
 Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+	 Executed 1 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.1 seconds"
 
-expect aggregate-failed-status-zero 2 "Contradictory" 0 "Test Case 'A.testX' passed (0.0 seconds)
+expect aggregate-failed-status-zero 2 "Contradictory" 0 "Test Case 'S.testFail1' failed (0.0 seconds)
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
+	 Executed 1 tests, with 0 tests skipped and 1 failures (0 unexpected) in 0.1 seconds"
 
-# 4e. A STATUS ABOVE THE SIGNAL RANGE IS NOT A SIGNAL. 193+ is not 128+N on this
-#     host, and GNU timeout propagates the command's own status.
-expect status-above-signal-range 2 "above the range" 200 "Test Case 'A.testX' failed (0.0 seconds)
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+expect failed-case-under-passed-aggregate 2 "a test case FAILED" 0 "Test Case 'S.testFail1' failed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 1 tests, with 0 tests skipped and 1 failures (0 unexpected) in 0.1 seconds"
 
-# 5. THE ESTABLISHED CASES, so this file also pins what already worked.
+expect case-count-disagrees 2 "terminal case lines" 0 "Test Case 'S.testPass1' passed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 3 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.1 seconds"
+
+expect skip-count-disagrees 2 "skipped case lines" 0 "Test Case 'S.testPass1' passed (0.0 seconds)
+Test Case 'S.testPass2' passed (0.0 seconds)
+Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
+	 Executed 2 tests, with 1 tests skipped and 0 failures (0 unexpected) in 0.1 seconds"
+
+# 4d. A STATUS ABOVE THE SIGNAL RANGE IS NOT A SIGNAL.
+expect status-above-signal-range 2 "above the range" 200 "$(mklog 0 1 0)"
+
+# 5. THE ESTABLISHED CASES, so this file pins what already worked.
 expect hang 3 "A hang is not a kill" 124 "Test Case 'S.testA' started"
 expect no-tests-matched 2 "matched no tests" 0 "Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
-	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 seconds"
-expect broke-not-failed 2 "the run broke, it did not fail" 1 "Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
-expect plain-survived 1 "still passes" 0 "Test Case 'S.testA' passed (0.0 seconds)
-Test Suite 'Selected tests' passed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.1 seconds"
-expect plain-killed 0 "killed by 1 of 3 that ran" 1 "Test Case 'S.testA' failed (0.0 seconds)
+	 Executed 0 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.0 seconds"
+expect broke-not-failed 2 "the run broke, it did not fail" 1 "Test Case 'S.testPass1' passed (0.0 seconds)
 Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 3 tests, with 1 failure (0 unexpected) in 0.1 seconds"
+	 Executed 1 tests, with 0 tests skipped and 0 failures (0 unexpected) in 0.1 seconds"
+expect plain-survived 1 "still passes" 0 "$(mklog 3 0 0)"
+expect plain-killed 0 "killed by 1 of 3 that ran" 1 "$(mklog 2 1 0)"
 
 # 6. THE KILLER SET IS NAMED, not just counted — the split is the finding.
-expect names-its-killers 0 "S.testSecond" 1 "Test Case 'S.testFirst' failed (0.0 seconds)
-Test Case 'S.testSecond' failed (0.0 seconds)
-Test Suite 'Selected tests' failed at 2026-01-01 00:00:00.000
-	 Executed 4 tests, with 2 failures (0 unexpected) in 0.1 seconds"
+expect names-its-killers 0 "S.testFail2" 1 "$(mklog 2 2 0)"
 
 # 7. THE HARNESS MUST UN-EDIT THE TREE — ASSERTED BY RUNNING IT.
 #
