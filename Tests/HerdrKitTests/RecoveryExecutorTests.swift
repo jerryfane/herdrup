@@ -393,6 +393,40 @@ final class RecoveryExecutorTests: XCTestCase {
 
     /// Asserts an async call throws. XCTAssertThrowsError's autoclosure cannot
     /// carry `await`, which is the same limitation XCTUnwrap has here.
+    /// Runs a catch window's phase-1 open, which must THROW promptly.
+    ///
+    /// Bounded and cancellation-backed, and that is the whole point. The plain
+    /// `expectThrow` awaits the call directly, so a mutation that makes entry 1
+    /// PARK instead of throwing — `claimPhase` returning `phase + 1` compiles
+    /// and does exactly this — suspends the test INSIDE the await, where it can
+    /// no longer reach a release or a cancel. The focused test then ran 30
+    /// seconds and was classified ESCAPED. All five catch-window tests shared
+    /// that shape, so it is fixed once here rather than five times.
+    ///
+    /// Third time a mutation escaped into a hang on this file: a test's
+    /// teardown, then the park itself, now the phase-1 expectation. The lesson
+    /// that keeps recurring is that ESCAPED is not KILLED and reads like it.
+    private func expectPhaseOneThrows(
+        _ transport: ScriptedTransport,
+        _ pane: String,
+        _ window: ScriptedTransport.CatchWindow,
+        _ message: String = "entry 1 must throw; the window is armed on it"
+    ) async {
+        let threw = UncheckedBox<Bool?>(nil)
+        let task = Task {
+            do { try await transport.openStream(pane: pane, for: AttemptID(uuid: UUID())) {}
+                 threw.value = false } catch { threw.value = true }
+        }
+        let settled = await waitUntil(2) { threw.value != nil }
+        if !settled {
+            window.release()          // unwedge whatever it parked on
+            task.cancel()
+        }
+        _ = await task.result
+        XCTAssertTrue(settled, "\(message) — it PARKED instead, which would have hung the suite")
+        XCTAssertEqual(threw.value, true, message)
+    }
+
     private func expectThrow(
         _ message: String, _ body: () async throws -> Void
     ) async {
@@ -694,9 +728,7 @@ final class RecoveryExecutorTests: XCTestCase {
         let window = transport.armCatchPathWindow("p")
 
         // Entry 1 throws (contract: leaves nothing live). Entry 2 must PARK.
-        await expectThrow("entry 1 must throw; the window is armed on it") {
-            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
-        }
+        await expectPhaseOneThrows(transport, "p", window)
         let second = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
         let parked = await waitUntil { transport.retryIsParked("p") }
         XCTAssertTrue(parked, "the catch window never parked; the test is not armed")
@@ -738,9 +770,7 @@ final class RecoveryExecutorTests: XCTestCase {
             replacement.value = transport.armCatchPathWindow("p")   // re-armed mid-flight
         }
 
-        await expectThrow("entry 1 must throw") {
-            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
-        }
+        await expectPhaseOneThrows(transport, "p", first)
         let retry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
 
         let parkedItsOwn = await waitUntil { first.isParked }
@@ -777,9 +807,7 @@ final class RecoveryExecutorTests: XCTestCase {
     func testAStaleReleaseCannotOpenALaterCatchWindow() async throws {
         let transport = ScriptedTransport(panes: ["p"])
         let first = transport.armCatchPathWindow("p")
-        await expectThrow("entry 1 must throw") {
-            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
-        }
+        await expectPhaseOneThrows(transport, "p", first)
         let firstRetry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
         _ = await waitUntil { transport.retryIsParked("p") }
         first.release()
@@ -791,9 +819,7 @@ final class RecoveryExecutorTests: XCTestCase {
         // A second window, parked, with the FIRST window's release still in
         // someone's hand.
         let second = transport.armCatchPathWindow("p")
-        await expectThrow("entry 1 of the second window must throw") {
-            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
-        }
+        await expectPhaseOneThrows(transport, "p", second, "entry 1 of the second window must throw")
         let secondRetry = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
         let parked = await waitUntil { transport.retryIsParked("p") }
         XCTAssertTrue(parked, "the second window never parked; the test is not armed")
@@ -816,9 +842,7 @@ final class RecoveryExecutorTests: XCTestCase {
 
         for round in 1...2 {
             let window = transport.armCatchPathWindow("p")
-            await expectThrow("entry 1 must throw; the window is armed on it") {
-            try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {}
-        }
+            await expectPhaseOneThrows(transport, "p", window)
             let second = Task { try await transport.openStream(pane: "p", for: AttemptID(uuid: UUID())) {} }
             let parked = await waitUntil { transport.retryIsParked("p") }
             XCTAssertTrue(parked, "window \(round) did not park; the previous arm's state leaked into it")
