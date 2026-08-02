@@ -170,6 +170,15 @@ public enum SSHError: Error, CustomStringConvertible {
 /// `events.subscribe` holds its connection open. Each `roundTrip` and each
 /// `stream` therefore opens its own SSH channel.
 public struct SSHTransport: HerdrTransport {
+    /// Identity for descriptor auditing, and the reason it is a reference in a
+    /// value type: the audit needs to attribute a double close to ONE logical
+    /// transport, and copies of this struct are the same logical transport.
+    /// Every channel it opens inherits this token, so a test can ask what THIS
+    /// transport did without reading a process-wide tally that every other
+    /// test also writes to.
+    final class AuditToken {}
+    let auditToken = AuditToken()
+
     /// Shared, bounded pool for blocking libssh2 work. Bounded because a thread
     /// per request grows without limit under concurrency; shared because each
     /// request needs its own connection but not its own operating-system thread.
@@ -281,6 +290,8 @@ public struct SSHTransport: HerdrTransport {
     final class Session {
         let sock: Int32
         let handle: OpaquePointer
+        /// Who a double close here is attributed to. See DescriptorAudit.
+        var auditOwner: AnyObject?
 
         init(sock: Int32, handle: OpaquePointer) {
             self.sock = sock
@@ -301,7 +312,16 @@ public struct SSHTransport: HerdrTransport {
         }
 
         func closeSocket() {
-            _ = Glibc_close(sock)
+            // THROUGH THE AUDIT. This closed the descriptor directly, so the
+            // one test asserting "LiveChannel never closes a descriptor
+            // openSession already closed" drove a path the audit could not see:
+            // on any route where a session exists — host-key rejection among
+            // them — teardown comes here, not to the audited branch. A
+            // deliberate double close in that branch SURVIVED the test.
+            // The assertion was vacuous, and its process-wide counter then made
+            // it flaky on other tests' noise: a meter measuring nothing,
+            // wobbling.
+            DescriptorAudit.close(sock, owner: auditOwner)
         }
 
         func close() {
@@ -694,7 +714,7 @@ public struct SSHTransport: HerdrTransport {
         let sock = try tcpConnect(by: deadline, publishingTo: live)
         if let live, live.isInterrupted {
             live.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw CancellationError()
         }
         // SO_RCVTIMEO/SO_SNDTIMEO do NOT bound libssh2 in blocking mode — a
@@ -705,7 +725,7 @@ public struct SSHTransport: HerdrTransport {
         // long-lived subscription.
         guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
             live?.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw SSHError.sessionInitFailed
         }
         libssh2_session_set_blocking(handle, 1)
@@ -713,7 +733,7 @@ public struct SSHTransport: HerdrTransport {
         func fail(_ error: SSHError) -> SSHError {
             libssh2_session_free(handle)
             live?.release()          // we close it here; LiveChannel must not repeat it
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             return error
         }
 
@@ -726,7 +746,7 @@ public struct SSHTransport: HerdrTransport {
         } catch {
             libssh2_session_free(handle)
             live?.release()
-            _ = Glibc_close(sock)
+            DescriptorAudit.close(sock, owner: auditToken)
             throw error
         }
 
@@ -760,7 +780,9 @@ public struct SSHTransport: HerdrTransport {
         // minutes, and the interrupt path (LiveChannel shutting the socket down)
         // is what bounds those operations instead of a timer.
         libssh2_session_set_timeout(handle, 0)
-        return Session(sock: sock, handle: handle)
+        let session = Session(sock: sock, handle: handle)
+        session.auditOwner = auditToken
+        return session
     }
 
     /// Opens a direct-streamlocal channel to herdr's socket on the host.
@@ -852,6 +874,7 @@ public struct SSHTransport: HerdrTransport {
         // So: a shared bounded queue, plus a cancellation handle that publishes
         // the socket so an in-flight blocking read can actually be interrupted.
         let live = LiveChannel()
+        live.auditOwner = auditToken
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 SSHTransport.blockingQueue.addOperation {
@@ -889,6 +912,7 @@ public struct SSHTransport: HerdrTransport {
     public func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let live = LiveChannel()
+        live.auditOwner = auditToken
             // Same reasoning as roundTrip: a detached task is not a thread, and
             // this loop blocks for the life of the subscription.
             let work = Thread {
@@ -936,6 +960,11 @@ public struct SSHTransport: HerdrTransport {
 /// Owns a session and channel shared between a blocking reader and a cancelling
 /// caller, so cancellation can interrupt a read that is already in progress.
 final class LiveChannel: @unchecked Sendable {
+    /// Who to attribute a double close to. The channel is created per stream
+    /// and never held by a caller, so attributing to `self` gives a test
+    /// nothing it can ask about; the TRANSPORT outlives every channel it makes
+    /// and is what a test actually holds.
+    var auditOwner: AnyObject?
     private let lock = NSLock()
     private var session: SSHTransport.Session?
     private var channel: OpaquePointer?
@@ -1070,7 +1099,7 @@ final class LiveChannel: @unchecked Sendable {
         if let session {
             session.closeSocket()
         } else if raw >= 0 {
-            DescriptorAudit.close(raw)
+            DescriptorAudit.close(raw, owner: auditOwner ?? self)
         }
     }
 }
@@ -1085,18 +1114,44 @@ final class LiveChannel: @unchecked Sendable {
 enum DescriptorAudit {
     private static let lock = NSLock()
     private static var doubleCloseCount = 0
+    private static var byOwner: [ObjectIdentifier: Int] = [:]
 
     /// Closes, and records the close of a descriptor that was not open.
-    static func close(_ fd: Int32) {
+    ///
+    /// `owner` attributes the double close to the object whose teardown caused
+    /// it. Without it the tally was PROCESS-WIDE, and the only test reading it
+    /// bracketed a window with a baseline — which is safe only if nothing else
+    /// in the process closes a descriptor during that window. Other tests'
+    /// async teardown does exactly that, so the assertion failed roughly one
+    /// run in ten under full-suite load and never in isolation. The comment
+    /// here used to say the baseline handled sharing a process; it handled
+    /// SEQUENTIAL sharing, not concurrent.
+    static func close(_ fd: Int32, owner: AnyObject? = nil) {
         guard Glibc_close(fd) != 0, errno == EBADF else { return }
-        lock.lock(); doubleCloseCount += 1; lock.unlock()
+        lock.lock()
+        doubleCloseCount += 1
+        if let owner { byOwner[ObjectIdentifier(owner), default: 0] += 1 }
+        lock.unlock()
     }
 
-    /// Process-wide tally. Compared against a baseline rather than zero, since
-    /// tests share a process.
+    /// Process-wide tally. Kept for diagnostics; NOT sound for a test
+    /// assertion, because any concurrent teardown lands inside the window.
     static var doubleCloses: Int {
         lock.lock(); defer { lock.unlock() }
         return doubleCloseCount
+    }
+
+    /// Double closes attributable to ONE object — the only form a test can
+    /// assert on without depending on what the rest of the process is doing.
+    static func doubleCloses(by owner: AnyObject) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return byOwner[ObjectIdentifier(owner)] ?? 0
+    }
+
+    /// Drops an owner's entry once it is gone, so the map does not grow for the
+    /// life of the process.
+    static func forget(_ owner: AnyObject) {
+        lock.lock(); byOwner[ObjectIdentifier(owner)] = nil; lock.unlock()
     }
 }
 
