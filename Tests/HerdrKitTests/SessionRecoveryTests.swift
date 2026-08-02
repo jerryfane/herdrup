@@ -156,6 +156,55 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(plan(.connected(opened, at: Date()), &offline).subscribes, ["p1", "p4"])
     }
 
+    /// AXIS: a callback minted before a State replacement can never be adopted
+    /// by the replacement.
+    ///
+    /// A bare counter restarted at 1 in a fresh State, so the DISCARDED state's
+    /// first attempt matched the new state's first attempt and a late connected
+    /// was adopted — defeating the stale-callback protection at the exact
+    /// moment (a caller rebuilding state) it was needed. Identity now carries a
+    /// per-State random epoch.
+    func testCallbacksFromAReplacedStateAreStale() throws {
+        var state = try seeded(["p1"])
+        let preReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+
+        state = try seeded(["p1"])   // the caller rebuilds their state
+        let postReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        XCTAssertNotEqual(preReplacement, postReplacement,
+                          "a rebuilt State reminted an identical attempt identity")
+
+        let late = plan(.connected(preReplacement, at: Date()), &state)
+        XCTAssertEqual(late.actions, [.discardConnection],
+                       "a callback from the discarded state was adopted as current")
+    }
+
+    /// AXIS: a pane forgotten by a snapshot shrink and later rediscovered is
+    /// NOT subscribed a second time on the same transport.
+    ///
+    /// There is no unsubscribe verb on the wire — a subscription ends when its
+    /// connection does — so the shrink leaves the first subscription open, and
+    /// the rediscovery previously stacked a second one on top of it.
+    func testAPaneReappearingAfterASnapshotShrinkIsNotDoubleSubscribed() throws {
+        var state = try seeded(["p1", "p2"])
+        _ = connect(&state)   // subscribes {p1, p2}
+
+        // The snapshot forgets p2; its subscription on this transport stays open.
+        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state).isEmpty)
+
+        // p2 reappears — via event and via snapshot. Neither may re-subscribe.
+        XCTAssertTrue(plan(.paneCreated("p2"), &state).isEmpty,
+                      "paneCreated re-subscribed a pane this transport already watches")
+        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), state: &state).isEmpty,
+                      "observe re-subscribed a pane this transport already watches")
+
+        // A NEW transport starts from nothing: the full set is re-subscribed.
+        _ = plan(.networkChanged(at: Date()), &state)
+        let readopted = recovery.beginInitialAttempt(state: &state).reconnectAttempt
+            ?? state.currentAttempt!
+        XCTAssertEqual(plan(.connected(readopted, at: Date()), &state).subscribes, ["p1", "p2"],
+                       "the replacement transport must open the full current set")
+    }
+
     /// AXIS: the stability window measures EVENT time, not wall-clock time.
     ///
     /// Every prior test used event times near Date(), so `connectedSince =
@@ -230,7 +279,7 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         _ = plan(.backgrounded(at: Date()), &state)
 
-        let late = plan(.connected(AttemptID(value: 99), at: Date().addingTimeInterval(0.1)), &state)
+        let late = plan(.connected(AttemptID(epoch: 0, value: 99), at: Date().addingTimeInterval(0.1)), &state)
         XCTAssertEqual(late.actions, [.discardConnection])
         XCTAssertFalse(late.contains(.resyncAllPanes), "no work may start on an unwanted connection")
         XCTAssertNil(late.subscribes, "no subscription may open on an unwanted connection")
@@ -288,17 +337,22 @@ final class SessionRecoveryTests: XCTestCase {
         // the wire, and no herdr API would accept one. The point of this list is
         // that a new field forces that judgement out loud instead of arriving
         // unexamined.
+        // subscribedPanes: pane identity only (which panes THIS transport
+        // watches), no ordering, no position. attemptEpoch: random identity
+        // salt, never on the wire. Judged here out loud, which is this guard's
+        // whole job.
         XCTAssertEqual(
             fields,
-            ["connectedSince", "consecutiveFailures", "currentAttempt",
-             "isForeground", "knownPanes", "nextAttemptValue"],
+            ["attemptEpoch", "connectedSince", "consecutiveFailures",
+             "currentAttempt", "isForeground", "knownPanes", "nextAttemptValue",
+             "subscribedPanes"],
             "SessionRecovery.State grew a field; if it can hold a stream position, resumption just became expressible"
         )
         // One level down too: State stores AttemptID, so a position smuggled
         // into AttemptID's fields would be invisible to the check above.
-        let attemptFields = Mirror(reflecting: AttemptID(value: 0))
+        let attemptFields = Mirror(reflecting: AttemptID(epoch: 0, value: 0))
             .children.compactMap(\.label).sorted()
-        XCTAssertEqual(attemptFields, ["value"],
+        XCTAssertEqual(attemptFields, ["epoch", "value"],
                        "AttemptID grew a field; a stream position could hide inside State through it")
     }
 
@@ -444,7 +498,7 @@ final class SessionRecoveryTests: XCTestCase {
     func testASnapshotReplacesThePaneSetWholesale() throws {
         var state = try seeded(["p1", "p2", "p3"])
         XCTAssertEqual(state.knownPanes, ["p1", "p2", "p3"])
-        recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
+        _ = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
         XCTAssertEqual(state.knownPanes, ["p1"], "an authoritative listing is still authoritative")
     }
 
@@ -621,6 +675,24 @@ final class PaneSnapshotAccessTests: XCTestCase {
              "swift.property PaneSnapshot.paneIDs",
              "swift.struct PaneSnapshot"],
             "PaneSnapshot's package-visible surface changed; anything that can CONSTRUCT one from caller data reopens the filtered-list path observe() exists to close"
+        )
+
+        // The WHOLE module, not just PaneSnapshot's members. The member-only
+        // version let a package-level `public func makeSnapshot([AgentInfo]) ->
+        // PaneSnapshot` compile and pass — construction laundered through a free
+        // function is still construction. Any visible symbol anywhere in
+        // HerdrKit whose signature RETURNS a PaneSnapshot is a construction
+        // path, and exactly one is intended.
+        let returners = symbols.compactMap { symbol -> String? in
+            guard let signature = symbol["functionSignature"] as? [String: Any],
+                  let returns = signature["returns"] as? [[String: Any]],
+                  returns.contains(where: { ($0["spelling"] as? String)?.contains("PaneSnapshot") == true }),
+                  let path = symbol["pathComponents"] as? [String] else { return nil }
+            return path.joined(separator: ".")
+        }.sorted()
+        XCTAssertEqual(
+            returners, ["HerdrClient.paneSnapshot()"],
+            "a new package-visible symbol returns PaneSnapshot; every such symbol is a construction path, and only HerdrClient.paneSnapshot() is the authoritative source"
         )
     }
 }
