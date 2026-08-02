@@ -52,6 +52,9 @@ and they shape the transport design:
 
 ## Layout
 
+A guide to the main files, **not an exhaustive inventory** — `swift package describe`
+is authoritative. Everything named here must exist; not everything that exists is named.
+
 ```
 Sources/HerdrKit/
   HerdrClient.swift       typed API: agentList, read, prompt, sendKeys, subscribe
