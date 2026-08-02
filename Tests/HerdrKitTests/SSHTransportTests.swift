@@ -119,8 +119,8 @@ final class SSHTransportTests: XCTestCase {
         let ssh = try makeTransport()
         let unix = UnixSocketTransport(path: socketPath)
 
-        let overUnix = try await liveContract(HerdrClient(transport: unix))
-        let overSSH = try await liveContract(HerdrClient(transport: ssh))
+        let overUnix = try await liveContract(HerdrClient(transport: unix), unix)
+        let overSSH = try await liveContract(HerdrClient(transport: ssh), ssh)
 
         // Identical observable results, not merely both non-empty.
         XCTAssertEqual(overSSH.paneCount, overUnix.paneCount, "agent.list must agree")
@@ -130,7 +130,16 @@ final class SSHTransportTests: XCTestCase {
         XCTAssertEqual(overSSH.unwrappedNonEmpty, overUnix.unwrappedNonEmpty,
                        "the DEFAULT read surface must work over SSH too")
         XCTAssertEqual(overSSH.pingOK, overUnix.pingOK, "ping parity")
-        XCTAssertTrue(overSSH.pingOK, "ping must actually be sent, not merely claimed")
+
+        // Parity is necessary but NOT sufficient — both transports can agree on
+        // a wrong value, and every boolean here can agree on false. So assert
+        // absolute semantics too, over SSH specifically.
+        XCTAssertTrue(overSSH.pingOK, "a real ping must round-trip over SSH")
+        XCTAssertTrue(overSSH.styledHasCSI, "ansi must actually be styled")
+        XCTAssertFalse(overSSH.plainHasCSI, "text must actually be unstyled")
+        XCTAssertTrue(overSSH.unwrappedNonEmpty, "the default read surface must return content")
+        XCTAssertTrue(overSSH.unwrappedHasCSI, "the default surface must preserve styling")
+        XCTAssertGreaterThan(overSSH.paneCount, 0, "a live server must report panes")
     }
 
     struct ContractResult: Equatable {
@@ -139,12 +148,19 @@ final class SSHTransportTests: XCTestCase {
         var styledHasCSI: Bool
         var plainHasCSI: Bool
         var unwrappedNonEmpty: Bool
+        var unwrappedHasCSI: Bool
         var pingOK: Bool
     }
 
     /// The contract itself, transport-agnostic. Anything added here is
     /// automatically required of every transport.
-    func liveContract(_ client: HerdrClient) async throws -> ContractResult {
+    ///
+    /// Takes the transport as well as the client because a contract that only
+    /// sees the client cannot send a raw request — which is how `pingOK` came
+    /// to be hardcoded `true`, asserting a fact it never established.
+    func liveContract(
+        _ client: HerdrClient, _ transport: any HerdrTransport
+    ) async throws -> ContractResult {
         let agents = try await client.agentList()
         let pane = try XCTUnwrap(agents.first).paneID
         let styled = try await client.read(pane: pane, source: .visible, format: .ansi, lines: 40)
@@ -152,13 +168,18 @@ final class SSHTransportTests: XCTestCase {
         // recent_unwrapped is the DEFAULT reading surface per the design panel,
         // and was untested over SSH until now.
         let unwrapped = try await client.read(pane: pane, lines: 40)
+        // A REAL ping, whose response is parsed rather than assumed.
+        let pong = try await transport.roundTrip(#"{"id":"contract-ping","method":"ping","params":{}}"#)
+        let pongOK = pong.contains("\"result\"") && pong.contains("contract-ping")
+
         return ContractResult(
             paneCount: agents.count,
             firstPane: pane,
             styledHasCSI: styled.text.contains("\u{1B}["),
             plainHasCSI: plain.text.contains("\u{1B}["),
             unwrappedNonEmpty: !unwrapped.text.isEmpty,
-            pingOK: true
+            unwrappedHasCSI: unwrapped.text.contains("\u{1B}["),
+            pingOK: pongOK
         )
     }
 
@@ -169,20 +190,27 @@ final class SSHTransportTests: XCTestCase {
     ///
     /// Deterministic, not timing-dependent: many concurrent evaluations of two
     /// different fingerprints must yield exactly one winner.
-    func testConcurrentFirstContactCannotBothWin() async {
+    func testConcurrentFirstContactCannotBothWin() {
         let policy = PinningHostKeyPolicy()
         let a = String(repeating: "aa", count: 32)
         let b = String(repeating: "bb", count: 32)
 
-        let trusted = await withTaskGroup(of: (String, HostKeyDecision).self) { group in
-            for i in 0..<64 {
-                let fp = i.isMultiple(of: 2) ? a : b
-                group.addTask { (fp, policy.evaluate(host: "h", port: 22, presented: fp)) }
-            }
-            var accepted: Set<String> = []
-            for await (fp, decision) in group where decision == .trust { accepted.insert(fp) }
-            return accepted
+        // A task group alone is PROBABILISTIC — tasks may serialise and the
+        // test passes without ever racing. But a barrier across a task group
+        // DEADLOCKS: Swift's cooperative pool is width-limited, so 64 tasks
+        // cannot all arrive. (That deadlock is why this comment exists.)
+        //
+        // concurrentPerform uses real threads and genuinely runs them in
+        // parallel, so the contended window is entered rather than hoped for.
+        let workers = 64
+        let collected = Locked<[(String, HostKeyDecision)]>([])
+        DispatchQueue.concurrentPerform(iterations: workers) { i in
+            let fp = i.isMultiple(of: 2) ? a : b
+            let decision = policy.evaluate(host: "h", port: 22, presented: fp)
+            collected.mutate { $0.append((fp, decision)) }
         }
+        var trusted: Set<String> = []
+        for (fp, decision) in collected.value where decision == .trust { trusted.insert(fp) }
 
         XCTAssertEqual(
             trusted.count, 1,
@@ -249,4 +277,14 @@ final class Flag: @unchecked Sendable {
     private var value = false
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     func raise() { lock.lock(); value = true; lock.unlock() }
+}
+
+
+/// Minimal lock box for collecting results from real threads.
+final class Locked<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: T
+    init(_ initial: T) { storage = initial }
+    var value: T { lock.lock(); defer { lock.unlock() }; return storage }
+    func mutate(_ body: (inout T) -> Void) { lock.lock(); body(&storage); lock.unlock() }
 }

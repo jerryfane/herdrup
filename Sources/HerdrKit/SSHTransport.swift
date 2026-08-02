@@ -157,6 +157,18 @@ public enum SSHError: Error, CustomStringConvertible {
 /// `events.subscribe` holds its connection open. Each `roundTrip` and each
 /// `stream` therefore opens its own SSH channel.
 public struct SSHTransport: HerdrTransport {
+    /// Shared, bounded pool for blocking libssh2 work. Bounded because a thread
+    /// per request grows without limit under concurrency; shared because each
+    /// request needs its own connection but not its own operating-system thread.
+    /// Stack size is left at the platform default rather than a number picked
+    /// without measuring.
+    static let blockingQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "herdrkit.ssh.blocking"
+        q.maxConcurrentOperationCount = 4
+        return q
+    }()
+
     public let credentials: SSHCredentials
     private let hostKeyPolicy: HostKeyPolicy
 
@@ -343,7 +355,12 @@ public struct SSHTransport: HerdrTransport {
                 // occurs on a live channel with nothing available. Ask the
                 // channel. Treating zero as EOF ended streams that were merely
                 // idle, which on an event subscription is most of the time.
-                if libssh2_channel_eof(channel) == 0 { continue }
+                // libssh2_channel_eof: 1 = EOF, 0 = not EOF, NEGATIVE = query
+                // failed. Continuing only on exactly 0 meant every negative —
+                // i.e. every failure — was silently treated as a clean EOF.
+                let eof = libssh2_channel_eof(channel)
+                if eof == 0 { continue }
+                if eof < 0 { throw SSHError.readFailed(code: eof) }
                 if carry.isEmpty { return nil }
                 let rest = String(decoding: carry, as: UTF8.self)
                 carry.removeAll()
@@ -361,32 +378,42 @@ public struct SSHTransport: HerdrTransport {
     // MARK: - HerdrTransport
 
     public func roundTrip(_ requestLine: String) async throws -> String {
-        // Connect, handshake, auth, open, write and read are all BLOCKING, and
-        // Task.detached does NOT isolate them: a detached task is unstructured,
-        // not a dedicated thread, so its synchronous work still occupies a
-        // cooperative worker. An earlier version used it and claimed isolation
-        // it did not provide. Blocking work needs a real thread.
-        try await withCheckedThrowingContinuation { continuation in
-            let thread = Thread {
-                do {
-                    let session = try openSession()
-                    defer { session.close() }
-                    let channel = try openChannel(session)
-                    defer { libssh2_channel_free(channel) }
+        // Blocking work needs a real thread — Task.detached does not isolate it —
+        // but a thread PER REQUEST is unbounded and uncancellable. Concurrent
+        // callers would each allocate an OS thread that keeps connecting,
+        // handshaking or reading long after the awaiting task is gone.
+        //
+        // So: a shared bounded queue, plus a cancellation handle that publishes
+        // the socket so an in-flight blocking read can actually be interrupted.
+        let live = LiveChannel()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                SSHTransport.blockingQueue.addOperation {
+                    do {
+                        let session = try openSession()
+                        guard live.adopt(session) else {
+                            session.close()
+                            throw CancellationError()
+                        }
+                        defer { live.close() }
+                        let channel = try openChannel(session)
+                        live.adopt(channel: channel)
 
-                    try write(channel, requestLine)
-                    var carry: [UInt8] = []
-                    guard let line = try readLine(channel, carry: &carry) else {
-                        throw TransportError.closedBeforeResponse
+                        try write(channel, requestLine)
+                        var carry: [UInt8] = []
+                        guard let line = try readLine(channel, carry: &carry) else {
+                            throw TransportError.closedBeforeResponse
+                        }
+                        continuation.resume(returning: line)
+                    } catch {
+                        continuation.resume(throwing: error)
                     }
-                    continuation.resume(returning: line)
-                } catch {
-                    continuation.resume(throwing: error)
                 }
             }
-            thread.name = "herdrkit.ssh.roundTrip"
-            thread.stackSize = 512 * 1024
-            thread.start()
+        } onCancel: {
+            // Shuts the socket down so a blocked read returns now, rather than
+            // leaving the worker running until the peer speaks.
+            live.interrupt()
         }
     }
 
@@ -419,7 +446,6 @@ public struct SSHTransport: HerdrTransport {
                 }
             }
             work.name = "herdrkit.ssh.stream"
-            work.stackSize = 512 * 1024
             work.start()
             continuation.onTermination = { _ in
                 // Same discipline as UnixSocketTransport: Task.cancel() cannot
