@@ -172,13 +172,12 @@ final class SessionRecoveryTests: XCTestCase {
         // Deleting the adoption below leaves no subscribe: KILLED, so this
         // control is armed and adoption is its premise.
         //
-        // What it does NOT fix, measured after adding it rather than assumed:
-        // substituting a stranger AttemptID for `minted` in the assertion ABOVE
-        // still SURVIVES. Provenance rejects a stranger to the identical
-        // observable, and the control below reads `minted` independently, so
-        // nothing binds the two lines to one attempt. The negative line is
-        // therefore not attempt-discriminating; attempt discrimination is
-        // pinned by testALatePaneEventFromAnAbandonedAttemptActsOnNothing.
+        // ATTEMPT DISCRIMINATION comes from the shared `probe` value, not from
+        // this control. While the two deliveries were constructed separately, a
+        // stranger AttemptID substituted into the negative line alone SURVIVED
+        // — provenance rejects a stranger to the identical observable. Sharing
+        // one immutable event makes that substitution reach here too, where the
+        // subscribe then fails to appear: KILLED.
         _ = plan(.connected(minted, at: Date()), &state)
         XCTAssertEqual(plan(probe, &state).subscribes, ["p9"],
                        "the same event still admits nothing after adoption; the emptiness above was "
@@ -386,17 +385,13 @@ final class SessionRecoveryTests: XCTestCase {
         let probe = ClientEvent.paneCreated("adoption-probe", from: attemptB)
         XCTAssertTrue(plan(probe, &state).isEmpty,
                       "an event from B before B's adoption is processed admits nothing")
-        // MEASURED LIMITATION, stated rather than implied: substituting a
-        // stranger AttemptID for `attemptB` here leaves this assertion true
-        // (SURVIVED), because provenance rejects a stranger to the same
-        // observable. So this line pins "nothing leaks before adoption" and
-        // does NOT discriminate which attempt was refused. A positive control
-        // of the kind used in
-        // testBeginInitialAttemptWhileConnectedCancelsAndClearsAdoption does
-        // not fit here without consuming p9's freshness and gutting the
-        // mid-replay-learning assertion at the end of this test, which is the
-        // stronger check. Attempt discrimination is pinned by
-        // testALatePaneEventFromAnAbandonedAttemptActsOnNothing.
+        // ORDERING IS LOAD-BEARING HERE and is pinned: moving this delivery
+        // after the adoption below KILLS (it subscribes instead of staying
+        // empty), and moving the post-adoption delivery before it KILLS (no
+        // subscription appears). The post-adoption delivery and the snapshot
+        // below ARE interchangeable — both follow adoption and touch distinct
+        // panes — which is independence, not redundancy: the stranger mutation
+        // pins the probe and the p9 collision pins the snapshot.
 
         // And B's adoption must not be suppressed as a repeat.
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
