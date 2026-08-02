@@ -14,6 +14,8 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CSSH", path: "Sources/CSSH"),
         .target(name: "HerdrKit", dependencies: ["CSSH"]),
-        .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit"]),
+        // CSSH so tests can build a real Session to drive LiveChannel's
+        // ownership handoff directly, rather than only through a live server.
+        .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit", "CSSH"]),
     ]
 )
