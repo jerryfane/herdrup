@@ -26,9 +26,19 @@ final class AttemptAuthority: @unchecked Sendable {
     private var _current: AttemptID?
     private var _connectedSince: Date?
     private var _subscribedPanes: Set<String> = []
+    private var _isForeground = true
 
     var current: AttemptID? {
         lock.lock(); defer { lock.unlock() }; return _current
+    }
+
+    /// Foreground is a DECISION INPUT — whether to dial — so it lives here, not
+    /// in the value State. Value-stored, a saved foregrounded copy restored
+    /// after backgrounding read true and `beginInitialAttempt` dialed while
+    /// suspended, defeating the no-dialing-while-backgrounded rule through
+    /// ordinary replay.
+    var isForeground: Bool {
+        lock.lock(); defer { lock.unlock() }; return _isForeground
     }
 
     /// When the CURRENT attempt's connection was adopted, or nil. Lives here —
@@ -51,12 +61,12 @@ final class AttemptAuthority: @unchecked Sendable {
     /// rediscovery. State copies share this object and both types are Sendable,
     /// so concurrent use is the advertised surface, not an abuse of it.
 
-    /// Mints a new attempt and makes it current. Tears down transport-scoped
-    /// state in the same section: every mint is a new transport, and clearing
-    /// here is what keeps `connectedSince` unable to describe a non-current
-    /// attempt's transport.
-    func mint() -> AttemptID {
-        lock.lock(); defer { lock.unlock() }
+    /// Every mint is foreground-gated INSIDE the section, because the
+    /// foreground check and the mint were previously two operations — and a
+    /// value-replayed foreground bit sat between them. There is deliberately no
+    /// unconditional mint: no path may dial while backgrounded.
+
+    private func unsafeMint() -> AttemptID {
         let id = AttemptID(uuid: UUID())
         _current = id
         _connectedSince = nil
@@ -64,13 +74,39 @@ final class AttemptAuthority: @unchecked Sendable {
         return id
     }
 
-    /// Clears authority and transport state without minting — backgrounding
-    /// and disconnection, where nothing should be dialing.
-    func teardown() {
+    /// Cold launch / caller restart: mints only if foregrounded, else nothing.
+    func mintIfForeground() -> AttemptID? {
+        lock.lock(); defer { lock.unlock() }
+        guard _isForeground else { return nil }
+        return unsafeMint()
+    }
+
+    /// Network change: the old transport is dead either way, so transport state
+    /// tears down unconditionally; a replacement is minted only if foregrounded.
+    func teardownAndMintIfForeground() -> AttemptID? {
         lock.lock(); defer { lock.unlock() }
         _current = nil
         _connectedSince = nil
         _subscribedPanes = []
+        guard _isForeground else { return nil }
+        return unsafeMint()
+    }
+
+    /// Backgrounding: no attempt survives it, nothing dials after it.
+    func backgroundAndTeardown() {
+        lock.lock(); defer { lock.unlock() }
+        _isForeground = false
+        _current = nil
+        _connectedSince = nil
+        _subscribedPanes = []
+    }
+
+    /// Foregrounding: becomes foreground and mints, one section, so no
+    /// interleaved backgrounding can slip between the two.
+    func foregroundAndMint() -> AttemptID {
+        lock.lock(); defer { lock.unlock() }
+        _isForeground = true
+        return unsafeMint()
     }
 
     enum AdoptOutcome {
@@ -89,22 +125,21 @@ final class AttemptAuthority: @unchecked Sendable {
         return .adopted
     }
 
-    /// Staleness check and failure teardown in one section.
-    enum FailOutcome {
-        /// The failing attempt was not current; touch nothing.
-        case stale
-        /// The failure was real; carries the adoption time it ended, if any,
-        /// for stability accounting.
-        case failed(endedConnectionFrom: Date?)
-    }
-
-    func failIfCurrent(_ attempt: AttemptID) -> FailOutcome {
+    /// Validates the failed attempt, retires it, and mints its replacement in
+    /// ONE section. The split version (fail-teardown, then a separate mint
+    /// after backoff computation) left the FAILED attempt current in between:
+    /// a gated probe re-adopted connected(A) for the failed transport inside
+    /// that window, and eight concurrent transportFailed(A) callbacks each
+    /// passed the same current-attempt check and earned eight reconnects.
+    /// Retirement and replacement are one fact now — duplicates find A already
+    /// retired and are stale.
+    func retireAndReplace(_ attempt: AttemptID) -> (replacement: AttemptID, endedConnectionFrom: Date?)? {
         lock.lock(); defer { lock.unlock() }
-        guard attempt == _current else { return .stale }
+        guard attempt == _current else { return nil }
         let since = _connectedSince
-        _connectedSince = nil
-        _subscribedPanes = []
-        return .failed(endedConnectionFrom: since)
+        // The failed attempt is retired and its replacement is current before
+        // the lock releases; there is no observable in-between.
+        return (replacement: unsafeMint(), endedConnectionFrom: since)
     }
 
     /// Admits the panes not already subscribed, records them, and returns ONLY
@@ -282,20 +317,20 @@ public struct SessionRecovery: Sendable {
     /// Stated at that strength and no more, after a sweep refuted the stronger
     /// claim ("every transition goes through plan()"): two other methods mutate
     /// state, and value semantics plus the public initialiser mean a caller can
-    /// still REPLACE the whole value. What survives replay: attempt minting
-    /// (fresh UUIDs), attempt authority, the connection record and the
-    /// subscription ledger — all read through the lineage's shared
-    /// `AttemptAuthority`, so a restored copy cannot reauthorize a cancelled
-    /// attempt, present its transport as connected, or replay its ledger. What
-    /// replay DOES restore: pane knowledge (refreshed by the next snapshot)
-    /// and the failure streak (worst case, a wrong backoff delay — degradation,
-    /// not misdirection). A WHOLESALE `State()` rebuild is a fresh lineage:
-    /// everything before it goes stale, which is the safe direction.
+    /// still REPLACE the whole value. Every DECISION INPUT reads through the
+    /// lineage's shared `AttemptAuthority` — attempt identity, the connection
+    /// record, the subscription ledger, and the foreground bit (a value-stored
+    /// foreground was the last replay: a saved foregrounded copy dialed while
+    /// backgrounded) — so a restored copy cannot reauthorize a cancelled
+    /// attempt, present a dead transport as connected, replay its ledger, or
+    /// dial while suspended. What replay restores: pane knowledge (refreshed by
+    /// the next snapshot) and the failure streak (worst case, a wrong backoff
+    /// delay — degradation, not misdirection). A WHOLESALE `State()` rebuild is
+    /// a fresh lineage: everything before it goes stale, the safe direction.
     public struct State: Equatable, Sendable {
         public static func == (lhs: State, rhs: State) -> Bool {
             lhs.authority === rhs.authority
                 && lhs.consecutiveFailures == rhs.consecutiveFailures
-                && lhs.isForeground == rhs.isForeground
                 && lhs.knownPanes == rhs.knownPanes
         }
 
@@ -304,7 +339,7 @@ public struct SessionRecovery: Sendable {
         /// belongs to the attempt the authority says is current, so no replayed
         /// copy can present a cancelled transport as connected.
         public var connectedSince: Date? { authority.connectedSince }
-        public internal(set) var isForeground: Bool = true
+        public var isForeground: Bool { authority.isForeground }
         /// Shared by every copy of this State lineage — see `AttemptAuthority`
         /// for why authority must not live in replayable value contents.
         internal let authority = AttemptAuthority()
@@ -358,8 +393,8 @@ public struct SessionRecovery: Sendable {
     /// is foreground-guarded; each property was earned by an observed failure,
     /// recorded on the case bodies below.
     public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
-        guard state.isForeground else { return RecoveryPlan() }
-        return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
+        guard let minted = state.authority.mintIfForeground() else { return RecoveryPlan() }
+        return RecoveryPlan([.cancelTransport, .reconnect(minted, after: 0)])
     }
 
     public func plan(
@@ -390,46 +425,47 @@ public struct SessionRecovery: Sendable {
             // staleness check and the teardown share the authority's critical
             // section, and streak accounting runs only when the failure was
             // real.
-            guard case .failed(let endedConnectionFrom) = state.authority.failIfCurrent(attempt) else {
-                return RecoveryPlan()
-            }
+            // Retirement and replacement are ONE authority transition: the split
+            // version left the failed attempt current until a later mint, and
+            // in that window connected(A) re-adopted the failed transport while
+            // eight concurrent duplicate failures each earned a reconnect.
+            // Duplicates now find A already retired and are stale; streak
+            // accounting runs only for the one real retirement.
+            guard let retired = state.authority.retireAndReplace(attempt) else { return RecoveryPlan() }
             // A connection that lasted counts as healthy, so the next failure
             // starts from a short delay rather than inheriting an old streak.
-            if let since = endedConnectionFrom,
+            if let since = retired.endedConnectionFrom,
                at.timeIntervalSince(since) >= stabilityInterval {
                 state.consecutiveFailures = 0
             }
             state.consecutiveFailures += 1
             let delay = backoff(failures: state.consecutiveFailures, using: &generator)
-            return RecoveryPlan([.reconnect(state.authority.mint(), after: delay)])
+            return RecoveryPlan([.reconnect(retired.replacement, after: delay)])
 
         case .networkChanged:
             // Reconnect, not migrate. Cancel first: the old socket is bound to
             // an address that may no longer exist, and a half-open connection on
             // a dead interface fails by timing out rather than by erroring.
             state.consecutiveFailures = 0
-            guard state.isForeground else {
-                state.authority.teardown()
+            guard let minted = state.authority.teardownAndMintIfForeground() else {
                 return RecoveryPlan([.cancelTransport])
             }
-            return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
+            return RecoveryPlan([.cancelTransport, .reconnect(minted, after: 0)])
 
         case .backgrounded:
-            state.isForeground = false
-            state.authority.teardown()
+            state.authority.backgroundAndTeardown()
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
             // between closing it deliberately and discovering it dead later.
             return RecoveryPlan([.cancelTransport])
 
         case .foregrounded:
-            state.isForeground = true
             state.consecutiveFailures = 0
             // Cancel FIRST — foregrounding is not guaranteed to find a dead
             // transport, and dialing beside a live one previously leaked two
             // sockets reading the same panes forever. Resync and subscriptions
             // follow on `connected`; there is no transport yet to run them on.
-            return RecoveryPlan([.cancelTransport, .reconnect(state.authority.mint(), after: 0)])
+            return RecoveryPlan([.cancelTransport, .reconnect(state.authority.foregroundAndMint(), after: 0)])
 
         case .paneCreated(let pane):
             state.knownPanes.insert(pane)
