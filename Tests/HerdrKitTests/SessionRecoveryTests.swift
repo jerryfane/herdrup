@@ -344,12 +344,40 @@ final class SessionRecoveryTests: XCTestCase {
 
         // Nothing anywhere targeted p2, and the ledger never held it.
         for action in adopted.actions + subscribed.actions {
-            if case .subscribe(let panes) = action {
+            if case .subscribe(let panes, _) = action {
                 XCTAssertFalse(panes.contains("p2"), "a closed pane was subscribed onto the fresh transport")
             }
         }
         XCTAssertFalse(state.subscribedPanes.contains("p2"),
                        "the ledger recorded a subscription to a closed pane — irretractable on this wire")
+    }
+
+    /// AXIS: a subscription action is bound to the attempt that admitted it —
+    /// A's delayed plan can never be mistaken for B's.
+    ///
+    /// The reviewer's eighth probe closed the OUTPUT side of the asynchronous
+    /// boundary: input data carried provenance, but the emitted subscribe
+    /// discarded it after admission, so A's subscribe({p1}) compared EQUAL to
+    /// B's and an executor holding A's delayed plan could apply it to B.
+    func testASubscriptionActionIsBoundToItsAttempt() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptA, at: Date()), &state)
+        let plansA = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptA, state: &state)
+        XCTAssertEqual(plansA.subscribesOn, attemptA)
+
+        _ = plan(.networkChanged(at: Date()), &state)   // retires A
+        let attemptB = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptB, at: Date()), &state)
+        let plansB = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptB, state: &state)
+        XCTAssertEqual(plansB.subscribes, ["p1"], "B's own subscription executes once")
+        XCTAssertEqual(plansB.subscribesOn, attemptB)
+
+        // The two plans name the same panes and MUST NOT compare equal: the
+        // binding is what lets an executor reject A's delayed action.
+        XCTAssertNotEqual(plansA, plansB,
+                          "identical pane sets from different attempts compared equal; a delayed plan could target the replacement")
+        XCTAssertNotEqual(plansA.subscribesOn, plansB.subscribesOn)
     }
 
     /// AXIS: a delayed snapshot from an abandoned attempt admits nothing onto

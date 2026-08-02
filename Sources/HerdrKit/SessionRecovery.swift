@@ -237,11 +237,17 @@ public enum RecoveryAction: Equatable, Sendable {
     /// `observe` WITH this attempt, so a resync outlived by its attempt
     /// produces data that is recognisably stale rather than silently admitted.
     case resyncAllPanes(AttemptID)
-    /// Open subscriptions for these panes. The pane-scoped subscription kinds
-    /// have **no wildcard**, so a pane absent here is a pane nothing is
-    /// watching. (`Wire.swift` also models non-pane-scoped subscription kinds;
-    /// this plan carries pane identity only and does not express those.)
-    case subscribe(Set<String>)
+    /// Open subscriptions for these panes ON the carried attempt's transport,
+    /// and only there. Admission validates the DATA's provenance, but an
+    /// emitted action outlives the section that admitted it: a probe showed
+    /// A's subscribe({p1}) comparing EQUAL to B's after A was retired, so an
+    /// executor holding A's delayed plan could apply it to B. The executor must
+    /// bind or reject this action against the carried attempt at execution
+    /// time. (The pane-scoped subscription kinds have **no wildcard**, so a
+    /// pane absent from every subscribe is a pane nothing is watching;
+    /// `Wire.swift` also models non-pane-scoped kinds this plan does not
+    /// express.)
+    case subscribe(Set<String>, on: AttemptID)
 }
 
 /// An ordered list of steps. Order is the point.
@@ -283,7 +289,13 @@ public struct RecoveryPlan: Equatable, Sendable {
     }
 
     public var subscribes: Set<String>? {
-        for case .subscribe(let panes) in actions { return panes }
+        for case .subscribe(let panes, _) in actions { return panes }
+        return nil
+    }
+
+    /// The attempt a subscribe in this plan is bound to, if one exists.
+    public var subscribesOn: AttemptID? {
+        for case .subscribe(_, let attempt) in actions { return attempt }
         return nil
     }
 }
@@ -522,7 +534,7 @@ public struct SessionRecovery: Sendable {
             }
             state.knownPanes.insert(pane)
             guard !fresh.isEmpty else { return RecoveryPlan() }
-            return RecoveryPlan([.subscribe(fresh)])
+            return RecoveryPlan([.subscribe(fresh, on: from)])
 
         case .paneClosed(let pane, let from):
             guard state.authority.isCurrent(from) else { return RecoveryPlan() }
@@ -571,7 +583,7 @@ public struct SessionRecovery: Sendable {
         }
         state.knownPanes = snapshot.paneIDs
         guard !fresh.isEmpty else { return RecoveryPlan() }
-        return RecoveryPlan([.subscribe(fresh)])
+        return RecoveryPlan([.subscribe(fresh, on: attempt)])
     }
 }
 
