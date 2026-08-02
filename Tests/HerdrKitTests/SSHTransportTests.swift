@@ -12,6 +12,22 @@ import XCTest
 ///
 /// Skips when the local SSH prerequisites are absent so other environments stay
 /// honest about what they did not cover, rather than failing for the wrong reason.
+/// A counter a @Sendable seam can raise for its test.
+final class UncheckedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func bump() { lock.withLock { n += 1 } }
+    var value: Int { lock.withLock { n } }
+}
+
+/// A set-once flag a @Sendable seam can raise for its test.
+final class UncheckedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var isSet: Bool { lock.withLock { flag } }
+}
+
 final class SSHTransportTests: XCTestCase {
     private static let keyPath = "\(NSHomeDirectory())/.ssh/id_ed25519"
 
@@ -411,7 +427,13 @@ final class SSHTransportTests: XCTestCase {
             hostKeyPolicy: PinningHostKeyPolicy(store: store)
         )
 
-        let baseline = DescriptorAudit.doubleCloses
+        // Attributed to THIS transport, not the process. The old form snapshotted
+        // a process-wide counter and compared it after 25 stream attempts —
+        // sound only if nothing else in the process closes a descriptor inside
+        // that window. Other tests' async teardown does, so this failed about
+        // one run in ten under full-suite load and never in isolation. The
+        // assertion was reporting other tests' work as this transport's defect.
+        let baseline = transport.auditToken.doubleCloses
         var rejections = 0
         for _ in 0..<25 {
             do {
@@ -428,7 +450,7 @@ final class SSHTransportTests: XCTestCase {
         }
         XCTAssertEqual(rejections, 25, "every attempt must have reached the rejection path")
         XCTAssertEqual(
-            DescriptorAudit.doubleCloses, baseline,
+            transport.auditToken.doubleCloses, baseline,
             "LiveChannel closed a descriptor openSession had already closed"
         )
     }
@@ -479,6 +501,139 @@ final class SSHTransportTests: XCTestCase {
     ///
     /// So the error type is the assertion, and the budget is set far beyond the
     /// timing bound so nothing but cancellation can end the attempt at all.
+    /// AXIS: a released token's closer cannot be inherited by a replacement that
+    /// lands at the same address.
+    ///
+    /// The closer and the counters used to live in `[ObjectIdentifier: ...]`
+    /// maps. ObjectIdentifier is a POINTER VALUE and the allocator reuses it, so
+    /// review released a token without calling forget(), got a replacement at
+    /// the same address, and watched the retired token's closer run for it —
+    /// which could intercept or suppress a real close in an unrelated test.
+    ///
+    /// Now the state lives ON the token, so this is structurally impossible
+    /// rather than merely tested for. The test remains because "structurally
+    /// impossible" is a claim, and this is the cheapest way to keep it honest
+    /// if anyone reintroduces a map.
+    func testAReplacementTokenDoesNotInheritARetiredTokensCloser() throws {
+        var addresses: [ObjectIdentifier] = []
+        // UncheckedCounter, not a captured `var`. A @Sendable closure mutating
+        // captured local state fails `-Xswiftc -warnings-as-errors`, which is a
+        // standing requirement in this lane's own review header — and the file
+        // already carried this helper, written for exactly this, three rounds
+        // ago. I did not run that leg before pushing. Second time on this PR.
+        let intercepted = UncheckedCounter()
+
+        do {
+            let retired = SSHTransport.AuditToken()
+            retired.closer = { _ in intercepted.bump(); return 0 }
+            addresses.append(ObjectIdentifier(retired))
+        }   // released WITHOUT any cleanup call
+
+        let replacement = SSHTransport.AuditToken()
+        addresses.append(ObjectIdentifier(replacement))
+        try XCTSkipUnless(addresses[0] == addresses[1],
+                          "the allocator did not reuse the address; the hazard is not staged")
+
+        let fd = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(fd < 0, "could not open a descriptor")
+        let generation = DescriptorAudit.opened(fd)
+        DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: replacement)
+
+        XCTAssertEqual(intercepted.value, 0,
+                       "the replacement inherited a retired token's closer")
+        XCTAssertEqual(replacement.adoptionRejections, 1,
+                       "the replacement's own close did not run")
+    }
+
+    /// AXIS: a RECYCLED descriptor number is not closed in place of the one the
+    /// caller meant.
+    ///
+    /// Descriptor numbers are reused: close 7, open a socket, get 7 back. The
+    /// audit used to verify only that the number was closeable, so a probe
+    /// closed a descriptor, opened another that reused the number, and the
+    /// helper closed the UNRELATED socket while reporting the first one's
+    /// rejection as successful. EBADF describes a number's current state, never
+    /// which opening it belonged to.
+    func testARecycledDescriptorIsNotClosedInPlaceOfTheOriginal() throws {
+        let token = SSHTransport.AuditToken()
+        // /dev/null rather than a socket: any descriptor exercises recycling,
+        // and this avoids the Glibc/Darwin SOCK_STREAM divergence entirely —
+        // which is a live concern in this repo rather than a hypothetical one.
+        let first = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(first < 0, "could not open a descriptor")
+        let staleGeneration = DescriptorAudit.opened(first)
+        close(first)
+
+        let second = open("/dev/null", O_RDONLY)
+        try XCTSkipIf(second < 0, "could not open the second descriptor")
+        defer { close(second) }
+        try XCTSkipIf(second != first,
+                      "the descriptor number was not recycled; the hazard is not staged")
+        _ = DescriptorAudit.opened(second)
+
+        DescriptorAudit.closeRejectedAdoption(second, generation: staleGeneration, owner: token)
+
+        XCTAssertEqual(token.adoptionRejections, 0,
+                       "a stale generation was accepted as a successful rejection")
+        XCTAssertEqual(fcntl(second, F_GETFD) == -1 && errno == EBADF, false,
+                       "the audit closed a descriptor that was not the one it was given")
+    }
+
+    /// AXIS: the adopt-rejection cleanup closes its descriptor exactly once.
+    ///
+    /// The last unaudited-then-unpinned branch in tcpConnect. It runs only when
+    /// the channel is already closed AT THE INSTANT adoption is offered, and no
+    /// ordinary cancellation reaches it — interrupting earlier is caught at the
+    /// resolution claim, interrupting later lands in the catch cleanup. So a
+    /// deliberate double close there survived all 23 SSH tests, and the branch
+    /// needed a seam inside the window rather than a cleverer cancellation.
+    func testAdoptionRejectionClosesItsDescriptorExactlyOnce() async throws {
+        guard FileManager.default.fileExists(atPath: Self.keyPath),
+              let pem = try? String(contentsOfFile: Self.keyPath, encoding: .utf8)
+        else { throw XCTSkip("no local SSH key") }
+
+        var transport = SSHTransport(credentials: SSHCredentials(
+            host: "127.0.0.1", username: NSUserName(),
+            privateKeyPEM: pem, remoteSocketPath: socketPath))
+        let reached = UncheckedFlag()
+        transport.afterDescriptorPublished = { live in
+            guard let live else { return }
+            reached.set()
+            live.interrupt()          // closed BEFORE adoption is offered
+        }
+        let baseline = transport.auditToken.doubleCloses
+
+        // WITNESS THE CLOSE ITSELF, through an injected closer that delegates to
+        // the real one. Both a success-shaped substitute for the syscall and
+        // deleting the close outright leave this UNINVOKED — and neither is
+        // catchable by looking at the descriptor number afterwards, because by
+        // then the number may belong to someone else. I had accepted that as an
+        // unclosable gap; review built this.
+        let closes = UncheckedCounter()
+        transport.auditToken.closer = { fd in closes.bump(); return DescriptorAudit.realClose(fd) }
+
+        do {
+            for try await _ in transport.stream(#"{"id":"x","method":"events.subscribe","params":{}}"#) {
+                XCTFail("the stream must not deliver after an interrupted adoption")
+            }
+        } catch { /* cancelled or refused; either way the branch ran */ }
+
+        XCTAssertTrue(reached.isSet, "the seam never fired; the window was not entered")
+        // BRANCH-SPECIFIC EVIDENCE. `reached` proves only that the SEAM ran.
+        // Replacing the whole guard with a bare `_ = live?.adopt(...)` compiled
+        // and left this test green: the later cleanup closed the descriptor
+        // once, the tally matched, and the error was swallowed. Proving the
+        // branch RAN needs something only the branch produces.
+        XCTAssertEqual(
+            transport.auditToken.adoptionRejections, 1,
+            "the adopt-rejection branch never ran; the tally comparison below proves nothing")
+        XCTAssertEqual(closes.value, 1,
+                       "the rejection branch did not invoke the close: \(closes.value) calls")
+        XCTAssertEqual(
+            transport.auditToken.doubleCloses, baseline,
+            "the adopt-rejection cleanup closed its descriptor twice")
+    }
+
     func testCancellationInterruptsConnectAndReportsItAsCancellation() async throws {
         try XCTSkipUnless(Self.blackholeSwallowsSYN(), "no silent address available here")
 
@@ -489,6 +644,12 @@ final class SSHTransportTests: XCTestCase {
             setupTimeout: 30
         )
         let started = Date()
+        // The connect path's own closes are audited but nothing drove them:
+        // duplicating one compiled and every connect/cancellation regression
+        // still passed. Cancelling mid-connect is exactly the branch that
+        // closes the descriptor it just published, so this test is where it
+        // gets pinned.
+        let auditBaseline = transport.auditToken.doubleCloses
         let task = Task { _ = try await transport.roundTrip(#"{"id":"x","method":"ping","params":{}}"#) }
         try await Task.sleep(nanoseconds: 200_000_000)
         task.cancel()
@@ -506,6 +667,10 @@ final class SSHTransportTests: XCTestCase {
             error is CancellationError,
             "a cancelled connect surfaced as \(error) — a retrying caller cannot tell it from a peer reset"
         )
+
+        XCTAssertEqual(
+            transport.auditToken.doubleCloses, auditBaseline,
+            "cancelling mid-connect closed a descriptor twice")
     }
 
     /// AXIS: a cancellation landing in the poll-ready/`SO_ERROR` window is still
@@ -613,6 +778,20 @@ final class SSHTransportTests: XCTestCase {
     /// AXIS: an expired deadline is not waited out, so a stalled resolver never
     /// becomes the caller's problem.
     func testResolutionGivesUpOnAnExpiredDeadline() {
+        // THE RESOLVER MUST STILL BE PENDING. `claim` checks the deadline only
+        // while `finished == false`, so a resolver that completes first makes
+        // `.resolved` the CORRECT answer and this test fail — for 127.0.0.1,
+        // which resolves immediately. It failed on suite repeat 18, once in 200
+        // isolated processes, and left the head's suite intermittently red;
+        // review measured it. A precondition that races the thing it is meant
+        // to hold is the same vacuity as an absence assertion, wearing timing
+        // instead.
+        let holding = DispatchSemaphore(value: 0)
+        SSHTransport.Resolution.startGate = { holding.wait() }
+        defer {
+            SSHTransport.Resolution.startGate = nil
+            holding.signal()
+        }
         let resolution = SSHTransport.ResolutionRegistry.resolution(host: "127.0.0.1", port: 22)
         guard case .gaveUp = resolution.claim(
             by: Date().addingTimeInterval(-1), isInterrupted: { false }
