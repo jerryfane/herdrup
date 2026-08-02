@@ -776,17 +776,21 @@ actor SleepRecorder {
                        "exhausted retry state was erased: attempts reported \(attempts)")
         XCTAssertNotNil(lastError, "the last error was erased with the retry state")
 
-        // And a retained orphan callback must not restart attempts past the cap.
-        let attemptsBefore = transport.log().filter {
-            if case .openAttempt = $0 { return true }; return false
-        }.count
+        // And a retained orphan callback must not restart registrations past the
+        // cap. Observed through registrationCount, NOT the .openAttempt log:
+        // with onlyFirstOpenSucceeds every replacement registers its terminator
+        // and then throws BEFORE .openAttempt is recorded, so the log-equality
+        // form stayed true even when restarts happened — the reviewer isolated
+        // exactly that, seeing registrations grow 4 -> 9 while the shipped
+        // assertion passed. Third time on this test family that the OBSERVABLE,
+        // not the assertion, was what let a mutant through.
+        let registrationsBefore = transport.registrationCount("p1")
+        XCTAssertGreaterThan(registrationsBefore, 0, "precondition: registrations exist to observe")
         transport.killOldestRegistration("p1")
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        let attemptsAfter = transport.log().filter {
-            if case .openAttempt = $0 { return true }; return false
-        }.count
-        XCTAssertEqual(attemptsAfter, attemptsBefore,
-                       "an orphan callback restarted registration past the exhausted cap")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let registrationsAfter = transport.registrationCount("p1")
+        XCTAssertEqual(registrationsAfter, registrationsBefore - 1,
+                       "expected exactly the killed callback to be consumed; \(registrationsBefore) -> \(registrationsAfter) means restarts past the exhausted cap")
     }
 
     /// THE COORDINATOR'S PAIRED CONTROL: a healthy pane reports `.open` AND a
