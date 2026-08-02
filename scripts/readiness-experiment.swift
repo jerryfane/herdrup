@@ -189,6 +189,10 @@ func runTrial(sequence: Int, arm: Arm, runStart: Double) -> TrialRow {
         else { row.error = "write_failed_\(sent)"; return row }
     }
 
+    // The response is VALIDATED, not merely received. The first version stopped
+    // at any newline and recorded success, so zero error rows proved only that
+    // libssh2 delivered lines — a server error envelope, or an answer to some
+    // other request, would have been counted as a successful ping.
     var received: [UInt8] = []
     var buffer = [CChar](repeating: 0, count: 16 * 1024)
     while !received.contains(UInt8(ascii: "\n")) {
@@ -209,7 +213,18 @@ func runTrial(sequence: Int, arm: Arm, runStart: Double) -> TrialRow {
             row.error = "read_failed_\(n)"; return row
         }
     }
-    row.tRequestMs = nowMs() - requestStart
+    let elapsed = nowMs() - requestStart   // clock stops before validation
+
+    let lineEnd = received.firstIndex(of: UInt8(ascii: "\n"))!
+    let line = Data(received[..<lineEnd])
+    guard
+        let decoded = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+        decoded["id"] as? String == "readiness"
+    else { row.error = "malformed_or_mismatched_response"; return row }
+    guard decoded["error"] == nil, decoded["result"] != nil else {
+        row.error = "server_error_envelope"; return row
+    }
+    row.tRequestMs = elapsed
     return row
 }
 
