@@ -1480,6 +1480,18 @@ actor SleepRecorder {
         // across the note's execution.
         XCTAssertEqual(transport.log().count, transportOpsBeforeDeath,
                        "executing noteIgnoredDeath performed transport work; it must only observe")
+
+        // AND RESOURCE OWNERSHIP SURVIVED IT. Clearing resourcedAttempt in the
+        // note's branch compiled and survived all 33 executor tests: nothing
+        // observed it, and the next teardown would then skip closeAll for the
+        // attempt that actually holds sockets — a leaked connection, caused by
+        // an "observation". Ownership is only visible through what teardown
+        // does, so the test has to run one.
+        await executor.handle(.networkChanged(at: Date()))
+        let closed = await waitUntil { transport.log().contains(.closeAll(attempt)) }
+        XCTAssertTrue(closed,
+                      "after the ignored death, teardown did not close the attempt that owned the "
+                      + "transport; the note dropped resource ownership")
     }
 
     /// AXIS: a flood of ignored deaths cannot evict an actionable rejection.
@@ -1509,6 +1521,19 @@ actor SleepRecorder {
         for _ in 0..<(RecoveryExecutor.rejectionCapacity + 1) {
             await executor.handle(.streamFailed(pane: "p", from: attempt))
         }
+
+        // THE EXHAUSTED PANE'S STATUS MUST BE UNCHANGED. Clearing openFailures in
+        // the note's branch compiled and survived all 140 tests: it flips this
+        // pane from admittedNotOpen(attempts: cap) to notAdmitted, silently
+        // converting "wanted but unreachable" into "never wanted" — the exact
+        // distinction task 7 exists to preserve, destroyed by an action that
+        // claims to only observe.
+        let statusAfterFlood = await executor.paneStatus("p")
+        guard case .admittedNotOpen(let attemptsAfter, _) = statusAfterFlood else {
+            return XCTFail("the flood changed the pane's status to \(statusAfterFlood)")
+        }
+        XCTAssertEqual(attemptsAfter, RecoveryExecutor.openFailureCap,
+                       "the flood altered the failure counter the status depends on")
 
         let survived = await executor.rejections.contains { $0.reason.contains("retired attempt") }
         XCTAssertTrue(survived,
