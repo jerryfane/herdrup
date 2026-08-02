@@ -211,6 +211,11 @@ public struct SSHTransport: HerdrTransport {
             let fd = socket(entry.pointee.ai_family, entry.pointee.ai_socktype, entry.pointee.ai_protocol)
             if fd >= 0 {
                 if connect(fd, entry.pointee.ai_addr, entry.pointee.ai_addrlen) == 0 {
+                    // SSH carries small request/response exchanges; Nagle holds a
+                    // small write waiting for an ACK the peer has delayed, which
+                    // shows up as a fixed ~40ms floor rather than as work.
+                    var on: Int32 = 1
+                    setsockopt(fd, Int32(IPPROTO_TCP), TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
                     return fd
                 }
                 _ = Glibc_close(fd)
