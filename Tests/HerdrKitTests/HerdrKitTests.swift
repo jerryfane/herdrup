@@ -206,6 +206,16 @@ final class LiveServerTests: XCTestCase {
         )
     }
 
+    /// herdr-ios#2. The previous version broke out of the loop at the
+    /// acknowledgement, so a server that answered `subscription_started` and
+    /// then closed immediately would have passed — the exact behaviour the name
+    /// promises to rule out.
+    ///
+    /// That the event socket is PERSISTENT is load-bearing: it is why
+    /// `HerdrTransport` has two methods, why the transport plans one long-lived
+    /// event channel alongside N ephemeral request channels, and it is written
+    /// in the README as measured fact. Nothing in the suite noticed if it
+    /// stopped being true.
     func testSubscribeAcknowledgesAndStaysOpen() async throws {
         try XCTSkipIf(socketPath == nil, "no live herdr server")
         let c = try client()
@@ -215,11 +225,27 @@ final class LiveServerTests: XCTestCase {
             Subscription(.paneAgentStatusChanged, paneID: pane),
             Subscription(.paneTurnCompleted, paneID: pane),
         ])
-        var sawAck = false
-        for try await line in stream {
-            if line == .subscriptionStarted { sawAck = true; break }
-        }
-        XCTAssertTrue(sawAck, "server should acknowledge the subscription")
+
+        let seen = await observeSubscription(stream, idleWindow: 1.5)
+        XCTAssertTrue(seen.sawAck, "server should acknowledge the subscription")
+        XCTAssertFalse(
+            seen.endedEarly,
+            "the event stream must still be open after an idle interval; it closed instead"
+        )
+    }
+
+    /// Proves the assertion above can actually fail. A stub that acknowledges
+    /// and then closes is exactly the server behaviour the old test could not
+    /// distinguish from a healthy one.
+    func testTheStayOpenCheckCatchesAServerThatClosesAfterTheAck() async throws {
+        let stream = HerdrClient(transport: AckThenCloseTransport())
+            .subscribe([Subscription(.paneTurnCompleted, paneID: "p1")])
+        let seen = await observeSubscription(stream, idleWindow: 1.0)
+        XCTAssertTrue(seen.sawAck, "the stub does acknowledge")
+        XCTAssertTrue(
+            seen.endedEarly,
+            "a stream that closes after the ack must be detected as ended early"
+        )
     }
 }
 
@@ -275,5 +301,68 @@ final class StreamCancellationTests: XCTestCase {
             after - before, 2,
             "8 subscribe/cancel cycles leaked \(after - before) descriptors"
         )
+    }
+}
+
+
+/// What a subscription did during an observation window.
+struct SubscriptionObservation {
+    var sawAck = false
+    /// The stream terminated before the idle window elapsed. For a persistent
+    /// event channel that is a failure, not a completion.
+    var endedEarly = false
+}
+
+/// Consumes a subscription until either the idle window elapses — meaning the
+/// stream is still open — or the stream ends, meaning it is not.
+///
+/// Waiting for the window to pass is the whole point: any check that stops at
+/// the acknowledgement cannot tell a persistent stream from one that closed
+/// immediately afterwards.
+func observeSubscription(
+    _ stream: AsyncThrowingStream<StreamLine, Error>,
+    idleWindow: TimeInterval
+) async -> SubscriptionObservation {
+    let box = ObservationBox()
+    let consumer = Task {
+        do {
+            for try await line in stream where line == .subscriptionStarted {
+                box.markAck()
+            }
+            box.markEnded()          // stream finished on its own
+        } catch {
+            box.markEnded()          // a throw is also an end
+        }
+    }
+    try? await Task.sleep(nanoseconds: UInt64(idleWindow * 1_000_000_000))
+    let result = box.snapshot()
+    consumer.cancel()
+    return result
+}
+
+final class ObservationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observation = SubscriptionObservation()
+
+    func markAck() { lock.lock(); observation.sawAck = true; lock.unlock() }
+    func markEnded() { lock.lock(); observation.endedEarly = true; lock.unlock() }
+    func snapshot() -> SubscriptionObservation {
+        lock.lock(); defer { lock.unlock() }
+        return observation
+    }
+}
+
+/// Acknowledges a subscription and then closes — the server behaviour the old
+/// test could not distinguish from a healthy persistent stream.
+struct AckThenCloseTransport: HerdrTransport {
+    func roundTrip(_ requestLine: String) async throws -> String {
+        #"{"id":"x","result":{}}"#
+    }
+
+    func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(#"{"id":"sub","result":{"type":"subscription_started"}}"#)
+            continuation.finish()
+        }
     }
 }
