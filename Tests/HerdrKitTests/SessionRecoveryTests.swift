@@ -179,7 +179,15 @@ final class SessionRecoveryTests: XCTestCase {
         // discovery has no other path: snapshots only arrive over transports.
         var offline = try seeded(["p1"])
         let stale = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
+        // CONNECT IT FIRST. Without this the attempt is current-but-unconnected,
+        // which rejects snapshots for a DIFFERENT reason — so deleting the
+        // networkChanged below left the test green and it pinned the connection
+        // gate rather than abandonment.
+        XCTAssertEqual(plan(.connected(stale, at: Date()), &offline).actions,
+                       [.resyncAllPanes(stale)],
+                       "the attempt never adopted; the abandonment below is not the gate under test")
         _ = plan(.networkChanged(at: Date()), &offline)   // stale is abandoned
+        XCTAssertNotEqual(offline.currentAttempt, stale, "the attempt was not abandoned")
         let ignored = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), from: stale, state: &offline)
         XCTAssertTrue(ignored.isEmpty, "an abandoned attempt's snapshot must admit nothing")
         XCTAssertEqual(offline.knownPanes, ["p1"], "nor may it mutate knowledge")
@@ -203,7 +211,14 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let preReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
 
-        state = try seeded(["p1"])   // the caller rebuilds their state
+        // A MARKER THAT CROSSES THE ASSIGNMENT. Deleting the rebuild left this
+        // green: both attempts are minted from the same lineage either way and
+        // the identities still differ, so "not equal" proved nothing about
+        // replacement. knownPanes is value-stored, so it travels with the
+        // rebuilt State and distinguishes it from the original.
+        state = try seeded(["p1", "replacement-marker"])   // the caller rebuilds their state
+        XCTAssertTrue(state.knownPanes.contains("replacement-marker"),
+                      "the state was never replaced; every assertion below is about the original")
         let postReplacement = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertNotEqual(preReplacement, postReplacement,
                           "a rebuilt State reminted an identical attempt identity")
@@ -224,9 +239,18 @@ final class SessionRecoveryTests: XCTestCase {
     func testMintingAfterASavedCopyRestoreCannotReproduceAnIdentity() throws {
         var state = try seeded(["p1"])
         let saved = state
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-1")
         let minted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
 
         state = saved   // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-1"),
+                       "the saved copy was never restored; this test is not about replay")
         let reminted = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertNotEqual(minted, reminted,
                           "a saved-copy restore reproduced a previously minted identity")
@@ -250,11 +274,20 @@ final class SessionRecoveryTests: XCTestCase {
         var state = try seeded(["p1"])
         let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         let saved = state                      // A is current in this copy
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-2")
 
         let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
         let attemptB = changed.reconnectAttempt!
 
         state = saved                          // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-2"),
+                       "the saved copy was never restored; this test is not about replay")
         let lateA = plan(.connected(attemptA, at: Date()), &state)
         XCTAssertEqual(lateA.actions, [.discardConnection],
                        "a cancelled attempt was reauthorized by value restoration")
@@ -281,11 +314,20 @@ final class SessionRecoveryTests: XCTestCase {
         let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         _ = plan(.connected(attemptA, at: Date()), &state)
         let saved = state                       // connected bookkeeping aboard
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-3")
 
         let changed = plan(.networkChanged(at: Date()), &state)   // cancels A, mints B
         let attemptB = changed.reconnectAttempt!
 
         state = saved                           // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-3"),
+                       "the saved copy was never restored; this test is not about replay")
 
         // No incremental subscribe may target the cancelled transport.
         XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
@@ -312,6 +354,17 @@ final class SessionRecoveryTests: XCTestCase {
 
         // The snapshot forgets p2; its subscription on this transport stays open.
         XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state).isEmpty)
+
+        // THE SHRINK MUST HAVE HAPPENED. Without this the test passed with the
+        // shrink deleted entirely: p2 begins subscribed, so both rediscovery
+        // operations below return empty whether or not it ever left. The
+        // divergence between the two sets IS the state under test — forgotten
+        // in knowledge, still subscribed on the wire — and asserting it is what
+        // makes the emptiness below mean "not re-subscribed" rather than
+        // "nothing changed".
+        XCTAssertFalse(state.knownPanes.contains("p2"), "the snapshot did not shrink")
+        XCTAssertTrue(state.subscribedPanes.contains("p2"),
+                      "the shrink dropped the subscription; there is no unsubscribe verb")
 
         // p2 reappears — via event and via snapshot. Neither may re-subscribe.
         XCTAssertTrue(plan(.paneCreated("p2", from: opened), &state).isEmpty,
@@ -342,14 +395,32 @@ final class SessionRecoveryTests: XCTestCase {
     /// target p2.
     func testReplayedKnowledgeCannotSubscribeAClosedPane() throws {
         var state = try seeded(["p1", "p2"])
-        _ = connect(&state)
+        let opened = connect(&state)
+        // p2 MUST BE IN THE SAVED COPY, or "replayed knowledge cannot subscribe
+        // it" is true because there was nothing to replay. The test passed both
+        // with the close deleted AND with p2 never present: the authoritative
+        // ["p1"] snapshot at the end supplies the closed-pane state on its own.
+        XCTAssertTrue(state.knownPanes.contains("p2"),
+                      "p2 is not in the state being saved; the replay has nothing to carry")
         let saved = state
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-4")
 
-        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
+        _ = plan(.paneClosed("p2", from: opened), &state)
+        XCTAssertFalse(state.knownPanes.contains("p2"),
+                       "the close did not take effect; the replay below carries a pane the "
+                       + "live state never dropped, so nothing distinguishes replay from truth")
         let changed = plan(.networkChanged(at: Date()), &state)
         let attemptB = changed.reconnectAttempt!
 
         state = saved                           // the replay: memory says p2 exists
+        XCTAssertFalse(state.knownPanes.contains("live-marker-4"),
+                       "the saved copy was never restored; this test is not about replay")
 
         let adopted = plan(.connected(attemptB, at: Date()), &state)
         XCTAssertEqual(adopted.actions, [.resyncAllPanes(attemptB)],
@@ -567,9 +638,18 @@ final class SessionRecoveryTests: XCTestCase {
     func testASavedForegroundedCopyCannotDialAfterBackgrounding() throws {
         var state = try seeded(["p1"])
         let saved = state                       // foregrounded copy
+        // MARK THE LIVE STATE so the restore below is observable. Deleting
+        // `state = saved` left these tests green: the authority is shared by
+        // reference, so the assertions held whether or not the value copy was
+        // ever restored — they pinned the reference behaviour and said nothing
+        // about replay, which is the entire subject. knownPanes is
+        // value-stored, so it travels with the copy and distinguishes them.
+        state.knownPanes.insert("live-marker-5")
 
         _ = plan(.backgrounded(at: Date()), &state)
         state = saved                           // the replay
+        XCTAssertFalse(state.knownPanes.contains("live-marker-5"),
+                       "the saved copy was never restored; this test is not about replay")
 
         XCTAssertTrue(recovery.beginInitialAttempt(state: &state).isEmpty,
                       "a replayed foreground bit let a backgrounded client dial")
@@ -949,6 +1029,15 @@ final class SessionRecoveryTests: XCTestCase {
         let first = connect(&state)
         _ = plan(.paneCreated("p2", from: first), &state)   // learned mid-session
 
+        // THE LEARNING MUST HAVE HAPPENED, and it is the whole subject of this
+        // test's name. Without it the test passed with the paneCreated deleted:
+        // the authoritative snapshot after reconnect supplies p2 independently,
+        // so the final assertion held for a reason unrelated to learning
+        // anything mid-session.
+        XCTAssertTrue(state.knownPanes.contains("p2"), "the mid-session pane was never learned")
+        XCTAssertTrue(state.subscribedPanes.contains("p2"),
+                      "the mid-session pane was learned but never subscribed")
+
         _ = plan(.networkChanged(at: Date()), &state)
         let second = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertEqual(plan(.connected(second, at: Date()), &state).actions, [.resyncAllPanes(second)])
@@ -964,10 +1053,30 @@ final class SessionRecoveryTests: XCTestCase {
     /// Removal used to require passing a fresh full listing, which is what made
     /// partial listings dangerous — there was no other way to drop one.
     func testClosedPanesAreDroppedIncrementally() throws {
+        // CONNECT FIRST, so paneClosed arrives from the CURRENT attempt.
+        //
+        // This seeded knownPanes with no current attempt and sent paneClosed
+        // with a fresh random AttemptID, which production correctly REJECTS at
+        // the provenance gate. The drop never happened — the authoritative
+        // snapshot below removed p2 wholesale, producing the same final state,
+        // and the assertion could not tell the two apart. Replacing the
+        // paneClosed call with `_ = state` left the test green.
+        //
+        // Ninth instance today of an assertion expecting an absence with
+        // nothing establishing the presence was reachable. Found by applying
+        // the rule from the previous round to a test this PR never touched.
         var state = try seeded(["p1", "p2"])
-        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
         let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         XCTAssertEqual(plan(.connected(opened, at: Date()), &state).actions, [.resyncAllPanes(opened)])
+        XCTAssertTrue(state.knownPanes.contains("p2"), "p2 was never present; the drop is vacuous")
+
+        _ = plan(.paneClosed("p2", from: opened), &state)
+
+        // Asserted BEFORE any snapshot, which would otherwise mask the result by
+        // producing the same absence for an unrelated reason.
+        XCTAssertFalse(state.knownPanes.contains("p2"),
+                       "the incremental close did not drop the pane")
+
         let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state)
         XCTAssertEqual(resub.subscribes, ["p1"])
     }
@@ -1081,6 +1190,61 @@ final class ResyncInvalidationTests: XCTestCase {
 /// module, so formatting, access-level spelling and additional initialisers are
 /// all covered by construction rather than by enumeration.
 final class PaneSnapshotAccessTests: XCTestCase {
+    /// The SDK path, on Apple platforms only.
+    ///
+    /// Without it symbolgraph-extract cannot find the standard library at all —
+    /// "missing required modules: 'Swift', '_Concurrency', ..." — because on
+    /// Darwin the stdlib lives inside the SDK rather than beside the compiler.
+    /// Linux needs nothing here, which is why the invocation worked for months
+    /// without it.
+    static func sdkFlags() -> [String] {
+        #if canImport(Darwin)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        p.arguments = ["--show-sdk-path"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return [] }
+        p.waitUntilExit()
+        let path = String(
+            data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.isEmpty ? [] : ["-sdk", path]
+        #else
+        return []
+        #endif
+    }
+
+    /// libssh2's header search path, from pkg-config.
+    ///
+    /// SwiftPM hands the CSSH target these flags automatically — but this test
+    /// spawns symbolgraph-extract ITSELF, so it inherits nothing. On Debian that
+    /// was invisible because /usr/include is a default search path; on macOS,
+    /// Homebrew's prefix is not, so the shim's `#include <libssh2.h>` failed and
+    /// the whole module could not be built for extraction.
+    ///
+    /// That is a defect the pkg-config fix CREATED: moving from a hardcoded path
+    /// to a resolved one fixed the build and broke every hand-rolled tool
+    /// invocation that had been relying on the hardcoded assumption.
+    static func libssh2ClangFlags() -> [String] {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["pkg-config", "--cflags-only-I", "libssh2"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return [] }
+        p.waitUntilExit()
+        let text = String(
+            data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return text.split(separator: " ").compactMap { flag -> [String]? in
+            let f = flag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard f.hasPrefix("-I"), f.count > 2 else { return nil }
+            return ["-Xcc", f]
+        }.flatMap { $0 }
+    }
+
     func testPaneSnapshotExposesNoInitialiserOutsideTheModule() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -1094,7 +1258,24 @@ final class PaneSnapshotAccessTests: XCTestCase {
         let moduleDir = try XCTUnwrap(
             modules, "no built HerdrKit.swiftmodule; the access invariant went UNCHECKED"
         )
-        let triple = moduleDir.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        let buildTriple = moduleDir.deletingLastPathComponent()
+            .deletingLastPathComponent().lastPathComponent
+        // APPLE TRIPLES NEED THE DEPLOYMENT VERSION. SwiftPM names the build
+        // directory with an UNVERSIONED triple ("arm64-apple-macosx"), and
+        // symbolgraph-extract then defaults to macOS 10.4 — older than the
+        // module's floor, so it refuses to load it and the invariant goes
+        // unchecked. Invisible on Linux, which has no deployment-target concept.
+        //
+        // The running OS version is used rather than mirroring Package.swift's
+        // floor: it is >= the floor by construction (the module could not have
+        // been built otherwise), so it cannot drift out of step with the
+        // manifest the way a duplicated constant would.
+        let triple: String = {
+            guard buildTriple.contains("apple"),
+                  buildTriple.last.map({ !$0.isNumber }) ?? true else { return buildTriple }
+            let v = ProcessInfo.processInfo.operatingSystemVersion
+            return "\(buildTriple)\(v.majorVersion).\(v.minorVersion)"
+        }()
 
         // A FRESH directory per run, removed afterwards. The first version wrote
         // to a persistent per-triple directory and ignored the process exit
@@ -1122,6 +1303,7 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "-include-spi-symbols",
             "-I", moduleDir.path,
             "-I", root.appendingPathComponent("Sources/CSSH").path,
+        ] + Self.libssh2ClangFlags() + Self.sdkFlags() + [
             "-output-dir", output.path, "-minimum-access-level", "package",
         ]
         let stderrPipe = Pipe()
