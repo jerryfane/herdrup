@@ -16,10 +16,12 @@ import sys
 MARGIN = 20
 READY_CAP = 50
 TAIL_TOLERANCE = 1   # preregistered operational cutoff, NOT an evidence threshold.
-                     # n=100 does not justify THIS boundary specifically (0 vs 2 is
-                     # Fisher two-sided p~0.50) nor a non-inferiority guarantee for
-                     # events this rare. Fixed before the run so the choice cannot
-                     # be made after seeing the numbers.
+                     # n=100 does not justify THIS boundary (0 vs 2 is Fisher
+                     # two-sided p~0.50). Whether n=100 would support some OTHER
+                     # tail criterion is not asserted either way: that depends on a
+                     # baseline rate, margin, alpha and power, none of which are
+                     # defined. Fixed before the run so the choice cannot be made
+                     # after seeing the numbers.
 
 
 def flat(A, B, C, oa, ob, oc, ready_c):
