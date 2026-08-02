@@ -179,10 +179,19 @@ public struct SSHTransport: HerdrTransport {
 
     public let credentials: SSHCredentials
     private let hostKeyPolicy: HostKeyPolicy
+    /// Bound on handshake and authentication, in seconds. Configurable rather
+    /// than an unmeasured constant imposed on every network — a value tuned on
+    /// loopback would be wrong for a poor cellular link.
+    public let setupTimeout: TimeInterval
 
-    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
+    public init(
+        credentials: SSHCredentials,
+        hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(),
+        setupTimeout: TimeInterval = 20
+    ) {
         self.credentials = credentials
         self.hostKeyPolicy = hostKeyPolicy
+        self.setupTimeout = setupTimeout
     }
 
     // MARK: - Session
@@ -279,23 +288,27 @@ public struct SSHTransport: HerdrTransport {
             _ = Glibc_close(sock)
             throw CancellationError()
         }
-        // Bound the blocking phases: a silent peer must not hold a worker for
-        // longer than this regardless of cancellation.
-        var tv = timeval(tv_sec: 15, tv_usec: 0)
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        // SO_RCVTIMEO/SO_SNDTIMEO do NOT bound libssh2 in blocking mode — a
+        // reviewer measured establishment still blocked after 17s against a peer
+        // that withheld its banner, so the 15s bound previously claimed here was
+        // simply false. libssh2's own session timeout does bound it; it is set
+        // for setup and cleared after authentication so it never truncates a
+        // long-lived subscription.
         guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
-            if live == nil { _ = Glibc_close(sock) }
+            live?.release()
+            _ = Glibc_close(sock)
             throw SSHError.sessionInitFailed
         }
         libssh2_session_set_blocking(handle, 1)
 
         func fail(_ error: SSHError) -> SSHError {
             libssh2_session_free(handle)
+            live?.release()          // we close it here; LiveChannel must not repeat it
             _ = Glibc_close(sock)
             return error
         }
 
+        libssh2_session_set_timeout(handle, Int(setupTimeout * 1000))
         let hs = libssh2_session_handshake(handle, sock)
         guard hs == 0 else { throw fail(.handshakeFailed(code: hs)) }
 
@@ -303,6 +316,7 @@ public struct SSHTransport: HerdrTransport {
             try verifyHostKey(handle)
         } catch {
             libssh2_session_free(handle)
+            live?.release()
             _ = Glibc_close(sock)
             throw error
         }
@@ -326,6 +340,8 @@ public struct SSHTransport: HerdrTransport {
         }
         guard auth == 0 else { throw fail(.authenticationFailed(code: auth)) }
 
+        // Cleared: the setup bound must not truncate an idle event stream.
+        libssh2_session_set_timeout(handle, 0)
         return Session(sock: sock, handle: handle)
     }
 
@@ -507,6 +523,18 @@ final class LiveChannel: @unchecked Sendable {
     private var channel: OpaquePointer?
     private var rawSocket: Int32 = -1
     private var closed = false
+
+    /// Relinquish ownership of the published descriptor without closing it,
+    /// for failure paths that close it themselves.
+    ///
+    /// Without this, a failure path closed the fd while LiveChannel still held
+    /// the number, and close() closed it a second time — by which point the
+    /// process may have reused that descriptor for an unrelated socket. A
+    /// host-key rejection probe reproduced exactly that.
+    func release() {
+        lock.lock(); defer { lock.unlock() }
+        rawSocket = -1
+    }
 
     /// Publish a bare descriptor before a Session exists, so establishment is
     /// interruptible rather than only the read loop.
