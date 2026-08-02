@@ -17,7 +17,16 @@
 # Usage: scripts/dispatch-and-sample-head.sh <agent> <pr> <head-sha> <message-file>
 set -uo pipefail
 
-AGENT="$1"; PR="$2"; HEAD_SHA="$3"; MESSAGE_FILE="$4"
+AGENT="$1"; PR="$2"; HEAD_SHA="$(git rev-parse "$3")"; MESSAGE_FILE="$4"
+# FULL sha, always. The engine's head-mismatch guard compares the checkout head
+# to the job head as LITERAL STRINGS, so an abbreviated --head-sha fails closed
+# against the very commit it names: "checkout head is 0871cb381e51..., not
+# review job head 0871cb3". Three auto-retries burn and the job dies.
+#
+# It had never surfaced because on a REUSED worktree the resync overwrites the
+# head before the guard runs, so the guard never fired on this lane's dispatches
+# at all. PR #15 was a FRESH task, the worktree was correct, the guard ran — and
+# rejected a matching commit on formatting.
 REPO="jerryfane/herdr-ios"
 
 payload_head() {   # $1 = job id; prints head_sha or empty

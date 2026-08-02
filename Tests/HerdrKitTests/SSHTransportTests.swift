@@ -98,8 +98,23 @@ final class SSHTransportTests: XCTestCase {
         let transport = try makeTransport()
         let a = try await transport.roundTrip(#"{"id":"a","method":"ping","params":{}}"#)
         let b = try await transport.roundTrip(#"{"id":"b","method":"ping","params":{}}"#)
-        XCTAssertFalse(a.isEmpty)
-        XCTAssertFalse(b.isEmpty)
+
+        // NON-EMPTY IS NOT THE CLAIM. Both assertions here used to be
+        // `XCTAssertFalse(_.isEmpty)`, which is an absence-shaped conclusion
+        // under a name asserting a positive structural property — a transport
+        // echoing ONE response twice, or returning any non-empty text, passed.
+        // The second call throwing does cover channel reuse indirectly, since
+        // herdr's command socket is single-shot; but "covered indirectly by a
+        // throw" is not what the name says, and it is not what a reader would
+        // check against.
+        //
+        // Each response must carry ITS OWN request id, which is the observable
+        // form of "two independent channels" available at this surface.
+        XCTAssertTrue(a.contains(#""id":"a""#),
+                      "the first round trip's response did not answer its own request: \(a)")
+        XCTAssertTrue(b.contains(#""id":"b""#),
+                      "the second round trip's response did not answer its own request: \(b)")
+        XCTAssertNotEqual(a, b, "both round trips returned the identical response")
     }
 
     /// THE GOAL'S ACCEPTANCE BAR — the same live contract, run against BOTH
