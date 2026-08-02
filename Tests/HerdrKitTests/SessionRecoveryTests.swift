@@ -38,8 +38,13 @@ final class SessionRecoveryTests: XCTestCase {
     }
 
     private func seeded(_ ids: [String]) throws -> SessionRecovery.State {
+        // Planted directly: in production knowledge arrives via a transport's
+        // snapshot (observe now REQUIRES provenance), but a test legitimately
+        // starts with knowledge already held. knownPanes is informational, so
+        // direct planting cannot leak into subscriptions.
         var state = SessionRecovery.State()
-        _ = recovery.observe(PaneSnapshot(agents: try panes(ids)), state: &state)
+        state.knownPanes = Set(ids)
+        _ = try panes(ids)   // keep the fixture honest about decodability
         return state
     }
 
@@ -53,7 +58,8 @@ final class SessionRecoveryTests: XCTestCase {
     ) -> AttemptID {
         let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
         _ = plan(.connected(opened, at: when), &state)
-        _ = recovery.observe(PaneSnapshot(agents: try! panes(Array(state.knownPanes))), state: &state)
+        _ = recovery.observe(
+            PaneSnapshot(agents: try! panes(Array(state.knownPanes))), from: opened, state: &state)
         return opened
     }
 
@@ -116,7 +122,7 @@ final class SessionRecoveryTests: XCTestCase {
         let restarted = recovery.beginInitialAttempt(state: &state)
         XCTAssertEqual(restarted.actions.first, .cancelTransport)
         XCTAssertNil(state.connectedSince, "stale adoption state leaks subscribes to a dead transport")
-        XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty,
+        XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
                       "no subscribe may target the transport that was just abandoned")
     }
 
@@ -146,19 +152,25 @@ final class SessionRecoveryTests: XCTestCase {
     /// because the pane was already known.
     func testSnapshotGrowthWhileConnectedSubscribesTheAddedPanes() throws {
         var state = try seeded(["p1"])
-        _ = connect(&state)
+        let opened = connect(&state)
 
-        let grown = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p3"])), state: &state)
+        let grown = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p3"])), from: opened, state: &state)
         XCTAssertEqual(grown.subscribes, ["p3"], "exactly the added panes, not the whole set")
 
-        // While disconnected the snapshot only records; the next adoption's
-        // full-set subscribe covers it.
+        // A snapshot from an attempt that is no longer current is ignored
+        // WHOLLY — no subscriptions and no knowledge mutation. Disconnected
+        // discovery has no other path: snapshots only arrive over transports.
         var offline = try seeded(["p1"])
-        let recorded = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), state: &offline)
-        XCTAssertTrue(recorded.isEmpty, "no transport, nothing to subscribe on")
-        let opened = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
-        XCTAssertEqual(plan(.connected(opened, at: Date()), &offline).actions, [.resyncAllPanes])
-        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), state: &offline)
+        let stale = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
+        _ = plan(.networkChanged(at: Date()), &offline)   // stale is abandoned
+        let ignored = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), from: stale, state: &offline)
+        XCTAssertTrue(ignored.isEmpty, "an abandoned attempt's snapshot must admit nothing")
+        XCTAssertEqual(offline.knownPanes, ["p1"], "nor may it mutate knowledge")
+
+        // The CURRENT attempt's snapshot supplies both knowledge and subscriptions.
+        let fresh = recovery.beginInitialAttempt(state: &offline).reconnectAttempt!
+        XCTAssertEqual(plan(.connected(fresh, at: Date()), &offline).actions, [.resyncAllPanes(fresh)])
+        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p4"])), from: fresh, state: &offline)
         XCTAssertEqual(resub.subscribes, ["p1", "p4"])
     }
 
@@ -231,7 +243,7 @@ final class SessionRecoveryTests: XCTestCase {
                        "a cancelled attempt was reauthorized by value restoration")
 
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
-        XCTAssertEqual(adoptedB.actions.first, .resyncAllPanes,
+        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes(attemptB)],
                        "the lineage's real current attempt must still adopt")
     }
 
@@ -259,14 +271,14 @@ final class SessionRecoveryTests: XCTestCase {
         state = saved                           // the replay
 
         // No incremental subscribe may target the cancelled transport.
-        XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty,
+        XCTAssertTrue(plan(.paneCreated("p9", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state).isEmpty,
                       "a replayed connectedSince let paneCreated subscribe onto a cancelled transport")
 
         // And B's adoption must not be suppressed as a repeat.
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
-        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes],
+        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes(attemptB)],
                        "the replayed connectedSince classified B's adoption as a repeat and suppressed it")
-        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p9"])), state: &state)
+        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p9"])), from: attemptB, state: &state)
         XCTAssertEqual(subscribed.subscribes, ["p1", "p9"],
                        "B subscribes what the authoritative snapshot says, including the pane learned mid-replay")
     }
@@ -279,23 +291,23 @@ final class SessionRecoveryTests: XCTestCase {
     /// the rediscovery previously stacked a second one on top of it.
     func testAPaneReappearingAfterASnapshotShrinkIsNotDoubleSubscribed() throws {
         var state = try seeded(["p1", "p2"])
-        _ = connect(&state)   // subscribes {p1, p2}
+        let opened = connect(&state)   // subscribes {p1, p2}
 
         // The snapshot forgets p2; its subscription on this transport stays open.
-        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state).isEmpty)
+        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state).isEmpty)
 
         // p2 reappears — via event and via snapshot. Neither may re-subscribe.
-        XCTAssertTrue(plan(.paneCreated("p2"), &state).isEmpty,
+        XCTAssertTrue(plan(.paneCreated("p2", from: opened), &state).isEmpty,
                       "paneCreated re-subscribed a pane this transport already watches")
-        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), state: &state).isEmpty,
+        XCTAssertTrue(recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), from: opened, state: &state).isEmpty,
                       "observe re-subscribed a pane this transport already watches")
 
         // A NEW transport starts from nothing: the snapshot re-subscribes the set.
         _ = plan(.networkChanged(at: Date()), &state)
         let readopted = recovery.beginInitialAttempt(state: &state).reconnectAttempt
             ?? state.currentAttempt!
-        XCTAssertEqual(plan(.connected(readopted, at: Date()), &state).actions, [.resyncAllPanes])
-        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), state: &state)
+        XCTAssertEqual(plan(.connected(readopted, at: Date()), &state).actions, [.resyncAllPanes(readopted)])
+        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), from: readopted, state: &state)
         XCTAssertEqual(resub.subscribes, ["p1", "p2"],
                        "the replacement transport subscribes the authoritative set")
     }
@@ -316,18 +328,18 @@ final class SessionRecoveryTests: XCTestCase {
         _ = connect(&state)
         let saved = state
 
-        _ = plan(.paneClosed("p2"), &state)
+        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
         let changed = plan(.networkChanged(at: Date()), &state)
         let attemptB = changed.reconnectAttempt!
 
         state = saved                           // the replay: memory says p2 exists
 
         let adopted = plan(.connected(attemptB, at: Date()), &state)
-        XCTAssertEqual(adopted.actions, [.resyncAllPanes],
+        XCTAssertEqual(adopted.actions, [.resyncAllPanes(attemptB)],
                        "adoption must not convert remembered panes into subscriptions")
 
         // The authoritative snapshot — the server knows p2 is gone.
-        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
+        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptB, state: &state)
         XCTAssertEqual(subscribed.subscribes, ["p1"])
 
         // Nothing anywhere targeted p2, and the ledger never held it.
@@ -338,6 +350,52 @@ final class SessionRecoveryTests: XCTestCase {
         }
         XCTAssertFalse(state.subscribedPanes.contains("p2"),
                        "the ledger recorded a subscription to a closed pane — irretractable on this wire")
+    }
+
+    /// AXIS: a delayed snapshot from an abandoned attempt admits nothing onto
+    /// its replacement.
+    ///
+    /// The reviewer's seventh probe: adopt A and start its resync,
+    /// networkChanged to B, adopt B, then A's slow snapshot finally arrives.
+    /// Without provenance it was indistinguishable from B's data — its pane
+    /// was subscribed and recorded on B's ledger, and B's own later snapshot
+    /// could not retract it. Snapshots now carry the attempt whose transport
+    /// produced them, and admission verifies it in the same critical section.
+    func testADelayedSnapshotFromAnAbandonedAttemptAdmitsNothing() throws {
+        var state = try seeded(["p1"])
+        let attemptA = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptA, at: Date()), &state)   // A's resync is now in flight
+
+        let changed = plan(.networkChanged(at: Date()), &state)
+        let attemptB = changed.reconnectAttempt!
+        _ = plan(.connected(attemptB, at: Date()), &state)
+
+        // A's delayed snapshot lands — it saw a pane B's world does not have.
+        let stale = recovery.observe(
+            PaneSnapshot(agents: try panes(["p1", "ghost"])), from: attemptA, state: &state)
+        XCTAssertTrue(stale.isEmpty, "an abandoned attempt's snapshot subscribed panes onto its replacement")
+        XCTAssertFalse(state.subscribedPanes.contains("ghost"), "B's ledger recorded A's pane")
+        XCTAssertFalse(state.knownPanes.contains("ghost"), "A's stale knowledge overwrote B's")
+
+        // B's own snapshot works exactly as before.
+        let current = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptB, state: &state)
+        XCTAssertEqual(current.subscribes, ["p1"])
+    }
+
+    /// AXIS: a late pane event from an abandoned attempt neither subscribes nor
+    /// mutates knowledge on its replacement.
+    func testALatePaneEventFromAnAbandonedAttemptActsOnNothing() throws {
+        var state = try seeded(["p1"])
+        let attemptA = connect(&state)
+        _ = plan(.networkChanged(at: Date()), &state)
+        let attemptB = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        _ = plan(.connected(attemptB, at: Date()), &state)
+        _ = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptB, state: &state)
+
+        XCTAssertTrue(plan(.paneCreated("late", from: attemptA), &state).isEmpty)
+        XCTAssertFalse(state.knownPanes.contains("late"), "a dead transport's event became knowledge")
+        XCTAssertTrue(plan(.paneClosed("p1", from: attemptA), &state).isEmpty)
+        XCTAssertTrue(state.knownPanes.contains("p1"), "a dead transport's event removed live knowledge")
     }
 
     /// AXIS: a saved foregrounded copy cannot dial after backgrounding.
@@ -410,7 +468,7 @@ final class SessionRecoveryTests: XCTestCase {
     /// admission with nothing lost.
     func testConcurrentDiscoveriesAreAdmittedExactlyOnce() throws {
         var seed = try seeded(["p0"])
-        _ = connect(&seed)
+        let attempt = connect(&seed)
 
         let paneCount = 1_000
         let lanes = 8
@@ -427,7 +485,7 @@ final class SessionRecoveryTests: XCTestCase {
             var generator = SeededGenerator(seed: UInt64(lane) + 1)
             for index in 0..<paneCount {
                 let plan = recovery.plan(
-                    for: .paneCreated("pane-\(index)"), state: &copy, using: &generator)
+                    for: .paneCreated("pane-\(index)", from: attempt), state: &copy, using: &generator)
                 if let fresh = plan.subscribes, !fresh.isEmpty {
                     collected.lock(); emitted.append(contentsOf: fresh); collected.unlock()
                 }
@@ -489,21 +547,22 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(resumed.actions.first, .cancelTransport,
                        "whatever transport may exist is torn down before dialing")
         XCTAssertEqual(resumed.reconnectDelay, 0)
-        XCTAssertFalse(resumed.contains(.resyncAllPanes), "no transport yet to resync on")
+        XCTAssertFalse(resumed.actions.contains { if case .resyncAllPanes = $0 { return true }; return false },
+                       "no transport yet to resync on")
         XCTAssertNil(resumed.subscribes, "no transport yet to subscribe on")
 
         let attempt = resumed.reconnectAttempt!
         let connected = plan(.connected(attempt, at: Date().addingTimeInterval(0.3)), &state)
-        XCTAssertEqual(connected.actions, [.resyncAllPanes],
+        XCTAssertEqual(connected.actions, [.resyncAllPanes(attempt)],
                        "adoption emits resync ONLY; subscriptions derive from the snapshot it fetches")
 
         // The executor's next step: the resync's authoritative snapshot.
-        let snapshot = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), state: &state)
+        let snapshot = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), from: attempt, state: &state)
         XCTAssertEqual(snapshot.subscribes, ["p1", "p2"],
                        "the fresh transport subscribes what the server says exists")
 
         let everything = backgrounded.actions + resumed.actions + connected.actions + snapshot.actions
-        XCTAssertEqual(everything.filter { $0 == .resyncAllPanes }.count, 1,
+        XCTAssertEqual(everything.filter { if case .resyncAllPanes = $0 { return true }; return false }.count, 1,
                        "a recovery emitted more than one resync")
         XCTAssertEqual(everything.filter { if case .subscribe = $0 { return true }; return false }.count, 1,
                        "subscriptions are persistent; emitting them twice opens each pane twice")
@@ -522,7 +581,8 @@ final class SessionRecoveryTests: XCTestCase {
 
         let late = plan(.connected(AttemptID(uuid: UUID()), at: Date().addingTimeInterval(0.1)), &state)
         XCTAssertEqual(late.actions, [.discardConnection])
-        XCTAssertFalse(late.contains(.resyncAllPanes), "no work may start on an unwanted connection")
+        XCTAssertFalse(late.actions.contains { if case .resyncAllPanes = $0 { return true }; return false },
+                       "no work may start on an unwanted connection")
         XCTAssertNil(late.subscribes, "no subscription may open on an unwanted connection")
     }
 
@@ -547,9 +607,9 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(lateA.actions, [.discardConnection], "an abandoned attempt must not be adopted")
 
         let adoptedB = plan(.connected(attemptB, at: Date()), &state)
-        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes],
+        XCTAssertEqual(adoptedB.actions, [.resyncAllPanes(attemptB)],
                        "adoption resyncs only; subscriptions come from the snapshot")
-        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
+        let subscribed = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: attemptB, state: &state)
         XCTAssertEqual(subscribed.subscribes, ["p1"])
 
         // ...and then A reports its failure, after B is already in use.
@@ -559,7 +619,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertNotNil(state.connectedSince, "a stale failure must not tear down the adopted connection")
 
         let everything = lateA.actions + adoptedB.actions + subscribed.actions + failedA.actions
-        XCTAssertEqual(everything.filter { $0 == .resyncAllPanes }.count, 1,
+        XCTAssertEqual(everything.filter { if case .resyncAllPanes = $0 { return true }; return false }.count, 1,
                        "exactly one adoption may resync")
         XCTAssertEqual(everything.filter { if case .subscribe = $0 { return true }; return false }.count, 1,
                        "exactly one snapshot-derived subscribe per recovery")
@@ -705,17 +765,20 @@ final class SessionRecoveryTests: XCTestCase {
                        "a connection that lasted past the stability window must clear the streak")
     }
 
-    /// AXIS: a pane discovered while connected is subscribed immediately; one
-    /// discovered while disconnected waits for the resync rather than opening a
-    /// subscription on a transport that does not exist.
-    func testPaneCreatedSubscribesOnlyWhenThereIsAConnection() throws {
+    /// AXIS: pane events act only when their provenance is the current,
+    /// connected attempt — a non-current event neither subscribes NOR is
+    /// remembered, since an abandoned transport's events are not knowledge.
+    func testPaneCreatedActsOnlyWithCurrentProvenance() throws {
         var state = try seeded([])
-        XCTAssertTrue(plan(.paneCreated("p9"), &state).isEmpty, "no connection, nothing to subscribe on")
-        XCTAssertTrue(state.knownPanes.contains("p9"), "but it must still be remembered")
+        let foreign = AttemptID(uuid: UUID())   // never minted by this lineage
+        XCTAssertTrue(plan(.paneCreated("p9", from: foreign), &state).isEmpty)
+        XCTAssertFalse(state.knownPanes.contains("p9"),
+                       "an event from a non-current attempt must not mutate knowledge")
 
-        _ = connect(&state)
-        XCTAssertEqual(plan(.paneCreated("p8"), &state).subscribes, ["p8"])
-        XCTAssertTrue(plan(.paneCreated("p8"), &state).isEmpty, "a repeat must not re-subscribe")
+        let opened = connect(&state)
+        XCTAssertEqual(plan(.paneCreated("p8", from: opened), &state).subscribes, ["p8"])
+        XCTAssertTrue(plan(.paneCreated("p8", from: opened), &state).isEmpty,
+                      "a repeat must not re-subscribe")
     }
 
     /// AXIS: a pane learned about mid-session survives into the next resync.
@@ -724,11 +787,14 @@ final class SessionRecoveryTests: XCTestCase {
     /// silence is indistinguishable from having no output.
     func testPanesLearnedDuringASessionAreResubscribedAfterReconnect() throws {
         var state = try seeded(["p1"])
-        _ = plan(.paneCreated("p2"), &state)
-        let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
-        XCTAssertEqual(plan(.connected(opened, at: Date()), &state).actions, [.resyncAllPanes])
+        let first = connect(&state)
+        _ = plan(.paneCreated("p2", from: first), &state)   // learned mid-session
+
+        _ = plan(.networkChanged(at: Date()), &state)
+        let second = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
+        XCTAssertEqual(plan(.connected(second, at: Date()), &state).actions, [.resyncAllPanes(second)])
         // The server still has p2, so the authoritative snapshot carries it.
-        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), state: &state)
+        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1", "p2"])), from: second, state: &state)
         XCTAssertEqual(resub.subscribes, ["p1", "p2"],
                        "a pane discovered mid-session comes back via the snapshot, not memory")
     }
@@ -740,10 +806,10 @@ final class SessionRecoveryTests: XCTestCase {
     /// partial listings dangerous — there was no other way to drop one.
     func testClosedPanesAreDroppedIncrementally() throws {
         var state = try seeded(["p1", "p2"])
-        _ = plan(.paneClosed("p2"), &state)
+        _ = plan(.paneClosed("p2", from: state.currentAttempt ?? AttemptID(uuid: UUID())), &state)
         let opened = recovery.beginInitialAttempt(state: &state).reconnectAttempt!
-        XCTAssertEqual(plan(.connected(opened, at: Date()), &state).actions, [.resyncAllPanes])
-        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
+        XCTAssertEqual(plan(.connected(opened, at: Date()), &state).actions, [.resyncAllPanes(opened)])
+        let resub = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state)
         XCTAssertEqual(resub.subscribes, ["p1"])
     }
 
@@ -758,7 +824,8 @@ final class SessionRecoveryTests: XCTestCase {
     func testASnapshotReplacesThePaneSetWholesale() throws {
         var state = try seeded(["p1", "p2", "p3"])
         XCTAssertEqual(state.knownPanes, ["p1", "p2", "p3"])
-        _ = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), state: &state)
+        let opened = connect(&state)
+        _ = recovery.observe(PaneSnapshot(agents: try panes(["p1"])), from: opened, state: &state)
         XCTAssertEqual(state.knownPanes, ["p1"], "an authoritative listing is still authoritative")
     }
 
@@ -964,7 +1031,7 @@ final class PaneSnapshotAccessTests: XCTestCase {
         }.sorted()
         XCTAssertEqual(
             mentioners,
-            ["HerdrClient.paneSnapshot()", "SessionRecovery.observe(_:state:)"],
+            ["HerdrClient.paneSnapshot()", "SessionRecovery.observe(_:from:state:)"],
             "a new package-visible symbol mentions PaneSnapshot; if it can yield one from caller data it is a construction path, and only HerdrClient.paneSnapshot() may produce"
         )
     }
