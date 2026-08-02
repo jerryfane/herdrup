@@ -57,7 +57,22 @@ fi
 
 # "Executed 0 tests" means the filter matched nothing, which exits 0 and would
 # otherwise be indistinguishable from a survivor.
-EXECUTED=$(grep -oE "Executed [0-9]+ tests?" "$RUN_LOG" | grep -oE "[0-9]+" | sort -rn | head -1)
+# A CRASH ANYWHERE IN THE RUN IS NOT A KILL, even when an earlier suite already
+# recorded a failure. A two-suite probe made suite 1 fail one assertion and
+# suite 2 die with signal 4; the failure line and suite 1's count were both
+# present, so this reported "KILLED (1 tests)" and hid the crash entirely. That
+# is the exact rule this harness exists to enforce, broken by the harness.
+if grep -qE "Exited with unexpected signal code|Program crashed|Fatal error" "$RUN_LOG"; then
+    echo "INVALID: '$NAME' crashed the run. A crash is not a kill, even after a failure."
+    grep -m2 -E "Exited with unexpected signal code|Program crashed|Fatal error" "$RUN_LOG"
+    exit 2
+fi
+
+# From the TERMINAL summary, not the largest component suite. A filter spanning
+# two suites reports each separately and then a final total; taking the largest
+# component silently made the denominator a partial count whenever a later suite
+# was bigger or never finished.
+EXECUTED=$(grep -E "^\s+Executed [0-9]+ tests?" "$RUN_LOG" | tail -1 | grep -oE "[0-9]+" | head -1)
 EXECUTED=${EXECUTED:-0}
 if [ "$EXECUTED" -eq 0 ]; then
     echo "INVALID: filter '$FILTER' matched no tests — nothing was exercised"
@@ -94,3 +109,16 @@ KILLERS=$(grep -oE "^Test Case '[^']+' failed" "$RUN_LOG" \
 KILL_COUNT=$(printf '%s\n' "$KILLERS" | grep -c . || true)
 echo "  killed by $KILL_COUNT of $EXECUTED:"
 printf '%s\n' "$KILLERS" | sed 's/^/    /'
+
+# SKIPPED TESTS ARE NOT PASSING TESTS, and the split prompt cannot tell them
+# apart without this. A probe where the INTENDED regression skipped and an
+# unrelated test killed the mutant printed "killed by 1 of 2" — indistinguishable
+# from the premise-suspect pattern, while the intended test never ran its body.
+# This repo has conditional live-server and descriptor-canary skips, so it is not
+# hypothetical.
+SKIPPED=$(grep -oE "^Test Case '[^']+' skipped" "$RUN_LOG" \
+          | sed -E "s/^Test Case '([^']+)' skipped/\1/" | sort -u)
+if [ -n "$SKIPPED" ]; then
+    echo "  SKIPPED (did not run — arm these before reading the split):"
+    printf '%s\n' "$SKIPPED" | sed 's/^/    /'
+fi
