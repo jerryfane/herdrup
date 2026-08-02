@@ -367,36 +367,76 @@ final class ResyncInvalidationTests: XCTestCase {
 }
 
 
-/// Access control is the provenance guarantee, so it is checked as access
-/// control rather than through behaviour.
+/// Access control is the provenance guarantee, so it is checked against the
+/// COMPILER'S OWN view of the module surface.
 ///
-/// A behavioural test cannot observe who is *allowed* to call an initializer —
-/// the previous provenance test passed with `PaneSnapshot.init` made public,
-/// which is precisely the change that reopens the filtered-list path. Reading
-/// the declaration is crude, and it is the only thing here that fails when the
-/// invariant is broken.
+/// Two weaker versions preceded this. A behavioural test could not see access
+/// control at all and passed with the initialiser made public. A textual scan
+/// then caught that exact spelling and nothing else: `public` on the preceding
+/// line, `package` instead of `public`, or an added `public init(paneIDs:)` all
+/// compiled and all survived it — and the last two genuinely reopen the path
+/// this type exists to close.
+///
+/// `swift symbolgraph-extract` reports what is actually visible outside the
+/// module, so formatting, access-level spelling and additional initialisers are
+/// all covered by construction rather than by enumeration.
 final class PaneSnapshotAccessTests: XCTestCase {
-    func testPaneSnapshotInitialiserIsNotPublic() throws {
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // HerdrKitTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // repo root
-            .appendingPathComponent("Sources/HerdrKit/SessionRecovery.swift")
-        let text = try String(contentsOf: source, encoding: .utf8)
+    func testPaneSnapshotExposesNoInitialiserOutsideTheModule() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let build = root.appendingPathComponent(".build")
 
-        guard let declaration = text.range(of: "public struct PaneSnapshot") else {
-            return XCTFail("PaneSnapshot moved; this guard no longer looks where it thinks it does")
-        }
-        let body = text[declaration.lowerBound...]
-        guard let end = body.range(of: "\n}") else {
-            return XCTFail("could not delimit PaneSnapshot")
-        }
-        let snapshot = body[..<end.lowerBound]
+        // The triple is the directory name, so this does not hardcode a platform.
+        let modules = try FileManager.default
+            .contentsOfDirectory(atPath: build.path)
+            .map { build.appendingPathComponent($0).appendingPathComponent("debug/Modules") }
+            .first { FileManager.default.fileExists(atPath: $0.appendingPathComponent("HerdrKit.swiftmodule").path) }
+        let moduleDir = try XCTUnwrap(
+            modules, "no built HerdrKit.swiftmodule; the access invariant went UNCHECKED"
+        )
+        let triple = moduleDir.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
 
-        XCTAssertTrue(snapshot.contains("init(agents:"), "the initialiser this guard exists for is gone")
-        XCTAssertFalse(
-            snapshot.contains("public init(agents:"),
-            "PaneSnapshot.init became public — code outside HerdrKit can now build one from a filtered list, which is the exact path observe() exists to close"
+        let output = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("herdrkit-symbolgraph-\(triple)")
+        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        let swift = ["/opt/swift/usr/bin/swift", "/usr/bin/swift"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: try XCTUnwrap(
+            swift, "no swift toolchain found; the access invariant went UNCHECKED"
+        ))
+        process.arguments = [
+            "symbolgraph-extract", "-module-name", "HerdrKit", "-target", triple,
+            "-I", moduleDir.path,
+            "-I", root.appendingPathComponent("Sources/CSSH").path,
+            "-output-dir", output.path, "-minimum-access-level", "package",
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        let graph = output.appendingPathComponent("HerdrKit.symbols.json")
+        guard let data = try? Data(contentsOf: graph) else {
+            return XCTFail("symbolgraph-extract produced no graph; the access invariant went UNCHECKED")
+        }
+        let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let symbols = try XCTUnwrap(decoded?["symbols"] as? [[String: Any]])
+
+        // Sanity: the extraction has to have seen the type, or an empty result
+        // would look like a pass.
+        let snapshotSymbols = symbols.filter {
+            (($0["pathComponents"] as? [String])?.first) == "PaneSnapshot"
+        }
+        XCTAssertFalse(snapshotSymbols.isEmpty, "PaneSnapshot is not in the surface at all; wrong module or stale build")
+
+        let initialisers = snapshotSymbols.filter {
+            (($0["kind"] as? [String: Any])?["identifier"] as? String)?.hasPrefix("swift.init") == true
+        }
+        XCTAssertTrue(
+            initialisers.isEmpty,
+            "PaneSnapshot exposes \(initialisers.count) initialiser(s) at package access or above; code outside HerdrKit can now build one from a filtered list, which is the exact path observe() exists to close"
         )
     }
 }

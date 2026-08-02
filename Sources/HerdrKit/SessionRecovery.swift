@@ -308,9 +308,11 @@ public struct SessionRecovery: Sendable {
 public struct PaneSnapshot: Equatable, Sendable {
     public let paneIDs: Set<String>
 
-    /// Deliberately not `public`. Widening this restores the filtered-list path
-    /// that `observe` exists to close, and `PaneSnapshotAccessTests` fails if it
-    /// is widened.
+    /// Deliberately not `public`. `PaneSnapshotAccessTests` checks the module's
+    /// compiler-derived surface, so it fails on **any** widening — this
+    /// initialiser or another one, `public` or `package`, however it is
+    /// formatted. An earlier textual version of that guard recognised exactly
+    /// one spelling and let three equivalent widenings through.
     init(agents: [AgentInfo]) {
         self.paneIDs = Set(agents.map(\.paneID))
     }
