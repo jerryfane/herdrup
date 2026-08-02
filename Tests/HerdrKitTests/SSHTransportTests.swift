@@ -526,6 +526,15 @@ final class SSHTransportTests: XCTestCase {
         do {
             let retired = SSHTransport.AuditToken()
             retired.closer = { _ in intercepted.bump(); return 0 }
+            // PROVE THE CLOSER IS INSTALLED before releasing the token. Without
+            // this, replacing the assignment with `_ = retired` left the test
+            // GREEN: address reuse still happened, so nothing skipped, but the
+            // hazard was never armed and "the replacement did not inherit it"
+            // was true because there was nothing to inherit.
+            _ = retired.closer(-1)
+            XCTAssertEqual(intercepted.value, 1,
+                           "the retired token's closer was never installed; the inheritance "
+                           + "check below would be vacuous")
             addresses.append(ObjectIdentifier(retired))
         }   // released WITHOUT any cleanup call
 
@@ -539,8 +548,9 @@ final class SSHTransportTests: XCTestCase {
         let generation = DescriptorAudit.opened(fd)
         DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: replacement)
 
-        XCTAssertEqual(intercepted.value, 0,
-                       "the replacement inherited a retired token's closer")
+        XCTAssertEqual(intercepted.value, 1,
+                       "the replacement inherited a retired token's closer: the count rose past "
+                       + "the one invocation that armed it")
         XCTAssertEqual(replacement.adoptionRejections, 1,
                        "the replacement's own close did not run")
     }
