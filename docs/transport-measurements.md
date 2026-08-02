@@ -1,108 +1,123 @@
 # SSH transport cost, measured
 
-Goal v1b task 2. Everything here was measured on this box against a live herdr
-server over a real SSH tunnel. Nothing is inferred, and where a cause is unknown
-it says so rather than guessing.
+Goal v1b task 2.
 
-**Loopback is a floor, not a prediction for cellular.** Every number below is the
-best case.
+**Read the caveats with the numbers.** This document has been corrected three
+times, each time because a claim outran what was actually measured. What follows
+distinguishes what was observed from what was concluded, and says which
+conclusions remain unverified.
 
-## The breakdown
+**Loopback is a floor, not a prediction for cellular.**
 
-| phase | cost | nature |
+## Measured phase latencies
+
+| phase | latency | what it is |
 |---|---|---|
 | TCP connect | 0.1 ms | negligible |
-| SSH handshake / key exchange | 18.6 ms | **real cryptographic work** |
-| public-key authentication | 20.4 ms | **real cryptographic work** |
-| **channel opened immediately after auth** | **~96 ms (p50 of 30)** | **readiness delay** |
+| SSH handshake / key exchange | 18.6 ms | measured latency of the handshake phase |
+| public-key authentication | 20.4 ms | measured latency of the auth phase |
+| channel opened immediately after auth | ~96 ms (p50 of one 30-sample batch) | readiness delay |
 | channel on a session aged 100 ms | 0.28–0.54 ms | ready |
-| every subsequent channel | 0.1 ms | free |
-| missing `TCP_NODELAY` | ~30 ms | fixed, now recovered |
+| missing `TCP_NODELAY` | ~30 ms | fixed, recovered |
 
-## The finding that matters — CORRECTED
+These are **phase latencies**, not proof of where the time goes inside each
+phase. The handshake and auth figures are plausibly dominated by cryptographic
+work, but this measurement times the API call — it does not establish that the
+latency is computation rather than round trips or waiting.
 
-An earlier version of this document claimed *"the first channel opened on a
-fresh session is expensive; every channel after it is free."* **That is false**,
-and a reviewer disproved it with a measurement I had not thought to run.
+## The finding: a post-authentication readiness delay
+
+An earlier version claimed *"the first channel of a session is expensive; every
+channel after it is free."* **That is false.** The cost tracks how long the
+session has existed, not the channel's position.
 
 | condition | first-channel cost |
 |---|---|
-| opened **immediately** after authentication | 89.6–102.1 ms |
-| session **aged 100 ms** before its first channel | **0.28–0.54 ms** |
-| pre-opened sessions | ~0.22 ms |
+| opened immediately after authentication | 89.6–102.1 ms |
+| session aged 100 ms first | 0.28–0.54 ms |
+| pre-opened sessions | mostly fast, **but included first-open outliers up to 2594 ms** |
 
-**It is not the first channel that is expensive. It is a channel opened
-immediately after authentication.** Waiting 100 ms makes the cost vanish. So
-this is a *post-authentication readiness delay*, not an intrinsic per-session
-cost — the session needs a moment to become ready, and a channel requested
-inside that window pays for it.
+**A short delay after authentication is strongly associated with a cheap first
+channel.** It is not established that ageing *causes* the improvement, nor that
+100 ms is a threshold — the pre-opened control still produced multi-second
+outliers, so ageing does not reliably eliminate the cost. An earlier version
+said waiting "makes the cost vanish"; that overstates it.
 
-The distinction matters for the design: a pool that merely holds sessions does
-not fix this, because a freshly authenticated session handed straight out still
-pays. **Sessions must be prewarmed or validated before checkout.**
+### Consequence for the design
 
-Because `roundTrip` opens a fresh session per request and uses it immediately,
-**every request pays the readiness delay.** Pooling alone does not remove it —
-a pooled session handed out before it is ready pays exactly the same. The cost
-is avoided by *prewarming*, not by *reusing*.
+Because `roundTrip` opens a session per request and uses it immediately, every
+request lands inside the window where the delay appears.
 
-## The method lesson — also corrected
+**Pooling alone does not fix this** — a pooled session handed out before it is
+ready pays the same. The design response is to prewarm: open and free a
+sacrificial channel before checkout, so the request path does not carry it.
 
-An earlier version claimed the `p50 = 40.7 ms` was a "confident wrong number"
-produced by a median over a bimodal distribution. **That reasoning conflated two
-datasets.** The displayed sequence — eleven samples near 0.1 ms and one at
-1804.6 ms — has a median near 0.1 ms, not 40.7 ms. The 40.7 ms came from a
-different run under different conditions.
+**This is not guaranteed to work.** Prewarming is expected to help because
+subsequent channels on a session are consistently cheap, but the outliers above
+mean it is not proven to remove the cost in all cases. It should be validated
+against real checkout behaviour, not assumed.
 
-A median is not inherently misleading. **The actual error was aggregating
-measurements taken in heterogeneous session states** — some channels opened
-immediately after auth, some on aged sessions — into one statistic, as though
-they were samples of the same thing. They were not.
+## The method lesson — corrected twice
 
-The surviving lesson is narrower and more useful than the one first written:
-**print the sequence when hunting a cause**, because it exposes whether your
-samples are even measuring the same condition. The bimodality was real; the
-explanation attached to it was wrong.
+The first version claimed a `p50 = 40.7 ms` was a "confident wrong number" from
+a median over a bimodal distribution. **That conflated two datasets:** the
+displayed sequence has a median near 0.1 ms; 40.7 ms came from a different run.
 
-## What was ruled out
+The second version blamed "aggregating heterogeneous session states." That is
+the likely explanation, but **it cannot be verified**: the original harness kept
+only summaries for its 20 sequential opens, and the raw sequence and session-age
+metadata were not retained. The attribution is a reasonable reconstruction, not
+a demonstrated fact.
 
-- **herdr is not the cause.** A trivial echo socket, with zero herdr code in the
-  path, paid *more* in one sampled run (1877.8 ms) than herdr did (99.7 ms).
-- **Not `UseDNS`** — unset, and modern OpenSSH defaults it off.
+What survives, and is directly supported: **print the sequence, and retain it.**
+Had the raw samples and their session ages been kept, this would be settled
+instead of reconstructed.
+
+## What was ruled out, and how narrowly
+
+- **herdr is not *necessary* for a large delay.** A trivial echo socket with no
+  herdr code in the path produced 1877.8 ms in one sampled run against herdr's
+  99.7 ms in another. That shows herdr is not required to produce the effect —
+  it does **not** show herdr cannot contribute to it independently. Two single
+  observations cannot separate those.
+- **Not `UseDNS`** — unset; modern OpenSSH defaults it off.
 - **Not GSSAPI** — `gssapiauthentication no`, `gssapikeyexchange no`.
-- **Not herdr's two-write response pattern.** An earlier claim that this cost
-  ~100 ms per request and was worth ~190x was **retracted**: it compared two
-  structurally different relay programs and attributed the whole difference to
-  write shape. Controlled A/B puts it at roughly 2x, sub-millisecond.
-  `jerryfane/herdr#29` stays parked on this evidence.
+- **Not herdr's two-write response pattern.** An earlier claim of ~100 ms per
+  request and ~190x was **retracted**: it compared two structurally different
+  relay programs. Controlled A/B puts it at roughly 2x, sub-millisecond.
+  `jerryfane/herdr#29` stays parked on that evidence.
 
 ## What remains unknown
 
-**Why the first channel of a session costs what it does, and why the magnitude
-varies by an order of magnitude between runs.** It lives somewhere in the first
-`direct-streamlocal` forward of a session. A variable 100 ms–1900 ms penalty
-resembles a timeout or a retry more than it resembles work, but that is a
-hypothesis and it is not tested here.
+**Why a freshly authenticated session is not immediately ready.** The effect is
+associated with the period just after authentication, but its mechanism is not
+identified, and this document should not be read as locating it in any
+particular layer — earlier versions placed it in "the first
+`direct-streamlocal` forward of a session," which the measurements do not
+support.
+
+**Why some opens take seconds rather than ~96 ms.** Outliers up to 2594 ms
+appeared even in the pre-opened control. A multi-second penalty resembles a
+timeout or retry more than work, but that is a hypothesis and is untested.
 
 ## Consequence for the connection design
 
 **Pool authenticated sessions. Keep channels per-request.**
 
-- Sessions are worth pooling for the ~39 ms of real crypto, which pooling pays
-  once instead of once per request.
-- The readiness delay is **not** solved by pooling. It is solved by prewarming a
-  session — opening and freeing a sacrificial channel — **before** it is handed
-  out. A pool without prewarming still pays it on every checkout.
-- Channels are not worth pooling: they are free after the first, and herdr's
-  command socket is single-shot, so each request needs its own regardless.
+- Sessions are worth pooling for the ~39 ms of handshake and auth latency, paid
+  once instead of per request.
+- **Prewarm before checkout.** Pooling alone leaves the readiness delay on the
+  request path.
+- Channels are not worth pooling: they are consistently cheap on a ready
+  session, and herdr's command socket is single-shot, so each request needs its
+  own regardless.
 - The eviction threshold **needs its own basis.** The original plan inherited
-  ~3 s from herdr's `INITIAL_REQUEST_TIMEOUT`, but that governs herdr's socket,
-  not sshd's session — a different object with different lifetime rules.
+  ~3 s from herdr's `INITIAL_REQUEST_TIMEOUT`, which governs herdr's socket, not
+  sshd's session.
 
-This holds whatever the cause turns out to be, because prewarming addresses it
-either way. That is why the investigation stopped: the design needs the shape,
-and the shape is known.
+### The cheap falsifier
 
-The falsifier is cheap and needs no implementation — compare an immediate
-first-channel open against one on an aged session. If ageing stops helping,
-prewarming is not the answer and this conclusion is wrong.
+Compare an immediate first-channel open against one on an aged session, **with
+the raw sequence and session ages retained**. If ageing stops helping, or if
+outliers persist at the same rate, prewarming is not the answer and this
+conclusion is wrong. No implementation is required to run it.
