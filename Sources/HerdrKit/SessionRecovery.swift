@@ -24,10 +24,37 @@ import Foundation
 final class AttemptAuthority: @unchecked Sendable {
     private let lock = NSLock()
     private var _current: AttemptID?
+    private var _connectedSince: Date?
+    private var _subscribedPanes: Set<String> = []
 
     var current: AttemptID? {
         get { lock.lock(); defer { lock.unlock() }; return _current }
         set { lock.lock(); _current = newValue; lock.unlock() }
+    }
+
+    /// When the CURRENT attempt's connection was adopted, or nil.
+    ///
+    /// Lives here — not in the value State — because a value copy saved while A
+    /// was connected replayed its date: `paneCreated` subscribed onto the
+    /// cancelled transport, and the real replacement's `connected(B)` was
+    /// classified as an already-adopted repeat and suppressed. Sharing is the
+    /// fix; the INVARIANT that keeps this honest is that every transition which
+    /// mints or clears `current` clears this first, so it can never describe a
+    /// non-current attempt's transport. A first draft also carried an attempt
+    /// tag as a second guard on the same property; the tag was unreachable
+    /// (mutation-verified: removing it changed nothing), and an unpinnable
+    /// twin guard is the trap this project has now hit three times.
+    var connectedSince: Date? {
+        get { lock.lock(); defer { lock.unlock() }; return _connectedSince }
+        set { lock.lock(); _connectedSince = newValue; lock.unlock() }
+    }
+
+    /// The subscription ledger, transport-scoped state like the connection —
+    /// a replayed copy's ledger described the CANCELLED transport's
+    /// subscriptions, which is the same poison one field over.
+    var subscribedPanes: Set<String> {
+        get { lock.lock(); defer { lock.unlock() }; return _subscribedPanes }
+        set { lock.lock(); _subscribedPanes = newValue; lock.unlock() }
     }
 }
 
@@ -42,10 +69,12 @@ public struct AttemptID: Equatable, Hashable, Sendable {
     /// identity replay cannot reproduce is one that never derives from
     /// replayable contents — so nothing about an AttemptID comes from State.
     ///
-    /// What this cannot fix, stated because it is inherent to value semantics:
-    /// restoring an old State copy restores its `currentAttempt`, making that
-    /// old attempt current again by the caller's own hand. Minting is
-    /// replay-proof; the caller's stored value is the caller's to misuse.
+    /// Minting is replay-proof (nothing here derives from State), and since the
+    /// authority moved into a shared reference, so is the record of WHICH
+    /// attempt is current and connected: restoring an old State copy restores
+    /// pane knowledge and streak bookkeeping, while attempt authority, the
+    /// connection and the subscription ledger all read through the lineage's
+    /// shared `AttemptAuthority` and cannot be replayed.
     let uuid: UUID
 }
 
@@ -191,24 +220,28 @@ public struct SessionRecovery: Sendable {
     /// Stated at that strength and no more, after a sweep refuted the stronger
     /// claim ("every transition goes through plan()"): two other methods mutate
     /// state, and value semantics plus the public initialiser mean a caller can
-    /// still REPLACE the whole value. Attempt MINTING survives that: identity
-    /// is a fresh UUID derived from nothing the State stores, so no
-    /// replacement or copy-restore can make a new mint collide with an old
-    /// one. What replay can still do is restore an old copy's `currentAttempt`
-    /// verbatim — the caller reinstating an abandoned attempt by hand — which
-    /// no value-typed design prevents. Hold one `State` per client.
+    /// still REPLACE the whole value. What survives replay: attempt minting
+    /// (fresh UUIDs), attempt authority, the connection record and the
+    /// subscription ledger — all read through the lineage's shared
+    /// `AttemptAuthority`, so a restored copy cannot reauthorize a cancelled
+    /// attempt, present its transport as connected, or replay its ledger. What
+    /// replay DOES restore: pane knowledge (refreshed by the next snapshot)
+    /// and the failure streak (worst case, a wrong backoff delay — degradation,
+    /// not misdirection). A WHOLESALE `State()` rebuild is a fresh lineage:
+    /// everything before it goes stale, which is the safe direction.
     public struct State: Equatable, Sendable {
         public static func == (lhs: State, rhs: State) -> Bool {
             lhs.authority === rhs.authority
                 && lhs.consecutiveFailures == rhs.consecutiveFailures
-                && lhs.connectedSince == rhs.connectedSince
                 && lhs.isForeground == rhs.isForeground
                 && lhs.knownPanes == rhs.knownPanes
-                && lhs.subscribedPanes == rhs.subscribedPanes
         }
 
         public internal(set) var consecutiveFailures: Int = 0
-        public internal(set) var connectedSince: Date?
+        /// Bound to the current attempt: a connection only counts while it
+        /// belongs to the attempt the authority says is current, so no replayed
+        /// copy can present a cancelled transport as connected.
+        public var connectedSince: Date? { authority.connectedSince }
         public internal(set) var isForeground: Bool = true
         /// Shared by every copy of this State lineage — see `AttemptAuthority`
         /// for why authority must not live in replayable value contents.
@@ -229,8 +262,10 @@ public struct SessionRecovery: Sendable {
         /// stays open (there is no unsubscribe verb on the wire — subscriptions
         /// end when their connection does). Without this ledger, that pane
         /// REAPPEARING got an incremental second subscription on top of its
-        /// still-open first.
-        public internal(set) var subscribedPanes: Set<String> = []
+        /// still-open first. Lives in the shared authority: it is
+        /// transport-scoped exactly like the connection, and a replayed value
+        /// copy of it described the cancelled transport's subscriptions.
+        public var subscribedPanes: Set<String> { authority.subscribedPanes }
 
         public init() {}
 
@@ -277,8 +312,8 @@ public struct SessionRecovery: Sendable {
     /// background guards elsewhere were reachable at all.
     public func beginInitialAttempt(state: inout State) -> RecoveryPlan {
         guard state.isForeground else { return RecoveryPlan() }
-        state.connectedSince = nil
-        state.subscribedPanes = []
+        state.authority.connectedSince = nil
+        state.authority.subscribedPanes = []
         return RecoveryPlan([.cancelTransport, .reconnect(nextAttempt(&state), after: 0)])
     }
 
@@ -310,8 +345,8 @@ public struct SessionRecovery: Sendable {
             // type exists to prevent — and overwrote `connectedSince`, silently
             // restarting the stability clock.
             guard state.connectedSince == nil else { return RecoveryPlan() }
-            state.connectedSince = at
-            state.subscribedPanes = state.knownPanes
+            state.authority.connectedSince = at
+            state.authority.subscribedPanes = state.knownPanes
             // The only emitter of `.resyncAllPanes`, and the only emitter of the
             // FULL-SET subscribe. Not the only `.subscribe` site: `paneCreated`
             // and `observe` emit incremental single-pane/added-pane subscribes
@@ -336,8 +371,8 @@ public struct SessionRecovery: Sendable {
             if let since = state.connectedSince, at.timeIntervalSince(since) >= stabilityInterval {
                 state.consecutiveFailures = 0
             }
-            state.connectedSince = nil
-            state.subscribedPanes = []
+            state.authority.connectedSince = nil
+            state.authority.subscribedPanes = []
             state.consecutiveFailures += 1
             let delay = backoff(failures: state.consecutiveFailures, using: &generator)
             return RecoveryPlan([.reconnect(nextAttempt(&state), after: delay)])
@@ -346,8 +381,8 @@ public struct SessionRecovery: Sendable {
             // Reconnect, not migrate. Cancel first: the old socket is bound to an
             // address that may no longer exist, and a half-open connection on a
             // dead interface fails by timing out rather than by erroring.
-            state.connectedSince = nil
-            state.subscribedPanes = []
+            state.authority.connectedSince = nil
+            state.authority.subscribedPanes = []
             state.consecutiveFailures = 0
             state.authority.current = nil
             guard state.isForeground else { return RecoveryPlan([.cancelTransport]) }
@@ -355,8 +390,8 @@ public struct SessionRecovery: Sendable {
 
         case .backgrounded:
             state.isForeground = false
-            state.connectedSince = nil
-            state.subscribedPanes = []
+            state.authority.connectedSince = nil
+            state.authority.subscribedPanes = []
             state.authority.current = nil
             // Cancel rather than leave it open. A suspended process cannot read
             // the socket, and the server reaps it anyway — so the choice is
@@ -366,8 +401,8 @@ public struct SessionRecovery: Sendable {
         case .foregrounded:
             state.isForeground = true
             state.consecutiveFailures = 0
-            state.connectedSince = nil
-            state.subscribedPanes = []
+            state.authority.connectedSince = nil
+            state.authority.subscribedPanes = []
             // Cancel FIRST. Foregrounding is not guaranteed to find a dead
             // transport: a foregrounded event with a connection still live (the
             // OS never suspended us, or a lifecycle bug delivered no
@@ -389,7 +424,7 @@ public struct SessionRecovery: Sendable {
             guard state.isConnected, !state.subscribedPanes.contains(pane) else {
                 return RecoveryPlan()
             }
-            state.subscribedPanes.insert(pane)
+            state.authority.subscribedPanes.insert(pane)
             return RecoveryPlan([.subscribe([pane])])
 
         case .paneClosed(let pane):
@@ -426,7 +461,7 @@ public struct SessionRecovery: Sendable {
         // one short of the connection itself.
         let unwatched = snapshot.paneIDs.subtracting(state.subscribedPanes)
         guard state.isConnected, !unwatched.isEmpty else { return RecoveryPlan() }
-        state.subscribedPanes.formUnion(unwatched)
+        state.authority.subscribedPanes.formUnion(unwatched)
         return RecoveryPlan([.subscribe(unwatched)])
     }
 }
