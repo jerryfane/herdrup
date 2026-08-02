@@ -1186,6 +1186,19 @@ enum DescriptorAudit {
     /// opened another that reused the number, and the audit reported the second
     /// one's close as the first one's success. A generation is the only thing
     /// that can tell those apart.
+    /// The close used for an owner's descriptors — real by default, injectable
+    /// so a test can witness that a site invoked it.
+    private static var closers: [ObjectIdentifier: @Sendable (Int32) -> Int32] = [:]
+    static func setCloser(_ closer: @escaping @Sendable (Int32) -> Int32, for owner: AnyObject) {
+        lock.lock(); closers[ObjectIdentifier(owner)] = closer; lock.unlock()
+    }
+    static func realClose(_ fd: Int32) -> Int32 { Glibc_close(fd) }
+    private static func closer(for owner: AnyObject?) -> @Sendable (Int32) -> Int32 {
+        guard let owner else { return { Glibc_close($0) } }
+        lock.lock(); defer { lock.unlock() }
+        return closers[ObjectIdentifier(owner)] ?? { Glibc_close($0) }
+    }
+
     static func opened(_ fd: Int32) -> Int {
         lock.lock(); defer { lock.unlock() }
         generations[fd, default: 0] += 1
@@ -1199,10 +1212,15 @@ enum DescriptorAudit {
     /// Two things are verified rather than assumed, because both were exploited:
     ///   - the GENERATION still matches, so a recycled number cannot be closed
     ///     in place of the one the caller meant;
-    ///   - the descriptor is ACTUALLY GONE afterwards, checked with F_GETFD.
-    ///     Trusting close's return value let a build-valid substitute —
-    ///     `(fd >= 0 ? 0 : -1)` — report success while leaking the descriptor.
-    ///     A result is a claim; the post-state is evidence.
+    ///   - the close goes through an INJECTABLE, owner-scoped closer, so a test
+    ///     can prove this site actually invoked it. That replaces an earlier
+    ///     post-close `fcntl(F_GETFD)` check which was itself racy — once close
+    ///     returns the number is free, another thread can reuse it, and a
+    ///     healthy rejection then went unrecorded under load.
+    ///
+    /// The seam is what makes "did this site close anything?" answerable without
+    /// inspecting a number that no longer belongs to us. I had accepted that gap
+    /// as unclosable; review built the construction that closes it.
     static func closeRejectedAdoption(_ fd: Int32, generation: Int, owner: AnyObject?) {
         let current = lock.withLock { generations[fd] ?? 0 }
         guard current == generation else { return }   // recycled: not ours to close
@@ -1227,13 +1245,15 @@ enum DescriptorAudit {
         // it in-process requires exactly the racy probe removed above. The
         // adjacent mutation — deleting the call entirely — IS caught, because
         // then nothing is recorded.
-        // ONE STATEMENT, deliberately. As a `guard ... else { return }` followed
-        // by the record, deleting the close line left the record reachable and
-        // the leak passed. As an `if` whose body IS the record, deleting the
-        // condition orphans the body and fails to COMPILE — which the harness
-        // classifies INVALID rather than SURVIVED, so the difference between
-        // "not caught" and "not a valid experiment" stays visible.
-        if Glibc_close(fd) == 0, let owner {
+        // THROUGH THE OWNER'S CLOSER. Both a success-shaped substitute for the
+        // syscall and outright deletion of the close leave the injected closer
+        // UNINVOKED, so a test that installs one and counts it catches either —
+        // without looking at the descriptor number after close, which is what
+        // made the previous attempt racy.
+        //
+        // (The comment that stood here claimed deletion would fail to compile.
+        // It does not: `if let owner {` is valid Swift, as review demonstrated.)
+        if closer(for: owner)(fd) == 0, let owner {
             lock.lock(); rejectionsByOwner[ObjectIdentifier(owner), default: 0] += 1; lock.unlock()
         }
     }
@@ -1248,6 +1268,7 @@ enum DescriptorAudit {
         lock.lock()
         byOwner[ObjectIdentifier(owner)] = nil
         rejectionsByOwner[ObjectIdentifier(owner)] = nil
+        closers[ObjectIdentifier(owner)] = nil
         lock.unlock()
     }
 }
