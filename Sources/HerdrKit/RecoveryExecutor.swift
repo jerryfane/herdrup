@@ -16,7 +16,17 @@ public protocol ExecutorTransport: Sendable {
     func connect(for attempt: AttemptID) async throws
     /// The complete pane set, from the transport this attempt owns.
     func fetchSnapshot(for attempt: AttemptID) async throws -> PaneSnapshot
-    /// Open one pane's persistent event stream. `onTermination` SHOULD fire
+    /// Open one pane's persistent event stream.
+    ///
+    /// **Throwing MUST leave no live registration and no future callback.** A
+    /// conformer that installs a callback and then throws creates a resource
+    /// the executor does not know it owns: the catch path starts a replacement
+    /// with its own latch, and a later first fire of the FAILED registration's
+    /// callback retires the replacement's ledger entry and opens a third
+    /// stream. The executor cannot detect that from outside, so it is a
+    /// requirement here rather than a defence there.
+    ///
+    /// `onTermination` SHOULD fire
     /// exactly once when the stream dies; the executor enforces the once with a
     /// latch regardless, because a double-fire would otherwise become a
     /// permanent double-subscription — the policy deliberately treats every
@@ -85,10 +95,34 @@ public actor RecoveryExecutor {
     /// Caught by the ordering test's operation log on its first run.
     private var resourcedAttempt: AttemptID?
 
-    /// Retained for tests and diagnostics: every action this executor REFUSED,
-    /// with the reason. Rejections are the point of the bindings, so they are
-    /// observable rather than silent.
+    struct FailureKey: Hashable {
+        let attempt: AttemptID
+        let pane: String
+    }
+    private var openFailures: [FailureKey: Int] = [:]
+
+    /// Bounded diagnostics: the most recent refusals, plus how many were
+    /// dropped. Append-only was a slow leak on a long-running client — stale
+    /// plans and duplicate callbacks are rare but unbounded over days.
     public private(set) var rejections: [(action: String, reason: String)] = []
+    public private(set) var droppedRejections = 0
+    static let rejectionCapacity = 128
+
+    private func record(rejection: (action: String, reason: String)) {
+        rejections.append(rejection)
+        if rejections.count > Self.rejectionCapacity {
+            rejections.removeFirst(rejections.count - Self.rejectionCapacity)
+            droppedRejections += 1
+        }
+    }
+
+    /// Takes and clears the buffer, for a caller that ships diagnostics.
+    public func drainRejections() -> (entries: [(action: String, reason: String)], dropped: Int) {
+        let taken = (entries: rejections, dropped: droppedRejections)
+        rejections = []
+        droppedRejections = 0
+        return taken
+    }
 
     public init(recovery: SessionRecovery = SessionRecovery(), transport: ExecutorTransport) {
         self.init(recovery: recovery, transport: transport, generator: SystemRandomNumberGenerator())
@@ -175,7 +209,7 @@ public actor RecoveryExecutor {
                 // reconnect scheduled at all: a wedged executor. Reproduced 4/4
                 // by the sweep before this guard existed.
                 guard attempt == state.currentAttempt else {
-                    rejections.append((action: "reconnect", reason: "bound to a retired attempt"))
+                    record(rejection: (action: "reconnect", reason: "bound to a retired attempt"))
                     continue
                 }
                 dial(attempt, after: after)
@@ -189,7 +223,7 @@ public actor RecoveryExecutor {
                 // however it arrives. This is enforcement of the invariant the
                 // policy can only declare.
                 guard on == state.currentAttempt else {
-                    rejections.append((
+                    record(rejection: (
                         action: "subscribe(\(panes.sorted().joined(separator: ",")))",
                         reason: "bound to a retired attempt"
                     ))
@@ -247,6 +281,17 @@ public actor RecoveryExecutor {
         }
     }
 
+    /// Bound on consecutive open failures for one pane on one attempt.
+    ///
+    /// Not a niceness: an open that throws becomes `.streamFailed`, the policy
+    /// re-admits the pane, and the re-admission opens again — a persistently
+    /// failing conformer is an unbounded, delay-free retry loop that saturates
+    /// the actor. The delay grows per consecutive failure and resets when a
+    /// pane opens successfully; past the cap the pane is left unsubscribed with
+    /// the refusal recorded, which is a visibly degraded pane rather than a
+    /// spinning client.
+    static let openFailureCap = 5
+
     private func open(panes: Set<String>, for attempt: AttemptID) async {
         for pane in panes.sorted() {
             // Re-checked PER PANE, because every openStream await is an actor
@@ -255,11 +300,25 @@ public actor RecoveryExecutor {
             // attempt AFTER its closeAll had run — orphan streams nothing would
             // ever close. Reproduced by test before this guard existed.
             guard attempt == state.currentAttempt else {
-                rejections.append((
+                record(rejection: (
                     action: "openStream(\(pane))",
                     reason: "attempt retired mid-subscribe"
                 ))
                 return
+            }
+            let failures = openFailures[FailureKey(attempt: attempt, pane: pane)] ?? 0
+            guard failures < Self.openFailureCap else {
+                record(rejection: (
+                    action: "openStream(\(pane))",
+                    reason: "open failed \(failures) times; pane left unsubscribed"
+                ))
+                continue
+            }
+            if failures > 0 {
+                // Back off between consecutive failures for THIS pane on THIS
+                // attempt, through the same seam the dial uses so tests pin it.
+                await sleeper(Double(failures) * 0.25)
+                guard attempt == state.currentAttempt else { return }
             }
             do {
                 // The exactly-once termination contract is ENFORCED here, not
@@ -276,16 +335,33 @@ public actor RecoveryExecutor {
                     }
                     Task { await self?.handle(.streamFailed(pane: pane, from: attempt)) }
                 }
+                // RECHECK-AND-REAP after the await. The pre-await guard cannot
+                // cover the suspension itself: a teardown completing while
+                // openStream was in flight leaves a stream registered for a
+                // retired attempt — published after its closeAll, so nothing
+                // would ever close it. Reaping is the only correction available
+                // once the registration exists.
+                if attempt != state.currentAttempt {
+                    record(rejection: (
+                        action: "openStream(\(pane))",
+                        reason: "attempt retired during open; stream reaped"
+                    ))
+                    await transport.closeAll(for: attempt)
+                    return
+                }
+                openFailures[FailureKey(attempt: attempt, pane: pane)] = nil
             } catch {
                 // A stream that cannot OPEN is a death the same as one that
-                // dies later; the policy decides whether to replace it.
+                // dies later; the policy decides whether to replace it, and the
+                // counter above bounds how often that replacement is attempted.
+                openFailures[FailureKey(attempt: attempt, pane: pane), default: 0] += 1
                 await handle(.streamFailed(pane: pane, from: attempt))
             }
         }
     }
 
     private func recordDuplicateTermination(pane: String) {
-        rejections.append((
+        record(rejection: (
             action: "termination(\(pane))",
             reason: "duplicate termination dropped by the once-latch"
         ))
