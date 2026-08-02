@@ -516,11 +516,16 @@ final class SSHTransportTests: XCTestCase {
     /// if anyone reintroduces a map.
     func testAReplacementTokenDoesNotInheritARetiredTokensCloser() throws {
         var addresses: [ObjectIdentifier] = []
-        var intercepted = 0
+        // UncheckedCounter, not a captured `var`. A @Sendable closure mutating
+        // captured local state fails `-Xswiftc -warnings-as-errors`, which is a
+        // standing requirement in this lane's own review header — and the file
+        // already carried this helper, written for exactly this, three rounds
+        // ago. I did not run that leg before pushing. Second time on this PR.
+        let intercepted = UncheckedCounter()
 
         do {
             let retired = SSHTransport.AuditToken()
-            retired.closer = { _ in intercepted += 1; return 0 }
+            retired.closer = { _ in intercepted.bump(); return 0 }
             addresses.append(ObjectIdentifier(retired))
         }   // released WITHOUT any cleanup call
 
@@ -534,7 +539,7 @@ final class SSHTransportTests: XCTestCase {
         let generation = DescriptorAudit.opened(fd)
         DescriptorAudit.closeRejectedAdoption(fd, generation: generation, owner: replacement)
 
-        XCTAssertEqual(intercepted, 0,
+        XCTAssertEqual(intercepted.value, 0,
                        "the replacement inherited a retired token's closer")
         XCTAssertEqual(replacement.adoptionRejections, 1,
                        "the replacement's own close did not run")
