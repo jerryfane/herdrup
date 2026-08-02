@@ -191,6 +191,18 @@ public actor RecoveryExecutor {
 
     private func open(panes: Set<String>, for attempt: AttemptID) async {
         for pane in panes.sorted() {
+            // Re-checked PER PANE, because every openStream await is an actor
+            // suspension point: a retirement can interleave mid-loop, and a
+            // door-only check let the remaining panes open for the retired
+            // attempt AFTER its closeAll had run — orphan streams nothing would
+            // ever close. Reproduced by test before this guard existed.
+            guard attempt == state.currentAttempt else {
+                rejections.append((
+                    action: "openStream(\(pane))",
+                    reason: "attempt retired mid-subscribe"
+                ))
+                return
+            }
             do {
                 try await transport.openStream(pane: pane, for: attempt) { [weak self] in
                     // One termination, one death event — the exactly-once
