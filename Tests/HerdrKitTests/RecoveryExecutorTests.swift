@@ -264,6 +264,13 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         return seconds
     }
 
+    // REMOVED: the connect stall (stallConnect/releaseConnect/parkedConnects).
+    // It was added to pin `pendingDial` and has ZERO call sites now that the
+    // assertion it served was cut. Dead seams in this fake are not inert — two
+    // were removed from here in #14 for firing a terminator inside openStream
+    // while nothing called them — so it goes rather than sitting armed for
+    // whoever finds it next. `git log` has it if the pendingDial gap is ever
+    // closed.
     func connect(for attempt: AttemptID) async throws {
         record(.connect(attempt))
         if failConnects { throw TransportError.closedBeforeResponse }
@@ -1065,6 +1072,30 @@ final class RecoveryExecutorTests: XCTestCase {
                       "the dropped duplicate must be observable")
     }
 
+/// Observes a parked dial's cancellation. `pendingDial` holds the task that
+/// runs the sleeper, so a cancelled dial surfaces as `Task.sleep` throwing —
+/// the one place that state is directly visible.
+actor DialGate {
+    private var entered = false
+    private var cancelled = false
+    private var released = false
+    private var beats = 0
+    /// A POSITIVE heartbeat from the parked dial. The first version proved
+    /// liveness by sleeping 150ms and asserting cancellation had NOT been
+    /// reported — an absence, which a merely-delayed report satisfies just as
+    /// well as a living task. A probe delaying markCancelled by 300ms made the
+    /// unchanged code pass AND let the mutation survive. Only the loop itself
+    /// can raise this count.
+    func beat() { beats += 1 }
+    var heartbeats: Int { beats }
+    func enter() { entered = true }
+    func markCancelled() { cancelled = true }
+    func release() { released = true }
+    var hasEntered: Bool { entered }
+    var wasCancelled: Bool { cancelled }
+    var isReleased: Bool { released }
+}
+
 actor SleepRecorder {
     private var delays: [TimeInterval] = []
     func record(_ delay: TimeInterval) { delays.append(delay) }
@@ -1447,10 +1478,307 @@ actor SleepRecorder {
         // The real death lands after the retraction: the ledger has no entry,
         // so dropAndReadmit's was-in-the-ledger check refuses it. Exactly-once
         // holds because BOTH paths go through that one check.
+        let transportOpsBeforeDeath = transport.log().count
         await executor.handle(.streamFailed(pane: "p", from: attempt))
         let afterSecond = await executor.subscribedPanes.contains("p")
         XCTAssertFalse(afterSecond,
                        "a death after retraction re-admitted a pane the policy had given up on")
+
+        // AND ASSERT THE DEATH WAS ACTUALLY DELIVERED. Without this the test is
+        // a tautology: it sets up absence, runs a path, and asserts absence —
+        // which is true whether the path was harmless or never ran. Deleting
+        // the `handle(.streamFailed)` line above left it passing.
+        //
+        // That is the authoring pattern, not a slip: "prove path P does not
+        // disturb state Y" naturally becomes arrange-Y, run-P, assert-Y, and if
+        // the setup establishes Y directly the assertion is satisfied before P
+        // executes. The rule that prevents it: WHEN ASSERTING P DID NOT DISTURB
+        // Y, ALSO ASSERT P RAN.
+        //
+        // Ignoring the death produced no observable at all, so this assertion
+        // was unwritable until the policy started recording the refusal — a
+        // path with no success signal cannot be armed by any test.
+        let ignored = await executor.ignoredDeaths
+        XCTAssertEqual(ignored, 1, "the death was never delivered; the assertion above proved nothing")
+        let lastPane = await executor.lastIgnoredDeathPane
+        XCTAssertEqual(lastPane, "p", "a different pane's death was counted")
+
+        // AND THE NOTE DID NO TRANSPORT WORK. Its entire contract is that it
+        // makes a no-op observable; if executing it can touch the transport it
+        // is behaviour wearing an observation's name. A mutation adding
+        // `closeAll(for:)` after the record SURVIVED both regressions and the
+        // whole 32-test filter, because nothing compared the transport log
+        // across the note's execution.
+        XCTAssertEqual(transport.log().count, transportOpsBeforeDeath,
+                       "executing noteIgnoredDeath performed transport work; it must only observe")
+
+        // AND RESOURCE OWNERSHIP SURVIVED IT. Clearing resourcedAttempt in the
+        // note's branch compiled and survived all 33 executor tests: nothing
+        // observed it, and the next teardown would then skip closeAll for the
+        // attempt that actually holds sockets — a leaked connection, caused by
+        // an "observation". Ownership is only visible through what teardown
+        // does, so the test has to run one.
+        // A NEW closeAll, not any historical one. `contains` accepted evidence
+        // from BEFORE the death: with an unrelated earlier closeAll(attempt) in
+        // the log, the resourcedAttempt mutation passed again. A log accumulates,
+        // so membership is never proof that something happened AT a moment.
+        let closesBefore = transport.log().filter { $0 == .closeAll(attempt) }.count
+        await executor.handle(.networkChanged(at: Date()))
+        let closed = await waitUntil {
+            transport.log().filter { $0 == .closeAll(attempt) }.count > closesBefore
+        }
+        XCTAssertTrue(closed,
+                      "after the ignored death, teardown did not close the attempt that owned the "
+                      + "transport; the note dropped resource ownership")
+    }
+
+    /// AXIS: a flood of ignored deaths cannot evict an actionable rejection.
+    ///
+    /// The review's probe, kept: ignored deaths used to be entries in the shared
+    /// 128-cap buffer, so 129 of them destroyed a seeded real refusal and bumped
+    /// droppedRejections. A surface added for VISIBILITY was deleting
+    /// visibility. Ignored deaths now have their own counter and cannot displace
+    /// anything.
+    func testAFloodOfIgnoredDeathsCannotEvictActionableRejections() async throws {
+        let transport = ScriptedTransport(panes: ["p"])
+        transport.failingPanes = ["p"]
+        let executor = RecoveryExecutor(transport: transport)
+        await executor.setSleeper { _ in }
+        await executor.start()
+        await waitForExhaustion(executor, "p")
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
+
+        // Seed ONE actionable refusal, through the public path.
+        let retired = AttemptID(uuid: UUID())
+        await executor.execute(RecoveryPlan([.subscribe(["p"], on: retired)]))
+        let seeded = await executor.rejections.contains { $0.reason.contains("retired attempt") }
+        XCTAssertTrue(seeded, "the actionable rejection was never recorded; the test is not armed")
+
+        // More ignored deaths than the buffer could ever hold.
+        for _ in 0..<(RecoveryExecutor.rejectionCapacity + 1) {
+            await executor.handle(.streamFailed(pane: "p", from: attempt))
+        }
+
+        // THE EXHAUSTED PANE'S STATUS MUST BE UNCHANGED. Clearing openFailures in
+        // the note's branch compiled and survived all 140 tests: it flips this
+        // pane from admittedNotOpen(attempts: cap) to notAdmitted, silently
+        // converting "wanted but unreachable" into "never wanted" — the exact
+        // distinction task 7 exists to preserve, destroyed by an action that
+        // claims to only observe.
+        let statusAfterFlood = await executor.paneStatus("p")
+        guard case .admittedNotOpen(let attemptsAfter, _) = statusAfterFlood else {
+            return XCTFail("the flood changed the pane's status to \(statusAfterFlood)")
+        }
+        XCTAssertEqual(attemptsAfter, RecoveryExecutor.openFailureCap,
+                       "the flood altered the failure counter the status depends on")
+
+        let survived = await executor.rejections.contains { $0.reason.contains("retired attempt") }
+        XCTAssertTrue(survived,
+                      "\(RecoveryExecutor.rejectionCapacity + 1) ignored deaths evicted an actionable rejection")
+        let dropped = await executor.droppedRejections
+        XCTAssertEqual(dropped, 0, "ignored deaths consumed the actionable rejection budget")
+        let counted = await executor.ignoredDeaths
+        XCTAssertEqual(counted, RecoveryExecutor.rejectionCapacity + 1,
+                       "the deaths were not all counted; the flood did not happen")
+    }
+
+    /// AXIS: the ignored-death note touches NOTHING it does not own.
+    ///
+    /// "Observation-only" is a claim about EVERY piece of state the executor
+    /// holds, and pinning it against the two obvious ones — the ledger and the
+    /// transport — left five compiling mutations alive in the note's branch:
+    /// clearing lastOpenErrors, pendingDial, the sleeper, state.knownPanes, and
+    /// droppedRejections. In production those would respectively erase the
+    /// reported failure cause, lose the cancellation handle for an in-flight
+    /// dial, remove retry backoff, forget the panes later death decisions read,
+    /// and discard the accumulated drop delta.
+    ///
+    /// Every state below is driven to a NON-DEFAULT value first. Asserting
+    /// "still empty" against something that was empty anyway is the vacuous
+    /// shape this file has now been caught in three times.
+    func testTheIgnoredDeathNoteLeavesEveryOtherSurfaceAlone() async throws {
+        let transport = ScriptedTransport(panes: ["p", "other"])
+        transport.failingPanes = ["p"]
+        let executor = RecoveryExecutor(transport: transport)
+        let backoffs = SleepRecorder()
+        await executor.setSleeper { delay in await backoffs.record(delay) }
+        await executor.start()
+        await waitForExhaustion(executor, "p")
+        let attemptOptional = await executor.currentAttempt
+        let attempt = try XCTUnwrap(attemptOptional)
+
+        // Drive the drop counter past zero: more stale plans than the buffer holds.
+        let retired = AttemptID(uuid: UUID())
+        for _ in 0..<(RecoveryExecutor.rejectionCapacity + 5) {
+            await executor.execute(RecoveryPlan([.subscribe(["p"], on: retired)]))
+        }
+
+        // PRECONDITIONS — each surface non-default, so "unchanged" means something.
+        let knownBefore = await executor.knownPanes
+        XCTAssertFalse(knownBefore.isEmpty, "knownPanes is empty; the assertion below would be vacuous")
+        let droppedBefore = await executor.droppedRejections
+        XCTAssertGreaterThan(droppedBefore, 0, "droppedRejections is 0; the assertion below would be vacuous")
+        let statusBefore = await executor.paneStatus("p")
+        guard case .admittedNotOpen(_, let errorBefore) = statusBefore, errorBefore != nil else {
+            return XCTFail("no recorded open error; the lastOpenErrors assertion would be vacuous")
+        }
+        let backoffsBefore = await backoffs.recorded().count
+        XCTAssertGreaterThan(backoffsBefore, 0, "the sleeper never fired; its assertion would be vacuous")
+        let rejectionsBefore = await executor.rejections.count
+        XCTAssertGreaterThan(rejectionsBefore, 0,
+                             "the rejection buffer is empty; its assertion below would compare 0 to 0")
+
+        // The note.
+        await executor.handle(.streamFailed(pane: "p", from: attempt))
+
+        // Nothing moved but its own counter.
+        let knownAfter = await executor.knownPanes
+        XCTAssertEqual(knownAfter, knownBefore, "the note cleared knownPanes")
+        let droppedAfter = await executor.droppedRejections
+        XCTAssertEqual(droppedAfter, droppedBefore, "the note reset droppedRejections")
+        let statusAfter = await executor.paneStatus("p")
+        guard case .admittedNotOpen(_, let errorAfter) = statusAfter else {
+            return XCTFail("the note changed the pane's status to \(statusAfter)")
+        }
+        XCTAssertEqual(errorAfter, errorBefore, "the note cleared the recorded open error")
+        let rejectionsAfter = await executor.rejections.count
+        XCTAssertEqual(rejectionsAfter, rejectionsBefore, "the note altered the rejection buffer")
+        let counted = await executor.ignoredDeaths
+        XCTAssertEqual(counted, 1, "the note did not count itself")
+
+        // The sleeper still works. Driven DIRECTLY through a delayed reconnect
+        // rather than by provoking a retry: a pane's first open failure does not
+        // back off (the delay is failures * 0.25, and failures is 0 until one
+        // has been recorded), so "add a failing pane and wait" never reaches the
+        // seam. My first version asserted exactly that and failed on unmutated
+        // code — the premise, not the behaviour.
+        //
+        // Last, because it dials and therefore disturbs the state the
+        // assertions above read.
+        await executor.execute(RecoveryPlan([.reconnect(attempt, after: 0.5)]))
+        let backedOff = await waitUntil { await backoffs.recorded().count > backoffsBefore }
+        XCTAssertTrue(backedOff, "the note replaced the sleeper; nothing waits any more")
+
+        // AND THE PENDING-DIAL HANDLE SURVIVED.
+        //
+        // I declared this unpinnable last round and I was wrong: I had only
+        // tried to observe it through the TRANSPORT — whether a superseded dial
+        // records a connect — which races the stall release against the
+        // cancellation. Review showed the observation belongs on the SLEEPER
+        // instead. `dial` parks inside it, `pendingDial` holds that task, and a
+        // cancelled task's `Task.sleep` THROWS. So cancellation is directly
+        // observable, deterministically, with no race to lose.
+        //
+        // The lesson is not about dials: I concluded "cannot be observed" from
+        // "the one surface I tried did not work".
+        let gate = DialGate()
+        await executor.setSleeper { delay in
+            guard delay >= 4 else { return }          // only the parked reconnect
+            await gate.enter()
+            while await !gate.isReleased {
+                await gate.beat()
+                do { try await Task.sleep(nanoseconds: 20_000_000) }
+                catch { await gate.markCancelled(); return }
+            }
+        }
+        await executor.execute(RecoveryPlan([.reconnect(attempt, after: 5)]))
+        let parked = await waitUntil { await gate.hasEntered }
+        XCTAssertTrue(parked, "the dial never parked; there was no handle to lose")
+
+        await executor.handle(.streamFailed(pane: "p", from: attempt))   // the note
+
+        // LIVENESS HANDSHAKE BEFORE THE TEARDOWN. Without it this proved only
+        // that the dial was EVENTUALLY cancelled, and a mutation adding
+        // `pendingDial?.cancel()` to the note survived: the note killed a
+        // legitimate reconnect and the networkChanged immediately after masked
+        // it, with the gate crediting teardown for a cancellation the note had
+        // already caused. In production that leaves the executor with no
+        // scheduled reconnect until some other event arrives.
+        let beatsBefore = await gate.heartbeats
+        let stillAlive = await waitUntil { await gate.heartbeats > beatsBefore + 1 }
+        XCTAssertTrue(stillAlive,
+                      "the pending dial stopped beating after the note: the NOTE cancelled it, and "
+                      + "only teardown may do that")
+        let cancelledByTheNote = await gate.wasCancelled
+        XCTAssertFalse(cancelledByTheNote, "the note reported the dial cancelled")
+
+        await executor.handle(.networkChanged(at: Date()))               // supersedes the dial
+
+        let cancelled = await waitUntil { await gate.wasCancelled }
+        await gate.release()                                             // frees the mutant's orphan
+        XCTAssertTrue(cancelled,
+                      "the superseded dial was never cancelled: the note dropped pendingDial, and "
+                      + "the orphan keeps its connection resources until it completes")
+    }
+
+    /// AXIS: the note disturbs neither the reconnect backoff streak nor the
+    /// jitter generator — pinned by a PAIRED CONTROL on identical seeds.
+    ///
+    /// Two more executor-owned surfaces the every-surface assertion missed.
+    /// `state.consecutiveFailures = 0` in the note's branch compiled and
+    /// survived everything: an ignored stale death mid-streak would reset the
+    /// next failure to first-attempt backoff, defeating exponential backoff and
+    /// potentially sustaining a reconnect storm. `_ = generator.next()`
+    /// likewise survived, shifting every subsequent jitter draw.
+    ///
+    /// Neither is readable from outside, so the observable is the DELAY the
+    /// policy computes next. Two executors on the same seed, one given the note
+    /// and one not: identical inputs must produce identical delays, and any
+    /// state the note touched shows up as a divergence.
+    func testTheNoteDisturbsNeitherTheBackoffStreakNorTheJitter() async throws {
+        func delaysAfterAStreak(withNote: Bool) async throws -> [TimeInterval] {
+            let transport = ScriptedTransport(panes: ["p"])
+            let recorder = SleepRecorder()
+            let executor = RecoveryExecutor(
+                recovery: SessionRecovery(), transport: transport,
+                generator: SeededGenerator(seed: 42))
+            await executor.setSleeper { delay in await recorder.record(delay) }
+            await executor.start()
+            _ = await waitUntil { await executor.isConnected }
+
+            // Build a streak, so consecutiveFailures is well past its default.
+            // Wait for EACH failure's own delay to be recorded before causing the
+            // next. Waiting only for currentAttempt to change advanced while the
+            // dial's Task had not yet recorded — so outstanding tasks recorded
+            // later, reordering the array or satisfying the final wait without
+            // the post-note failure being seen at all. 8 of 19 runs failed on
+            // UNCHANGED code, and both target mutations survived some probes.
+            for i in 0..<3 {
+                let current = await executor.currentAttempt
+                guard let current else { break }
+                let before = await recorder.recorded().count
+                await executor.handle(.transportFailed(current, at: Date()))
+                let recorded = await waitUntil { await recorder.recorded().count > before }
+                XCTAssertTrue(recorded, "failure \(i) never recorded its backoff; the streak is not built")
+            }
+            let beforeNote = await recorder.recorded().count
+
+            if withNote {
+                let current = await executor.currentAttempt
+                await executor.handle(.streamFailed(pane: "never-admitted",
+                                                    from: try XCTUnwrap(current)))
+            }
+
+            // One more failure: its delay is a function of the streak length and
+            // the generator's position, which is exactly what the note must not
+            // have moved.
+            let current = await executor.currentAttempt
+            await executor.handle(.transportFailed(try XCTUnwrap(current), at: Date()))
+            let finalRecorded = await waitUntil { await recorder.recorded().count > beforeNote }
+            XCTAssertTrue(finalRecorded, "the post-note failure never recorded its backoff")
+            return await recorder.recorded()
+        }
+
+        let control = try await delaysAfterAStreak(withNote: false)
+        let withNote = try await delaysAfterAStreak(withNote: true)
+
+        XCTAssertFalse(control.isEmpty, "no delays were recorded; the comparison would be vacuous")
+        XCTAssertGreaterThan(control.count, 1,
+                             "only one delay recorded; the streak never built and the assertion is weak")
+        XCTAssertEqual(withNote, control,
+                       "the note moved the backoff streak or the jitter generator: "
+                       + "delays \(withNote) against a control of \(control)")
     }
 
     /// AXIS: after retraction, a genuine re-admission works — the pane is not
