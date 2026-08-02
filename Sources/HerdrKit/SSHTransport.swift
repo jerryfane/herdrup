@@ -92,17 +92,25 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
 
         public init() {}
 
+        /// Read-only inspection, for tests and diagnostics.
         public func pinned(key: String) -> String? {
             lock.lock(); defer { lock.unlock() }
             return pins[key]
         }
 
-        public func pin(host: String, port: UInt16 = 22, fingerprint: String) {
-            lock.lock(); defer { lock.unlock() }
-            pins["\(host):\(port)"] = fingerprint
+        /// Seeds a pin. Expressed through the same atomic primitive so there is
+        /// no separate write path to misuse.
+        @discardableResult
+        public func pin(host: String, port: UInt16 = 22, fingerprint: String) -> HostKeyDecision {
+            compareAndPin(key: "\(host):\(port)", presented: fingerprint)
         }
 
-        /// The whole decision inside one critical section.
+        /// THE ONLY WRITE PATH. Structural, not merely careful: with no separate
+        /// lookup-then-store API, the racy split form cannot be written at all.
+        /// A concurrency test can only ever sample a race — the reviewer showed
+        /// the previous one let the split form survive 492 times in 500 — so the
+        /// guarantee has to come from the shape of the interface, not from a
+        /// test that hopes to catch it.
         func compareAndPin(key: String, presented: String) -> HostKeyDecision {
             lock.lock(); defer { lock.unlock() }
             if let existing = pins[key] {
@@ -254,11 +262,30 @@ public struct SSHTransport: HerdrTransport {
         }
     }
 
-    func openSession() throws -> Session {
+    /// Establishes a session, publishing the raw socket to `live` BEFORE any
+    /// blocking call so cancellation can interrupt establishment itself.
+    ///
+    /// The previous shape completed connect, handshake, host-key check and auth
+    /// and only then handed the socket over — so a cancel arriving during those
+    /// steps had nothing to shut down. A peer that accepts TCP and withholds its
+    /// banner would hold a worker indefinitely, and four such peers exhaust the
+    /// whole queue.
+    func openSession(publishingTo live: LiveChannel? = nil) throws -> Session {
         try SSHRuntime.ensureStarted()
         let sock = try tcpConnect()
-        guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
+        // Ownership is published here, before handshake/auth, so an interrupt
+        // during establishment reaches a real descriptor.
+        if let live, !live.adopt(rawSocket: sock) {
             _ = Glibc_close(sock)
+            throw CancellationError()
+        }
+        // Bound the blocking phases: a silent peer must not hold a worker for
+        // longer than this regardless of cancellation.
+        var tv = timeval(tv_sec: 15, tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard let handle = libssh2_session_init_ex(nil, nil, nil, nil) else {
+            if live == nil { _ = Glibc_close(sock) }
             throw SSHError.sessionInitFailed
         }
         libssh2_session_set_blocking(handle, 1)
@@ -395,7 +422,10 @@ public struct SSHTransport: HerdrTransport {
             try await withCheckedThrowingContinuation { continuation in
                 SSHTransport.blockingQueue.addOperation {
                     do {
-                        let session = try openSession()
+                        // A queued operation may have been cancelled while it
+                        // waited for a worker; do not begin setup at all.
+                        guard !live.isInterrupted else { throw CancellationError() }
+                        let session = try openSession(publishingTo: live)
                         guard live.adopt(session) else {
                             session.close()
                             throw CancellationError()
@@ -429,7 +459,11 @@ public struct SSHTransport: HerdrTransport {
             // this loop blocks for the life of the subscription.
             let work = Thread {
                 do {
-                    let session = try openSession()
+                    guard !live.isInterrupted else {
+                        continuation.finish()
+                        return
+                    }
+                    let session = try openSession(publishingTo: live)
                     guard live.adopt(session) else {
                         session.close()
                         continuation.finish()
@@ -467,16 +501,27 @@ public struct SSHTransport: HerdrTransport {
 
 /// Owns a session and channel shared between a blocking reader and a cancelling
 /// caller, so cancellation can interrupt a read that is already in progress.
-private final class LiveChannel: @unchecked Sendable {
+final class LiveChannel: @unchecked Sendable {
     private let lock = NSLock()
     private var session: SSHTransport.Session?
     private var channel: OpaquePointer?
+    private var rawSocket: Int32 = -1
     private var closed = false
+
+    /// Publish a bare descriptor before a Session exists, so establishment is
+    /// interruptible rather than only the read loop.
+    func adopt(rawSocket fd: Int32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        rawSocket = fd
+        return true
+    }
 
     func adopt(_ session: SSHTransport.Session) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { return false }
         self.session = session
+        rawSocket = -1     // the Session owns it from here
         return true
     }
 
@@ -494,9 +539,10 @@ private final class LiveChannel: @unchecked Sendable {
     func interrupt() {
         lock.lock(); defer { lock.unlock() }
         closed = true
-        if let sock = session?.sock {
-            _ = Glibc_shutdownSocket(sock)
-        }
+        // Either phase may be in flight: establishment (raw socket published,
+        // no Session yet) or the read loop (Session owns it).
+        if let sock = session?.sock { _ = Glibc_shutdownSocket(sock) }
+        else if rawSocket >= 0 { _ = Glibc_shutdownSocket(rawSocket) }
     }
 
     func close() {
@@ -504,6 +550,8 @@ private final class LiveChannel: @unchecked Sendable {
         closed = true
         if let channel { libssh2_channel_free(channel) }
         channel = nil
+        if session == nil && rawSocket >= 0 { _ = Glibc_close(rawSocket) }
+        rawSocket = -1
         session?.close()
         session = nil
     }
