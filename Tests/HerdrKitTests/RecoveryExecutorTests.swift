@@ -1079,6 +1079,15 @@ actor DialGate {
     private var entered = false
     private var cancelled = false
     private var released = false
+    private var beats = 0
+    /// A POSITIVE heartbeat from the parked dial. The first version proved
+    /// liveness by sleeping 150ms and asserting cancellation had NOT been
+    /// reported — an absence, which a merely-delayed report satisfies just as
+    /// well as a living task. A probe delaying markCancelled by 300ms made the
+    /// unchanged code pass AND let the mutation survive. Only the loop itself
+    /// can raise this count.
+    func beat() { beats += 1 }
+    var heartbeats: Int { beats }
     func enter() { entered = true }
     func markCancelled() { cancelled = true }
     func release() { released = true }
@@ -1668,6 +1677,7 @@ actor SleepRecorder {
             guard delay >= 4 else { return }          // only the parked reconnect
             await gate.enter()
             while await !gate.isReleased {
+                await gate.beat()
                 do { try await Task.sleep(nanoseconds: 20_000_000) }
                 catch { await gate.markCancelled(); return }
             }
@@ -1685,10 +1695,13 @@ actor SleepRecorder {
         // it, with the gate crediting teardown for a cancellation the note had
         // already caused. In production that leaves the executor with no
         // scheduled reconnect until some other event arrives.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        let beatsBefore = await gate.heartbeats
+        let stillAlive = await waitUntil { await gate.heartbeats > beatsBefore + 1 }
+        XCTAssertTrue(stillAlive,
+                      "the pending dial stopped beating after the note: the NOTE cancelled it, and "
+                      + "only teardown may do that")
         let cancelledByTheNote = await gate.wasCancelled
-        XCTAssertFalse(cancelledByTheNote,
-                       "the NOTE cancelled the pending dial; only teardown may do that")
+        XCTAssertFalse(cancelledByTheNote, "the note reported the dial cancelled")
 
         await executor.handle(.networkChanged(at: Date()))               // supersedes the dial
 
@@ -1725,11 +1738,19 @@ actor SleepRecorder {
             _ = await waitUntil { await executor.isConnected }
 
             // Build a streak, so consecutiveFailures is well past its default.
-            for _ in 0..<3 {
+            // Wait for EACH failure's own delay to be recorded before causing the
+            // next. Waiting only for currentAttempt to change advanced while the
+            // dial's Task had not yet recorded — so outstanding tasks recorded
+            // later, reordering the array or satisfying the final wait without
+            // the post-note failure being seen at all. 8 of 19 runs failed on
+            // UNCHANGED code, and both target mutations survived some probes.
+            for i in 0..<3 {
                 let current = await executor.currentAttempt
                 guard let current else { break }
+                let before = await recorder.recorded().count
                 await executor.handle(.transportFailed(current, at: Date()))
-                _ = await waitUntil { await executor.currentAttempt != current }
+                let recorded = await waitUntil { await recorder.recorded().count > before }
+                XCTAssertTrue(recorded, "failure \(i) never recorded its backoff; the streak is not built")
             }
             let beforeNote = await recorder.recorded().count
 
@@ -1744,7 +1765,8 @@ actor SleepRecorder {
             // have moved.
             let current = await executor.currentAttempt
             await executor.handle(.transportFailed(try XCTUnwrap(current), at: Date()))
-            _ = await waitUntil { await recorder.recorded().count > beforeNote }
+            let finalRecorded = await waitUntil { await recorder.recorded().count > beforeNote }
+            XCTAssertTrue(finalRecorded, "the post-note failure never recorded its backoff")
             return await recorder.recorded()
         }
 
