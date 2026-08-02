@@ -52,7 +52,13 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     private var stalledPanes: Set<String> = []
 
     func stall(_ pane: String) { lock.withLock { _ = stalledPanes.insert(pane) } }
-    func release(_ pane: String) { lock.withLock { _ = stalledPanes.remove(pane) } }
+    /// Releases both gates: the shared pane stall and the catch window's own.
+    /// The catch release is LATCHED rather than a removal — a removal can be
+    /// undone by a later insert, which is precisely how the replacement attempt
+    /// re-armed a gate the test had already opened.
+    func release(_ pane: String) {
+        lock.withLock { _ = stalledPanes.remove(pane); _ = catchReleased.insert(pane) }
+    }
 
     /// Kill-on-registration: arms a flag so the pane's NEXT registered
     /// terminator fires immediately, INSIDE openStream before it returns —
@@ -74,7 +80,8 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     func killDuringFirstSuccessfulOpen(_ pane: String) {
         lock.withLock { _ = succeedOnceThenKill.insert(pane) }
     }
-    /// The pane's FIRST open throws; its SECOND open stalls until released.
+    /// The pane's FIRST open throws; its SECOND open parks until released.
+    /// Later opens pass through untouched.
     ///
     /// That pair IS the catch-path window and nothing else. While the second
     /// open (the policy's replacement, dialed from inside
@@ -83,9 +90,15 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     /// retirement is invisible to both the post-open reap and the backoff
     /// guard. Encoded as a single armed seam rather than composed from
     /// `failingPanes` + `stall`, because composing them cannot express
-    /// "throw, THEN stall" for one pane: the stall precedes the failure check,
+    /// "throw, THEN park" for one pane: the stall precedes the failure check,
     /// so a pre-set stall would park the first open instead of the retry and
     /// the window would never open.
+    ///
+    /// The throwing entry drops its registration, so live registrations and
+    /// entered opens are DIFFERENT counts here — use `openEntryCount` for "how
+    /// many opens happened" and `registrationCount` for "how many callbacks are
+    /// live". Conflating them is what armed this window on a contract
+    /// violation for a whole round.
     private var catchPathWindow: Set<String> = []
     private var openCounts: [String: Int] = [:]
     func armCatchPathWindow(_ pane: String) {
@@ -114,16 +127,23 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     private var openEntries: [String: Int] = [:]
     func openEntryCount(_ pane: String) -> Int { lock.withLock { openEntries[pane] ?? 0 } }
 
-    /// Whether the pane's open is CURRENTLY parked in the stall.
+    /// Whether the pane's catch-window retry is CURRENTLY parked.
     ///
     /// Stronger than the entry count as a precondition, and the difference is a
     /// real race rather than a nicety: the entry count is incremented at the top
-    /// of `openStream`, the stall is inserted further down, and a test that
-    /// observed the count could call `release` in between — removing a stall
-    /// that had not been inserted yet. The open then parked forever and the
-    /// test timed out having proven nothing (1 run in 5). Observing the stall
-    /// itself cannot be early by construction.
-    func retryIsParked(_ pane: String) -> Bool { lock.withLock { stalledPanes.contains(pane) } }
+    /// of `openStream`, the gate is entered further down, and a test that
+    /// observed the count could call `release` in between — releasing a gate
+    /// nothing had entered yet. The open then parked forever and the test timed
+    /// out having proven nothing (1 run in 5). Observing the gate itself cannot
+    /// be early by construction.
+    func retryIsParked(_ pane: String) -> Bool { lock.withLock { catchParkedEntry[pane] != nil } }
+
+    /// The catch window's gate, private to it and keyed to one INVOCATION.
+    /// Deliberately not `stalledPanes`: that set is keyed by pane and shared
+    /// with every other stall seam, so a second attempt opening the same pane
+    /// re-armed it under a test that had already released it.
+    private var catchParkedEntry: [String: Int] = [:]
+    private var catchReleased: Set<String> = []
 
     /// Drops the registration this call made, so a throwing open leaves none.
     /// Deliberately NOT applied on the `installsThenThrows` path: that one
@@ -246,16 +266,32 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         // observable in the false-open test; dropping it here made that test's
         // precondition read 0 registrations and the hazard vanish.
         if laterOpen { throw TransportError.closedBeforeResponse }
-        // Armed catch-path window: throw the first time, stall every time
-        // after. Both decisions happen AFTER the terminator registration
-        // above, so `registrationCount` counts opens ENTERED — which is what
-        // lets a test wait for the retry to exist rather than for a proxy.
-        switch catchPathPhase(pane) {
-        case 1:
+        // Armed catch-path window: entry 1 throws, entry 2 parks. EXACTLY entry
+        // 2 — later entries pass straight through.
+        //
+        // Both the "exactly" and the private gate are corrections, not
+        // tidiness. Stalling every entry >= 2 through the shared, pane-keyed
+        // `stalledPanes` let the REPLACEMENT ATTEMPT re-arm the retired
+        // attempt's gate: once B started, B's own open for the same pane
+        // reinserted it after the test had released A, so both calls parked and
+        // neither outcome ever appeared. The unmutated regression timed out
+        // 1 run in 20, and worse, the guard-removal mutant reached that same
+        // dead third outcome 1 in 11 — a mutant escaping into a timeout is
+        // indistinguishable from a mutant that was killed, so the race
+        // corrupted the mutation evidence, not just the test.
+        let phase = catchPathPhase(pane)
+        if phase == 1 {
             dropOwnRegistration(pane)      // the contract: a throwing open leaves nothing live
             throw TransportError.closedBeforeResponse
-        case let phase where phase >= 2: lock.withLock { _ = stalledPanes.insert(pane) }
-        default: break
+        }
+        if phase == 2 {
+            // Keyed to THIS invocation. No other call, on any attempt, can
+            // enter or re-arm it.
+            lock.withLock { catchParkedEntry[pane] = openEntries[pane] }
+            while lock.withLock({ !catchReleased.contains(pane) }) {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            lock.withLock { catchParkedEntry[pane] = nil }
         }
         while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
         record(.openAttempt(pane, attempt))
@@ -273,11 +309,12 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
             return
         }
         if failOpens || lock.withLock({ failingPanes.contains(pane) }) {
-            if installsThenThrows {
-                lock.withLock { terminators[pane, default: []].append(onTermination) }
-            } else {
-                dropOwnRegistration(pane)
-            }
+            // The deliberate violation is RETAINING the entry registration, not
+            // adding a second one. This used to append the identical closure
+            // again, so each failed open left TWO retained callbacks while the
+            // test and the doc comment both describe one — the probe was
+            // exercising a hazard twice the size of the one it documents.
+            if !installsThenThrows { dropOwnRegistration(pane) }
             throw TransportError.closedBeforeResponse
         }
         record(.openStream(pane, attempt))
