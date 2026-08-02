@@ -23,6 +23,15 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
     private var terminators: [String: @Sendable () -> Void] = [:]
     var panesToServe: [String]
     var failConnects = false
+    /// When set, openStream suspends (a REAL actor suspension, not a thread
+    /// block) until the flag clears — the door interleavings walk through.
+    private var stalledPanes: Set<String> = []
+
+    func stall(_ pane: String) { lock.lock(); stalledPanes.insert(pane); lock.unlock() }
+    func release(_ pane: String) { lock.lock(); stalledPanes.remove(pane); lock.unlock() }
+    private func isStalled(_ pane: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }; return stalledPanes.contains(pane)
+    }
 
     init(panes: [String]) { self.panesToServe = panes }
 
@@ -53,6 +62,7 @@ final class ScriptedTransport: ExecutorTransport, @unchecked Sendable {
         pane: String, for attempt: AttemptID,
         onTermination: @escaping @Sendable () -> Void
     ) async throws {
+        while isStalled(pane) { try? await Task.sleep(nanoseconds: 10_000_000) }
         record(.openStream(pane, attempt))
         lock.lock(); terminators[pane] = onTermination; lock.unlock()
     }
@@ -206,6 +216,37 @@ final class RecoveryExecutorTests: XCTestCase {
                        "exactly ONE stream open may follow one death — \(opensAfter.count - opensBefore.count) did")
         XCTAssertEqual(transport.log().filter { $0 == .openStream("p1", attempt) }.count, 1,
                        "the living pane's stream must be untouched")
+    }
+
+    /// AXIS: a retirement interleaving MID-LOOP stops the remaining streams —
+    /// the binding holds per pane, not merely at the loop's door.
+    ///
+    /// The actor suspends at every openStream await. The binding was checked
+    /// once before the loop, so a networkChanged arriving while pane 1's open
+    /// was suspended let pane 2 open for the RETIRED attempt — after closeAll
+    /// had already run for it, so the late stream was an orphan nothing would
+    /// ever close.
+    func testARetirementMidSubscribeLoopStopsTheRemainingStreams() async throws {
+        let transport = ScriptedTransport(panes: ["a-first", "b-second"])
+        let executor = RecoveryExecutor(transport: transport)
+        transport.stall("a-first")             // pane 1 suspends inside its open
+        await executor.start()
+
+        _ = await waitUntil {
+            transport.log().contains { if case .fetchSnapshot = $0 { return true }; return false }
+        }
+        let attemptA = await executor.currentAttempt!
+
+        // While the loop is suspended on pane 1, the world moves.
+        await executor.handle(.networkChanged(at: Date()))
+        transport.release("a-first")
+
+        // Give A's loop every chance to finish; B's own subscribes are for
+        // attempt B and do not confound the assertion.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(transport.log().contains { $0 == .openStream("b-second", attemptA) },
+                       "the loop opened a stream for a retired attempt after its closeAll")
     }
 
     /// A dial that fails schedules the retry through the policy (backoff), and
