@@ -295,13 +295,22 @@ public struct SessionRecovery: Sendable {
 
 /// The complete pane set as the server reported it.
 ///
-/// Only `HerdrClient` can make one, so "this is the whole set" is enforced by
-/// where the value came from rather than by asking callers to be careful.
+/// The guarantee is exactly what `internal` provides and no more: **code outside
+/// this module cannot construct one**, so an app cannot hand `observe` a
+/// filtered list. Inside the module any code can use the initializer, and
+/// `HerdrClient.paneSnapshot()` is the intended source by convention rather than
+/// by enforcement.
+///
+/// An earlier comment here said "only `HerdrClient` can make one". That was
+/// wrong, and wrong in the direction that makes a weak guarantee sound like a
+/// strong one — which matters because the whole point of this type is that its
+/// provenance is enforced rather than trusted.
 public struct PaneSnapshot: Equatable, Sendable {
     public let paneIDs: Set<String>
 
-    /// Internal on purpose: a caller outside the module cannot mint one from a
-    /// filtered list, which is the entire guarantee.
+    /// Deliberately not `public`. Widening this restores the filtered-list path
+    /// that `observe` exists to close, and `PaneSnapshotAccessTests` fails if it
+    /// is widened.
     init(agents: [AgentInfo]) {
         self.paneIDs = Set(agents.map(\.paneID))
     }
