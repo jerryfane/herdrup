@@ -1294,6 +1294,27 @@ final class PaneSnapshotAccessTests: XCTestCase {
     /// That is a defect the pkg-config fix CREATED: moving from a hardcoded path
     /// to a resolved one fixed the build and broke every hand-rolled tool
     /// invocation that had been relying on the hardcoded assumption.
+    /// Every directory under `.build` that holds a `module.modulemap`, so
+    /// symbolgraph-extract can resolve HerdrKit's TRANSITIVE C modules.
+    ///
+    /// Adding Citadel pulled in swift-atomics, swift-nio and BoringSSL, whose
+    /// C shim modules (`_AtomicsShims`, `CNIOAtomics`, `CCryptoBoringSSL`,
+    /// `CCitadelBcrypt`, …) each live in their own `<module>.build/` dir or a
+    /// checkout's `include/`. symbolgraph-extract spawns its own clang and
+    /// inherits none of SwiftPM's search paths, so without these it fails with
+    /// "missing required module '_AtomicsShims'" and the access invariant goes
+    /// UNCHECKED. Collected dynamically rather than hardcoded — the transitive
+    /// set changes with the dependency graph and a fixed list would silently rot.
+    static func transitiveModuleSearchPaths(build: URL) -> [String] {
+        let fm = FileManager.default
+        guard let walker = fm.enumerator(at: build, includingPropertiesForKeys: nil) else { return [] }
+        var dirs = Set<String>()
+        for case let url as URL in walker where url.lastPathComponent == "module.modulemap" {
+            dirs.insert(url.deletingLastPathComponent().path)
+        }
+        return dirs.sorted()
+    }
+
     static func libssh2ClangFlags() -> [String] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -1360,7 +1381,9 @@ final class PaneSnapshotAccessTests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: try XCTUnwrap(
             swift, "no swift toolchain found; the access invariant went UNCHECKED"
         ))
-        process.arguments = [
+        let transitiveIncludes: [String] = Self.transitiveModuleSearchPaths(build: build)
+            .flatMap { ["-I", $0] }
+        var args: [String] = [
             "symbolgraph-extract", "-module-name", "HerdrKit", "-target", triple,
             // Without this, @_spi(Anything) public symbols are OMITTED from the
             // graph — and an SPI initializer is callable outside the module by
@@ -1370,9 +1393,12 @@ final class PaneSnapshotAccessTests: XCTestCase {
             "-include-spi-symbols",
             "-I", moduleDir.path,
             "-I", root.appendingPathComponent("Sources/CSSH").path,
-        ] + Self.libssh2ClangFlags() + Self.sdkFlags() + [
-            "-output-dir", output.path, "-minimum-access-level", "package",
         ]
+        args += transitiveIncludes
+        args += Self.libssh2ClangFlags()
+        args += Self.sdkFlags()
+        args += ["-output-dir", output.path, "-minimum-access-level", "package"]
+        process.arguments = args
         let stderrPipe = Pipe()
         process.standardOutput = Pipe()
         process.standardError = stderrPipe
