@@ -4,30 +4,15 @@ import Citadel
 @testable import HerdrKit
 
 /// End-to-end round-trip through the REAL deployed api-bridge over a REAL SSH
-/// connection. Skips unless the environment can support it (an Ed25519 key, a
-/// reachable sshd, and a running herdr), so the suite stays green on machines
-/// without them — matching the SSHTransportTests live-skip discipline.
+/// connection. Skips unless the environment can support it — decided by
+/// `LiveEnvironment` from signals INDEPENDENT of the transport (key on disk, sshd
+/// on :22, herdr socket present). Once those hold, the transport's errors are NOT
+/// swallowed as skips: a real regression fails here (review findings #5/#6).
 ///
 /// READ-ONLY BY CONTRACT (truncate-safety inventory): every request here is
-/// `agent.list` / `ping` — never a mutating call — so running this against the
-/// live fleet cannot disturb it.
+/// `agent.list` / `ping` / a read-only subscription — never a mutating call — so
+/// running this against the live fleet cannot disturb it.
 final class CitadelTransportLiveTests: XCTestCase {
-
-    private func credentials() throws -> SSHCredentials {
-        let keyURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ssh/id_ed25519")
-        guard let keyData = try? Data(contentsOf: keyURL),
-              let keyText = String(data: keyData, encoding: .utf8) else {
-            throw XCTSkip("no ~/.ssh/id_ed25519; CitadelTransport not exercisable here")
-        }
-        return SSHCredentials(
-            host: "127.0.0.1",
-            port: 22,
-            username: NSUserName(),
-            privateKeyPEM: keyText,
-            remoteSocketPath: ""  // unused: the server-side api-bridge resolves the socket
-        )
-    }
 
     /// A real round-trip: connect over SSH, exec the deployed `herdr api-bridge`
     /// with a base64 agent.list, read the reply. Proves the whole path — key
@@ -38,15 +23,12 @@ final class CitadelTransportLiveTests: XCTestCase {
     /// that the fingerprint is computed over a REAL presented host key (the pin
     /// is asserted below), which no unit test with a synthetic key can show.
     func testLiveAgentListRoundTrip() async throws {
-        let credentials = try credentials()
+        let credentials = try LiveEnvironment.requireLiveCredentials()
         let policy = PinningHostKeyPolicy()
         let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: policy)
-        let reply: String
-        do {
-            reply = try await transport.roundTrip(#"{"id":"live-1","method":"agent.list","params":{}}"#)
-        } catch {
-            throw XCTSkip("could not reach herdr over SSH (\(error)); live path not exercisable here")
-        }
+        // No catch here: the environment is proven present, so a thrown error is
+        // a transport regression to surface, not a reason to skip.
+        let reply = try await transport.roundTrip(#"{"id":"live-1","method":"agent.list","params":{}}"#)
         await transport.close()
 
         XCTAssertTrue(reply.contains(#""id":"live-1""#),
@@ -69,18 +51,16 @@ final class CitadelTransportLiveTests: XCTestCase {
     /// subscription wedged the connection. If cancellation left the held client
     /// broken, the round-trip here would hang or throw.
     func testLiveStreamCancellationLeavesConnectionReusable() async throws {
-        let credentials = try credentials()
+        let credentials = try LiveEnvironment.requireLiveCredentials()
         let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy())
 
         let subscribe = #"{"id":"sub","method":"events.subscribe","params":{"subscriptions":[{"type":"layout.updated"}]}}"#
+        // No catch: the environment is proven present, so a stream error is a
+        // regression to fail on, not a skip.
         var firstLine: String?
-        do {
-            for try await line in transport.stream(subscribe) {
-                firstLine = line
-                break   // stop consuming -> onTermination cancels -> channel close
-            }
-        } catch {
-            throw XCTSkip("could not stream from herdr over SSH (\(error)); live path not exercisable here")
+        for try await line in transport.stream(subscribe) {
+            firstLine = line
+            break   // stop consuming -> onTermination cancels -> channel close
         }
 
         let line = try XCTUnwrap(firstLine, "the subscription delivered no line")

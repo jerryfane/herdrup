@@ -20,12 +20,25 @@ set -uo pipefail
 export PATH=/opt/swift/usr/bin:$PATH
 
 NAME="$1"; TARGET="$2"; REPLACEMENT="$3"; FILTER="$4"
-FILE="${5:-Sources/HerdrKit/SSHTransport.swift}"
+# The file is REQUIRED. It used to default to Sources/HerdrKit/SSHTransport.swift,
+# which no longer exists — and a missing FILE left an empty mktemp backup that the
+# EXIT trap then copied BACK, resurrecting the target as a 0-byte file. Fail fast
+# instead, before any backup is taken.
+FILE="${5:-}"
+if [ -z "$FILE" ]; then
+    echo "usage: scripts/mutate.sh <name> \"<target>\" \"<replacement>\" <test-filter> <file>  (file is required)"
+    exit 2
+fi
+if [ ! -f "$FILE" ]; then
+    echo "INVALID: mutation target file '$FILE' does not exist"
+    exit 2
+fi
 BACKUP="$(mktemp)"
 BUILD_LOG="$(mktemp)"
 RUN_LOG="$(mktemp)"
 cp "$FILE" "$BACKUP"
-restore() { cp "$BACKUP" "$FILE"; rm -f "$BACKUP" "$BUILD_LOG" "$RUN_LOG"; }
+# Only restore from a non-empty backup, so a botched backup can never truncate FILE.
+restore() { [ -s "$BACKUP" ] && cp "$BACKUP" "$FILE"; rm -f "$BACKUP" "$BUILD_LOG" "$RUN_LOG"; }
 trap restore EXIT
 
 # The mutation must actually apply. Three silent no-op mutations made green runs

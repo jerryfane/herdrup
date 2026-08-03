@@ -1,8 +1,40 @@
 import XCTest
 import Foundation
+import NIOCore
 @testable import HerdrKit
 
 final class CitadelTransportTests: XCTestCase {
+
+    // MARK: - LineAccumulator (byte-accurate line decoding)
+
+    /// AXIS: a multi-byte UTF-8 scalar split across two stdout chunks is
+    /// reconstructed intact. Decoding each chunk independently with
+    /// `String(buffer:)` replaced the split scalar with U+FFFD — the HIGH bug
+    /// the review caught. SSH splits large stdout at arbitrary byte boundaries,
+    /// so this is the real wire condition, not a contrived one.
+    func testLineAccumulatorReconstructsMultibyteScalarSplitAcrossChunks() {
+        let rocket = Array("🚀".utf8)   // F0 9F 9A 80
+        XCTAssertEqual(rocket.count, 4, "precondition: the scalar is 4 bytes")
+        var acc = LineAccumulator()
+
+        // Chunk boundary falls INSIDE the scalar: first two bytes, then the rest.
+        XCTAssertTrue(acc.append(ByteBuffer(bytes: rocket[0..<2])).isEmpty,
+                      "no newline yet, so no completed line")
+        let completed = acc.append(ByteBuffer(bytes: Array(rocket[2..<4]) + [UInt8(ascii: "\n")]))
+        XCTAssertEqual(completed, ["🚀"],
+                       "the scalar split across chunks was corrupted, not reconstructed")
+    }
+
+    /// Splits on every newline and holds the unterminated tail as a remainder.
+    func testLineAccumulatorSplitsLinesAndKeepsRemainder() {
+        var acc = LineAccumulator()
+        let lines = acc.append(ByteBuffer(string: "alpha\nbeta\ngamma"))
+        XCTAssertEqual(lines, ["alpha", "beta"], "did not split on both newlines")
+        XCTAssertTrue(acc.hasRemainder, "the tail after the last newline was dropped")
+        XCTAssertEqual(acc.flush(), "gamma", "the remainder was not the unterminated tail")
+        XCTAssertFalse(acc.hasRemainder, "flush did not clear the remainder")
+    }
+
 
     /// AXIS: the base64 argument the transport builds is exactly what the
     /// server-side `herdr api-bridge <base64>` decodes back to.
