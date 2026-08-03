@@ -39,6 +39,10 @@ public enum TransportError: Error, CustomStringConvertible {
     /// rejected by execve with E2BIG BEFORE the bridge runs — so it is refused
     /// here, where a caller can see it, rather than failing opaquely on the host.
     case requestTooLarge(bytes: Int, max: Int)
+    /// The server's host key did not match the pinned key (or a first-contact
+    /// pin was refused). Transport-agnostic — the pure-Swift transport fails the
+    /// SSH handshake with this before any auth or command runs.
+    case hostKeyRejected(host: String, fingerprint: String)
 
     public var description: String {
         switch self {
@@ -49,6 +53,8 @@ public enum TransportError: Error, CustomStringConvertible {
         case .closedBeforeResponse: return "peer closed before sending a response line"
         case .requestTooLarge(let b, let m):
             return "request too large for the argument transport: \(b) > \(m) command bytes"
+        case .hostKeyRejected(let h, let fp):
+            return "host key for \(h) rejected: \(fp) does not match the pinned key"
         }
     }
 }

@@ -31,13 +31,23 @@ public actor CitadelTransport: HerdrTransport {
     ///   - credentials: host/port/username, the Ed25519 private key, and the
     ///     passphrase. `remoteSocketPath` is unused here — the server-side
     ///     api-bridge resolves the API socket itself.
-    ///   - hostKeyValidator: TOFU pinning belongs here. Until the
-    ///     `PinningHostKeyPolicy` port lands, callers must pass an explicit
-    ///     validator; there is deliberately no `acceptAnything` default, so
-    ///     this cannot silently ship trusting every host.
+    ///   - hostKeyValidator: the raw Citadel validator, for callers that need
+    ///     full control (e.g. `.acceptAnything()` in an isolated live test).
+    ///     Prefer the `hostKeyPolicy` initializer, whose default pins.
     public init(credentials: SSHCredentials, hostKeyValidator: SSHHostKeyValidator) {
         self.credentials = credentials
         self.hostKeyValidator = hostKeyValidator
+    }
+
+    /// Pins the host key on first contact and hard-stops on change (TOFU) — the
+    /// safe default for a shipping client, and the same policy the libssh2
+    /// transport used. Wraps the policy in the nio-ssh delegate internally, so a
+    /// caller needs no Citadel/nio-ssh types and cannot accidentally get a
+    /// trust-everything validator: the default here is the pinning one.
+    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
+        self.credentials = credentials
+        self.hostKeyValidator = .custom(PinningHostKeyValidator(
+            host: credentials.host, port: credentials.port, policy: hostKeyPolicy))
     }
 
     // MARK: - connection

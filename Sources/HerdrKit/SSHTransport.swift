@@ -43,84 +43,9 @@ public struct SSHCredentials: Sendable {
     }
 }
 
-/// What the caller decides when a host key is seen.
-public enum HostKeyDecision: Sendable, Equatable {
-    /// Accept and remember this fingerprint.
-    case trust
-    /// Refuse the connection.
-    case reject
-}
-
-/// Consulted on every connect. A changed key is never silently accepted: the
-/// policy is asked separately for first-contact and for change, and a change
-/// defaults to refusal at the call site rather than here.
-public protocol HostKeyPolicy: Sendable {
-    /// Decide, compare and pin as ONE operation.
-    ///
-    /// A split lookup-then-callback interface is a TOFU race: two concurrent
-    /// first connections can both observe no pin, trust different keys, and
-    /// overwrite each other — silently violating hard-stop-on-change at exactly
-    /// the moment pinning is supposed to establish trust. Keyed by host AND
-    /// port, since two hosts can share a name on different ports.
-    func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision
-}
-
-/// Pins on first contact and hard-stops on change.
-public struct PinningHostKeyPolicy: HostKeyPolicy {
-    private let store: PinStore
-
-    public init(store: PinStore = PinStore()) {
-        self.store = store
-    }
-
-    /// Compare-and-pin under a single lock, so concurrent first contacts cannot
-    /// both win. A key that differs from the pin is always refused: a changed
-    /// host key is indistinguishable from interception, and this transport
-    /// carries an operator's whole fleet.
-    public func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision {
-        store.compareAndPin(key: "\(host):\(port)", presented: presented)
-    }
-
-    public func pinnedFingerprint(for host: String, port: UInt16 = 22) -> String? {
-        store.pinned(key: "\(host):\(port)")
-    }
-
-    /// In-memory pin store. The iOS target substitutes a Keychain-backed one.
-    public final class PinStore: @unchecked Sendable {
-        private let lock = NSLock()
-        private var pins: [String: String] = [:]
-
-        public init() {}
-
-        /// Read-only inspection, for tests and diagnostics.
-        public func pinned(key: String) -> String? {
-            lock.lock(); defer { lock.unlock() }
-            return pins[key]
-        }
-
-        /// Seeds a pin. Expressed through the same atomic primitive so there is
-        /// no separate write path to misuse.
-        @discardableResult
-        public func pin(host: String, port: UInt16 = 22, fingerprint: String) -> HostKeyDecision {
-            compareAndPin(key: "\(host):\(port)", presented: fingerprint)
-        }
-
-        /// THE ONLY WRITE PATH. Structural, not merely careful: with no separate
-        /// lookup-then-store API, the racy split form cannot be written at all.
-        /// A concurrency test can only ever sample a race — the reviewer showed
-        /// the previous one let the split form survive 492 times in 500 — so the
-        /// guarantee has to come from the shape of the interface, not from a
-        /// test that hopes to catch it.
-        func compareAndPin(key: String, presented: String) -> HostKeyDecision {
-            lock.lock(); defer { lock.unlock() }
-            if let existing = pins[key] {
-                return existing == presented ? .trust : .reject
-            }
-            pins[key] = presented
-            return .trust
-        }
-    }
-}
+// HostKeyDecision, HostKeyPolicy, PinningHostKeyPolicy and its PinStore moved to
+// HostKeyPinning.swift — the pinning policy is a trust decision shared by every
+// transport, not a libssh2 mechanic, so it must outlive this file.
 
 public enum SSHError: Error, CustomStringConvertible {
     case resolveFailed(host: String)
