@@ -16,6 +16,16 @@ final class TerminalWrapTests: XCTestCase {
     ) {
         let folded = TerminalWrap.fold(line: input, width: width)
         let strip = { (s: String) in s.filter { !$0.isWhitespace } }
+
+        // CANARY. This helper is called from several tests, so if its comparison
+        // were degenerate — both sides normalising to "" — every caller would
+        // pass and the suite would report thorough coverage of nothing. A
+        // reviewer probe confirmed that exact mutation survived. These two lines
+        // make the helper prove it can still tell content apart before it is
+        // trusted to say two things are equal.
+        XCTAssertEqual(strip("a b\tc"), "abc", "the normaliser is not preserving content")
+        XCTAssertNotEqual(strip("abc"), strip("abd"), "the normaliser cannot distinguish content")
+
         XCTAssertEqual(strip(folded.lines.joined()), strip(input),
                        "content changed while folding at width \(width)", file: file, line: line)
     }
@@ -90,10 +100,13 @@ final class TerminalWrapTests: XCTestCase {
     func testNoLineExceedsTheWidthWhenEveryTokenFits() {
         let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
         let width = 12
+        XCTAssertFalse(text.isEmpty, "empty text; every assertion below is vacuous")
         XCTAssertTrue(text.split(separator: " ").allSatisfy { $0.count <= width },
                       "a token is wider than the width; an overflow below would not be the folder's fault")
 
         let folded = TerminalWrap.fold(line: text, width: width)
+        XCTAssertGreaterThan(folded.lines.count, 1,
+                             "the text did not fold; a width check over one line proves nothing")
         for line in folded.lines {
             XCTAssertLessThanOrEqual(line.count, width, "line '\(line)' exceeds width \(width)")
         }
@@ -128,12 +141,15 @@ final class TerminalWrapTests: XCTestCase {
     /// recovers on the next layout pass; lost output does not.
     func testANonPositiveWidthReturnsInputUnfoldedRatherThanEmpty() {
         let input = ["first line", "second line"]
+        var widthsChecked = 0
         for width in [0, -1, -80] {
+            widthsChecked += 1
             let folded = TerminalWrap.fold(input, width: width)
             XCTAssertEqual(folded.map(\.lines), [["first line"], ["second line"]],
                            "width \(width) did not return the input unfolded")
             XCTAssertFalse(folded.contains { $0.hardBroke })
         }
+        XCTAssertEqual(widthsChecked, 3, "the width loop did not run; nothing above was asserted")
     }
 
     // MARK: - interior spacing
@@ -145,8 +161,67 @@ final class TerminalWrapTests: XCTestCase {
     /// prose, which is a silent corruption of meaning rather than of characters.
     func testInteriorSpacingIsPreservedWhenTheLineFits() {
         let aligned = "name    status    age"
+        XCTAssertTrue(aligned.contains("  "),
+                      "the fixture has no interior run to preserve; this test is about nothing")
         let folded = TerminalWrap.fold(line: aligned, width: 80)
         XCTAssertEqual(folded.lines, [aligned], "interior spacing was collapsed")
+    }
+
+    // MARK: - the two round-one defects
+
+    /// AXIS: leading indentation is CONTENT and survives a fold that does not
+    /// even happen.
+    ///
+    /// The first version skipped any whitespace token at column zero, so
+    /// `fold("    child", width: 80)` returned `"child"` — indentation deleted
+    /// with no fold occurring. Code, tree output, YAML and stack traces are all
+    /// structured by exactly that indentation. The comment then sitting at the
+    /// defect claimed tokenise folded leading spaces into the first word, which
+    /// it never did: prose describing a behaviour the code did not have.
+    func testLeadingIndentationIsPreserved() {
+        XCTAssertEqual(TerminalWrap.fold(line: "    child", width: 80).lines, ["    child"],
+                       "leading indentation was deleted")
+        XCTAssertEqual(TerminalWrap.fold(line: "\tdeeper", width: 80).lines, ["\tdeeper"],
+                       "a leading tab was deleted")
+
+        // And it must survive a real fold, not just the no-fold case.
+        let folded = TerminalWrap.fold(line: "    alpha beta gamma", width: 12)
+        XCTAssertGreaterThan(folded.lines.count, 1, "the premise: this must actually fold")
+        XCTAssertTrue(folded.lines[0].hasPrefix("    "),
+                      "indentation was lost on a line that folded")
+    }
+
+    /// A continuation line's leading space IS an artefact and is still dropped.
+    /// Without this the fix above would over-correct into padding every folded
+    /// line with the space it broke at.
+    func testContinuationLinesDoNotInheritABreakSpace() {
+        let folded = TerminalWrap.fold(line: "alpha beta gamma", width: 11)
+        XCTAssertEqual(folded.lines, ["alpha beta", "gamma"],
+                       "a continuation line kept the space the fold broke at")
+    }
+
+    /// AXIS: width is counted in TERMINAL CELLS, not Swift Characters.
+    ///
+    /// A reviewer probe folded three double-width CJK glyphs at width 4 and got
+    /// one six-column line, because `String.count` said 3. A function whose
+    /// purpose is fitting text to a terminal width cannot measure in a unit the
+    /// terminal does not use.
+    func testDoubleWidthGlyphsAreCountedAsTwoColumns() {
+        XCTAssertEqual(TerminalWrap.columns(of: "界", at: 0), 2, "a CJK glyph measured as one column")
+        XCTAssertEqual(TerminalWrap.columns(of: "a", at: 0), 1)
+
+        let folded = TerminalWrap.fold(line: "界界界", width: 4)
+        XCTAssertEqual(folded.lines, ["界界", "界"],
+                       "three double-width glyphs did not fold at four columns")
+    }
+
+    /// A tab advances to the next multiple of 8, so its width depends on where
+    /// it sits. Counting it as one character makes every column figure after it
+    /// wrong.
+    func testATabAdvancesToTheNextEightColumnStop() {
+        XCTAssertEqual(TerminalWrap.columns(of: "\t", at: 0), 8)
+        XCTAssertEqual(TerminalWrap.columns(of: "\t", at: 5), 3)
+        XCTAssertEqual(TerminalWrap.columns(of: "\t", at: 8), 8)
     }
 
     func testTokeniseAlternatesWordsAndWhitespaceRuns() {

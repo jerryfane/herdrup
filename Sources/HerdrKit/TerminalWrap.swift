@@ -26,6 +26,90 @@ public enum TerminalWrap {
         public let hardBroke: Bool
     }
 
+    // MARK: - terminal columns
+
+    /// Columns one character occupies in a terminal, at column `col`.
+    ///
+    /// WIDTH IS MEASURED IN TERMINAL CELLS, NOT SWIFT CHARACTERS. The first
+    /// version of this file counted `String.count`, and a reviewer's probe
+    /// folded `界界界` at width 4 into a single SIX-column line. A function whose
+    /// entire purpose is fitting text to a phone's terminal width cannot
+    /// measure in a unit the terminal does not use.
+    ///
+    /// This is an approximation of `wcwidth`, not a port of it — full fidelity
+    /// needs the Unicode East Asian Width table. It covers the ranges that
+    /// actually appear in agent output: CJK, Hangul, fullwidth forms and emoji.
+    /// Stated as an approximation because a caller relying on exactness for,
+    /// say, box-drawing alignment deserves to know it is not guaranteed.
+    static func columns(of ch: Character, at col: Int) -> Int {
+        // A tab advances to the next multiple of 8. It is the only character
+        // whose width depends on where it sits, which is why every width
+        // calculation here threads a starting column rather than summing
+        // per-character widths in isolation.
+        if ch == "\t" { return 8 - (col % 8) }
+
+        guard let scalar = ch.unicodeScalars.first else { return 0 }
+        let v = scalar.value
+
+        // Control characters occupy no cells.
+        if v < 0x20 || (v >= 0x7F && v < 0xA0) { return 0 }
+
+        let wide: [ClosedRange<UInt32>] = [
+            0x1100...0x115F,    // Hangul Jamo
+            0x2E80...0x303E,    // CJK radicals, Kangxi
+            0x3041...0x33FF,    // Hiragana, Katakana, CJK compatibility
+            0x3400...0x4DBF,    // CJK Extension A
+            0x4E00...0x9FFF,    // CJK Unified Ideographs
+            0xA000...0xA4CF,    // Yi
+            0xAC00...0xD7A3,    // Hangul syllables
+            0xF900...0xFAFF,    // CJK compatibility ideographs
+            0xFE30...0xFE6F,    // CJK compatibility forms
+            0xFF00...0xFF60,    // Fullwidth forms
+            0xFFE0...0xFFE6,
+            0x1F300...0x1F64F,  // emoji
+            0x1F900...0x1F9FF,
+            0x20000...0x3FFFD,  // CJK Extension B+
+        ]
+        if wide.contains(where: { $0.contains(v) }) { return 2 }
+
+        // A grapheme built from regional indicators — a flag — renders as one
+        // double-width glyph even though its first scalar is not in the ranges
+        // above.
+        if ch.unicodeScalars.count > 1,
+           ch.unicodeScalars.allSatisfy({ (0x1F1E6...0x1F1FF).contains($0.value) }) {
+            return 2
+        }
+        return 1
+    }
+
+    /// Columns a string occupies, starting from column `start`.
+    static func columns(of s: some StringProtocol, startingAt start: Int = 0) -> Int {
+        var col = start
+        for ch in s { col += columns(of: ch, at: col) }
+        return col - start
+    }
+
+    /// Takes the longest prefix of `s` fitting `width` columns from column 0.
+    ///
+    /// Always takes at least one Character when `s` is non-empty and
+    /// `width > 0`, so a caller looping on the remainder always makes progress —
+    /// including a double-width glyph at width 1, which OVERFLOWS rather than
+    /// stalling. That is the one named exception to the width rule.
+    static func prefixFitting(_ s: Substring, width: Int) -> Substring {
+        var col = 0
+        var end = s.startIndex
+        while end < s.endIndex {
+            let w = columns(of: s[end], at: col)
+            if col + w > width && end != s.startIndex { break }
+            col += w
+            end = s.index(after: end)
+            if col >= width { break }
+        }
+        return s[s.startIndex..<end]
+    }
+
+    // MARK: - folding
+
     /// Folds `lines` to `width` columns.
     ///
     /// NON-POSITIVE WIDTH RETURNS THE INPUT UNFOLDED, deliberately. A width of
@@ -50,49 +134,59 @@ public enum TerminalWrap {
 
         var out: [String] = []
         var current = ""
-        var currentCount = 0
+        var currentCols = 0
         var hardBroke = false
 
-        /// Emits `current` and resets. Kept as one operation so no path can
-        /// append without also clearing the counter.
+        /// Emits `current` and resets.
         ///
         /// TRAILING WHITESPACE IS TRIMMED HERE AND NOWHERE ELSE. flush() is
         /// called only at fold points — where the next token did not fit — so
-        /// the space being removed is one the fold created, exactly like the
-        /// leading space dropped from a continuation line. Symmetry matters:
-        /// keeping it produced lines that were visually short of the width by an
-        /// invisible character. The FINAL line does not go through flush(), so a
-        /// line genuinely ending in spaces keeps them; that is content, not an
-        /// artefact, and the two cases must not be conflated.
+        /// the space removed is one the fold created. The FINAL line does not go
+        /// through flush(), so a line genuinely ending in spaces keeps them;
+        /// that is content, not an artefact, and the two must not be conflated.
         func flush() {
             while let last = current.last, last.isWhitespace { current.removeLast() }
             out.append(current)
             current = ""
-            currentCount = 0
+            currentCols = 0
         }
 
-        for token in tokenise(line) {
-            let tokenCount = token.count
+        for (index, token) in tokenise(line).enumerated() {
+            let isWhitespaceToken = token.allSatisfy(\.isWhitespace)
+
+            // LEADING INDENTATION IS CONTENT AND SURVIVES.
+            //
+            // This branch is the fix for a real defect: the first version
+            // skipped ANY whitespace token found at column zero, so
+            // fold("    child", width: 80) returned "child" — indentation
+            // deleted with no fold even occurring. Code, tree output, YAML and
+            // stack traces are all structured by exactly that indentation, and
+            // the comment sitting here previously claimed tokenise folded it
+            // into the first word, which it never did.
+            //
+            // `index == 0` is what distinguishes the true start of a LOGICAL
+            // line from a continuation the fold created. Only the latter's
+            // leading space is an artefact.
+            if index == 0 && isWhitespaceToken {
+                current = token
+                currentCols = columns(of: token, startingAt: 0)
+                continue
+            }
+
+            let tokenCols = columns(of: token, startingAt: currentCols)
 
             // A token that cannot fit ANY line must be split, whatever the
-            // current state. Trying to place it whole would either overflow the
-            // width or, if the loop instead flushed and retried, spin forever on
-            // a token that never fits.
-            if tokenCount > width {
-                if currentCount > 0 { flush() }
+            // current state. Placing it whole would overflow; flushing and
+            // retrying would spin forever on a token that never fits.
+            if columns(of: token, startingAt: 0) > width {
+                if !current.isEmpty { flush() }
                 var rest = Substring(token)
                 while !rest.isEmpty {
-                    // TERMINATION. `width` is > 0 here, so `prefix(width)` takes
-                    // at least one Character on every pass and `rest` strictly
-                    // shrinks. There is no input for which this does not finish,
-                    // including width 1 against a multi-scalar grapheme — Swift
-                    // Characters are indivisible, so one is taken and the line
-                    // exceeds the width rather than the loop stalling.
-                    let chunk = rest.prefix(width)
-                    rest = rest.dropFirst(chunk.count)
+                    let chunk = prefixFitting(rest, width: width)
+                    rest = rest[chunk.endIndex...]
                     if rest.isEmpty {
                         current = String(chunk)
-                        currentCount = chunk.count
+                        currentCols = columns(of: chunk, startingAt: 0)
                     } else {
                         out.append(String(chunk))
                         hardBroke = true
@@ -101,36 +195,33 @@ public enum TerminalWrap {
                 continue
             }
 
-            if currentCount == 0 {
-                // Leading whitespace on a fresh line is dropped: it is an
-                // artefact of the fold, not content. A run of spaces at the
-                // START of a logical line is preserved by tokenise, which emits
-                // it as part of the first token.
-                if token.allSatisfy(\.isWhitespace) { continue }
+            if current.isEmpty {
+                // Leading whitespace on a CONTINUATION line is dropped: that
+                // one is an artefact of the fold. See index == 0 above.
+                if isWhitespaceToken { continue }
                 current = token
-                currentCount = tokenCount
-            } else if currentCount + tokenCount <= width {
+                currentCols = tokenCols
+            } else if currentCols + tokenCols <= width {
                 current += token
-                currentCount += tokenCount
+                currentCols += tokenCols
             } else {
                 flush()
-                if token.allSatisfy(\.isWhitespace) { continue }
+                if isWhitespaceToken { continue }
                 current = token
-                currentCount = tokenCount
+                currentCols = columns(of: token, startingAt: 0)
             }
         }
 
-        if currentCount > 0 || out.isEmpty { out.append(current) }
+        if !current.isEmpty || out.isEmpty { out.append(current) }
         return Folded(lines: out, hardBroke: hardBroke)
     }
 
     /// Splits a line into alternating word and whitespace runs, preserving both.
     ///
     /// Whitespace is kept as its own token rather than discarded, so interior
-    /// spacing survives a fold that does not happen to break there. Column
-    /// alignment in terminal output — tables, tree output, diff gutters — is
-    /// made of exactly those runs, and eating them turns aligned output into
-    /// prose.
+    /// spacing survives a fold that does not break there. Column alignment in
+    /// terminal output — tables, tree output, diff gutters — is made of exactly
+    /// those runs, and eating them turns aligned output into prose.
     static func tokenise(_ line: String) -> [String] {
         var tokens: [String] = []
         var current = ""
