@@ -52,10 +52,25 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
         store.pinned(key: "\(host):\(port)")
     }
 
-    /// In-memory pin store. The iOS target substitutes a Keychain-backed one.
+    /// In-memory pin store.
+    ///
+    /// Pins survive for the PROCESS lifetime, not across launches: a fresh
+    /// `PinStore()` per transport means a transport recreated after an app
+    /// restart has no record of the earlier pin and would trust a substituted
+    /// key as first contact. So the default policy uses the process-wide
+    /// `.shared` store (all default transports in a process share pins), and a
+    /// shipping client that needs cross-LAUNCH TOFU must inject a persistent,
+    /// e.g. Keychain-backed, store via `PinningHostKeyPolicy(store:)`. This type
+    /// is the persistence seam; it deliberately keeps no platform storage of its
+    /// own so it still builds on Linux.
     public final class PinStore: @unchecked Sendable {
         private let lock = NSLock()
         private var pins: [String: String] = [:]
+
+        /// Process-wide store backing the default pinning policy, so two
+        /// transports created with the default initializer enforce one pin set
+        /// rather than each trusting first contact independently.
+        public static let shared = PinStore()
 
         public init() {}
 

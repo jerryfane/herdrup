@@ -145,6 +145,26 @@ final class HostKeyPinningTests: XCTestCase {
         )
     }
 
+    /// The process-wide shared store enforces a pin ACROSS policy instances, so a
+    /// transport recreated mid-process (a new default-backed policy) still
+    /// hard-stops a changed key — the cross-instance gap review finding #1
+    /// flagged, where a fresh in-memory store trusted a substituted key as first
+    /// contact. A unique host keeps the shared store uncontaminated by other tests.
+    func testSharedStoreEnforcesPinsAcrossPolicyInstances() {
+        let host = "shared-store-\(UUID().uuidString)"
+        let store = PinningHostKeyPolicy.PinStore.shared
+        let a = String(repeating: "aa", count: 32)
+        let b = String(repeating: "bb", count: 32)
+
+        let policy1 = PinningHostKeyPolicy(store: store)
+        XCTAssertEqual(policy1.evaluate(host: host, port: 22, presented: a), .trust,
+                       "first contact through the shared store should pin")
+        // A DISTINCT policy instance sharing the default store must reject a change.
+        let policy2 = PinningHostKeyPolicy(store: store)
+        XCTAssertEqual(policy2.evaluate(host: host, port: 22, presented: b), .reject,
+                       "a second default-backed policy trusted a changed key — pins are not shared across instances")
+    }
+
     /// Pins are keyed by host AND port: the same name on a different port is a
     /// different host, and sharing a pin across them would accept a key that
     /// was never trusted for that endpoint.

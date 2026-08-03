@@ -73,4 +73,5 @@ final class CitadelTransportLiveTests: XCTestCase {
         XCTAssertTrue(reply.contains(#""id":"after""#),
                       "a round-trip after stream cancellation did not complete: \(reply.prefix(160))")
     }
+
 }
