@@ -207,6 +207,34 @@ final class TerminalWrapTests: XCTestCase {
         XCTAssertEqual(folded.lines.joined(), "    child", "content changed")
     }
 
+    /// AXIS: leading indentation WIDER THAN THE SCREEN is split to width, not
+    /// emitted as one over-width line.
+    ///
+    /// The fast path stored the whole indent token and bypassed the oversized
+    /// splitter: ten leading spaces at width 6 produced a ten-cell line.
+    /// Whitespace is divisible, so it must fold like any oversized token — only
+    /// an indivisible glyph (a tab) may overflow.
+    func testOversizedLeadingIndentIsSplitToWidth() {
+        let folded = TerminalWrap.fold(line: "          child", width: 6)  // 10 spaces
+        for l in folded.lines {
+            XCTAssertLessThanOrEqual(TerminalWrap.columns(of: l, startingAt: 0), 6,
+                                     "line '\(l)' exceeds width 6")
+        }
+        XCTAssertEqual(folded.lines.joined().filter { !$0.isWhitespace }, "child",
+                       "content changed while splitting an oversized indent")
+    }
+
+    /// AXIS: the flag-clear half of the indentation fix is guarded.
+    ///
+    /// Deleting `currentIsLeadingIndent = false` (set when a word joins the
+    /// indent) built green against all prior tests — an unguarded fix, exactly
+    /// the revert-mutation I am meant to run on my own work. With it deleted,
+    /// `fold("    a b c", width: 6)` keeps the fold-point space as "    a ".
+    func testFoldPointSpaceIsDroppedAfterIndentJoinsAWord() {
+        XCTAssertEqual(TerminalWrap.fold(line: "    a b c", width: 6).lines, ["    a", "b c"],
+                       "a fold-point space survived after the indent joined a word")
+    }
+
     /// A continuation line's leading space IS an artefact and is still dropped.
     /// Without this the fix above would over-correct into padding every folded
     /// line with the space it broke at.

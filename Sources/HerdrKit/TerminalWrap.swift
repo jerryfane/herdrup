@@ -197,9 +197,26 @@ public enum TerminalWrap {
             // line from a continuation the fold created. Only the latter's
             // leading space is an artefact.
             if index == 0 && isWhitespaceToken {
-                current = token
-                currentCols = columns(of: token, startingAt: 0)
                 currentIsLeadingIndent = true
+                if columns(of: token, startingAt: 0) <= width {
+                    current = token
+                    currentCols = columns(of: token, startingAt: 0)
+                } else {
+                    // INDENT WIDER THAN THE SCREEN. The fast path above stored it
+                    // whole and emitted one over-width line — a reviewer probe of
+                    // ten leading spaces at width 6 produced a ten-cell line.
+                    // Whitespace is divisible (unlike a tab), so split it to
+                    // width instead of overflowing, keeping the remainder as the
+                    // still-leading indent the first word will try to join.
+                    var rest = Substring(token)
+                    while columns(of: rest, startingAt: 0) > width {
+                        let chunk = prefixFitting(rest, width: width)
+                        out.append(String(chunk))
+                        rest = rest[chunk.endIndex...]
+                    }
+                    current = String(rest)
+                    currentCols = columns(of: current, startingAt: 0)
+                }
                 continue
             }
 
