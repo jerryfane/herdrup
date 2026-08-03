@@ -47,12 +47,13 @@ public actor CitadelTransport: HerdrTransport {
     /// no Citadel/nio-ssh types and cannot accidentally get a trust-everything
     /// validator.
     ///
-    /// The default policy is backed by the PROCESS-WIDE `PinStore.shared`, so two
-    /// transports created this way enforce one pin set (a transport recreated
-    /// mid-process still hard-stops a changed key). It does NOT persist across
-    /// app launches — for cross-launch TOFU a shipping client must inject a
-    /// persistent, e.g. Keychain-backed, store: `PinningHostKeyPolicy(store:)`.
-    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(store: .shared)) {
+    /// The default policy (`PinningHostKeyPolicy()`) is backed by the
+    /// PROCESS-WIDE `PinStore.shared`, so two transports created this way enforce
+    /// one pin set (a transport recreated mid-process still hard-stops a changed
+    /// key). It does NOT persist across app launches — for cross-launch TOFU a
+    /// shipping client passes its own `HostKeyPolicy` here that pins against
+    /// persistent (e.g. Keychain) storage; `PinStore` is in-memory only.
+    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
         self.credentials = credentials
         self.hostKeyValidator = .custom(PinningHostKeyValidator(
             host: credentials.host, port: credentials.port, policy: hostKeyPolicy))

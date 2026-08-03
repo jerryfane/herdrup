@@ -21,7 +21,7 @@ final class CitadelTransportContractTests: XCTestCase {
         // neither transport's errors are swallowed as skips — a broken transport
         // fails, as the deleted SSH-vs-Unix test did (review finding #5).
         let credentials = try LiveEnvironment.requireLiveCredentials()
-        let citadel = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy())
+        let citadel = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy(store: PinningHostKeyPolicy.PinStore()))
         let unix = UnixSocketTransport(path: LiveEnvironment.socketPath)
 
         let overUnix = try await liveContract(HerdrClient(transport: unix), unix)
