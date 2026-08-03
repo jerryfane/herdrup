@@ -6,6 +6,48 @@ import Glibc
 import Darwin
 #endif
 
+/// How to reach and authenticate to a herdr host.
+///
+/// Transport-agnostic — moved here from SSHTransport.swift when the libssh2
+/// transport was removed, since `CitadelTransport` authenticates from exactly
+/// the same credentials.
+public struct SSHCredentials: Sendable {
+    public var host: String
+    public var port: UInt16
+    public var username: String
+    /// PEM private key bytes. Held in memory and handed to the SSH stack
+    /// directly — never written to disk and never referenced by path, so the key
+    /// material's lifetime is the caller's to control rather than the
+    /// filesystem's.
+    public var privateKeyPEM: String
+    /// Optional public key bytes. Unused by the pure-Swift transport (nio-ssh
+    /// derives it from the private key); retained for source compatibility.
+    public var publicKeyPEM: String?
+    public var passphrase: String?
+    /// Vestigial under the pure-Swift transport: the server-side `api-bridge`
+    /// resolves the API socket itself, so `CitadelTransport` ignores this. Kept
+    /// so existing call sites compile; pruning it is a follow-up.
+    public var remoteSocketPath: String
+
+    public init(
+        host: String,
+        port: UInt16 = 22,
+        username: String,
+        privateKeyPEM: String,
+        publicKeyPEM: String? = nil,
+        passphrase: String? = nil,
+        remoteSocketPath: String
+    ) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.privateKeyPEM = privateKeyPEM
+        self.publicKeyPEM = publicKeyPEM
+        self.passphrase = passphrase
+        self.remoteSocketPath = remoteSocketPath
+    }
+}
+
 /// How a request reaches a herdr server.
 ///
 /// The two methods are not stylistic variants — they encode a measured property
@@ -34,6 +76,18 @@ public enum TransportError: Error, CustomStringConvertible {
     case pathTooLong(String)
     case writeFailed(errno: Int32)
     case closedBeforeResponse
+    /// The request, once base64'd into the `herdr api-bridge <arg>` command
+    /// line, would exceed the kernel's per-arg limit (MAX_ARG_STRLEN) and be
+    /// rejected by execve with E2BIG BEFORE the bridge runs — so it is refused
+    /// here, where a caller can see it, rather than failing opaquely on the host.
+    case requestTooLarge(bytes: Int, max: Int)
+    /// The server's host key did not match the pinned key (or a first-contact
+    /// pin was refused). Transport-agnostic — the pure-Swift transport fails the
+    /// SSH handshake with this before any auth or command runs.
+    case hostKeyRejected(host: String, fingerprint: String)
+    /// The api-bridge (or the remote shell) produced no reply on stdout but wrote
+    /// to stderr — surfaced rather than handed back as an empty, undecodable line.
+    case bridgeFailed(stderr: String)
 
     public var description: String {
         switch self {
@@ -42,6 +96,12 @@ public enum TransportError: Error, CustomStringConvertible {
         case .pathTooLong(let p): return "socket path too long for sockaddr_un: \(p)"
         case .writeFailed(let e): return "write failed (errno \(e))"
         case .closedBeforeResponse: return "peer closed before sending a response line"
+        case .requestTooLarge(let b, let m):
+            return "request too large for the argument transport: \(b) > \(m) command bytes"
+        case .hostKeyRejected(let h, let fp):
+            return "host key for \(h) rejected: \(fp) does not match the pinned key"
+        case .bridgeFailed(let stderr):
+            return "api-bridge produced no reply; stderr: \(stderr)"
         }
     }
 }
