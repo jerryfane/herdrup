@@ -191,6 +191,22 @@ final class TerminalWrapTests: XCTestCase {
                       "indentation was lost on a line that folded")
     }
 
+    /// AXIS: leading indentation survives even when the first word cannot join
+    /// it — the NARROW-WIDTH case the first indentation fix missed.
+    ///
+    /// fold("    child", width: 6) stored the indent, then flushed it alone when
+    /// "child" would not fit beside it, and flush() stripped the indent to an
+    /// empty line. The losslessness helper is blind to this by construction (it
+    /// strips whitespace), so it took a reviewer's compiled probe. This is the
+    /// same class as the original width-80 defect, one width narrower — I fixed
+    /// the instance and not the class the first time.
+    func testLeadingIndentationSurvivesWhenTheFirstWordCannotJoinIt() {
+        let folded = TerminalWrap.fold(line: "    child", width: 6)
+        XCTAssertEqual(folded.lines.first, "    ",
+                       "the leading indent was stripped when flushed alone at a narrow width")
+        XCTAssertEqual(folded.lines.joined(), "    child", "content changed")
+    }
+
     /// A continuation line's leading space IS an artefact and is still dropped.
     /// Without this the fix above would over-correct into padding every folded
     /// line with the space it broke at.
@@ -213,6 +229,31 @@ final class TerminalWrapTests: XCTestCase {
         let folded = TerminalWrap.fold(line: "界界界", width: 4)
         XCTAssertEqual(folded.lines, ["界界", "界"],
                        "three double-width glyphs did not fold at four columns")
+    }
+
+    /// AXIS: double-width EMOJI outside the CJK planes count as two cells.
+    ///
+    /// The first width table hand-listed 0x1F300+ and measured ✅ (U+2705),
+    /// ⌚ (U+231A) and the keycap 1️⃣ as one cell — a reviewer probe folded
+    /// ✅✅✅ into a single line at width 4. Deferring to Unicode.Scalar
+    /// .Properties (isEmojiPresentation, plus the VS16 in a keycap) is the
+    /// "complete table" answer rather than widening a hand-list, which is the
+    /// fix-the-class move I keep failing to make on the first pass.
+    func testBmpEmojiAreCountedAsTwoColumns() {
+        XCTAssertEqual(TerminalWrap.columns(of: "✅", at: 0), 2, "U+2705 measured as one cell")
+        XCTAssertEqual(TerminalWrap.columns(of: "⌚", at: 0), 2, "U+231A measured as one cell")
+        XCTAssertEqual(TerminalWrap.columns(of: "1️⃣", at: 0), 2, "a keycap (VS16) measured as one cell")
+
+        let folded = TerminalWrap.fold(line: "✅✅✅", width: 4)
+        XCTAssertEqual(folded.lines, ["✅✅", "✅"],
+                       "three double-width emoji did not fold at four columns")
+    }
+
+    /// A text-default symbol WITHOUT emoji presentation stays one cell — the
+    /// negative half, so the fix does not just call everything wide.
+    func testTextDefaultSymbolsStayOneColumn() {
+        XCTAssertEqual(TerminalWrap.columns(of: "a", at: 0), 1)
+        XCTAssertEqual(TerminalWrap.columns(of: "±", at: 0), 1, "a plain sign was widened")
     }
 
     /// A tab advances to the next multiple of 8, so its width depends on where
