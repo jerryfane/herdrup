@@ -13,28 +13,34 @@ import Citadel
 /// live fleet cannot disturb it.
 final class CitadelTransportLiveTests: XCTestCase {
 
-    private func makeTransport() throws -> CitadelTransport {
+    private func credentials() throws -> SSHCredentials {
         let keyURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".ssh/id_ed25519")
         guard let keyData = try? Data(contentsOf: keyURL),
               let keyText = String(data: keyData, encoding: .utf8) else {
             throw XCTSkip("no ~/.ssh/id_ed25519; CitadelTransport not exercisable here")
         }
-        let credentials = SSHCredentials(
+        return SSHCredentials(
             host: "127.0.0.1",
             port: 22,
             username: NSUserName(),
             privateKeyPEM: keyText,
             remoteSocketPath: ""  // unused: the server-side api-bridge resolves the socket
         )
-        return CitadelTransport(credentials: credentials, hostKeyValidator: .acceptAnything())
     }
 
     /// A real round-trip: connect over SSH, exec the deployed `herdr api-bridge`
     /// with a base64 agent.list, read the reply. Proves the whole path — key
     /// auth, channel exec, argument decode, single-shot reply — end to end.
+    ///
+    /// Connects through the SHIPPING DEFAULT: the pinning host-key policy, not
+    /// `.acceptAnything()`. So it also proves first-contact trust connects and
+    /// that the fingerprint is computed over a REAL presented host key (the pin
+    /// is asserted below), which no unit test with a synthetic key can show.
     func testLiveAgentListRoundTrip() async throws {
-        let transport = try makeTransport()
+        let credentials = try credentials()
+        let policy = PinningHostKeyPolicy()
+        let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: policy)
         let reply: String
         do {
             reply = try await transport.roundTrip(#"{"id":"live-1","method":"agent.list","params":{}}"#)
@@ -47,5 +53,9 @@ final class CitadelTransportLiveTests: XCTestCase {
                       "the reply is not correlated to the request id: \(reply.prefix(160))")
         XCTAssertTrue(reply.contains("agent_list") || reply.contains("\"result\""),
                       "the reply is not an agent.list result: \(reply.prefix(160))")
+        // The handshake completed, so the pinning validator ran and pinned the
+        // server's real host key — the default trust path is exercised, not bypassed.
+        XCTAssertNotNil(policy.pinnedFingerprint(for: credentials.host, port: credentials.port),
+                        "connected but the host key was never pinned — pinning path not exercised")
     }
 }
