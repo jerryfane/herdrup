@@ -24,16 +24,27 @@ let package = Package(
     products: [
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],
+    dependencies: [
+        // The pure-Swift SSH stack (swift-nio-ssh + Citadel's key parsing and
+        // BoringSSL crypto). Cross-platform — this is what lets HerdrKit link
+        // into iOS, which libssh2 cannot. Pinned exactly: Citadel pulls a
+        // swift-nio-ssh FORK (Wellz26/swift-nio-ssh), and a fork carrying the
+        // transport's crypto is worth a fixed, reviewed revision rather than a
+        // range. Proven to build+link for iOS-simulator (spike/citadel-ios).
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", exact: "0.12.1"),
+    ],
     targets: [
-        // pkgConfig, not a hardcoded header path: libssh2 lives at
-        // /usr/include on Debian, /opt/homebrew/include on Apple Silicon and
-        // /usr/local/include on Intel macs. providers only advise on how to
-        // install it; pkgConfig is what actually supplies the flags.
+        // libssh2 stays for now — CitadelTransport lands alongside SSHTransport
+        // and must prove out against the same contract before the libssh2 path
+        // (CSSH, DescriptorAudit, the thread pool) is removed. That removal is
+        // the follow-up; this PR is additive.
         .systemLibrary(
             name: "CSSH", path: "Sources/CSSH",
             pkgConfig: "libssh2",
             providers: [.brew(["libssh2"]), .apt(["libssh2-1-dev"])]),
-        .target(name: "HerdrKit", dependencies: ["CSSH"]),
+        .target(
+            name: "HerdrKit",
+            dependencies: ["CSSH", .product(name: "Citadel", package: "Citadel")]),
         // CSSH so tests can build a real Session to drive LiveChannel's
         // ownership handoff directly, rather than only through a live server.
         .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit", "CSSH"]),
