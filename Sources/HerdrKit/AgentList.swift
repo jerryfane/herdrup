@@ -7,8 +7,9 @@ import Foundation
 /// ways of not knowing, and the whole value of this type is refusing to merge
 /// them:
 ///
-///   - `.absent`      the field was not sent. Not an agent pane, or an older
-///                    server that predates the field.
+///   - `.absent`      the field was not sent. `agent.list` only ever returns
+///                    agent terminals, so this means an older server or a gap
+///                    — NOT "this is not an agent".
 ///   - `.indefinite`  the server sent `"unknown"`. It looked and could not tell.
 ///   - `.unrecognised` the server sent something this client has never heard of.
 ///
@@ -135,8 +136,15 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         // client is out of date", which are different problems with different
         // fixes — but they group identically, because the user's situation is
         // the same either way.
-        case .indefinite, .unrecognised: return .unrecognised
-        case .absent: return .idle
+        // ALL THREE NOT-KNOWINGS SURFACE. `.absent` was grouped as `.idle`
+        // here, on the reasoning that a missing status means "not an agent
+        // pane". That reasoning was wrong, and the reviewer checked the server
+        // rather than argue it: `agent_info` returns None unless
+        // `terminal.is_agent_terminal()` (herdr src/app/agents.rs:368), so
+        // every row in `agent.list` IS an agent. An absent status means an
+        // older server or a gap — never a non-agent — and calling it definite
+        // idle collapsed the exact case this file exists to surface.
+        case .indefinite, .unrecognised, .absent: return .unrecognised
         }
     }
 }
@@ -152,7 +160,11 @@ public struct AgentList: Equatable, Sendable {
     /// What the top of the screen says. Counts only positively-blocked agents —
     /// an unrecognised status is surfaced by its own section, and inflating this
     /// number with maybes would make the one number on the screen untrustworthy.
-    public var needsYouCount: Int { rows.filter { $0.status.isBlocked }.count }
+    /// Counts the GROUP, not the retained status. Reading `status.isBlocked`
+    /// directly meant a blocked agent whose pane had since vanished sorted into
+    /// `.stopped` and made `isQuiet` true while still reporting 1 here — the
+    /// screen simultaneously claiming all-clear and one-waiting.
+    public var needsYouCount: Int { rows.filter { $0.group == .needsYou }.count }
 
     /// True when nothing is blocked AND nothing is unrecognised. The quiet state
     /// has to mean "I checked everything", so an uninterpretable agent must
