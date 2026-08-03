@@ -1,0 +1,31 @@
+name: Herdr
+options:
+  bundleIdPrefix: com.jerryfane
+  deploymentTarget: { iOS: "17.0" }
+  createIntermediateGroups: true
+packages:
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel.git
+    exactVersion: 0.12.1
+targets:
+  Herdr:
+    type: application
+    platform: iOS
+    sources: [ App ]
+    dependencies:
+      - package: Citadel
+        product: Citadel
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: herdr
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [ UIInterfaceOrientationPortrait ]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
