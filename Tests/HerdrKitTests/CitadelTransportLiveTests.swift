@@ -58,4 +58,39 @@ final class CitadelTransportLiveTests: XCTestCase {
         XCTAssertNotNil(policy.pinnedFingerprint(for: credentials.host, port: credentials.port),
                         "connected but the host key was never pinned — pinning path not exercised")
     }
+
+    /// The OTHER transport method: `stream`. Opens a real `events.subscribe`
+    /// (layout.updated — the one non-pane-scoped kind, read-only), reads the
+    /// `subscription_started` ack, then stops. Breaking the loop cancels the
+    /// stream, which closes the channel.
+    ///
+    /// Then it round-trips on the SAME transport. That second call is the point:
+    /// it is the negative of the herdr-ios#1 hang, where a cancelled idle
+    /// subscription wedged the connection. If cancellation left the held client
+    /// broken, the round-trip here would hang or throw.
+    func testLiveStreamCancellationLeavesConnectionReusable() async throws {
+        let credentials = try credentials()
+        let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy())
+
+        let subscribe = #"{"id":"sub","method":"events.subscribe","params":{"subscriptions":[{"type":"layout.updated"}]}}"#
+        var firstLine: String?
+        do {
+            for try await line in transport.stream(subscribe) {
+                firstLine = line
+                break   // stop consuming -> onTermination cancels -> channel close
+            }
+        } catch {
+            throw XCTSkip("could not stream from herdr over SSH (\(error)); live path not exercisable here")
+        }
+
+        let line = try XCTUnwrap(firstLine, "the subscription delivered no line")
+        XCTAssertTrue(line.contains("subscription_started"),
+                      "the first stream line is not the subscription ack: \(line.prefix(160))")
+
+        // The connection survived the stream's cancellation.
+        let reply = try await transport.roundTrip(#"{"id":"after","method":"agent.list","params":{}}"#)
+        await transport.close()
+        XCTAssertTrue(reply.contains(#""id":"after""#),
+                      "a round-trip after stream cancellation did not complete: \(reply.prefix(160))")
+    }
 }
