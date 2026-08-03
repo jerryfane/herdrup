@@ -15,27 +15,37 @@ let package = Package(
     // no availability checking at all, so the package compiled there while
     // being unbuildable on any Apple platform.
     //
-    // The floors are chosen, not defaults: macOS 13 for the toolchain that runs
-    // the tests, iOS 17 because that is the floor the app target will inherit
-    // and it decides which SwiftUI is available to the UI work. `platforms`
-    // constrains Apple platforms only, so the "builds on Linux too" property
-    // above is untouched.
-    platforms: [.macOS(.v13), .iOS(.v17)],
+    // The floors are chosen, not defaults: macOS 14 for the toolchain that runs
+    // the tests (Citadel requires .macOS(.v14); a v13 floor fails `swift build`
+    // on macOS with a dependency-floor mismatch — invisible on Linux, which
+    // ignores `platforms:` entirely), iOS 17 because that is the floor the app
+    // target will inherit and it decides which SwiftUI is available to the UI
+    // work (and it matches Citadel's iOS floor, which is why iOS already builds).
+    // `platforms` constrains Apple platforms only, so the "builds on Linux too"
+    // property above is untouched.
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],
+    dependencies: [
+        // The pure-Swift SSH stack (swift-nio-ssh + Citadel's key parsing and
+        // BoringSSL crypto). Cross-platform — this is what lets HerdrKit link
+        // into iOS, which libssh2 cannot. Pinned exactly: Citadel pulls a
+        // swift-nio-ssh FORK (Wellz26/swift-nio-ssh), and a fork carrying the
+        // transport's crypto is worth a fixed, reviewed revision rather than a
+        // range. Proven to build+link for iOS-simulator (spike/citadel-ios).
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", exact: "0.12.1"),
+    ],
     targets: [
-        // pkgConfig, not a hardcoded header path: libssh2 lives at
-        // /usr/include on Debian, /opt/homebrew/include on Apple Silicon and
-        // /usr/local/include on Intel macs. providers only advise on how to
-        // install it; pkgConfig is what actually supplies the flags.
-        .systemLibrary(
-            name: "CSSH", path: "Sources/CSSH",
-            pkgConfig: "libssh2",
-            providers: [.brew(["libssh2"]), .apt(["libssh2-1-dev"])]),
-        .target(name: "HerdrKit", dependencies: ["CSSH"]),
-        // CSSH so tests can build a real Session to drive LiveChannel's
-        // ownership handoff directly, rather than only through a live server.
-        .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit", "CSSH"]),
+        // libssh2 is gone: CitadelTransport (pure-Swift nio-ssh + Citadel)
+        // replaced SSHTransport, and with it CSSH, DescriptorAudit, LiveChannel
+        // and the fd-ownership thread pool. This is what lets HerdrKit build for
+        // iOS at all — the libssh2 XCFramework could not link there.
+        .target(
+            name: "HerdrKit",
+            dependencies: [.product(name: "Citadel", package: "Citadel")]),
+        .testTarget(
+            name: "HerdrKitTests",
+            dependencies: ["HerdrKit", .product(name: "Citadel", package: "Citadel")]),
     ]
 )
