@@ -1,0 +1,57 @@
+# XcodeGen spec for the herdr iOS app.
+#
+# The buildbox runs `xcodegen generate` before `xcodebuild`, so the Xcode project
+# is DERIVED FROM THIS FILE and never committed. That is deliberate: an
+# .xcodeproj is an opaque blob that cannot be reviewed, diffed, or authored from
+# a machine without Xcode — and this app is written on Linux.
+#
+# Toolchain facts taken from the buildbox's own log (518340e.log), not assumed:
+#   simulator   iPhone 17 Pro
+#   SDK         iPhoneSimulator26.2
+#   target      arm64-apple-ios17.0-simulator
+#   bundle ids  com.jerryfane.<name>
+name: Herdr
+
+options:
+  bundleIdPrefix: com.jerryfane
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  # The local package, consumed unchanged. HerdrKit contains no UIKit or SwiftUI
+  # so it keeps building and testing on Linux; the app depends on it, never the
+  # reverse. If this link ever inverts, the Linux test suite silently stops
+  # covering the layer the app runs on.
+  HerdrKit:
+    path: .
+
+targets:
+  Herdr:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    dependencies:
+      # Declared in step ONE rather than when a screen first needs it. Linking
+      # HerdrKit into an iOS app exercises the libssh2 system library, the module
+      # map and the platform floors — the exact surface that broke three ways in
+      # #18 and was invisible from Linux every time. Better to find that now,
+      # against ten lines of UI, than later against a thousand.
+      - package: HerdrKit
+        product: HerdrKit
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: herdr
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
