@@ -36,7 +36,11 @@ public protocol HostKeyPolicy: Sendable {
 public struct PinningHostKeyPolicy: HostKeyPolicy {
     private let store: PinStore
 
-    public init(store: PinStore = PinStore()) {
+    /// Defaults to the PROCESS-WIDE `.shared` store, so a default-constructed
+    /// policy — and thus `CitadelTransport`'s default — shares one pin set rather
+    /// than each transport trusting first contact independently. Pass an explicit
+    /// `PinStore()` for an isolated store (tests do this).
+    public init(store: PinStore = .shared) {
         self.store = store
     }
 
@@ -52,17 +56,20 @@ public struct PinningHostKeyPolicy: HostKeyPolicy {
         store.pinned(key: "\(host):\(port)")
     }
 
-    /// In-memory pin store.
+    /// In-memory pin store, process-lifetime only.
     ///
-    /// Pins survive for the PROCESS lifetime, not across launches: a fresh
-    /// `PinStore()` per transport means a transport recreated after an app
-    /// restart has no record of the earlier pin and would trust a substituted
-    /// key as first contact. So the default policy uses the process-wide
-    /// `.shared` store (all default transports in a process share pins), and a
-    /// shipping client that needs cross-LAUNCH TOFU must inject a persistent,
-    /// e.g. Keychain-backed, store via `PinningHostKeyPolicy(store:)`. This type
-    /// is the persistence seam; it deliberately keeps no platform storage of its
-    /// own so it still builds on Linux.
+    /// A fresh `PinStore()` per transport would let a transport recreated after
+    /// an app restart trust a substituted key as first contact, so the default
+    /// policy uses the process-wide `.shared` store (all default transports in a
+    /// process share pins).
+    ///
+    /// This type is IN-MEMORY ONLY and is NOT a persistence seam — it is a
+    /// concrete final class with no storage backend to override, so it cannot be
+    /// made Keychain-backed. Cross-LAUNCH TOFU is achieved instead by supplying a
+    /// custom `HostKeyPolicy` (the one-method protocol `CitadelTransport(...,
+    /// hostKeyPolicy:)` accepts) that compares-and-pins against persistent
+    /// storage such as the Keychain. Keeping no platform storage here is what
+    /// lets the type build on Linux.
     public final class PinStore: @unchecked Sendable {
         private let lock = NSLock()
         private var pins: [String: String] = [:]

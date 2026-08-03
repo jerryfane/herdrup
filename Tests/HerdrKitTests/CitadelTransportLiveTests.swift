@@ -24,7 +24,7 @@ final class CitadelTransportLiveTests: XCTestCase {
     /// is asserted below), which no unit test with a synthetic key can show.
     func testLiveAgentListRoundTrip() async throws {
         let credentials = try LiveEnvironment.requireLiveCredentials()
-        let policy = PinningHostKeyPolicy()
+        let policy = PinningHostKeyPolicy(store: PinningHostKeyPolicy.PinStore())
         let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: policy)
         // No catch here: the environment is proven present, so a thrown error is
         // a transport regression to surface, not a reason to skip.
@@ -52,7 +52,7 @@ final class CitadelTransportLiveTests: XCTestCase {
     /// broken, the round-trip here would hang or throw.
     func testLiveStreamCancellationLeavesConnectionReusable() async throws {
         let credentials = try LiveEnvironment.requireLiveCredentials()
-        let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy())
+        let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy(store: PinningHostKeyPolicy.PinStore()))
 
         let subscribe = #"{"id":"sub","method":"events.subscribe","params":{"subscriptions":[{"type":"layout.updated"}]}}"#
         // No catch: the environment is proven present, so a stream error is a
@@ -72,6 +72,24 @@ final class CitadelTransportLiveTests: XCTestCase {
         await transport.close()
         XCTAssertTrue(reply.contains(#""id":"after""#),
                       "a round-trip after stream cancellation did not complete: \(reply.prefix(160))")
+    }
+
+    /// Guards the transport's DEFAULT host-key wiring (review finding: the policy
+    /// test alone doesn't prove `CitadelTransport`'s default uses the shared
+    /// store). A pure-default transport — no `hostKeyPolicy` argument — must pin
+    /// the server key into the PROCESS-WIDE `PinStore.shared`; if the default is
+    /// changed to a fresh/isolated store, the shared store stays empty here and
+    /// this fails. Every OTHER live/contract test uses a fresh store, so only this
+    /// default transport writes 127.0.0.1 into `.shared`.
+    func testDefaultTransportPinsIntoTheSharedStore() async throws {
+        let credentials = try LiveEnvironment.requireLiveCredentials()
+        let transport = CitadelTransport(credentials: credentials)   // pure default wiring
+        _ = try await transport.roundTrip(#"{"id":"wiring","method":"agent.list","params":{}}"#)
+        await transport.close()
+
+        XCTAssertNotNil(
+            PinningHostKeyPolicy.PinStore.shared.pinned(key: "\(credentials.host):\(credentials.port)"),
+            "the default transport did not pin into PinStore.shared — its default wiring is not the shared store")
     }
 
 }
