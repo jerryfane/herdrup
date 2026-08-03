@@ -4,21 +4,17 @@ import Foundation
 
 final class CitadelTransportTests: XCTestCase {
 
-    /// AXIS: the exec command the transport builds is exactly what the
+    /// AXIS: the base64 argument the transport builds is exactly what the
     /// server-side `herdr api-bridge <base64>` decodes back to.
     ///
     /// This is the contract BETWEEN the two repos — the transport encodes, the
     /// bridge's `decode_request_arg` decodes. If they disagree on the encoding,
     /// every request silently breaks, so it is pinned here where it is cheap to
     /// check rather than discovered against a live server.
-    func testBridgeCommandBase64RoundTrips() throws {
+    func testEncodedRequestBase64RoundTrips() throws {
         let request = #"{"id":"7","method":"agent.list","params":{}}"#
-        let command = try CitadelTransport.bridgeCommand(for: request)
+        let encoded = CitadelTransport.encodedRequest(for: request)
 
-        XCTAssertTrue(command.hasPrefix("herdr api-bridge "),
-                      "the command does not invoke the api-bridge subcommand")
-
-        let encoded = String(command.dropFirst("herdr api-bridge ".count))
         let decoded = try XCTUnwrap(Data(base64Encoded: encoded).map { String(decoding: $0, as: UTF8.self) },
                                     "the argument is not valid base64")
         XCTAssertEqual(decoded, request,
@@ -29,22 +25,38 @@ final class CitadelTransportTests: XCTestCase {
     /// whole reason for base64 rather than shell-quoting. A prompt with quotes,
     /// backticks, `$(…)`, and newlines is exactly what would break a naive
     /// `herdr api-bridge '<json>'`.
-    func testBridgeCommandSurvivesShellMetacharacters() throws {
+    func testEncodedRequestSurvivesShellMetacharacters() throws {
         let nasty = #"{"id":"1","method":"agent.prompt","params":{"text":"run `id`; echo $(whoami) \"quoted\" & | ; newline\nhere"}}"#
-        let command = try CitadelTransport.bridgeCommand(for: nasty)
-        let encoded = String(command.dropFirst("herdr api-bridge ".count))
+        let encoded = CitadelTransport.encodedRequest(for: nasty)
 
-        // No shell metacharacter leaks into the command outside the base64 blob.
+        // No shell metacharacter leaks into the base64 blob.
         XCTAssertFalse(encoded.contains(where: { "`$();|&\"\n".contains($0) }),
-                       "a shell metacharacter survived into the command line unescaped")
+                       "a shell metacharacter survived into the base64 argument")
         let decoded = try XCTUnwrap(Data(base64Encoded: encoded).map { String(decoding: $0, as: UTF8.self) })
         XCTAssertEqual(decoded, nasty, "the request was altered in transit")
     }
 
-    /// Base64 output is single-line — an SSH exec command line cannot contain a
-    /// raw newline, and base64 standard encoding without line wrapping is what
-    /// guarantees it. (Foundation's base64 does not wrap by default; this pins
-    /// that assumption.)
+    /// AXIS: the command resolves herdr's remote path rather than assuming it is
+    /// on the non-interactive SSH `PATH`. A live round-trip proved a bare
+    /// `herdr api-bridge` fails "command not found" because the default install
+    /// (`~/.local/bin`) is not on a non-login shell's PATH. The command must
+    /// therefore fall back to `$HOME/.local/bin/herdr` — this pins that so the
+    /// resolution cannot be silently dropped back to a bare `herdr`.
+    func testBridgeCommandResolvesHerdrPath() throws {
+        let command = try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#)
+
+        XCTAssertTrue(command.contains("command -v herdr"),
+                      "the command does not consult PATH for herdr")
+        XCTAssertTrue(command.contains("$HOME/.local/bin/herdr"),
+                      "the command does not fall back to the ~/.local/bin install location")
+        XCTAssertTrue(command.contains(" api-bridge "),
+                      "the command does not invoke the api-bridge subcommand")
+    }
+
+    /// The full exec command line is single-line — an SSH exec command line
+    /// cannot contain a raw newline, and base64 standard encoding without line
+    /// wrapping is what guarantees the argument stays on one line. (Foundation's
+    /// base64 does not wrap by default; this pins that assumption.)
     func testBridgeCommandIsASingleLine() throws {
         let request = String(repeating: #"{"k":"vvvvvvvvvv"},"#, count: 50)
         let command = try CitadelTransport.bridgeCommand(for: request)

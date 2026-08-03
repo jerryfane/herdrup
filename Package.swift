@@ -47,6 +47,8 @@ let package = Package(
             dependencies: ["CSSH", .product(name: "Citadel", package: "Citadel")]),
         // CSSH so tests can build a real Session to drive LiveChannel's
         // ownership handoff directly, rather than only through a live server.
-        .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit", "CSSH"]),
+        .testTarget(
+            name: "HerdrKitTests",
+            dependencies: ["HerdrKit", "CSSH", .product(name: "Citadel", package: "Citadel")]),
     ]
 )

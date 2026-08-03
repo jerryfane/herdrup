@@ -70,13 +70,30 @@ public actor CitadelTransport: HerdrTransport {
     /// execve with no bridge to report it.
     static let maxCommandBytes = 120_000
 
-    /// `herdr api-bridge <base64(requestLine)>` — the exec command line the
-    /// remote shell runs. base64 so no JSON metacharacter needs shell quoting.
-    /// Throws `TransportError.requestTooLarge` rather than let the command exceed
-    /// the argv limit and fail opaquely on the host (herdr#39's client contract).
+    /// The request, base64-encoded. Kept separate from the command so the
+    /// encoding contract can be tested without the shell wrapper around it.
+    static func encodedRequest(for requestLine: String) -> String {
+        Data(requestLine.utf8).base64EncodedString()
+    }
+
+    /// Resolves herdr on the remote host: prefer `PATH`, fall back to the
+    /// standard `~/.local/bin` install location.
+    ///
+    /// A non-interactive SSH exec runs a NON-login shell, whose `PATH` does not
+    /// include `~/.local/bin` — where herdr installs by default — so a bare
+    /// `herdr api-bridge` fails with "command not found". A live round-trip
+    /// caught exactly this. This mirrors herdr's own remote wrapper
+    /// (src/remote/unix.rs: `command -v herdr`, else `$HOME/.local/bin/herdr`).
+    static let herdrPathResolution =
+        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); exec "$HERDR" api-bridge "#
+
+    /// The full exec command line: resolve herdr, then run
+    /// `api-bridge <base64(requestLine)>`. base64 so no JSON metacharacter needs
+    /// shell quoting. Throws `TransportError.requestTooLarge` rather than let the
+    /// command exceed the argv limit and fail opaquely on the host (herdr#39's
+    /// client contract).
     static func bridgeCommand(for requestLine: String) throws -> String {
-        let encoded = Data(requestLine.utf8).base64EncodedString()
-        let command = "herdr api-bridge \(encoded)"
+        let command = herdrPathResolution + encodedRequest(for: requestLine)
         let byteCount = command.utf8.count
         guard byteCount <= maxCommandBytes else {
             throw TransportError.requestTooLarge(bytes: byteCount, max: maxCommandBytes)
