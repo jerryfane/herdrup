@@ -1,5 +1,6 @@
 import SwiftUI
 import Security
+import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import HerdrKit
 
 // Phase 4, first real slice: terminal-first, on the merged pure-Swift transport.
@@ -61,25 +62,48 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
     func pin(host: String, port: UInt16, fingerprint: String) {
         lock.lock(); defer { lock.unlock() }
         let account = accountKey(host: host, port: port)
-        var base: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(base as CFDictionary)
-        base[kSecValueData as String] = Data(fingerprint.utf8)
-        base[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(base as CFDictionary, nil)
+        // One checked SecItemUpdate replaces the value IN PLACE (no window where
+        // the pin is absent). Only if there is nothing to update do we add. Under
+        // the lock, there is no check-then-act race.
+        let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: Data(fingerprint.utf8)] as CFDictionary)
+        if updated == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = Data(fingerprint.utf8)
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
-    /// Canonicalizes the pin key: DNS names are case-insensitive (RFC 4343) and
-    /// an absolute name may carry a trailing dot, so `Fleet.Example.` and
-    /// `fleet.example` reach the same host and MUST share one pin — otherwise a
-    /// different spelling is a fresh first-contact that bypasses the pin.
+    /// Canonicalizes the pin key so spellings that reach the same host share one
+    /// pin — otherwise a different spelling is a fresh first-contact that bypasses
+    /// the pin. IPv6 literals have many textual forms (RFC 5952), so they are
+    /// normalized through inet_pton/inet_ntop; DNS names are case-insensitive
+    /// (RFC 4343) and may carry a trailing dot.
     private func accountKey(host: String, port: UInt16) -> String {
-        var h = host.lowercased()
-        while h.hasSuffix(".") { h.removeLast() }
+        var h = host.trimmingCharacters(in: .whitespaces)
+        if h.hasPrefix("[") && h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
+        if let canonicalIP = canonicalIPv6(h) {
+            h = canonicalIP
+        } else {
+            h = h.lowercased()
+            while h.hasSuffix(".") { h.removeLast() }
+        }
         return "\(h):\(port)"
+    }
+
+    /// Canonical IPv6 text (compressed, lowercase) via the resolver, or nil if
+    /// `s` is not an IPv6 literal.
+    private func canonicalIPv6(_ s: String) -> String? {
+        var addr = in6_addr()
+        guard s.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
+        return String(cString: buffer)
     }
 
     private enum Lookup { case found(String), notFound, error }
