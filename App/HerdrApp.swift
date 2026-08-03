@@ -70,17 +70,26 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
 }
 
 struct RootView: View {
+    // Holds the transport as well as the client: `close()` is the transport's,
+    // not the client's, so disconnect reaps the SSH connection rather than
+    // leaking it until deallocation.
+    @State private var transport: CitadelTransport?
     @State private var client: HerdrClient?
 
     var body: some View {
         Group {
             if let client {
                 TerminalHomeView(client: client, onDisconnect: {
-                    Task { await client.close() }
+                    let closing = transport
+                    Task { await closing?.close() }
                     self.client = nil
+                    self.transport = nil
                 })
             } else {
-                ConnectView { client = $0 }
+                ConnectView { newTransport in
+                    self.transport = newTransport
+                    self.client = HerdrClient(transport: newTransport)
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -90,7 +99,7 @@ struct RootView: View {
 /// Collects host/key and constructs the transport. Constructing does not connect —
 /// the first request does — so this screen never blocks on the network.
 struct ConnectView: View {
-    var onConnect: (HerdrClient) -> Void
+    var onConnect: (CitadelTransport) -> Void
 
     @State private var host = ""
     @State private var port = "22"
@@ -151,7 +160,7 @@ struct ConnectView: View {
                         let transport = CitadelTransport(
                             credentials: credentials,
                             hostKeyPolicy: KeychainHostKeyPolicy())   // cross-launch TOFU
-                        onConnect(HerdrClient(transport: transport))
+                        onConnect(transport)
                     } label: {
                         Text("connect")
                             .font(.system(.body, design: .monospaced).weight(.semibold))
