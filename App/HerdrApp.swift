@@ -113,7 +113,14 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
         var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         guard inet_ntop(AF_INET6, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
         var canonical = String(cString: buffer)
-        if parts.count == 2 { canonical += "%" + parts[1].lowercased() }
+        if parts.count == 2 {
+            // Canonicalize the zone to its numeric interface index, so a name and
+            // its index (`%en0` vs `%4`) — the same interface — share one pin
+            // (RFC 9844). A numeric or unknown zone is kept as-is (lowercased).
+            let zone = String(parts[1])
+            let index = zone.withCString { if_nametoindex($0) }
+            canonical += "%" + (index != 0 ? String(index) : zone.lowercased())
+        }
         return canonical
     }
 
@@ -369,9 +376,16 @@ struct TerminalHomeView: View {
                             .multilineTextAlignment(.center)
                     }
                 }
-                Button("retry") { Task { await load() } }
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(Palette.accent)
+                // Plain retry ONLY for non-host-key errors. After a host-key
+                // rejection a bare reconnect could first-contact-trust whatever
+                // key next appears (bypassing the fingerprint the user must
+                // verify) — so the only routes then are the bound "trust this
+                // key" above or disconnect.
+                if rejectedFingerprint == nil {
+                    Button("retry") { Task { await load() } }
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(Palette.accent)
+                }
             }
             .padding()
         } else if loading {
