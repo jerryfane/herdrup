@@ -30,20 +30,45 @@ enum Palette {
 /// target because the Security framework is not available on Linux, where
 /// HerdrKit still builds.
 final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
+    /// Shared so all transports enforce one lock/pin set (SwiftUI re-inits View
+    /// structs, so a per-view instance would churn and split the lock).
+    static let shared = KeychainHostKeyPolicy()
+
     private let lock = NSLock()
     private let service = "dev.herdr.hostkey.pins"
 
     func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision {
         lock.lock(); defer { lock.unlock() }
         let account = "\(host):\(port)"
-        if let existing = pinned(account: account) {
+        switch lookup(account: account) {
+        case .found(let existing):
             return existing == presented ? .trust : .reject
+        case .notFound:
+            // First contact: trust ONLY if the pin actually persists; a failed
+            // write must not read as "trusted but unpinned" next launch.
+            return store(account: account, fingerprint: presented) ? .trust : .reject
+        case .error:
+            // A Keychain read error is NOT the absence of a pin. Fail CLOSED —
+            // reading it as "no pin" would trust any key on a transient failure.
+            return .reject
         }
-        store(account: account, fingerprint: presented)
-        return .trust
     }
 
-    private func pinned(account: String) -> String? {
+    /// Clears the pin for a host so a VERIFIED key rotation can re-pin on the
+    /// next connect. User-initiated only, after out-of-band verification.
+    func forget(host: String, port: UInt16) {
+        lock.lock(); defer { lock.unlock() }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: "\(host):\(port)",
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    private enum Lookup { case found(String), notFound, error }
+
+    private func lookup(account: String) -> Lookup {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -52,12 +77,20 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let fingerprint = String(data: data, encoding: .utf8) else { return .error }
+            return .found(fingerprint)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            return .error   // transient/availability/auth error — not an absence
+        }
     }
 
-    private func store(account: String, fingerprint: String) {
+    private func store(account: String, fingerprint: String) -> Bool {
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -65,41 +98,69 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
             kSecValueData as String: Data(fingerprint.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        SecItemAdd(attributes as CFDictionary, nil)
+        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
     }
 }
 
 struct RootView: View {
-    // Holds the transport as well as the client: `close()` is the transport's,
-    // not the client's, so disconnect reaps the SSH connection rather than
-    // leaking it until deallocation.
+    // Owns the transport (so disconnect can `close()` it — that's the transport's
+    // method, not the client's), the credentials (to rebuild on reconnect), and
+    // the pin policy (to forget a host key on a verified rotation).
     @State private var transport: CitadelTransport?
     @State private var client: HerdrClient?
+    @State private var credentials: SSHCredentials?
+    @State private var session = 0   // bumped to force a fresh load on reconnect
+    private let pins = KeychainHostKeyPolicy.shared
 
     var body: some View {
         Group {
-            if let client {
-                TerminalHomeView(client: client, onDisconnect: {
-                    let closing = transport
-                    Task { await closing?.close() }
-                    self.client = nil
-                    self.transport = nil
-                })
+            if let client, let credentials {
+                TerminalHomeView(
+                    client: client,
+                    onDisconnect: { disconnect() },
+                    onForgetHostKey: { forgetAndReconnect(credentials) }
+                )
+                .id(session)
             } else {
-                ConnectView { newTransport in
-                    self.transport = newTransport
-                    self.client = HerdrClient(transport: newTransport)
-                }
+                ConnectView { connect($0) }
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private func connect(_ creds: SSHCredentials) {
+        let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
+        credentials = creds
+        transport = newTransport
+        client = HerdrClient(transport: newTransport)
+    }
+
+    private func disconnect() {
+        let closing = transport
+        Task { await closing?.close() }
+        client = nil
+        transport = nil
+        credentials = nil
+    }
+
+    /// A verified key rotation: drop the pin, then reconnect (which re-pins the
+    /// new key on first contact). Bumping `session` recreates the home view so
+    /// its load re-runs.
+    private func forgetAndReconnect(_ creds: SSHCredentials) {
+        pins.forget(host: creds.host, port: creds.port)
+        let closing = transport
+        Task { await closing?.close() }
+        let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
+        transport = newTransport
+        client = HerdrClient(transport: newTransport)
+        session += 1
     }
 }
 
 /// Collects host/key and constructs the transport. Constructing does not connect —
 /// the first request does — so this screen never blocks on the network.
 struct ConnectView: View {
-    var onConnect: (CitadelTransport) -> Void
+    var onConnect: (SSHCredentials) -> Void
 
     @State private var host = ""
     @State private var port = "22"
@@ -157,10 +218,7 @@ struct ConnectView: View {
                             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
                             privateKeyPEM: keyPEM,
                             remoteSocketPath: "")
-                        let transport = CitadelTransport(
-                            credentials: credentials,
-                            hostKeyPolicy: KeychainHostKeyPolicy())   // cross-launch TOFU
-                        onConnect(transport)
+                        onConnect(credentials)
                     } label: {
                         Text("connect")
                             .font(.system(.body, design: .monospaced).weight(.semibold))
@@ -198,10 +256,12 @@ struct ConnectView: View {
 struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
+    var onForgetHostKey: () -> Void
 
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
     @State private var loading = true
+    @State private var hostKeyRejected = false
 
     var body: some View {
         NavigationStack {
@@ -228,6 +288,15 @@ struct TerminalHomeView: View {
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
+                if hostKeyRejected {
+                    Text("the host key changed since you last connected. forget the pin ONLY if you have verified the new key out of band.")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                        .multilineTextAlignment(.center)
+                    Button("forget host key & reconnect") { onForgetHostKey() }
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.red)
+                }
                 Button("retry") { Task { await load() } }
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(Palette.accent)
@@ -267,10 +336,15 @@ struct TerminalHomeView: View {
     private func load() async {
         loading = true
         error = nil
+        hostKeyRejected = false
         do {
             agents = try await client.agentList()
         } catch {
             self.error = "\(error)"
+            if let transportError = error as? TransportError,
+               case .hostKeyRejected = transportError {
+                hostKeyRejected = true
+            }
         }
         loading = false
     }
