@@ -305,6 +305,27 @@ final class TerminalWrapTests: XCTestCase {
         XCTAssertEqual(TerminalWrap.columns(of: "\t", at: 8), 8)
     }
 
+    /// AXIS: whitespace that production PRESERVES is checked exactly, not via the
+    /// whitespace-stripping helper.
+    ///
+    /// The class the reviewer generalised from #23 r4: the losslessness helper
+    /// strips whitespace by design, so any test leaning on it is blind to a lost
+    /// space. Two build-valid mutations passed all prior tests — trimming final
+    /// lines ("child  " -> "child", "   " -> "") and replacing an interior tab
+    /// with a space. These assertions compare exactly and kill both.
+    func testWhitespaceProductionPreservesIsCheckedExactly() {
+        // Final trailing whitespace is content on the last line (flush() only
+        // trims at fold points, never the final line).
+        XCTAssertEqual(TerminalWrap.fold(line: "child  ", width: 40).lines, ["child  "],
+                       "trailing whitespace on the final line was trimmed")
+        // A whitespace-only line is one whitespace line, not empty.
+        XCTAssertEqual(TerminalWrap.fold(line: "   ", width: 40).lines, ["   "],
+                       "a whitespace-only line was emptied")
+        // An interior tab is preserved verbatim, not normalised to a space.
+        XCTAssertEqual(TerminalWrap.fold(line: "a\tb", width: 40).lines, ["a\tb"],
+                       "an interior tab was altered")
+    }
+
     func testTokeniseAlternatesWordsAndWhitespaceRuns() {
         XCTAssertEqual(TerminalWrap.tokenise("ab  cd"), ["ab", "  ", "cd"])
         XCTAssertEqual(TerminalWrap.tokenise("  lead"), ["  ", "lead"])
