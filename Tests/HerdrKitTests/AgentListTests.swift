@@ -93,6 +93,52 @@ final class AgentListTests: XCTestCase {
                        "the screen would say all-clear while holding a row it could not read")
     }
 
+    /// AXIS: an agent whose status field is ABSENT surfaces like any other
+    /// not-knowing.
+    ///
+    /// This was wrong at first review and the fix was unguarded until this test
+    /// existed: reverting `.absent` to group as `.idle` left the whole suite
+    /// green. `agent.list` returns only agent terminals — herdr's `agent_info`
+    /// bails unless `terminal.is_agent_terminal()` — so an absent status is an
+    /// older server or a gap, never "not an agent", and must not be read as a
+    /// definite idle.
+    func testAnAbsentStatusSurfacesRatherThanReadingAsIdle() throws {
+        let list = AgentList(agents: [
+            try agent(pane: "old-server", status: nil),
+            try agent(pane: "p2", status: "idle"),
+        ])
+        let row = try XCTUnwrap(list.rows.first { $0.info.paneID == "old-server" })
+
+        XCTAssertEqual(row.status, .absent, "the premise: this row's status field is missing")
+        XCTAssertEqual(row.group, .unrecognised,
+                       "an agent with no status was given the definite meaning 'idle'")
+        XCTAssertLessThan(row.group, .idle, "it sorted into or below the collapsed group")
+        XCTAssertFalse(list.isQuiet,
+                       "the screen claimed all-clear while holding an agent it could not read")
+    }
+
+    /// AXIS: the headline count follows the GROUP, not the retained status.
+    ///
+    /// A blocked agent whose pane has since vanished belongs in `.stopped`. It
+    /// kept its blocked status for the detail view, and the count read that
+    /// status directly — so the screen said "nothing needs you" and "1 needs
+    /// you" at the same time. Reverting the fix left the suite green until this
+    /// test existed.
+    func testAStoppedAgentDoesNotCountEvenIfItsLastStatusWasBlocked() throws {
+        let list = AgentList(
+            agents: [try agent(pane: "gone", status: "blocked")],
+            livePaneIDs: ["someone-else"]
+        )
+        let row = try XCTUnwrap(list.rows.first)
+        XCTAssertEqual(row.status, .blocked, "the premise: the row retains its blocked status")
+        XCTAssertEqual(row.group, .stopped, "the premise: the pane is absent from the census")
+
+        XCTAssertEqual(list.needsYouCount, 0,
+                       "the count read the stale status; the screen reports both all-clear and "
+                       + "one-waiting at once")
+        XCTAssertTrue(list.isQuiet)
+    }
+
     /// The unrecognised group must never start collapsed — sorting it high is
     /// pointless if the section is shut by default.
     func testOnlyTheIdleGroupStartsCollapsed() {
@@ -173,6 +219,11 @@ final class AgentListTests: XCTestCase {
             try agent(pane: "p1", status: "working"),
             try agent(pane: "p2", status: "blocked"),
         ], livePaneIDs: nil)
+        // THE ROWS MUST EXIST FIRST. Asserting "none is stopped" is trivially
+        // true of an empty list, and this test passed with every agent removed
+        // — an absence assertion with nothing establishing the presence it is
+        // about.
+        XCTAssertEqual(list.rows.count, 2, "no rows were built; the assertion below is vacuous")
         XCTAssertFalse(list.rows.contains { $0.group == .stopped },
                        "a missing census was read as evidence of death")
     }
@@ -200,6 +251,11 @@ final class AgentListTests: XCTestCase {
             try agent(pane: "p1", status: "idle"),
             try agent(pane: "p2", status: "done"),
         ])
+        // Same trap: `isQuiet` is true of an empty list, and this passed with
+        // the fixture removed entirely. Pin that the quiet rows are actually
+        // present and actually quiet-by-status before concluding anything.
+        XCTAssertEqual(quiet.rows.map(\.status), [.idle, .done],
+                       "the quiet fixture is not present; isQuiet below proves nothing")
         XCTAssertTrue(quiet.isQuiet)
         XCTAssertEqual(quiet.needsYouCount, 0)
 
