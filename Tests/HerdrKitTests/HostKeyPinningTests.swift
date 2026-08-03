@@ -105,6 +105,65 @@ final class HostKeyPinningTests: XCTestCase {
                       "a changed host key was not rejected with hostKeyRejected: \(changed)")
     }
 
+    // MARK: - policy concurrency and scoping (moved from SSHTransportTests when
+    // the libssh2 transport was removed; the policy itself is transport-agnostic)
+
+    /// STRESS COVERAGE, not a determinism proof — labelled honestly after a
+    /// reviewer measured the previous version letting the racy implementation
+    /// survive 492 times out of 500.
+    ///
+    /// The real guarantee against the TOFU race is STRUCTURAL: `compareAndPin`
+    /// is the store's only write path, so the split lookup-then-store form
+    /// cannot be written. This test samples the contended window and would
+    /// occasionally catch a regression, but it cannot prove absence and must
+    /// not be cited as if it could.
+    func testConcurrentFirstContactCannotBothWin() {
+        let policy = PinningHostKeyPolicy()
+        let a = String(repeating: "aa", count: 32)
+        let b = String(repeating: "bb", count: 32)
+
+        // A task group alone is PROBABILISTIC — tasks may serialise and the
+        // test passes without ever racing. But a barrier across a task group
+        // DEADLOCKS: Swift's cooperative pool is width-limited, so 64 tasks
+        // cannot all arrive. (That deadlock is why this comment exists.)
+        //
+        // concurrentPerform uses real threads and genuinely runs them in
+        // parallel, so the contended window is entered rather than hoped for.
+        let workers = 64
+        let collected = Locked<[(String, HostKeyDecision)]>([])
+        DispatchQueue.concurrentPerform(iterations: workers) { i in
+            let fp = i.isMultiple(of: 2) ? a : b
+            let decision = policy.evaluate(host: "h", port: 22, presented: fp)
+            collected.mutate { $0.append((fp, decision)) }
+        }
+        var trusted: Set<String> = []
+        for (fp, decision) in collected.value where decision == .trust { trusted.insert(fp) }
+
+        XCTAssertEqual(
+            trusted.count, 1,
+            "exactly one fingerprint may ever be trusted for a host:port; got \(trusted.count)"
+        )
+    }
+
+    /// Pins are keyed by host AND port: the same name on a different port is a
+    /// different host, and sharing a pin across them would accept a key that
+    /// was never trusted for that endpoint.
+    func testPinsAreScopedToHostAndPort() {
+        let policy = PinningHostKeyPolicy()
+        let fp = String(repeating: "cc", count: 32)
+        XCTAssertEqual(policy.evaluate(host: "h", port: 22, presented: fp), .trust)
+        XCTAssertEqual(
+            policy.evaluate(host: "h", port: 2222, presented: String(repeating: "dd", count: 32)),
+            .trust,
+            "a different port is a different endpoint, so this is a first contact"
+        )
+        XCTAssertEqual(
+            policy.evaluate(host: "h", port: 22, presented: String(repeating: "dd", count: 32)),
+            .reject,
+            "the original endpoint's pin must still hold"
+        )
+    }
+
     /// The same key name on a different port pins independently — the pin is
     /// keyed by host AND port, so port 2222 is a distinct endpoint from port 22.
     func testDifferentPortsPinIndependently() throws {
@@ -124,4 +183,14 @@ final class HostKeyPinningTests: XCTestCase {
         XCTAssertTrue(isRejected(decide(v22, try keyB(), on: loop)),
                       "port 22 accepted key B, so the pins are not isolated by port")
     }
+}
+
+/// A minimal locked box for the concurrency test above (moved with it from
+/// SSHTransportTests).
+final class Locked<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: T
+    init(_ initial: T) { storage = initial }
+    var value: T { lock.lock(); defer { lock.unlock() }; return storage }
+    func mutate(_ body: (inout T) -> Void) { lock.lock(); body(&storage); lock.unlock() }
 }

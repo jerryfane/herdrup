@@ -6,6 +6,48 @@ import Glibc
 import Darwin
 #endif
 
+/// How to reach and authenticate to a herdr host.
+///
+/// Transport-agnostic — moved here from SSHTransport.swift when the libssh2
+/// transport was removed, since `CitadelTransport` authenticates from exactly
+/// the same credentials.
+public struct SSHCredentials: Sendable {
+    public var host: String
+    public var port: UInt16
+    public var username: String
+    /// PEM private key bytes. Held in memory and handed to the SSH stack
+    /// directly — never written to disk and never referenced by path, so the key
+    /// material's lifetime is the caller's to control rather than the
+    /// filesystem's.
+    public var privateKeyPEM: String
+    /// Optional public key bytes. Unused by the pure-Swift transport (nio-ssh
+    /// derives it from the private key); retained for source compatibility.
+    public var publicKeyPEM: String?
+    public var passphrase: String?
+    /// Vestigial under the pure-Swift transport: the server-side `api-bridge`
+    /// resolves the API socket itself, so `CitadelTransport` ignores this. Kept
+    /// so existing call sites compile; pruning it is a follow-up.
+    public var remoteSocketPath: String
+
+    public init(
+        host: String,
+        port: UInt16 = 22,
+        username: String,
+        privateKeyPEM: String,
+        publicKeyPEM: String? = nil,
+        passphrase: String? = nil,
+        remoteSocketPath: String
+    ) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.privateKeyPEM = privateKeyPEM
+        self.publicKeyPEM = publicKeyPEM
+        self.passphrase = passphrase
+        self.remoteSocketPath = remoteSocketPath
+    }
+}
+
 /// How a request reaches a herdr server.
 ///
 /// The two methods are not stylistic variants — they encode a measured property
