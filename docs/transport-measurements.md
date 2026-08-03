@@ -388,8 +388,10 @@ against C and then for it, which is the reason the raw counts are required rathe
 than the conclusion.
 
 No pool implementation is required — only a measurement harness. **The harness
-exists and the experiment has been run**: `scripts/readiness-experiment.swift`
-(the three arms, randomised, per-trial raw retention),
+was written and the experiment run** (this section is the historical record;
+`scripts/readiness-experiment.swift` was removed when libssh2 was retired in the
+Route-B transport swap, as it mirrored the now-deleted libssh2 call sequence):
+the three arms, randomised, per-trial raw retention,
 `scripts/analyze-readiness.py` (which imports `flat()` from
 `scripts/check-decision-rule.py`, so the analysis cannot drift from the rule it
 claims to apply), and `scripts/readiness-experiment-results.csv` (all 300 raw

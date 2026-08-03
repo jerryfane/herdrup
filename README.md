@@ -24,8 +24,8 @@ swift build
 swift test          # live tests run when a herdr socket + sshd are present, skip otherwise
 ```
 
-Builds and tests on **Linux and macOS** (macOS 13+, iOS 17+ floors are declared in
-`Package.swift`).
+Builds and tests on **Linux and macOS** (macOS 14+, iOS 17+ floors are declared in
+`Package.swift` — macOS 14 because Citadel requires it).
 
 ## Measured protocol facts
 

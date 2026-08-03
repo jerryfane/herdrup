@@ -42,12 +42,17 @@ public actor CitadelTransport: HerdrTransport {
         self.hostKeyValidator = hostKeyValidator
     }
 
-    /// Pins the host key on first contact and hard-stops on change (TOFU) — the
-    /// safe default for a shipping client, and the same policy the libssh2
-    /// transport used. Wraps the policy in the nio-ssh delegate internally, so a
-    /// caller needs no Citadel/nio-ssh types and cannot accidentally get a
-    /// trust-everything validator: the default here is the pinning one.
-    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
+    /// Pins the host key on first contact and hard-stops on change (TOFU),
+    /// wrapping the policy in the nio-ssh delegate internally so a caller needs
+    /// no Citadel/nio-ssh types and cannot accidentally get a trust-everything
+    /// validator.
+    ///
+    /// The default policy is backed by the PROCESS-WIDE `PinStore.shared`, so two
+    /// transports created this way enforce one pin set (a transport recreated
+    /// mid-process still hard-stops a changed key). It does NOT persist across
+    /// app launches — for cross-launch TOFU a shipping client must inject a
+    /// persistent, e.g. Keychain-backed, store: `PinningHostKeyPolicy(store:)`.
+    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(store: .shared)) {
         self.credentials = credentials
         self.hostKeyValidator = .custom(PinningHostKeyValidator(
             host: credentials.host, port: credentials.port, policy: hostKeyPolicy))
@@ -164,30 +169,47 @@ public actor CitadelTransport: HerdrTransport {
 
     public nonisolated func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
+            // A subscription gets its OWN connection, NOT the shared command
+            // client. Citadel's public `executeCommandStream` exposes only the
+            // output stream and never closes its child channel (only the internal
+            // `_executeCommandStream` does), so a subscription's resources are not
+            // individually owned. Giving each stream a dedicated client means
+            // termination closes it explicitly — deterministic per-subscription
+            // cleanup rather than relying on the event loop dropping it. (Review
+            // finding #2 asked for this explicit ownership.)
+            let connection = StreamConnection()
             let task = Task {
                 do {
-                    let client = try await self.connectedClient()
+                    let client = try await self.makeConnection()
+                    await connection.adopt(client)
+                    if Task.isCancelled { await connection.close(); continuation.finish(); return }
                     let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
-                    // Same byte-accurate decoding as roundTrip: emit whole lines
-                    // as they complete, decoding UTF-8 only at newline boundaries so
-                    // a multi-byte scalar straddling two chunks is never corrupted.
+                    // Same byte-accurate decoding as roundTrip: decode UTF-8 only
+                    // at newline boundaries so a multi-byte scalar straddling two
+                    // chunks is never corrupted.
                     var lines = LineAccumulator()
                     for try await chunk in output {
                         guard case .stdout(let bytes) = chunk else { continue }
                         for line in lines.append(bytes) { continuation.yield(line) }
                     }
                     if lines.hasRemainder { continuation.yield(lines.flush()) }
+                    await connection.close()
                     continuation.finish()
                 } catch is CancellationError {
+                    await connection.close()
                     continuation.finish()
                 } catch {
+                    await connection.close()
                     continuation.finish(throwing: error)
                 }
             }
-            // Cancelling the consumer cancels the task, which closes the channel —
-            // the clean teardown proven at 1.51s in the route-B falsifier, and
-            // the api-bridge's stdout-hangup watcher reaps its side.
-            continuation.onTermination = { _ in task.cancel() }
+            // Termination cancels the reader AND closes the dedicated client,
+            // which reaps the SSH channel now rather than leaking it until the
+            // process exits.
+            continuation.onTermination = { _ in
+                task.cancel()
+                Task { await connection.close() }
+            }
         }
     }
 
@@ -230,5 +252,29 @@ struct LineAccumulator {
     mutating func flush() -> String {
         defer { bytes.removeAll() }
         return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+/// Owns a subscription's dedicated SSH client so termination can close it —
+/// which reaps the exec channel that Citadel's `executeCommandStream` would
+/// otherwise leave open. Idempotent; a `close` that races the connect (`adopt`
+/// after `close`) still closes the late client.
+actor StreamConnection {
+    private var client: SSHClient?
+    private var closed = false
+
+    func adopt(_ client: SSHClient) async {
+        if closed {
+            try? await client.close()
+        } else {
+            self.client = client
+        }
+    }
+
+    func close() async {
+        closed = true
+        let held = client
+        client = nil
+        try? await held?.close()
     }
 }
