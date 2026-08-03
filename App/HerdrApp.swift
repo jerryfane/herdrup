@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import Security
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import HerdrKit
@@ -177,19 +178,49 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if let client, let credentials {
-                TerminalHomeView(
-                    client: client,
-                    onDisconnect: { disconnect() },
-                    onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
-                )
-                .id(session)
+            #if DEBUG
+            if let mock = ScreenshotMock.mode {
+                mockView(mock)
             } else {
-                ConnectView { connect($0) }
+                liveContent
             }
+            #else
+            liveContent
+            #endif
         }
         .preferredColorScheme(.dark)
     }
+
+    @ViewBuilder
+    private var liveContent: some View {
+        if let client, let credentials {
+            TerminalHomeView(
+                client: client,
+                onDisconnect: { disconnect() },
+                onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
+            )
+            .id(session)
+        } else {
+            ConnectView { connect($0) }
+        }
+    }
+
+    #if DEBUG
+    /// Renders a screen from MockTransport (no connection, no key) so the buildbox
+    /// can screenshot the list/pane views safely.
+    @ViewBuilder
+    private func mockView(_ mode: ScreenshotMock) -> some View {
+        let mockClient = HerdrClient(transport: MockTransport())
+        switch mode {
+        case .list:
+            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false })
+        case .pane:
+            NavigationStack {
+                TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis")
+            }
+        }
+    }
+    #endif
 
     private func connect(_ creds: SSHCredentials) {
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
@@ -449,14 +480,20 @@ struct TerminalPaneView: View {
     let paneID: String
     let title: String
 
-    @State private var lines: [String] = []
+    @State private var rawText = ""
     @State private var error: String?
-    @State private var columns = 80
 
     var body: some View {
         ZStack {
             Palette.bg.ignoresSafeArea()
             GeometryReader { geo in
+                // Fold using the SETTLED layout width from the geometry proxy,
+                // recomputed each render — reading the width in `.task` measured
+                // it before layout and fell back to the ~20-col minimum, which
+                // over-wrapped every line.
+                let columns = columnCount(for: geo.size.width)
+                let lines = TerminalWrap.fold(rawText.components(separatedBy: "\n"), width: columns)
+                    .flatMap { $0.lines }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         if let error {
@@ -474,23 +511,21 @@ struct TerminalPaneView: View {
                     }
                     .padding(12)
                 }
-                .task(id: paneID) {
-                    columns = columnCount(for: geo.size.width)
-                    await refresh()
-                }
+                .task(id: paneID) { await refresh() }
             }
         }
         .navigationTitle(title)
         .toolbar {
             Button {
-                Task { await refresh() }   // reuses the measured `columns`
+                Task { await refresh() }
             } label: {
                 Image(systemName: "arrow.clockwise").foregroundStyle(Palette.accent)
             }
         }
     }
 
-    /// Rough monospace column count for the footnote font (~7pt advance).
+    /// Rough monospace column count for the footnote font (~7pt advance), less the
+    /// 12pt horizontal padding on each side.
     private func columnCount(for width: CGFloat) -> Int {
         max(20, Int((width - 24) / 7.2))
     }
@@ -498,11 +533,55 @@ struct TerminalPaneView: View {
     private func refresh() async {
         do {
             let read = try await client.read(pane: paneID, source: .recentUnwrapped, format: .text, lines: 200)
-            let raw = read.text.components(separatedBy: "\n")
-            lines = TerminalWrap.fold(raw, width: columns).flatMap { $0.lines }
+            rawText = read.text
             error = nil
         } catch {
             self.error = "\(error)"
         }
     }
 }
+
+#if DEBUG
+/// DEBUG-only screenshot mode: renders the list/pane views from MockTransport —
+/// no connection, no key, so the buildbox can screenshot them SAFELY (the app
+/// otherwise launches to the empty ConnectView). Enable by launching with env
+/// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
+/// launch argument.
+enum ScreenshotMock {
+    case list, pane
+
+    static var mode: ScreenshotMock? {
+        let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
+        let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
+        guard env != nil || arg else { return nil }
+        return env == "pane" ? .pane : .list
+    }
+}
+
+/// Canned-response transport for the screenshot mock. The JSON is machine-checked
+/// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
+/// compiled on Linux) — keep the two fixtures in sync.
+struct MockTransport: HerdrTransport {
+    func roundTrip(_ requestLine: String) async throws -> String {
+        if requestLine.contains("agent.list") { return Self.agentList }
+        if requestLine.contains("agent.read") { return Self.agentRead }
+        return #"{"id":"mock","result":{}}"#
+    }
+
+    func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    static let agentList = #"""
+    {"id":"mock","result":{"type":"agent_list","agents":[
+      {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"working","terminal_title_stripped":"omp-runtime-adapter"},
+      {"pane_id":"w1:p2","name":"herdr-app","agent":"claude","agent_status":"done","terminal_title_stripped":"citadel-transport"},
+      {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","terminal_title_stripped":"digest-pipeline"}
+    ]}}
+    """#
+
+    static let agentRead = #"""
+    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent list\n3 agents running\n\n* jarvis      working   omp-runtime-adapter\n* herdr-app   done      citadel-transport\n* trend-scout idle      digest-pipeline\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
+    """#
+}
+#endif
