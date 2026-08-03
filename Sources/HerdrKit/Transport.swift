@@ -34,6 +34,11 @@ public enum TransportError: Error, CustomStringConvertible {
     case pathTooLong(String)
     case writeFailed(errno: Int32)
     case closedBeforeResponse
+    /// The request, once base64'd into the `herdr api-bridge <arg>` command
+    /// line, would exceed the kernel's per-arg limit (MAX_ARG_STRLEN) and be
+    /// rejected by execve with E2BIG BEFORE the bridge runs — so it is refused
+    /// here, where a caller can see it, rather than failing opaquely on the host.
+    case requestTooLarge(bytes: Int, max: Int)
 
     public var description: String {
         switch self {
@@ -42,6 +47,8 @@ public enum TransportError: Error, CustomStringConvertible {
         case .pathTooLong(let p): return "socket path too long for sockaddr_un: \(p)"
         case .writeFailed(let e): return "write failed (errno \(e))"
         case .closedBeforeResponse: return "peer closed before sending a response line"
+        case .requestTooLarge(let b, let m):
+            return "request too large for the argument transport: \(b) > \(m) command bytes"
         }
     }
 }

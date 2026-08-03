@@ -61,18 +61,34 @@ public actor CitadelTransport: HerdrTransport {
         return client
     }
 
+    /// Conservative ceiling on the full command line, well under the kernel's
+    /// MAX_ARG_STRLEN (~131072 on a 4-KiB-page Linux host; the reviewer measured
+    /// E2BIG at exactly 131072). The margin absorbs the `herdr api-bridge `
+    /// prefix and cross-platform variance. base64's 4/3 expansion means the raw
+    /// request may be up to ~90 KiB — ample for every request except an enormous
+    /// `agent.prompt` / `pane.send_text`, which is refused rather than failing at
+    /// execve with no bridge to report it.
+    static let maxCommandBytes = 120_000
+
     /// `herdr api-bridge <base64(requestLine)>` — the exec command line the
     /// remote shell runs. base64 so no JSON metacharacter needs shell quoting.
-    static func bridgeCommand(for requestLine: String) -> String {
+    /// Throws `TransportError.requestTooLarge` rather than let the command exceed
+    /// the argv limit and fail opaquely on the host (herdr#39's client contract).
+    static func bridgeCommand(for requestLine: String) throws -> String {
         let encoded = Data(requestLine.utf8).base64EncodedString()
-        return "herdr api-bridge \(encoded)"
+        let command = "herdr api-bridge \(encoded)"
+        let byteCount = command.utf8.count
+        guard byteCount <= maxCommandBytes else {
+            throw TransportError.requestTooLarge(bytes: byteCount, max: maxCommandBytes)
+        }
+        return command
     }
 
     // MARK: - HerdrTransport
 
     public func roundTrip(_ requestLine: String) async throws -> String {
         let client = try await connectedClient()
-        let output = try await client.executeCommandStream(Self.bridgeCommand(for: requestLine))
+        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
 
         // One request, one reply line. Accumulate stdout and return the first
         // complete line; the channel closes after the single-shot API reply.
@@ -95,7 +111,7 @@ public actor CitadelTransport: HerdrTransport {
             let task = Task {
                 do {
                     let client = try await self.connectedClient()
-                    let output = try await client.executeCommandStream(Self.bridgeCommand(for: requestLine))
+                    let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
                     var buffer = ""
                     for try await chunk in output {
                         guard case .stdout(let bytes) = chunk else { continue }
