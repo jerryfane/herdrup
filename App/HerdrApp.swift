@@ -59,7 +59,11 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
     /// for a verified key rotation: an atomic replace (delete + add under the
     /// lock), so there is no delete-then-TOFU window where a substituted key
     /// could be pinned — only the fingerprint passed here is trusted next connect.
-    func pin(host: String, port: UInt16, fingerprint: String) {
+    /// Returns whether the fingerprint was actually persisted. The caller MUST
+    /// NOT reconnect on false — reconnecting without a stored pin would treat the
+    /// next key as first contact (a TOFU window).
+    @discardableResult
+    func pin(host: String, port: UInt16, fingerprint: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let account = accountKey(host: host, port: port)
         let query: [String: Any] = [
@@ -69,14 +73,15 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
         ]
         // One checked SecItemUpdate replaces the value IN PLACE (no window where
         // the pin is absent). Only if there is nothing to update do we add. Under
-        // the lock, there is no check-then-act race.
+        // the lock, there is no check-then-act race. Every status is checked, so
+        // a failed persist is reported rather than silently trusted later.
         let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: Data(fingerprint.utf8)] as CFDictionary)
-        if updated == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = Data(fingerprint.utf8)
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            SecItemAdd(add as CFDictionary, nil)
-        }
+        if updated == errSecSuccess { return true }
+        guard updated == errSecItemNotFound else { return false }
+        var add = query
+        add[kSecValueData as String] = Data(fingerprint.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
     /// Canonicalizes the pin key so spellings that reach the same host share one
@@ -97,13 +102,19 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
     }
 
     /// Canonical IPv6 text (compressed, lowercase) via the resolver, or nil if
-    /// `s` is not an IPv6 literal.
+    /// `s` is not an IPv6 literal. A scoped address keeps its zone id (`%en0`)
+    /// lowercased so `fe80::1%EN0` and `fe80::1%en0` share a pin — the zone is
+    /// canonicalized alongside the address rather than left to split the pin.
     private func canonicalIPv6(_ s: String) -> String? {
+        let parts = s.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        let address = String(parts[0])
         var addr = in6_addr()
-        guard s.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else { return nil }
+        guard address.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else { return nil }
         var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         guard inet_ntop(AF_INET6, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
-        return String(cString: buffer)
+        var canonical = String(cString: buffer)
+        if parts.count == 2 { canonical += "%" + parts[1].lowercased() }
+        return canonical
     }
 
     private enum Lookup { case found(String), notFound, error }
@@ -188,14 +199,17 @@ struct RootView: View {
     /// that fingerprint before reconnecting, a substituted key during the
     /// reconnect is rejected — there is no re-TOFU window. Bumping `session`
     /// recreates the home view so its load re-runs.
-    private func trustAndReconnect(_ creds: SSHCredentials, fingerprint: String) {
-        pins.pin(host: creds.host, port: creds.port, fingerprint: fingerprint)
+    /// Returns false (without reconnecting) if the verified key could not be
+    /// persisted — reconnecting then would reopen a first-contact TOFU window.
+    private func trustAndReconnect(_ creds: SSHCredentials, fingerprint: String) -> Bool {
+        guard pins.pin(host: creds.host, port: creds.port, fingerprint: fingerprint) else { return false }
         let closing = transport
         Task { await closing?.close() }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         transport = newTransport
         client = HerdrClient(transport: newTransport)
         session += 1
+        return true
     }
 }
 
@@ -298,12 +312,13 @@ struct ConnectView: View {
 struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
-    var onTrustHostKey: (String) -> Void
+    var onTrustHostKey: (String) -> Bool
 
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
     @State private var loading = true
     @State private var rejectedFingerprint: String?
+    @State private var trustFailed = false
 
     var body: some View {
         NavigationStack {
@@ -343,9 +358,16 @@ struct TerminalHomeView: View {
                             .font(.caption).foregroundStyle(Palette.dim)
                             .multilineTextAlignment(.center)
                     }
-                    Button("trust this key & reconnect") { onTrustHostKey(fingerprint) }
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.red)
+                    Button("trust this key & reconnect") {
+                        trustFailed = !onTrustHostKey(fingerprint)
+                    }
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.red)
+                    if trustFailed {
+                        Text("could not save the verified key to the keychain — not reconnecting. try again.")
+                            .font(.caption).foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 Button("retry") { Task { await load() } }
                     .font(.system(.body, design: .monospaced))
@@ -387,6 +409,7 @@ struct TerminalHomeView: View {
         loading = true
         error = nil
         rejectedFingerprint = nil
+        trustFailed = false
         do {
             agents = try await client.agentList()
         } catch {
