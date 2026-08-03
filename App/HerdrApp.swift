@@ -114,12 +114,17 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
         guard inet_ntop(AF_INET6, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
         var canonical = String(cString: buffer)
         if parts.count == 2 {
-            // Canonicalize the zone to its numeric interface index, so a name and
-            // its index (`%en0` vs `%4`) — the same interface — share one pin
-            // (RFC 9844). A numeric or unknown zone is kept as-is (lowercased).
-            let zone = String(parts[1])
-            let index = zone.withCString { if_nametoindex($0) }
-            canonical += "%" + (index != 0 ? String(index) : zone.lowercased())
+            // Lowercase the zone id — a STABLE canonicalization. An earlier
+            // version mapped the zone through if_nametoindex, but that was a
+            // fail-open (backfill review): if_nametoindex is a case-sensitive
+            // exact-match lookup (so `%EN0` and `%en0` took different branches
+            // and split the pin), and worse it embedded the kernel-assigned
+            // interface INDEX, which is runtime state that changes across
+            // reboots — a moved index no longer matches the pin and the next key
+            // is trusted as first contact. Lowercasing is stable and closes the
+            // realistic (case) variation; a name-vs-numeric-zone difference is a
+            // theoretical link-local-only edge, not worth an unstable key.
+            canonical += "%" + parts[1].lowercased()
         }
         return canonical
     }
