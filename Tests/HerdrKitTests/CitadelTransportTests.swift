@@ -13,7 +13,7 @@ final class CitadelTransportTests: XCTestCase {
     /// check rather than discovered against a live server.
     func testBridgeCommandBase64RoundTrips() throws {
         let request = #"{"id":"7","method":"agent.list","params":{}}"#
-        let command = CitadelTransport.bridgeCommand(for: request)
+        let command = try CitadelTransport.bridgeCommand(for: request)
 
         XCTAssertTrue(command.hasPrefix("herdr api-bridge "),
                       "the command does not invoke the api-bridge subcommand")
@@ -31,7 +31,7 @@ final class CitadelTransportTests: XCTestCase {
     /// `herdr api-bridge '<json>'`.
     func testBridgeCommandSurvivesShellMetacharacters() throws {
         let nasty = #"{"id":"1","method":"agent.prompt","params":{"text":"run `id`; echo $(whoami) \"quoted\" & | ; newline\nhere"}}"#
-        let command = CitadelTransport.bridgeCommand(for: nasty)
+        let command = try CitadelTransport.bridgeCommand(for: nasty)
         let encoded = String(command.dropFirst("herdr api-bridge ".count))
 
         // No shell metacharacter leaks into the command outside the base64 blob.
@@ -45,9 +45,24 @@ final class CitadelTransportTests: XCTestCase {
     /// raw newline, and base64 standard encoding without line wrapping is what
     /// guarantees it. (Foundation's base64 does not wrap by default; this pins
     /// that assumption.)
-    func testBridgeCommandIsASingleLine() {
+    func testBridgeCommandIsASingleLine() throws {
         let request = String(repeating: #"{"k":"vvvvvvvvvv"},"#, count: 50)
-        let command = CitadelTransport.bridgeCommand(for: request)
+        let command = try CitadelTransport.bridgeCommand(for: request)
         XCTAssertFalse(command.contains("\n"), "the exec command line contains a newline")
+    }
+
+    /// AXIS: a request too large for the argv transport is refused with a clear
+    /// error, not allowed to fail opaquely at execve (E2BIG) on the host.
+    func testOversizedRequestIsRefused() {
+        // Just over the ceiling once base64-expanded.
+        let huge = String(repeating: "x", count: CitadelTransport.maxCommandBytes)
+        XCTAssertThrowsError(try CitadelTransport.bridgeCommand(for: huge)) { error in
+            guard case TransportError.requestTooLarge(let bytes, let max) = error else {
+                return XCTFail("wrong error: \(error)")
+            }
+            XCTAssertGreaterThan(bytes, max, "refused a request that was within the limit")
+        }
+        // A normal request is well under and does not throw.
+        XCTAssertNoThrow(try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#))
     }
 }
