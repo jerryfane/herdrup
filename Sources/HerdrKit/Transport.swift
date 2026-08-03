@@ -85,6 +85,9 @@ public enum TransportError: Error, CustomStringConvertible {
     /// pin was refused). Transport-agnostic — the pure-Swift transport fails the
     /// SSH handshake with this before any auth or command runs.
     case hostKeyRejected(host: String, fingerprint: String)
+    /// The api-bridge (or the remote shell) produced no reply on stdout but wrote
+    /// to stderr — surfaced rather than handed back as an empty, undecodable line.
+    case bridgeFailed(stderr: String)
 
     public var description: String {
         switch self {
@@ -97,6 +100,8 @@ public enum TransportError: Error, CustomStringConvertible {
             return "request too large for the argument transport: \(b) > \(m) command bytes"
         case .hostKeyRejected(let h, let fp):
             return "host key for \(h) rejected: \(fp) does not match the pinned key"
+        case .bridgeFailed(let stderr):
+            return "api-bridge produced no reply; stderr: \(stderr)"
         }
     }
 }

@@ -15,12 +15,15 @@ let package = Package(
     // no availability checking at all, so the package compiled there while
     // being unbuildable on any Apple platform.
     //
-    // The floors are chosen, not defaults: macOS 13 for the toolchain that runs
-    // the tests, iOS 17 because that is the floor the app target will inherit
-    // and it decides which SwiftUI is available to the UI work. `platforms`
-    // constrains Apple platforms only, so the "builds on Linux too" property
-    // above is untouched.
-    platforms: [.macOS(.v13), .iOS(.v17)],
+    // The floors are chosen, not defaults: macOS 14 for the toolchain that runs
+    // the tests (Citadel requires .macOS(.v14); a v13 floor fails `swift build`
+    // on macOS with a dependency-floor mismatch — invisible on Linux, which
+    // ignores `platforms:` entirely), iOS 17 because that is the floor the app
+    // target will inherit and it decides which SwiftUI is available to the UI
+    // work (and it matches Citadel's iOS floor, which is why iOS already builds).
+    // `platforms` constrains Apple platforms only, so the "builds on Linux too"
+    // property above is untouched.
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],

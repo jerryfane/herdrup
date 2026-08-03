@@ -26,6 +26,9 @@ public actor CitadelTransport: HerdrTransport {
     private let credentials: SSHCredentials
     private let hostKeyValidator: SSHHostKeyValidator
     private var client: SSHClient?
+    /// A connect in flight, so concurrent first-use awaits one attempt (see
+    /// `connectedClient`) rather than each opening — and leaking — its own session.
+    private var connectTask: Task<SSHClient, Error>?
 
     /// - Parameters:
     ///   - credentials: host/port/username, the Ed25519 private key, and the
@@ -53,22 +56,42 @@ public actor CitadelTransport: HerdrTransport {
     // MARK: - connection
 
     /// Returns the held client, connecting on first use or after a drop.
+    ///
+    /// Concurrent first-use joins ONE connect. `SSHClient.connect` is a
+    /// suspension point, and actor reentrancy lets a second caller pass the
+    /// `client == nil` check while the first is still connecting; without the
+    /// shared `connectTask` both would open a session and all but the last would
+    /// leak (a live SSH session never closed). Callers await the same in-flight
+    /// task instead.
     private func connectedClient() async throws -> SSHClient {
         if let client, client.isConnected { return client }
+        if let connectTask { return try await connectTask.value }
 
+        let task = Task<SSHClient, Error> { try await self.makeConnection() }
+        connectTask = task
+        do {
+            let connected = try await task.value
+            client = connected
+            connectTask = nil
+            return connected
+        } catch {
+            connectTask = nil   // a failed attempt must not wedge every later call
+            throw error
+        }
+    }
+
+    private func makeConnection() async throws -> SSHClient {
         let privateKey = try Curve25519.Signing.PrivateKey(
             sshEd25519: Data(credentials.privateKeyPEM.utf8),
             decryptionKey: credentials.passphrase.map { Data($0.utf8) }
         )
-        let client = try await SSHClient.connect(
+        return try await SSHClient.connect(
             host: credentials.host,
             port: Int(credentials.port),
             authenticationMethod: .ed25519(username: credentials.username, privateKey: privateKey),
             hostKeyValidator: hostKeyValidator,
             reconnect: .never
         )
-        self.client = client
-        return client
     }
 
     /// Conservative ceiling on the full command line, well under the kernel's
@@ -117,20 +140,26 @@ public actor CitadelTransport: HerdrTransport {
         let client = try await connectedClient()
         let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
 
-        // One request, one reply line. Accumulate stdout and return the first
-        // complete line; the channel closes after the single-shot API reply.
-        var accumulated = ""
+        // One request, one reply line. Accumulate RAW bytes and decode UTF-8 only
+        // at newline boundaries: decoding each SSH channel-data chunk on its own
+        // (String(buffer:)) turns a multi-byte scalar split across a chunk boundary
+        // into U+FFFD, silently corrupting the reply.
+        var lines = LineAccumulator()
+        var stderr = ""
         for try await chunk in output {
-            if case .stdout(let buffer) = chunk {
-                accumulated += String(buffer: buffer)
-                if let newline = accumulated.firstIndex(of: "\n") {
-                    return String(accumulated[..<newline])
-                }
+            switch chunk {
+            case .stdout(let buffer):
+                if let first = lines.append(buffer).first { return first }
+            case .stderr(let buffer):
+                stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here
             }
         }
-        // No trailing newline (shouldn't happen for a well-formed reply) — return
-        // what arrived rather than dropping it.
-        return accumulated
+        // Channel closed without a newline-terminated reply.
+        if lines.hasRemainder { return lines.flush() }   // a reply that lacked a trailing newline
+        // Empty stdout: surface the bridge/remote diagnostic rather than handing
+        // the caller an empty string it can only fail to decode.
+        if !stderr.isEmpty { throw TransportError.bridgeFailed(stderr: stderr) }
+        throw TransportError.closedBeforeResponse
     }
 
     public nonisolated func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
@@ -139,18 +168,15 @@ public actor CitadelTransport: HerdrTransport {
                 do {
                     let client = try await self.connectedClient()
                     let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
-                    var buffer = ""
+                    // Same byte-accurate decoding as roundTrip: emit whole lines
+                    // as they complete, decoding UTF-8 only at newline boundaries so
+                    // a multi-byte scalar straddling two chunks is never corrupted.
+                    var lines = LineAccumulator()
                     for try await chunk in output {
                         guard case .stdout(let bytes) = chunk else { continue }
-                        buffer += String(buffer: bytes)
-                        // Emit whole lines as they arrive; a subscription streams
-                        // one JSON object per line.
-                        while let newline = buffer.firstIndex(of: "\n") {
-                            continuation.yield(String(buffer[..<newline]))
-                            buffer = String(buffer[buffer.index(after: newline)...])
-                        }
+                        for line in lines.append(bytes) { continuation.yield(line) }
                     }
-                    if !buffer.isEmpty { continuation.yield(buffer) }
+                    if lines.hasRemainder { continuation.yield(lines.flush()) }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -167,7 +193,42 @@ public actor CitadelTransport: HerdrTransport {
 
     /// Closes the held SSH connection. Idempotent.
     public func close() async {
+        connectTask?.cancel()
+        connectTask = nil
         try? await client?.close()
         client = nil
+    }
+}
+
+/// Accumulates raw stdout bytes and yields complete newline-delimited lines,
+/// decoding UTF-8 only at line boundaries.
+///
+/// Decoding each SSH channel-data chunk independently (`String(buffer:)`) would
+/// corrupt any multi-byte UTF-8 scalar split across a chunk boundary: the
+/// incomplete tail becomes U+FFFD and its bytes are consumed, so concatenating
+/// the decoded chunks can never reconstitute the character. A `\n` byte (0x0A)
+/// can never fall inside a multi-byte UTF-8 sequence, so decoding only at
+/// newlines keeps every line intact.
+struct LineAccumulator {
+    private var bytes: [UInt8] = []
+
+    /// Appends a chunk and returns the lines it completed (newline stripped).
+    mutating func append(_ buffer: ByteBuffer) -> [String] {
+        bytes.append(contentsOf: buffer.readableBytesView)
+        var lines: [String] = []
+        while let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) {
+            lines.append(String(decoding: bytes[..<newline], as: UTF8.self))
+            bytes.removeSubrange(...newline)
+        }
+        return lines
+    }
+
+    /// Bytes remain after the last newline (an unterminated final line).
+    var hasRemainder: Bool { !bytes.isEmpty }
+
+    /// Decodes and clears whatever is left after the last newline.
+    mutating func flush() -> String {
+        defer { bytes.removeAll() }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }

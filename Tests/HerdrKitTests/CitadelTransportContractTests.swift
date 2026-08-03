@@ -15,41 +15,17 @@ import Citadel
 /// Skips when the local prerequisites (key, socket, reachable sshd+herdr) are
 /// absent, so other environments stay honest about what they did not cover.
 final class CitadelTransportContractTests: XCTestCase {
-    private static let keyPath = "\(NSHomeDirectory())/.ssh/id_ed25519"
-
-    private var socketPath: String {
-        ProcessInfo.processInfo.environment["HERDR_SOCKET_PATH"]
-            ?? UnixSocketTransport.defaultPath()
-    }
-
-    private func makeCitadel() throws -> CitadelTransport {
-        guard FileManager.default.fileExists(atPath: Self.keyPath),
-              let pem = try? String(contentsOfFile: Self.keyPath, encoding: .utf8)
-        else { throw XCTSkip("no local SSH key; CitadelTransport not exercisable here") }
-        let creds = SSHCredentials(
-            host: "127.0.0.1", port: 22, username: NSUserName(),
-            privateKeyPEM: pem, remoteSocketPath: "")
-        return CitadelTransport(credentials: creds, hostKeyPolicy: PinningHostKeyPolicy())
-    }
 
     func testTheLiveContractHoldsIdenticallyOverCitadelAndUnix() async throws {
-        try XCTSkipIf(socketPath.isEmpty, "no socket")
-        guard FileManager.default.fileExists(atPath: socketPath) else {
-            throw XCTSkip("no herdr socket; contract not exercisable here")
-        }
-        let citadel = try makeCitadel()
-        let unix = UnixSocketTransport(path: socketPath)
+        // Independent environment gate (key + sshd + socket). Once it passes,
+        // neither transport's errors are swallowed as skips — a broken transport
+        // fails, as the deleted SSH-vs-Unix test did (review finding #5).
+        let credentials = try LiveEnvironment.requireLiveCredentials()
+        let citadel = CitadelTransport(credentials: credentials, hostKeyPolicy: PinningHostKeyPolicy())
+        let unix = UnixSocketTransport(path: LiveEnvironment.socketPath)
 
-        // Unix is the baseline: if it is broken, that is a real failure.
         let overUnix = try await liveContract(HerdrClient(transport: unix), unix)
-        // Citadel needs a reachable sshd+herdr; a connection/exec failure means the
-        // SSH path is not exercisable here, not that the contract is broken.
-        let overCitadel: ContractResult
-        do {
-            overCitadel = try await liveContract(HerdrClient(transport: citadel), citadel)
-        } catch {
-            throw XCTSkip("could not reach herdr over Citadel SSH (\(error)); path not exercisable here")
-        }
+        let overCitadel = try await liveContract(HerdrClient(transport: citadel), citadel)
         await citadel.close()
 
         // Identical observable results, not merely both non-empty.
