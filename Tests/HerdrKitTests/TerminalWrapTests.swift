@@ -215,13 +215,25 @@ final class TerminalWrapTests: XCTestCase {
     /// Whitespace is divisible, so it must fold like any oversized token — only
     /// an indivisible glyph (a tab) may overflow.
     func testOversizedLeadingIndentIsSplitToWidth() {
-        let folded = TerminalWrap.fold(line: "          child", width: 6)  // 10 spaces
+        let input = "          child"  // 10 spaces
+        let width = 6
+        // PRECONDITION: the leading run must actually exceed width, or the
+        // oversized branch is never taken and this test proves nothing.
+        let leadingRun = input.prefix { $0 == " " }
+        XCTAssertGreaterThan(leadingRun.count, width,
+                             "the fixture's indent does not exceed width; the test is vacuous")
+
+        let folded = TerminalWrap.fold(line: input, width: width)
         for l in folded.lines {
-            XCTAssertLessThanOrEqual(TerminalWrap.columns(of: l, startingAt: 0), 6,
-                                     "line '\(l)' exceeds width 6")
+            XCTAssertLessThanOrEqual(TerminalWrap.columns(of: l, startingAt: 0), width,
+                                     "line '\(l)' exceeds width \(width)")
         }
-        XCTAssertEqual(folded.lines.joined().filter { !$0.isWhitespace }, "child",
-                       "content changed while splitting an oversized indent")
+        // EXACT join, not whitespace-stripped. The earlier version stripped
+        // whitespace before comparing to "child", so deleting the entire indent
+        // — in the fixture OR in production — produced the same observable and
+        // survived. The split lines must rejoin to the original byte-for-byte.
+        XCTAssertEqual(folded.lines.joined(), input,
+                       "joined output does not equal the input exactly; indentation was lost or altered")
     }
 
     /// AXIS: the flag-clear half of the indentation fix is guarded.
