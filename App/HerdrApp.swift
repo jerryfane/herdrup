@@ -481,19 +481,19 @@ struct TerminalPaneView: View {
     let title: String
 
     @State private var rawText = ""
+    @State private var lines: [String] = []
     @State private var error: String?
 
     var body: some View {
         ZStack {
             Palette.bg.ignoresSafeArea()
             GeometryReader { geo in
-                // Fold using the SETTLED layout width from the geometry proxy,
-                // recomputed each render — reading the width in `.task` measured
-                // it before layout and fell back to the ~20-col minimum, which
-                // over-wrapped every line.
+                // Fold from the SETTLED layout width, but cache the result: re-fold
+                // ONLY when the width or the text changes (below), not on every body
+                // evaluation — folding 200 lines each frame cost ~13ms during
+                // scroll. Reading the width in `.task` (an earlier bug) measured it
+                // before layout and over-wrapped at the ~20-col minimum.
                 let columns = columnCount(for: geo.size.width)
-                let lines = TerminalWrap.fold(rawText.components(separatedBy: "\n"), width: columns)
-                    .flatMap { $0.lines }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         if let error {
@@ -512,6 +512,10 @@ struct TerminalPaneView: View {
                     .padding(12)
                 }
                 .task(id: paneID) { await refresh() }
+                // `initial: true` folds once on appear too, so `lines` is never
+                // left empty if the text arrives before the first width change.
+                .onChange(of: columns, initial: true) { _, newColumns in refold(columns: newColumns) }
+                .onChange(of: rawText) { _, _ in refold(columns: columns) }
             }
         }
         .navigationTitle(title)
@@ -528,6 +532,12 @@ struct TerminalPaneView: View {
     /// 12pt horizontal padding on each side.
     private func columnCount(for width: CGFloat) -> Int {
         max(20, Int((width - 24) / 7.2))
+    }
+
+    /// Folds `rawText` to `columns` into the cached `lines`. Called only from the
+    /// width/text `onChange`, so scrolling does not re-fold.
+    private func refold(columns: Int) {
+        lines = TerminalWrap.fold(rawText.components(separatedBy: "\n"), width: columns).flatMap { $0.lines }
     }
 
     private func refresh() async {
