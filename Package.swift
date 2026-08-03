@@ -34,21 +34,15 @@ let package = Package(
         .package(url: "https://github.com/orlandos-nl/Citadel.git", exact: "0.12.1"),
     ],
     targets: [
-        // libssh2 stays for now — CitadelTransport lands alongside SSHTransport
-        // and must prove out against the same contract before the libssh2 path
-        // (CSSH, DescriptorAudit, the thread pool) is removed. That removal is
-        // the follow-up; this PR is additive.
-        .systemLibrary(
-            name: "CSSH", path: "Sources/CSSH",
-            pkgConfig: "libssh2",
-            providers: [.brew(["libssh2"]), .apt(["libssh2-1-dev"])]),
+        // libssh2 is gone: CitadelTransport (pure-Swift nio-ssh + Citadel)
+        // replaced SSHTransport, and with it CSSH, DescriptorAudit, LiveChannel
+        // and the fd-ownership thread pool. This is what lets HerdrKit build for
+        // iOS at all — the libssh2 XCFramework could not link there.
         .target(
             name: "HerdrKit",
-            dependencies: ["CSSH", .product(name: "Citadel", package: "Citadel")]),
-        // CSSH so tests can build a real Session to drive LiveChannel's
-        // ownership handoff directly, rather than only through a live server.
+            dependencies: [.product(name: "Citadel", package: "Citadel")]),
         .testTarget(
             name: "HerdrKitTests",
-            dependencies: ["HerdrKit", "CSSH", .product(name: "Citadel", package: "Citadel")]),
+            dependencies: ["HerdrKit", .product(name: "Citadel", package: "Citadel")]),
     ]
 )

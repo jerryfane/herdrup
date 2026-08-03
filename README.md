@@ -15,25 +15,17 @@ against a real herdr server. The iOS target will consume it unchanged.
 
 ### Prerequisites
 
-`HerdrKit` links **libssh2** through pkg-config, so the development package must be present
-before `swift build` will work on a clean machine:
-
-```bash
-# Debian / Ubuntu
-sudo apt-get install -y libssh2-1-dev pkg-config
-
-# macOS
-brew install libssh2 pkg-config
-```
+None beyond the Swift toolchain. The SSH transport is **pure Swift** (swift-nio-ssh +
+Citadel), so there is no system libssh2 to install — that is what lets `HerdrKit` link into
+iOS, where a libssh2 XCFramework could not.
 
 ```bash
 swift build
-swift test          # live tests run when a herdr socket is present, skip otherwise
+swift test          # live tests run when a herdr socket + sshd are present, skip otherwise
 ```
 
 Builds and tests on **Linux and macOS** (macOS 13+, iOS 17+ floors are declared in
-`Package.swift`). The header path comes from `pkg-config --cflags libssh2` rather than a
-hardcoded location, because Debian and Homebrew put it in different places.
+`Package.swift`).
 
 ## Measured protocol facts
 
@@ -57,20 +49,22 @@ is authoritative. Everything named here must exist; not everything that exists i
 
 ```
 Sources/HerdrKit/
+  AgentList.swift         agent-list model with fail-open-visible unknown statuses
+  CitadelTransport.swift  pure-Swift SSH transport: execs `herdr api-bridge` per channel
   HerdrClient.swift       typed API: agentList, read, prompt, sendKeys, subscribe
+  HostKeyPinning.swift    TOFU host-key policy + the nio-ssh validator bridge
   InputIntent.swift       keystroke/gesture intent, decoupled from any UI framework
   PlatformSocket.swift    the C symbols whose Swift spelling differs on Glibc vs Darwin
   RecoveryExecutor.swift  drives that policy against a real transport
   RefreshPolicy.swift     when cached agent state is stale enough to refetch
-  SSHTransport.swift      libssh2 direct-streamlocal tunnel to a remote herdr socket
   SessionRecovery.swift   reconnect/resync policy: attempt identity, the subscription ledger
-  Transport.swift         HerdrTransport protocol + AF_UNIX implementation
+  TerminalWrap.swift      folds unwrapped output to phone width losslessly
+  Transport.swift         HerdrTransport protocol, SSHCredentials, AF_UNIX implementation
   Wire.swift              request/response envelopes, models, subscription types
-Sources/CSSH/             libssh2 system-library target (shim.h + module map)
 ```
 
-**Done**: the SSH transport (`direct-streamlocal@openssh.com` — plain `direct-tcpip` cannot
-reach a remote unix socket), connection measurement, the pool design, and reconnect/resync
-including how an unopenable pane is distinguished from an unwanted one.
+**Done**: the pure-Swift SSH transport (a session channel per request execing `herdr
+api-bridge`, since nio-ssh has no streamlocal), TOFU host-key pinning, connection reuse, and
+reconnect/resync including how an unopenable pane is distinguished from an unwanted one.
 
 **Planned**: the iOS app target, terminal rendering, and the gesture layer.
