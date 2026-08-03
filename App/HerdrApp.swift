@@ -39,7 +39,7 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
 
     func evaluate(host: String, port: UInt16, presented: String) -> HostKeyDecision {
         lock.lock(); defer { lock.unlock() }
-        let account = "\(host):\(port)"
+        let account = accountKey(host: host, port: port)
         switch lookup(account: account) {
         case .found(let existing):
             return existing == presented ? .trust : .reject
@@ -54,16 +54,32 @@ final class KeychainHostKeyPolicy: HostKeyPolicy, @unchecked Sendable {
         }
     }
 
-    /// Clears the pin for a host so a VERIFIED key rotation can re-pin on the
-    /// next connect. User-initiated only, after out-of-band verification.
-    func forget(host: String, port: UInt16) {
+    /// Binds a host to an EXACT fingerprint the user verified out of band. Used
+    /// for a verified key rotation: an atomic replace (delete + add under the
+    /// lock), so there is no delete-then-TOFU window where a substituted key
+    /// could be pinned — only the fingerprint passed here is trusted next connect.
+    func pin(host: String, port: UInt16, fingerprint: String) {
         lock.lock(); defer { lock.unlock() }
-        let query: [String: Any] = [
+        let account = accountKey(host: host, port: port)
+        var base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: "\(host):\(port)",
+            kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(base as CFDictionary)
+        base[kSecValueData as String] = Data(fingerprint.utf8)
+        base[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        SecItemAdd(base as CFDictionary, nil)
+    }
+
+    /// Canonicalizes the pin key: DNS names are case-insensitive (RFC 4343) and
+    /// an absolute name may carry a trailing dot, so `Fleet.Example.` and
+    /// `fleet.example` reach the same host and MUST share one pin — otherwise a
+    /// different spelling is a fresh first-contact that bypasses the pin.
+    private func accountKey(host: String, port: UInt16) -> String {
+        var h = host.lowercased()
+        while h.hasSuffix(".") { h.removeLast() }
+        return "\(h):\(port)"
     }
 
     private enum Lookup { case found(String), notFound, error }
@@ -118,7 +134,7 @@ struct RootView: View {
                 TerminalHomeView(
                     client: client,
                     onDisconnect: { disconnect() },
-                    onForgetHostKey: { forgetAndReconnect(credentials) }
+                    onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
                 )
                 .id(session)
             } else {
@@ -143,11 +159,13 @@ struct RootView: View {
         credentials = nil
     }
 
-    /// A verified key rotation: drop the pin, then reconnect (which re-pins the
-    /// new key on first contact). Bumping `session` recreates the home view so
-    /// its load re-runs.
-    private func forgetAndReconnect(_ creds: SSHCredentials) {
-        pins.forget(host: creds.host, port: creds.port)
+    /// A verified key rotation: pin the EXACT fingerprint the user verified out
+    /// of band (from the rejection), then reconnect. Because the pin is bound to
+    /// that fingerprint before reconnecting, a substituted key during the
+    /// reconnect is rejected — there is no re-TOFU window. Bumping `session`
+    /// recreates the home view so its load re-runs.
+    private func trustAndReconnect(_ creds: SSHCredentials, fingerprint: String) {
+        pins.pin(host: creds.host, port: creds.port, fingerprint: fingerprint)
         let closing = transport
         Task { await closing?.close() }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
@@ -256,12 +274,12 @@ struct ConnectView: View {
 struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
-    var onForgetHostKey: () -> Void
+    var onTrustHostKey: (String) -> Void
 
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
     @State private var loading = true
-    @State private var hostKeyRejected = false
+    @State private var rejectedFingerprint: String?
 
     var body: some View {
         NavigationStack {
@@ -288,12 +306,20 @@ struct TerminalHomeView: View {
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
-                if hostKeyRejected {
-                    Text("the host key changed since you last connected. forget the pin ONLY if you have verified the new key out of band.")
-                        .font(.caption)
-                        .foregroundStyle(Palette.dim)
-                        .multilineTextAlignment(.center)
-                    Button("forget host key & reconnect") { onForgetHostKey() }
+                if let fingerprint = rejectedFingerprint {
+                    VStack(spacing: 8) {
+                        Text("the host key changed. the server now presents:")
+                            .font(.caption).foregroundStyle(Palette.dim)
+                        Text(fingerprint)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(Palette.text)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.center)
+                        Text("trust it ONLY if this exactly matches the key you verified out of band.")
+                            .font(.caption).foregroundStyle(Palette.dim)
+                            .multilineTextAlignment(.center)
+                    }
+                    Button("trust this key & reconnect") { onTrustHostKey(fingerprint) }
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.red)
                 }
@@ -336,14 +362,14 @@ struct TerminalHomeView: View {
     private func load() async {
         loading = true
         error = nil
-        hostKeyRejected = false
+        rejectedFingerprint = nil
         do {
             agents = try await client.agentList()
         } catch {
             self.error = "\(error)"
             if let transportError = error as? TransportError,
-               case .hostKeyRejected = transportError {
-                hostKeyRejected = true
+               case .hostKeyRejected(_, let fingerprint) = transportError {
+                rejectedFingerprint = fingerprint
             }
         }
         loading = false
