@@ -54,6 +54,26 @@ public enum TerminalWrap {
         // Control characters occupy no cells.
         if v < 0x20 || (v >= 0x7F && v < 0xA0) { return 0 }
 
+        // EMOJI PRESENTATION IS ASKED OF THE STDLIB, NOT GUESSED WITH RANGES.
+        // The first version hand-listed 0x1F300+ and missed every double-width
+        // BMP emoji: a reviewer probe measured ✅ (U+2705), ⌚ (U+231A) and the
+        // keycap 1️⃣ as ONE cell. wcwidth reports them as two. Rather than widen
+        // a hand-list — which is the "fixed the instances, not the class" error
+        // I keep making — this defers to Unicode.Scalar.Properties, which IS the
+        // table:
+        //   - a Variation-Selector-16 (U+FE0F) anywhere in the grapheme forces
+        //     emoji (wide) presentation, which is exactly what 1️⃣ = 1 + FE0F +
+        //     20E3 relies on;
+        //   - isEmojiPresentation is true for scalars that default to the wide
+        //     emoji glyph (✅, ⌚) and false for text-default symbols (☀ without
+        //     FE0F), which is the precise distinction wcwidth makes.
+        if ch.unicodeScalars.contains(where: { $0.value == 0xFE0F }) { return 2 }
+        if scalar.properties.isEmojiPresentation { return 2 }
+
+        // East Asian Wide / Fullwidth. The stdlib exposes emoji properties but
+        // NOT East Asian Width, so these ranges remain hand-maintained — they
+        // are stable Unicode blocks, unlike the sprawling emoji assignments the
+        // property query above now covers.
         let wide: [ClosedRange<UInt32>] = [
             0x1100...0x115F,    // Hangul Jamo
             0x2E80...0x303E,    // CJK radicals, Kangxi
@@ -66,15 +86,12 @@ public enum TerminalWrap {
             0xFE30...0xFE6F,    // CJK compatibility forms
             0xFF00...0xFF60,    // Fullwidth forms
             0xFFE0...0xFFE6,
-            0x1F300...0x1F64F,  // emoji
-            0x1F900...0x1F9FF,
             0x20000...0x3FFFD,  // CJK Extension B+
         ]
         if wide.contains(where: { $0.contains(v) }) { return 2 }
 
         // A grapheme built from regional indicators — a flag — renders as one
-        // double-width glyph even though its first scalar is not in the ranges
-        // above.
+        // double-width glyph even though its first scalar is not wide alone.
         if ch.unicodeScalars.count > 1,
            ch.unicodeScalars.allSatisfy({ (0x1F1E6...0x1F1FF).contains($0.value) }) {
             return 2
@@ -136,19 +153,31 @@ public enum TerminalWrap {
         var current = ""
         var currentCols = 0
         var hardBroke = false
+        // True only while `current` holds the ORIGINAL leading indentation of the
+        // logical line and nothing else. That indentation is content; the trailing
+        // whitespace flush() strips at every OTHER fold point is an artefact. The
+        // two look identical (a buffer ending in spaces) and must not be treated
+        // alike — conflating them is exactly the defect below.
+        var currentIsLeadingIndent = false
 
         /// Emits `current` and resets.
         ///
-        /// TRAILING WHITESPACE IS TRIMMED HERE AND NOWHERE ELSE. flush() is
-        /// called only at fold points — where the next token did not fit — so
-        /// the space removed is one the fold created. The FINAL line does not go
-        /// through flush(), so a line genuinely ending in spaces keeps them;
-        /// that is content, not an artefact, and the two must not be conflated.
+        /// TRAILING WHITESPACE IS TRIMMED HERE — EXCEPT when the buffer is the
+        /// logical line's leading indentation. flush() is called at fold points,
+        /// where a trailing space is one the fold created; but a narrow width can
+        /// force a flush while `current` still holds ONLY the leading indent (the
+        /// first word could not join it), and stripping there deleted the
+        /// indentation. fold("    child", width: 6) returned "child": a compiled
+        /// regression the losslessness helper cannot see, because it strips
+        /// whitespace by design. The indent is preserved as its own line instead.
         func flush() {
-            while let last = current.last, last.isWhitespace { current.removeLast() }
+            if !currentIsLeadingIndent {
+                while let last = current.last, last.isWhitespace { current.removeLast() }
+            }
             out.append(current)
             current = ""
             currentCols = 0
+            currentIsLeadingIndent = false
         }
 
         for (index, token) in tokenise(line).enumerated() {
@@ -170,6 +199,7 @@ public enum TerminalWrap {
             if index == 0 && isWhitespaceToken {
                 current = token
                 currentCols = columns(of: token, startingAt: 0)
+                currentIsLeadingIndent = true
                 continue
             }
 
@@ -204,6 +234,11 @@ public enum TerminalWrap {
             } else if currentCols + tokenCols <= width {
                 current += token
                 currentCols += tokenCols
+                // Once anything joins the indent, `current` is no longer pure
+                // leading indentation, so a later flush must resume trimming its
+                // trailing whitespace as an artefact. Without this,
+                // "    a b c" at a narrow width preserves the fold-point space.
+                currentIsLeadingIndent = false
             } else {
                 flush()
                 if isWhitespaceToken { continue }
