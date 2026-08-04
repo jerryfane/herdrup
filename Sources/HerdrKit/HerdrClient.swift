@@ -205,6 +205,19 @@ public actor HerdrClient {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
     }
 
+    /// True when `pane` reports an agent WITH a composer — the same gate
+    /// `InputRouter` uses to enter intent mode, and the observable proxy for "a
+    /// prompt will be accepted". A freshly-started agent is not promptable for a
+    /// variable window, and there is no reliable readiness flag (interactive_ready
+    /// is nil on this path), so the UI polls THIS to learn when a just-spawned
+    /// agent can receive its pre-filled task — then delivers it as a prompt, never
+    /// as rawKeys send_text into a not-ready agent. Absent pane, or an agent with
+    /// no composer, is NOT promptable (false).
+    public func isPromptable(pane: String) async throws -> Bool {
+        guard let info = try await agentList().first(where: { $0.paneID == pane }) else { return false }
+        return InputRouter().mode(for: info) == .intent
+    }
+
     // MARK: - Events
 
     /// Opens the persistent event stream.
