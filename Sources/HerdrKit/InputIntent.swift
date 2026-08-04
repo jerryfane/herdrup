@@ -77,6 +77,17 @@ public struct InputRouter: Sendable {
             // TUI panes unable to receive a single character, which made the
             // "keys elsewhere" half of this design fictional (herdr-ios#3).
             guard !text.isEmpty else { return .refused(reason: "empty input") }
+            // A newline in this path WOULD submit — send_text writes it to the
+            // pty and a shell runs the line. That is the exact "text lands and
+            // executes somewhere unintended" hazard rawKeys exists to prevent, so
+            // the no-submit guarantee is a lie if CR/LF pass through. Enter stays
+            // a separate, explicit key (.key("Enter")); a pasted or typed newline
+            // is refused, not silently executed. Scan UNICODE SCALARS, not
+            // Characters: Swift clusters "\r\n" into ONE grapheme that equals
+            // neither "\n" nor "\r", so a Character scan would wave CRLF through.
+            guard !text.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else {
+                return .refused(reason: "newline not allowed here — press Enter to submit")
+            }
             return .text(pane: pane, text)
 
         case (.key(let k), _):
