@@ -49,7 +49,10 @@ public struct HostEndpoint: Equatable, Sendable {
     }
 
     private static func validPort(_ s: Substring) -> UInt16? {
-        guard let p = UInt16(s), p >= 1 else { return nil }  // UInt16 rejects >65535; guard rejects 0
+        // ASCII digits only: UInt16("+22") parses to 22 and UInt16 accepts other
+        // sign/format oddities, so require the text to read exactly as a number.
+        guard !s.isEmpty, s.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let p = UInt16(s), p >= 1 else { return nil }  // UInt16 rejects >65535; guard rejects 0
         return p
     }
 }

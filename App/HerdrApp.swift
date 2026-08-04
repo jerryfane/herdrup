@@ -302,7 +302,10 @@ struct ConnectView: View {
                         onConnect(SSHCredentials(
                             host: ep.host, port: ep.port,
                             username: trimmedUser,
-                            privateKeyPEM: keyPEM, remoteSocketPath: ""))
+                            // Gated on trimmedKey, so send trimmedKey — a trailing
+                            // space/CR otherwise enables Connect then throws
+                            // InvalidOpenSSHBoundary in Citadel's parser.
+                            privateKeyPEM: trimmedKey, remoteSocketPath: ""))
                     } label: {
                         Text("Connect")
                             .font(Typography.app(16, .semibold))
@@ -708,10 +711,12 @@ struct TerminalHomeView: View {
 }
 
 /// One agent's pane: a styled header, the folded monospace output, and the input
-/// surface (Approve/Reject when the agent is blocked, a control-key row, a reply
-/// box). Input goes through HerdrKit's InputRouter so intent-mode prompts submit
-/// while shell/TUI keys pass through literally — the "send intent, not keystrokes"
-/// contract, not a raw byte pipe.
+/// surface (a control-key row with a Return cap, and a reply box). Input goes
+/// through HerdrKit's InputRouter so intent-mode prompts submit while shell/TUI
+/// keys pass through literally — the "send intent, not keystrokes" contract, not
+/// a raw byte pipe. Answering a blocked agent is by typing the choice + Return;
+/// there are deliberately no Approve/Reject buttons (a fixed 1/2 mapping cannot be
+/// verified against an agent-specific menu — structured menu actions are a follow-up).
 struct TerminalPaneView: View {
     let client: HerdrClient
     let paneID: String
@@ -993,8 +998,8 @@ struct MockTransport: HerdrTransport {
     """#
 
     /// A decoded blocked agent for the pane screenshot: status "blocked" groups
-    /// as NEEDS YOU, so the pane renders its status badge and Approve/Reject. No
-    /// composer field, so input falls to rawKeys — fine for a static shot.
+    /// as NEEDS YOU, so the pane renders its status badge. No composer field, so
+    /// input falls to rawKeys — fine for a static shot.
     static let demoPaneAgent: AgentInfo? = try? JSONDecoder().decode(
         AgentInfo.self,
         from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
