@@ -48,6 +48,14 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
+        # Export-compliance declaration for TestFlight/App Store. The app's only
+        # cryptography is standard SSH transport (swift-nio-ssh/Citadel) used for
+        # authentication + a secure channel — no proprietary or non-standard
+        # crypto — which qualifies for the exemption, so no annual self-
+        # classification is required. Set here so an archive upload does not stop
+        # to ask. (Owner asked to confirm; flip to true + self-classify if ever
+        # untrue.)
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -64,3 +72,12 @@ targets:
         # bundles it; this names the icon set inside it. Single 1024 artwork —
         # the mark survives to 48px, so iOS downscales it for every slot.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Distribution signing for the TestFlight/App Store archive lane. Team
+        # FXQ5Z9HHY6 (Jerry Fanelli), automatic signing — the Mac archive runs
+        # with `-allowProvisioningUpdates` + the App Store Connect API key, which
+        # creates/renews the Apple Distribution cert + App Store profile on demand.
+        # These are INERT for the buildbox's iphonesimulator build (the simulator
+        # is never code-signed), so the existing green sim build is unaffected;
+        # they take effect only for a device archive. See scripts/testflight.sh.
+        DEVELOPMENT_TEAM: FXQ5Z9HHY6
+        CODE_SIGN_STYLE: Automatic
