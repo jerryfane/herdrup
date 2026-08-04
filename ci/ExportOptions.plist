@@ -6,11 +6,12 @@
 
   method: "app-store-connect" is the Xcode 15.3+/16+/26 spelling (the buildbox runs
   Xcode 26 / SDK 26). On an older Xcode this must be "app-store".
-  destination: "export" produces a signed .ipa; the script uploads it as a separate,
-  explicitly-gated step so a first run can validate the archive before the App Store
-  Connect app record exists.
-  signingStyle: "automatic" pairs with `-allowProvisioningUpdates` + the API key, so
-  the Apple Distribution cert + App Store profile are created/renewed on demand.
+  destination: "export" produces a signed .ipa without uploading, so a first run can
+  validate the signing chain before the App Store Connect app record exists (the
+  upload variant is ci/ExportOptions-upload.plist, used only when TESTFLIGHT_UPLOAD=1).
+  signingStyle: "automatic" pairs with `-allowProvisioningUpdates` using the Mac's
+  signed-in Xcode account, so the Apple Distribution cert + App Store profile are
+  created/renewed on demand.
 -->
 <plist version="1.0">
 <dict>

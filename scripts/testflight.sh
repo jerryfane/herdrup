@@ -5,24 +5,22 @@
 # where the app is authored, so this script IS the archive lane, kept in-repo and
 # reviewable rather than hidden in Xcode UI. See docs/testflight-lane.md.
 #
-# SIGNING happens through the Mac's signed-in Xcode account (Apple ID). The archive
-# runs with `-allowProvisioningUpdates`, so Xcode creates/renews the Apple
-# Distribution certificate + App Store profile from that account session — this
-# does NOT require the App Store Connect API key to hold provisioning/cloud-signing
-# access (which an individual-account or non-Admin key may lack). The API key is
-# used ONLY for the upload leg.
+# SIGNING AND UPLOAD both go through the Mac's signed-in Xcode account (Apple ID).
+# `-allowProvisioningUpdates` creates/renews the Apple Distribution certificate +
+# App Store provisioning profile from that account session, and `destination:
+# upload` distributes through the same account. NO App Store Connect API key is used
+# or needed here — deliberately: passing an API key to `-exportArchive` makes it
+# perform distribution *signing*, not upload only, which would require the key to
+# hold cloud-managed-distribution/provisioning access an individual or non-Admin key
+# may lack. (For a fully-headless CI without an interactive account, see the
+# alternative in docs/testflight-lane.md: a manually-installed distribution cert +
+# profile plus an upload-only Transporter step with the API key.)
 #
 # Usage:
 #   scripts/testflight.sh                         # archive + export a signed .ipa (no upload)
+#   TESTFLIGHT_UPLOAD=1 scripts/testflight.sh     # ...and upload to TestFlight
 #
-#   TESTFLIGHT_UPLOAD=1 \
-#   ASC_KEY_ID=4X6YN5S8US \
-#   ASC_ISSUER_ID=<issuer-uuid> \
-#   ASC_KEY_PATH=/path/to/AuthKey_4X6YN5S8US.p8 \
-#   scripts/testflight.sh                         # ...and upload to TestFlight
-#
-# Upload requires the App Store Connect app record for com.jerryfane.herdr to exist
-# and the API key to have upload permission (App Manager or Admin).
+# Upload requires the App Store Connect app record for com.jerryfane.herdr to exist.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -40,15 +38,6 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
 
 command -v xcodegen >/dev/null || { echo "error: xcodegen not found (brew install xcodegen)" >&2; exit 1; }
 
-# Upload credentials are needed ONLY for the upload leg; a plain archive+export is
-# a self-contained signing dry-run that needs no API key.
-if [ "$UPLOAD" = "1" ]; then
-  : "${ASC_KEY_ID:?upload needs ASC_KEY_ID, the App Store Connect key id (e.g. 4X6YN5S8US)}"
-  : "${ASC_ISSUER_ID:?upload needs ASC_ISSUER_ID, the App Store Connect issuer uuid}"
-  : "${ASC_KEY_PATH:?upload needs ASC_KEY_PATH, the path to AuthKey_<key-id>.p8}"
-  [ -f "$ASC_KEY_PATH" ] || { echo "error: ASC_KEY_PATH not found: $ASC_KEY_PATH" >&2; exit 1; }
-fi
-
 echo "==> xcodegen generate"
 xcodegen generate
 
@@ -63,17 +52,12 @@ xcodebuild archive \
   -allowProvisioningUpdates
 
 if [ "$UPLOAD" = "1" ]; then
-  echo "==> export + upload to App Store Connect / TestFlight"
-  # destination: upload signs and uploads in one step (no deprecated altool). The
-  # API key authenticates the upload only.
+  echo "==> export + upload via the signed-in Xcode account"
   xcodebuild -exportArchive \
     -archivePath "$ARCHIVE" \
     -exportOptionsPlist ci/ExportOptions-upload.plist \
     -exportPath "$EXPORT_DIR" \
-    -allowProvisioningUpdates \
-    -authenticationKeyPath "$ASC_KEY_PATH" \
-    -authenticationKeyID "$ASC_KEY_ID" \
-    -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+    -allowProvisioningUpdates
   echo "==> uploaded (build $BUILD_NUMBER). It appears in TestFlight after Apple finishes processing."
 else
   echo "==> export signed .ipa (no upload)"
@@ -85,6 +69,6 @@ else
   IPA="$(ls "$EXPORT_DIR"/*.ipa 2>/dev/null | head -1 || true)"
   [ -n "$IPA" ] || { echo "error: no .ipa produced in $EXPORT_DIR" >&2; exit 1; }
   echo "==> archived + exported: $IPA (build $BUILD_NUMBER)"
-  echo "    Set TESTFLIGHT_UPLOAD=1 (+ ASC_* env) to upload. Upload needs the App"
-  echo "    Store Connect app record for com.jerryfane.herdr and an upload-capable key."
+  echo "    Set TESTFLIGHT_UPLOAD=1 to upload. Upload needs the App Store Connect"
+  echo "    app record for com.jerryfane.herdr."
 fi

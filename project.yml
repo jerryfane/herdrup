@@ -73,8 +73,8 @@ targets:
         # the mark survives to 48px, so iOS downscales it for every slot.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Distribution signing for the TestFlight/App Store archive lane. Team
-        # FXQ5Z9HHY6 (Jerry Fanelli), automatic signing — the Mac archive runs
-        # with `-allowProvisioningUpdates` + the App Store Connect API key, which
+        # FXQ5Z9HHY6 (Jerry Fanelli), automatic signing — the Mac archive runs with
+        # `-allowProvisioningUpdates` using the Mac's signed-in Xcode account, which
         # creates/renews the Apple Distribution cert + App Store profile on demand.
         # These are INERT for the buildbox's iphonesimulator build (the simulator
         # is never code-signed), so the existing green sim build is unaffected;
