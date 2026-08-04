@@ -415,7 +415,10 @@ struct ConnectView: View {
 /// footer says so.
 struct NewAgentView: View {
     let client: HerdrClient
-    let onStarted: () -> Void
+    /// Called after the agent is spawned, with the new pane id, the agent's
+    /// (normalized) name, and the trimmed task. The caller opens that pane with the
+    /// task pre-filled — the task is NOT sent here (see `start()`).
+    let onStarted: (_ paneID: String, _ name: String, _ task: String) -> Void
     let onCancel: () -> Void
 
     @State private var folder: String
@@ -423,13 +426,12 @@ struct NewAgentView: View {
     @State private var task: String
     @State private var starting = false
     @State private var errorMessage: String?
-    /// Set when the agent DID start but the task didn't land — the agent is live,
-    /// so we must not clean up or let a blind retry duplicate it.
-    @State private var partialSpawn = false
 
     private static let kinds = ["claude", "codex", "gemini"]
 
-    init(client: HerdrClient, onStarted: @escaping () -> Void = {}, onCancel: @escaping () -> Void = {},
+    init(client: HerdrClient,
+         onStarted: @escaping (_ paneID: String, _ name: String, _ task: String) -> Void = { _, _, _ in },
+         onCancel: @escaping () -> Void = {},
          initialFolder: String = "", initialKind: String = "claude", initialTask: String = "") {
         self.client = client
         self.onStarted = onStarted
@@ -447,7 +449,7 @@ struct NewAgentView: View {
     private var folderValid: Bool { trimmedFolder.isEmpty || trimmedFolder.hasPrefix("/") }
     private var canStart: Bool {
         !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && folderValid && !starting && !partialSpawn
+            && folderValid && !starting
     }
     /// The agent's name — the folder's basename, else the kind. herdr validates
     /// the name; a duplicate surfaces as a start error rather than being guessed.
@@ -561,30 +563,36 @@ struct NewAgentView: View {
     }
 
     private var startButton: some View {
-        // After a partial spawn the agent already exists, so the primary action
-        // becomes "go see it", not "Start again" (which would duplicate it).
-        let enabled = partialSpawn ? true : canStart
-        return Button { partialSpawn ? onStarted() : start() } label: {
+        Button { start() } label: {
             HStack(spacing: 8) {
                 if starting { ProgressView().tint(.white) }
-                Text(partialSpawn ? "Go to the agent" : (starting ? "Starting…" : "Start"))
+                Text(starting ? "Starting…" : "Start")
                     .font(Typography.app(16, .semibold))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(enabled ? Palette.brand : Palette.surface)
-            .foregroundStyle(enabled ? .white : Palette.textFaint)
+            .background(canStart ? Palette.brand : Palette.surface)
+            .foregroundStyle(canStart ? .white : Palette.textFaint)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
-        .disabled(!enabled)
+        .disabled(!canStart)
         .padding(.horizontal, 16).padding(.top, 16)
     }
 
-    /// The spawn: split a pane in the folder, start the agent, WAIT for it to be
-    /// ready, then send the task. Every failure is surfaced honestly, and the
-    /// partial state is handled by WHERE it failed:
-    ///   - before the agent starts → clean up the orphan pane (safe), retry OK.
-    ///   - after the agent starts   → the agent is LIVE; do NOT clean up or retry
-    ///     (would kill it / duplicate the name) — disclose and send them to it.
+    /// The spawn: split a pane in the folder, then start the agent. It does NOT
+    /// send the task here. `agent.start` only initiates launch; `agent.prompt`
+    /// refuses (agent_not_ready) for a variable, sometimes-long window until the
+    /// agent registers as a promptable known agent with a composer, and there is no
+    /// reliable client-pollable readiness flag to wait on (interactive_ready is not
+    /// populated on this path). So rather than auto-deliver into a not-ready agent
+    /// (or spin on a poll that never flips), we hand the pane + task back to the
+    /// caller, which opens the agent's terminal with the task PRE-FILLED. The
+    /// terminal's input router sends it as a proper prompt the moment the pane
+    /// reports a composer (InputMode.intent) — one deliberate tap, no lost task.
+    ///
+    /// Failure is surfaced honestly by WHERE it failed:
+    ///   - before the agent starts (split failed) → nothing to clean up.
+    ///   - after the split but the start failed → the pane is an orphan with no
+    ///     live agent, so close it (safe) and a retry starts clean.
     private func start() {
         guard !starting else { return }   // re-entry invariant, not just Button.disabled
         starting = true
@@ -596,25 +604,15 @@ struct NewAgentView: View {
         Task {
             defer { starting = false }
             var createdPane: String?
-            var agentStarted = false
             do {
                 let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd)
                 createdPane = paneID
                 _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
-                agentStarted = true
-                // agent.start only INITIATES launch; prompting before ready returns
-                // agent_not_ready, so wait for the composer first.
-                try await client.waitForReady(pane: paneID)
-                if !taskText.isEmpty {
-                    try await client.prompt(pane: paneID, text: taskText)
-                }
-                onStarted()
+                onStarted(paneID, name, taskText)
             } catch {
-                if agentStarted {
-                    partialSpawn = true
-                    errorMessage = "'\(name)' started, but the task didn't send (\(error)). "
-                        + "Open it from the list to send the task."
-                } else if let pane = createdPane {
+                if let pane = createdPane {
+                    // startAgent failed after the split left an orphan pane; close
+                    // it so a retry does not accumulate empty panes.
                     try? await client.closePane(paneID: pane)
                     errorMessage = "couldn't start the agent: \(error)"
                 } else {
@@ -651,6 +649,20 @@ struct TerminalHomeView: View {
         case settings, newAgent
         var id: Int { rawValue }
     }
+
+    /// A freshly-spawned pane to open with its task pre-filled. Held in
+    /// `pendingOpen` while the New-agent cover animates away, then applied in the
+    /// cover's onDismiss (→ `openedPane`) so the push happens AFTER the cover is
+    /// gone — presenting a navigation push and dismissing a full-screen cover in
+    /// the same frame is the historically fragile case.
+    private struct PaneToOpen: Identifiable, Hashable {
+        let paneID: String
+        let name: String
+        let task: String
+        var id: String { paneID }
+    }
+    @State private var pendingOpen: PaneToOpen?
+    @State private var openedPane: PaneToOpen?
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -689,10 +701,20 @@ struct TerminalHomeView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
+            // Programmatic push for a just-spawned agent's pane, opened with its
+            // task pre-filled. Popping back reloads the list so the new agent shows.
+            .navigationDestination(item: $openedPane) { pane in
+                TerminalPaneView(client: client, paneID: pane.paneID, title: pane.name,
+                                 agent: nil, initialReply: pane.task)
+                    .onDisappear { Task { await load() } }
+            }
         }
         // ONE item-based cover, not two stacked isPresented covers (stacked
         // presentation modifiers on a single view are historically fragile).
-        .fullScreenCover(item: $activeCover) { cover in
+        // onDismiss applies a queued open AFTER the cover is fully gone.
+        .fullScreenCover(item: $activeCover, onDismiss: {
+            if let pane = pendingOpen { pendingOpen = nil; openedPane = pane }
+        }) { cover in
             switch cover {
             case .settings:
                 SettingsView(
@@ -707,7 +729,12 @@ struct TerminalHomeView: View {
             case .newAgent:
                 NewAgentView(
                     client: client,
-                    onStarted: { activeCover = nil; Task { await load() } },
+                    // Spawn done: queue the new pane, then dismiss the cover; the
+                    // cover's onDismiss opens the pane with the task pre-filled.
+                    onStarted: { paneID, name, task in
+                        pendingOpen = PaneToOpen(paneID: paneID, name: name, task: task)
+                        activeCover = nil
+                    },
                     onCancel: { activeCover = nil })
             }
         }
@@ -985,20 +1012,36 @@ struct TerminalPaneView: View {
     let client: HerdrClient
     let paneID: String
     let title: String
-    /// The agent this pane hosts, when known (drives identity, status badge, and
-    /// input mode). Nil when opened without list context — input falls back to
-    /// rawKeys, the safe reading.
-    var agent: AgentInfo? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var rawText = ""
     @State private var lines: [String] = []
     @State private var error: String?
-    @State private var reply = ""
+    @State private var reply: String
+    /// The agent this pane hosts (drives identity, status badge, and input mode).
+    /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
+    /// every refresh so status + input mode track the LIVE pane instead of freezing
+    /// at open time. Nil until the server names an agent for this pane — input
+    /// stays rawKeys (the safe reading) until then. This live re-resolution is what
+    /// lets a freshly-spawned agent flip rawKeys→intent once its composer appears,
+    /// so a pre-filled task sends as a proper prompt.
+    @State private var agent: AgentInfo?
     @State private var sending = false
     @State private var actionNote: String?
 
     private let router = InputRouter()
+
+    /// `initialReply` pre-fills the reply box — used when opening a freshly-spawned
+    /// agent's pane with the new-agent task ready to send. The agent is not
+    /// promptable at spawn, so the task waits here for one deliberate tap once the
+    /// composer is up, rather than being auto-delivered into a not-ready agent.
+    init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil, initialReply: String = "") {
+        self.client = client
+        self.paneID = paneID
+        self.title = title
+        _agent = State(initialValue: agent)
+        _reply = State(initialValue: initialReply)
+    }
 
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
     /// "kind · folder" for the header, e.g. "claude · herdr-ios".
@@ -1190,6 +1233,15 @@ struct TerminalPaneView: View {
             error = nil
         } catch {
             self.error = "\(error)"
+        }
+        // Re-resolve this pane's agent so the status badge and input mode track the
+        // live pane — a fresh spawn flips rawKeys→intent HERE once its composer is
+        // up. A failed lookup or an absent pane KEEPS the prior value: never
+        // downgrade a known agent to nil, which would drop intent mode back to
+        // rawKeys. Kept separate from the read above so a list hiccup does not blank
+        // the pane text we just read.
+        if let live = try? await client.agentList().first(where: { $0.paneID == paneID }) {
+            agent = live
         }
     }
 }
