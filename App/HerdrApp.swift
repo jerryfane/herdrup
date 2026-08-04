@@ -218,6 +218,10 @@ struct RootView: View {
             }
         case .settings:
             SettingsView(host: "mac.tail-scale.ts.net")
+        case .newAgent:
+            NewAgentView(client: mockClient,
+                         initialFolder: "/root/herdr-ios", initialKind: "codex",
+                         initialTask: "Fix the failing schema artifact test and push")
         }
     }
     #endif
@@ -405,6 +409,222 @@ struct ConnectView: View {
     }
 }
 
+/// New agent (screen 04): pick a folder, an agent kind, and a task, then spawn a
+/// real agent. HIGH-STAKES — "Start" splits a pane, launches the agent, and sends
+/// the task (splitPane → startAgent → prompt), which begins spending tokens. The
+/// footer says so.
+struct NewAgentView: View {
+    let client: HerdrClient
+    let onStarted: () -> Void
+    let onCancel: () -> Void
+
+    @State private var folder: String
+    @State private var kind: String
+    @State private var task: String
+    @State private var starting = false
+    @State private var errorMessage: String?
+    /// Set when the agent DID start but the task didn't land — the agent is live,
+    /// so we must not clean up or let a blind retry duplicate it.
+    @State private var partialSpawn = false
+
+    private static let kinds = ["claude", "codex", "gemini"]
+
+    init(client: HerdrClient, onStarted: @escaping () -> Void = {}, onCancel: @escaping () -> Void = {},
+         initialFolder: String = "", initialKind: String = "claude", initialTask: String = "") {
+        self.client = client
+        self.onStarted = onStarted
+        self.onCancel = onCancel
+        _folder = State(initialValue: initialFolder)
+        _kind = State(initialValue: initialKind)
+        _task = State(initialValue: initialTask)
+    }
+
+    private var trimmedFolder: String { folder.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// A folder must be ABSOLUTE (or blank = follow the focused pane). The phone
+    /// cannot expand "~" or a relative path — the remote $HOME is unknown here —
+    /// and the server would silently drop a non-directory and spawn in $HOME. So
+    /// reject anything non-absolute at the form rather than run in the wrong place.
+    private var folderValid: Bool { trimmedFolder.isEmpty || trimmedFolder.hasPrefix("/") }
+    private var canStart: Bool {
+        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && folderValid && !starting && !partialSpawn
+    }
+    /// The agent's name — the folder's basename, else the kind. herdr validates
+    /// the name; a duplicate surfaces as a start error rather than being guessed.
+    private var derivedName: String {
+        let f = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !f.isEmpty {
+            let base = URL(fileURLWithPath: f).lastPathComponent
+            if !base.isEmpty && base != "/" { return base }
+        }
+        return kind
+    }
+
+    var body: some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        sectionLabel("WHERE")
+                        folderRow
+                        sectionLabel("WHO")
+                        agentRow
+                        sectionLabel("WHAT")
+                        taskEditor
+                        if let errorMessage {
+                            Text(errorMessage).font(Typography.machine(12)).foregroundStyle(Palette.died)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16).padding(.top, 10)
+                        }
+                        startButton
+                        Text("Starts a real agent and begins spending tokens.")
+                            .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                            .frame(maxWidth: .infinity).multilineTextAlignment(.center)
+                            .padding(.horizontal, 24).padding(.top, 10)
+                    }
+                    .padding(.bottom, 16)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
+                .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
+            Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
+        }
+        .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
+    }
+
+    private var folderRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Folder").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                TextField("/root/project", text: $folder)
+                    .multilineTextAlignment(.trailing)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .font(Typography.machine(15)).foregroundStyle(Palette.text)
+            }
+            .rowShell()
+            if !folderValid {
+                Text("use an absolute path (starts with /), or leave blank to use the current folder")
+                    .font(Typography.app(12)).foregroundStyle(Palette.died).padding(.horizontal, 4)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var agentRow: some View {
+        HStack {
+            Text("Agent").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            Spacer()
+            Menu {
+                ForEach(Self.kinds, id: \.self) { k in Button(k) { kind = k } }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(kind).font(Typography.machine(15)).foregroundStyle(Palette.text)
+                    Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                }
+            }
+        }
+        .rowShell()
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    private var taskEditor: some View {
+        TextEditor(text: $task)
+            .font(Typography.app(15)).foregroundStyle(Palette.text)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 90)
+            .padding(8)
+            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))   // filled card, per the mockup
+            .overlay(alignment: .topLeading) {
+                if task.isEmpty {
+                    Text("What should it do?").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
+                        .padding(.horizontal, 13).padding(.top, 16).allowsHitTesting(false)
+                }
+            }
+            .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    private var startButton: some View {
+        // After a partial spawn the agent already exists, so the primary action
+        // becomes "go see it", not "Start again" (which would duplicate it).
+        let enabled = partialSpawn ? true : canStart
+        return Button { partialSpawn ? onStarted() : start() } label: {
+            HStack(spacing: 8) {
+                if starting { ProgressView().tint(.white) }
+                Text(partialSpawn ? "Go to the agent" : (starting ? "Starting…" : "Start"))
+                    .font(Typography.app(16, .semibold))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 15)
+            .background(enabled ? Palette.brand : Palette.surface)
+            .foregroundStyle(enabled ? .white : Palette.textFaint)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(!enabled)
+        .padding(.horizontal, 16).padding(.top, 16)
+    }
+
+    /// The spawn: split a pane in the folder, start the agent, WAIT for it to be
+    /// ready, then send the task. Every failure is surfaced honestly, and the
+    /// partial state is handled by WHERE it failed:
+    ///   - before the agent starts → clean up the orphan pane (safe), retry OK.
+    ///   - after the agent starts   → the agent is LIVE; do NOT clean up or retry
+    ///     (would kill it / duplicate the name) — disclose and send them to it.
+    private func start() {
+        guard !starting else { return }   // re-entry invariant, not just Button.disabled
+        starting = true
+        errorMessage = nil
+        let cwd = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskText = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = AgentName.normalize(derivedName)   // to the server grammar BEFORE splitting
+        let chosenKind = kind
+        Task {
+            defer { starting = false }
+            var createdPane: String?
+            var agentStarted = false
+            do {
+                let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd)
+                createdPane = paneID
+                _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
+                agentStarted = true
+                // agent.start only INITIATES launch; prompting before ready returns
+                // agent_not_ready, so wait for the composer first.
+                try await client.waitForReady(pane: paneID)
+                if !taskText.isEmpty {
+                    try await client.prompt(pane: paneID, text: taskText)
+                }
+                onStarted()
+            } catch {
+                if agentStarted {
+                    partialSpawn = true
+                    errorMessage = "'\(name)' started, but the task didn't send (\(error)). "
+                        + "Open it from the list to send the task."
+                } else if let pane = createdPane {
+                    try? await client.closePane(paneID: pane)
+                    errorMessage = "couldn't start the agent: \(error)"
+                } else {
+                    errorMessage = "couldn't create the pane: \(error)"
+                }
+            }
+        }
+    }
+}
+
 /// Lists the agents on the host; tapping one opens its pane. A failed load is
 /// recoverable (retry, or disconnect back to the connect form).
 struct TerminalHomeView: View {
@@ -425,7 +645,12 @@ struct TerminalHomeView: View {
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
     @State private var search = ""
-    @State private var showingSettings = false
+    @State private var activeCover: ActiveCover?
+
+    private enum ActiveCover: Int, Identifiable {
+        case settings, newAgent
+        var id: Int { rawValue }
+    }
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -465,16 +690,26 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
         }
-        .fullScreenCover(isPresented: $showingSettings) {
-            SettingsView(
-                host: host,
-                connected: error == nil && !loading,
-                // Withhold reconnect during a host-key rejection — reconnecting
-                // then would first-contact-trust the next key (same gate as the
-                // recovery screen's withheld retry).
-                canReconnect: rejectedFingerprint == nil,
-                onReconnect: { showingSettings = false; onReconnect() },
-                onClose: { showingSettings = false })
+        // ONE item-based cover, not two stacked isPresented covers (stacked
+        // presentation modifiers on a single view are historically fragile).
+        .fullScreenCover(item: $activeCover) { cover in
+            switch cover {
+            case .settings:
+                SettingsView(
+                    host: host,
+                    connected: error == nil && !loading,
+                    // Withhold reconnect during a host-key rejection — reconnecting
+                    // then would first-contact-trust the next key (same gate as the
+                    // recovery screen's withheld retry).
+                    canReconnect: rejectedFingerprint == nil,
+                    onReconnect: { activeCover = nil; onReconnect() },
+                    onClose: { activeCover = nil })
+            case .newAgent:
+                NewAgentView(
+                    client: client,
+                    onStarted: { activeCover = nil; Task { await load() } },
+                    onCancel: { activeCover = nil })
+            }
         }
     }
 
@@ -494,9 +729,7 @@ struct TerminalHomeView: View {
                     .frame(height: 15)
             }
             Spacer()
-            // The new-agent screen (04) does not exist yet — a visible but inert
-            // affordance, not a live control that does nothing.
-            circleButton("plus") { }.disabled(true).opacity(0.35)
+            circleButton("plus") { activeCover = .newAgent }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
@@ -536,7 +769,7 @@ struct TerminalHomeView: View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
             tabItem("terminal", "Terminal", active: false)
-            Button { showingSettings = true } label: {
+            Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
             .buttonStyle(.plain)
@@ -1126,7 +1359,7 @@ private extension View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 enum ScreenshotMock {
-    case list, pane, settings
+    case list, pane, settings, newAgent
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -1135,6 +1368,7 @@ enum ScreenshotMock {
         switch env {
         case "pane": return .pane
         case "settings": return .settings
+        case "newagent": return .newAgent
         default: return .list
         }
     }
