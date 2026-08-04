@@ -26,6 +26,11 @@ enum Palette {
     static let textDim = Color(hex: 0x99A0BC)      // secondary
     static let textFaint = Color(hex: 0x7C83A6)    // tertiary / micro-labels (≥4.5:1 on ground)
 
+    // The app's ONE interactive/brand colour — violet. Not a status meaning; it
+    // marks the primary action (Connect CTA) and the active tab, matching the
+    // mockups. Distinct from the working blue so colour-as-meaning stays intact.
+    static let brand = Color(hex: 0x7A6FF0)
+
     // Status = meaning. The ONLY palette that carries colour.
     static let waiting = Color(hex: 0xE9A63C)      // amber — an agent is asking you
     static let died = Color(hex: 0xE2584E)         // red — exited / crashed

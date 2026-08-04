@@ -256,91 +256,137 @@ struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
 
     @State private var host = ""
-    @State private var port = "22"
     @State private var username = ""
     @State private var keyPEM = ""
+    @State private var showingKeySheet = false
 
-    /// A valid SSH port, or nil — invalid input is rejected here rather than
-    /// silently coerced to 22.
-    private var portValue: UInt16? {
-        UInt16(port.trimmingCharacters(in: .whitespaces)).flatMap { $0 >= 1 ? $0 : nil }
-    }
-    private var portInvalid: Bool { !port.isEmpty && portValue == nil }
+    // Host accepts "host" or "host:port" (and "[ipv6]:port"); the port lives in
+    // the one field so the form stays the three rows the mockup shows.
+    private var hostPort: (host: String, port: UInt16) { Self.parseHostPort(host) }
     private var canConnect: Bool {
-        !host.isEmpty && !username.isEmpty && !keyPEM.isEmpty && portValue != nil
+        !hostPort.host.isEmpty && !username.trimmingCharacters(in: .whitespaces).isEmpty && !keyPEM.isEmpty
     }
 
     var body: some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
                     Text("herdr")
-                        .font(.system(size: 34, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Palette.text)   // wordmark is monochrome; blue means "working"
-                    Text("connect to a host")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(Palette.textDim)
+                        .font(Typography.app(24, .bold))
+                        .foregroundStyle(Palette.text)
+                        .padding(.bottom, 4)
 
-                    field("host", text: $host)
-                    field("port", text: $port)
-                    if portInvalid {
-                        Text("invalid port (1–65535)")
-                            .font(.caption).foregroundStyle(.red)
-                    }
-                    field("user", text: $username)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("private key (ed25519 PEM)")
-                            .font(.caption).foregroundStyle(Palette.textDim)
-                        TextEditor(text: $keyPEM)
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(Palette.text)
-                            .scrollContentBackground(.hidden)
-                            .frame(height: 130)
-                            .padding(8)
-                            .background(Palette.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    // The three settings-style rows: label left, value right.
+                    VStack(spacing: 10) {
+                        fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
+                        fieldRow("User", text: $username, placeholder: "jerry")
+                        keyRow
                     }
 
                     Button {
-                        guard let port = portValue else { return }
-                        let credentials = SSHCredentials(
-                            host: host.trimmingCharacters(in: .whitespacesAndNewlines),
-                            port: port,
+                        let hp = hostPort
+                        onConnect(SSHCredentials(
+                            host: hp.host, port: hp.port,
                             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-                            privateKeyPEM: keyPEM,
-                            remoteSocketPath: "")
-                        onConnect(credentials)
+                            privateKeyPEM: keyPEM, remoteSocketPath: ""))
                     } label: {
-                        Text("connect")
-                            .font(.system(.body, design: .monospaced).weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(canConnect ? Palette.cardRaised : Palette.surface)
-                            .foregroundStyle(canConnect ? Palette.text : Palette.textDim)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        Text("Connect")
+                            .font(Typography.app(16, .semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 15)
+                            .background(canConnect ? Palette.brand : Palette.surface)
+                            .foregroundStyle(canConnect ? .white : Palette.textFaint)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .disabled(!canConnect)
+                    .padding(.top, 6)
+
+                    Text("Connects over your Tailscale network. Nothing is exposed publicly.")
+                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                        .padding(.top, 2)
                 }
-                .padding(24)
+                .padding(22)
             }
+        }
+        .sheet(isPresented: $showingKeySheet) { keySheet }
+    }
+
+    /// A row with the label on the left and a right-aligned monospace value.
+    private func fieldRow(_ label: String, text: Binding<String>, placeholder: String) -> some View {
+        HStack {
+            Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            TextField(placeholder, text: text)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// The key row NEVER renders the key itself — only whether one is loaded.
+    /// That is both the mockup ("id_ed25519 ✓") and the security rule: the
+    /// connect screen is screenshotted onto an open port, so the PEM must not be
+    /// on screen. Tapping opens a sheet to paste it.
+    private var keyRow: some View {
+        Button { showingKeySheet = true } label: {
+            HStack {
+                Text("Key").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                Spacer()
+                if keyPEM.isEmpty {
+                    Text("Add private key").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
+                } else {
+                    Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Palette.done)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var keySheet: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Paste your ed25519 private key (PEM). It is held only in memory and sent over the SSH connection — never shown again.")
+                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                    TextEditor(text: $keyPEM)
+                        .font(Typography.machine(13)).foregroundStyle(Palette.text)
+                        .scrollContentBackground(.hidden)
+                        .padding(10).background(Palette.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    if !keyPEM.isEmpty {
+                        Button("Clear key") { keyPEM = "" }
+                            .font(Typography.app(14)).foregroundStyle(Palette.died)
+                    }
+                    Spacer()
+                }
+                .padding(20)
+            }
+            .navigationTitle("Private key")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.brand)
+            } }
         }
     }
 
-    @ViewBuilder
-    private func field(_ label: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundStyle(Palette.textDim)
-            TextField("", text: text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(Palette.text)
-                .padding(10)
-                .background(Palette.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+    /// "host" | "host:port" | "[ipv6]:port" → (host, port). Defaults to 22.
+    static func parseHostPort(_ raw: String) -> (host: String, port: UInt16) {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("["), let close = s.firstIndex(of: "]") {
+            let inner = String(s[s.index(after: s.startIndex)..<close])
+            let rest = s[s.index(after: close)...]
+            if rest.hasPrefix(":"), let p = UInt16(rest.dropFirst()), p >= 1 { return (inner, p) }
+            return (inner, 22)
         }
+        // Exactly one colon splits host:port; a bare IPv6 (many colons) stays whole.
+        let parts = s.split(separator: ":", omittingEmptySubsequences: false)
+        if parts.count == 2, let p = UInt16(parts[1]), p >= 1 { return (String(parts[0]), p) }
+        return (s, 22)
     }
 }
 
