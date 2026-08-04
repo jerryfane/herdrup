@@ -277,7 +277,7 @@ struct ConnectView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("herdr")
                         .font(.system(size: 34, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Palette.working)
+                        .foregroundStyle(Palette.text)   // wordmark is monochrome; blue means "working"
                     Text("connect to a host")
                         .font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(Palette.textDim)
@@ -317,8 +317,8 @@ struct ConnectView: View {
                             .font(.system(.body, design: .monospaced).weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(canConnect ? Palette.working : Palette.surface)
-                            .foregroundStyle(canConnect ? Palette.ground : Palette.textDim)
+                            .background(canConnect ? Palette.cardRaised : Palette.surface)
+                            .foregroundStyle(canConnect ? Palette.text : Palette.textDim)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                     .disabled(!canConnect)
@@ -411,21 +411,28 @@ struct TerminalHomeView: View {
             Spacer()
             VStack(spacing: 2) {
                 Text("Agents").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-                // The one number, and its restful inverse. Blocked count leads in
-                // amber; when the model says nothing is blocked AND nothing is
-                // uninterpretable, say so plainly.
-                if fullList.needsYouCount > 0 {
-                    Text("\(fullList.needsYouCount) need you")
-                        .font(Typography.machine(12)).foregroundStyle(Palette.waiting)
-                } else if fullList.isQuiet && !agents.isEmpty {
-                    Text("nothing needs you")
-                        .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
-                }
+                // The line is ALWAYS present (reserved height) so the title does
+                // not jump as it appears; its text is the one number or its
+                // restful inverse.
+                Text(headerSubtitle.text)
+                    .font(Typography.machine(12)).foregroundStyle(headerSubtitle.color)
+                    .frame(height: 15)
             }
             Spacer()
-            circleButton("plus") { }   // new-agent screen (04) is not built yet
+            // The new-agent screen (04) does not exist yet — a visible but inert
+            // affordance, not a live control that does nothing.
+            circleButton("plus") { }.disabled(true).opacity(0.35)
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+    }
+
+    /// The one number leads in amber; when the model reports nothing blocked AND
+    /// nothing uninterpretable, the quiet state says so. A space holds the line
+    /// while loading/empty so nothing above it moves.
+    private var headerSubtitle: (text: String, color: Color) {
+        if fullList.needsYouCount > 0 { return ("\(fullList.needsYouCount) need you", Palette.waiting) }
+        if fullList.isQuiet && !agents.isEmpty { return ("nothing needs you", Palette.textFaint) }
+        return (" ", Palette.textFaint)
     }
 
     private func circleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
@@ -476,17 +483,21 @@ struct TerminalHomeView: View {
     // MARK: list
 
     private var agentList: some View {
-        ScrollView {
-            searchField
-            if agents.isEmpty {
-                emptyLine("no agents")
-            } else if visibleSections.isEmpty {
-                // Agents exist but the search matched none — say so, rather than
-                // leave a blank scroll that reads as "no agents".
-                emptyLine("no matches")
-            } else {
-                ForEach(visibleSections, id: \.group) { section in
-                    sectionView(section.group, section.rows)
+        VStack(spacing: 0) {
+            searchField   // pinned above the scroll, as the mockup/Termius have it
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if agents.isEmpty {
+                        emptyLine("no agents")
+                    } else if visibleSections.isEmpty {
+                        // Agents exist but the search matched none — say so, rather
+                        // than leave a blank scroll that reads as "no agents".
+                        emptyLine("no matches")
+                    } else {
+                        ForEach(visibleSections, id: \.group) { section in
+                            sectionView(section.group, section.rows)
+                        }
+                    }
                 }
             }
         }
@@ -498,7 +509,9 @@ struct TerminalHomeView: View {
     }
 
     private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
-        let isCollapsed = collapsed.contains(group)
+        // An active search overrides collapse — a match inside IDLE must not stay
+        // hidden behind a shut section the user did not open.
+        let isCollapsed = search.isEmpty && collapsed.contains(group)
         return VStack(alignment: .leading, spacing: 6) {
             Button {
                 if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
@@ -539,7 +552,7 @@ struct TerminalHomeView: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
-                Text(row.info.terminalTitleStripped ?? row.info.paneID)
+                Text(subtitle(row.info))
                     .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
             }
             Spacer(minLength: 8)
@@ -551,12 +564,35 @@ struct TerminalHomeView: View {
         .padding(.horizontal, 16).padding(.vertical, 4)
     }
 
-    @ViewBuilder
+    /// "folder · activity": folder is the last path component of `cwd`, activity
+    /// is the stripped terminal title. Either may be missing; the pane id is the
+    /// last resort so a row is never subtitle-less.
+    private func subtitle(_ info: AgentInfo) -> String {
+        let folder = info.cwd
+            .map { URL(fileURLWithPath: $0).lastPathComponent }
+            .flatMap { $0.isEmpty || $0 == "/" ? nil : $0 }
+        switch (folder, info.terminalTitleStripped) {
+        case let (f?, a?): return "\(f) · \(a)"
+        case let (f?, nil): return f
+        case let (nil, a?): return a
+        case (nil, nil): return info.paneID
+        }
+    }
+
     private func statusBadge(_ group: AgentGroup) -> some View {
+        // The status is colour+shape; name it for VoiceOver too.
+        badgeContent(group).accessibilityLabel(Text(group.label))
+    }
+
+    @ViewBuilder
+    private func badgeContent(_ group: AgentGroup) -> some View {
         switch group {
         case .needsYou: badgeCircle("exclamationmark", group.color)
         case .stopped: badgeCircle("xmark", group.color)
         case .unrecognised: badgeCircle("questionmark", group.color)
+        // "now" is a non-temporal "active" marker, not an elapsed timer — there
+        // is no start timestamp in AgentInfo to count from, so it does not claim
+        // a duration it cannot know.
         case .working: Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
         case .idle:
             // Not bare, not loud: a small hollow dot so an expanded idle row still
@@ -596,9 +632,13 @@ struct TerminalHomeView: View {
                         .font(Typography.app(12)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
                 }
             }
+            // Plain retry ONLY for non-host-key errors. After a host-key
+            // rejection a bare reconnect could first-contact-trust whatever key
+            // next appears (bypassing the fingerprint the user must verify), so
+            // the only routes then are "trust this key" above or disconnect.
             if rejectedFingerprint == nil {
                 Button("retry") { Task { await load() } }
-                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.working)
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
             }
         }
         .padding(24)
@@ -673,7 +713,7 @@ struct TerminalPaneView: View {
             Button {
                 Task { await refresh() }
             } label: {
-                Image(systemName: "arrow.clockwise").foregroundStyle(Palette.working)
+                Image(systemName: "arrow.clockwise").foregroundStyle(Palette.textDim)
             }
         }
     }
@@ -747,14 +787,14 @@ struct MockTransport: HerdrTransport {
     // model derives it. done folds into idle.
     static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[
-      {"pane_id":"w1:p1","name":"codex","agent":"codex","agent_status":"blocked","terminal_title_stripped":"herdr-ios · asking to run tests"},
-      {"pane_id":"w1:p2","name":"claude","agent":"claude","agent_status":"blocked","terminal_title_stripped":"vetrina · overwrite config.ts?"},
-      {"pane_id":"w2:p1","name":"codex","agent":"codex","agent_status":"idle","terminal_title_stripped":"trend-scout · exited, code 1"},
-      {"pane_id":"w2:p2","name":"claude","agent":"claude","agent_status":"working","terminal_title_stripped":"herdr · editing src/acp.rs"},
-      {"pane_id":"w3:p1","name":"claude","agent":"claude","agent_status":"idle","terminal_title_stripped":"clientloop · amigo-poc scaffold"},
-      {"pane_id":"w3:p2","name":"codex","agent":"codex","agent_status":"idle","terminal_title_stripped":"aste-screener · apify-harvest"},
-      {"pane_id":"w4:p1","name":"gemini","agent":"gemini","agent_status":"idle","terminal_title_stripped":"discovery · redaction-pass v3"},
-      {"pane_id":"w4:p2","name":"claude","agent":"claude","agent_status":"done","terminal_title_stripped":"bank-qa · deal-assistant rag"}
+      {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"},
+      {"pane_id":"w1:p2","name":"vetrina","agent":"codex","agent_status":"blocked","cwd":"/root/vetrina","terminal_title_stripped":"overwrite config.ts?"},
+      {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","cwd":"/root/trend-scout","terminal_title_stripped":"exited, code 1"},
+      {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs"},
+      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold"},
+      {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
+      {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
+      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"}
     ]}}
     """#
 
@@ -766,7 +806,7 @@ struct MockTransport: HerdrTransport {
     ]
 
     static let agentRead = #"""
-    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach codex\n\n> may I run `just test` on herdr-ios?\n  177 tests, ~30s, no network\n\n  [y] allow   [n] deny   [a] always\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
+    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> may I run `just test` on herdr-ios?\n  177 tests, ~30s, no network\n\n  [y] allow   [n] deny   [a] always\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
 }
 #endif
