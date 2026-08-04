@@ -210,7 +210,8 @@ struct RootView: View {
                              livePaneIDs: MockTransport.demoLivePaneIDs)
         case .pane:
             NavigationStack {
-                TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis")
+                TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis",
+                                 agent: MockTransport.demoPaneAgent)
             }
         }
     }
@@ -256,90 +257,136 @@ struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
 
     @State private var host = ""
-    @State private var port = "22"
     @State private var username = ""
     @State private var keyPEM = ""
+    @State private var showingKeySheet = false
 
-    /// A valid SSH port, or nil — invalid input is rejected here rather than
-    /// silently coerced to 22.
-    private var portValue: UInt16? {
-        UInt16(port.trimmingCharacters(in: .whitespaces)).flatMap { $0 >= 1 ? $0 : nil }
+    // Host accepts "host" or "host:port" (and "[ipv6]:port"); the port lives in
+    // the one field so the form stays the three rows the mockup shows. Parsing is
+    // HerdrKit's HostEndpoint (Linux-tested); an explicit bad port yields nil, so
+    // it is rejected here rather than silently connecting to :22.
+    private var endpoint: HostEndpoint? { HostEndpoint.parse(host) }
+    private var trimmedUser: String { username.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedKey: String { keyPEM.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var hostInvalid: Bool {
+        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && endpoint == nil
     }
-    private var portInvalid: Bool { !port.isEmpty && portValue == nil }
     private var canConnect: Bool {
-        !host.isEmpty && !username.isEmpty && !keyPEM.isEmpty && portValue != nil
+        endpoint != nil && !trimmedUser.isEmpty && !trimmedKey.isEmpty
     }
 
     var body: some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
                     Text("herdr")
-                        .font(.system(size: 34, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Palette.text)   // wordmark is monochrome; blue means "working"
-                    Text("connect to a host")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(Palette.textDim)
+                        .font(Typography.app(24, .bold))
+                        .foregroundStyle(Palette.text)
+                        .padding(.bottom, 4)
 
-                    field("host", text: $host)
-                    field("port", text: $port)
-                    if portInvalid {
-                        Text("invalid port (1–65535)")
-                            .font(.caption).foregroundStyle(.red)
-                    }
-                    field("user", text: $username)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("private key (ed25519 PEM)")
-                            .font(.caption).foregroundStyle(Palette.textDim)
-                        TextEditor(text: $keyPEM)
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(Palette.text)
-                            .scrollContentBackground(.hidden)
-                            .frame(height: 130)
-                            .padding(8)
-                            .background(Palette.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    // The three settings-style rows: label left, value right.
+                    VStack(spacing: 10) {
+                        fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
+                        if hostInvalid {
+                            Text("check host or host:port")
+                                .font(Typography.app(12)).foregroundStyle(Palette.died)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+                        }
+                        fieldRow("User", text: $username, placeholder: "jerry")
+                        keyRow
                     }
 
                     Button {
-                        guard let port = portValue else { return }
-                        let credentials = SSHCredentials(
-                            host: host.trimmingCharacters(in: .whitespacesAndNewlines),
-                            port: port,
-                            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-                            privateKeyPEM: keyPEM,
-                            remoteSocketPath: "")
-                        onConnect(credentials)
+                        guard let ep = endpoint else { return }
+                        onConnect(SSHCredentials(
+                            host: ep.host, port: ep.port,
+                            username: trimmedUser,
+                            // Gated on trimmedKey, so send trimmedKey — a trailing
+                            // space/CR otherwise enables Connect then throws
+                            // InvalidOpenSSHBoundary in Citadel's parser.
+                            privateKeyPEM: trimmedKey, remoteSocketPath: ""))
                     } label: {
-                        Text("connect")
-                            .font(.system(.body, design: .monospaced).weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(canConnect ? Palette.cardRaised : Palette.surface)
-                            .foregroundStyle(canConnect ? Palette.text : Palette.textDim)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        Text("Connect")
+                            .font(Typography.app(16, .semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 15)
+                            .background(canConnect ? Palette.brand : Palette.surface)
+                            .foregroundStyle(canConnect ? .white : Palette.textFaint)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .disabled(!canConnect)
+                    .padding(.top, 6)
+
+                    Text("Connects over your Tailscale network. Nothing is exposed publicly.")
+                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                        .padding(.top, 2)
                 }
-                .padding(24)
+                .padding(22)
             }
         }
+        .sheet(isPresented: $showingKeySheet) { keySheet }
     }
 
-    @ViewBuilder
-    private func field(_ label: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundStyle(Palette.textDim)
-            TextField("", text: text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(Palette.text)
-                .padding(10)
-                .background(Palette.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+    /// A row with the label on the left and a right-aligned monospace value.
+    private func fieldRow(_ label: String, text: Binding<String>, placeholder: String) -> some View {
+        HStack {
+            Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            TextField(placeholder, text: text)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// The key row NEVER renders the key itself — only whether one is loaded.
+    /// That is both the mockup ("id_ed25519 ✓") and the security rule: the
+    /// connect screen is screenshotted onto an open port, so the PEM must not be
+    /// on screen. Tapping opens a sheet to paste it.
+    private var keyRow: some View {
+        Button { showingKeySheet = true } label: {
+            HStack {
+                Text("Key").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                Spacer()
+                if keyPEM.isEmpty {
+                    Text("Add private key").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
+                } else {
+                    Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Palette.text)   // white ✓, per the mockup (not a status colour)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var keySheet: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Paste your ed25519 private key (PEM). It is held only in memory and sent over the SSH connection — never shown again.")
+                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                    TextEditor(text: $keyPEM)
+                        .font(Typography.machine(13)).foregroundStyle(Palette.text)
+                        .scrollContentBackground(.hidden)
+                        .padding(10).background(Palette.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    if !keyPEM.isEmpty {
+                        Button("Clear key") { keyPEM = "" }
+                            .font(Typography.app(14)).foregroundStyle(Palette.died)
+                    }
+                    Spacer()
+                }
+                .padding(20)
+            }
+            .navigationTitle("Private key")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.brand)
+            } }
         }
     }
 }
@@ -532,7 +579,7 @@ struct TerminalHomeView: View {
             if !isCollapsed {
                 ForEach(rows) { row in
                     NavigationLink {
-                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title)
+                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title, agent: row.info)
                     } label: {
                         card(row)
                     }
@@ -663,65 +710,207 @@ struct TerminalHomeView: View {
     }
 }
 
-/// Reads a pane and renders it as folded monospace lines. Folds to the measured
-/// view width, and refresh reuses that same width.
+/// One agent's pane: a styled header, the folded monospace output, and the input
+/// surface (a control-key row with a Return cap, and a reply box). Input goes
+/// through HerdrKit's InputRouter so intent-mode prompts submit while shell/TUI
+/// keys pass through literally — the "send intent, not keystrokes" contract, not
+/// a raw byte pipe. Answering a blocked agent is by typing the choice + Return;
+/// there are deliberately no Approve/Reject buttons (a fixed 1/2 mapping cannot be
+/// verified against an agent-specific menu — structured menu actions are a follow-up).
 struct TerminalPaneView: View {
     let client: HerdrClient
     let paneID: String
     let title: String
+    /// The agent this pane hosts, when known (drives identity, status badge, and
+    /// input mode). Nil when opened without list context — input falls back to
+    /// rawKeys, the safe reading.
+    var agent: AgentInfo? = nil
 
+    @Environment(\.dismiss) private var dismiss
     @State private var rawText = ""
     @State private var lines: [String] = []
     @State private var error: String?
+    @State private var reply = ""
+    @State private var sending = false
+    @State private var actionNote: String?
+
+    private let router = InputRouter()
+
+    private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
+    /// "kind · folder" for the header, e.g. "claude · herdr-ios".
+    private var heading: String {
+        let kind = agent?.agent ?? title
+        if let cwd = agent?.cwd {
+            let folder = URL(fileURLWithPath: cwd).lastPathComponent
+            if !folder.isEmpty && folder != "/" { return "\(kind) · \(folder)" }
+        }
+        return kind
+    }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending }
 
     var body: some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
-            GeometryReader { geo in
-                // Fold from the SETTLED layout width, but cache the result: re-fold
-                // ONLY when the width or the text changes (below), not on every body
-                // evaluation — folding 200 lines each frame cost ~13ms during
-                // scroll. Reading the width in `.task` (an earlier bug) measured it
-                // before layout and over-wrapped at the ~20-col minimum.
-                let columns = columnCount(for: geo.size.width)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if let error {
-                            Text(error)
-                                .font(.system(.footnote, design: .monospaced))
-                                .foregroundStyle(.red)
-                        }
-                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                            Text(line.isEmpty ? " " : line)
-                                .font(.system(.footnote, design: .monospaced))
-                                .foregroundStyle(Palette.text)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .padding(12)
+            VStack(spacing: 0) {
+                header
+                paneScroll
+                if let note = actionNote {
+                    Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
                 }
-                .task(id: paneID) { await refresh() }
-                // `initial: true` folds once on appear too, so `lines` is never
-                // left empty if the text arrives before the first width change.
-                .onChange(of: columns, initial: true) { _, newColumns in refold(columns: newColumns) }
-                .onChange(of: rawText) { _, _ in refold(columns: columns) }
+                controlBar
+                replyBar
             }
         }
-        .navigationTitle(title)
-        .toolbar {
-            Button {
-                Task { await refresh() }
-            } label: {
-                Image(systemName: "arrow.clockwise").foregroundStyle(Palette.textDim)
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: paneID) { await refresh() }
+    }
+
+    // MARK: header
+
+    private var header: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+                Text(heading).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                Spacer()
+                Button { Task { await refresh() } } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundStyle(Palette.textDim)
+                }
+            }
+            if let group {
+                HStack(spacing: 6) {
+                    Circle().fill(group.color).frame(width: 7, height: 7)
+                    Text(group.sectionTitle).font(Typography.microLabel).tracking(1).foregroundStyle(group.color)
+                    Spacer()
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(group.color.opacity(0.12)).clipShape(Capsule())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .background(Palette.surface)
+    }
+
+    // MARK: pane output (fold cache preserved)
+
+    private var paneScroll: some View {
+        GeometryReader { geo in
+            // Fold from the SETTLED layout width, but cache the result: re-fold
+            // ONLY when the width or the text changes, not on every body eval —
+            // folding 200 lines each frame cost ~13ms during scroll.
+            let columns = columnCount(for: geo.size.width)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let error {
+                        Text(error).font(Typography.machine(12)).foregroundStyle(Palette.died)
+                    }
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        Text(line.isEmpty ? " " : line)
+                            .font(Typography.machine(12.5)).foregroundStyle(Palette.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(14)
+            }
+            // `initial: true` folds once on appear too, so `lines` is never left
+            // empty if the text arrives before the first width change.
+            .onChange(of: columns, initial: true) { _, newColumns in refold(columns: newColumns) }
+            .onChange(of: rawText) { _, _ in refold(columns: columns) }
+        }
+    }
+
+    // MARK: input
+
+    // No Approve/Reject buttons: a fixed "1"/"2" mapping assumes a two-option
+    // menu shape the server never guarantees, and both reviewers found it could
+    // submit the OPPOSITE of the label (a menu with a broader grant at 2). Until
+    // the option list is delivered as structured data, the reader answers by
+    // typing the choice and pressing Return — which is the safe, verifiable path.
+    private var controlBar: some View {
+        HStack(spacing: 6) {
+            keyCap(label: "esc", key: "Escape")
+            keyCap(symbol: "chevron.left", key: "Left")
+            keyCap(symbol: "chevron.up", key: "Up")
+            keyCap(symbol: "chevron.down", key: "Down")
+            keyCap(symbol: "chevron.right", key: "Right")
+            keyCap(label: "tab", key: "Tab")
+            // The submit affordance rawKeys needs — typing never submits, so
+            // Return is the deliberate second action. Highlighted, as the mockup
+            // shows it.
+            keyCap(symbol: "return", key: "Enter", primary: true)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
+        Button { send(.key(key)) } label: {
+            Group {
+                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
+                else { Text(label ?? key).font(Typography.machine(12)) }
+            }
+            .foregroundStyle(primary ? .white : Palette.textDim)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background(primary ? Palette.brand : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(sending)
+        .accessibilityLabel(Text(key))
+    }
+
+    private var replyBar: some View {
+        HStack(spacing: 8) {
+            TextField("type a reply…", text: $reply)
+                .font(Typography.app(15)).foregroundStyle(Palette.text)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .padding(.horizontal, 16).padding(.vertical, 11)
+                .background(Palette.surface).clipShape(Capsule())
+            Button { send(.submitText(reply)) } label: {
+                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(canSend ? Palette.brand : Palette.surface).clipShape(Circle())
+            }
+            .disabled(!canSend)
+        }
+        .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+    }
+
+    /// Routes a reader action through InputRouter, then executes the plan. A
+    /// refusal is shown, never a silent no-op.
+    private func send(_ action: InputAction) {
+        let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
+        let plan = router.plan(action: action, pane: paneID, mode: mode)
+        Task {
+            sending = true
+            defer { sending = false }
+            do {
+                switch plan {
+                case .prompt(let pane, let text): try await client.prompt(pane: pane, text: text)
+                case .text(let pane, let text): try await client.sendText(pane: pane, text: text)
+                case .keys(let pane, let keys): try await client.sendKeys(pane: pane, keys: keys)
+                case .refused(let reason): actionNote = "not sent: \(reason)"; return
+                }
+                actionNote = nil
+                if case .submitText = action { reply = "" }
+                // Give the pane a beat to reflect the input, then re-read.
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await refresh()
+            } catch {
+                actionNote = "send failed: \(error)"
             }
         }
     }
 
-    /// Rough monospace column count for the footnote font (~7pt advance), less the
-    /// 12pt horizontal padding on each side.
+    // MARK: data
+
+    /// Rough monospace column count for the pane font (~7.2pt advance), less the
+    /// 14pt horizontal padding on each side.
     private func columnCount(for width: CGFloat) -> Int {
-        max(20, Int((width - 24) / 7.2))
+        max(20, Int((width - 28) / 7.2))
     }
 
     /// Folds `rawText` to `columns` into the cached `lines`. Called only from the
@@ -797,7 +986,14 @@ struct MockTransport: HerdrTransport {
     ]
 
     static let agentRead = #"""
-    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> may I run `just test` on herdr-ios?\n  177 tests, ~30s, no network\n\n  [y] allow   [n] deny   [a] always\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
+    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
+
+    /// A decoded blocked agent for the pane screenshot: status "blocked" groups
+    /// as NEEDS YOU, so the pane renders its status badge. No composer field, so
+    /// input falls to rawKeys — fine for a static shot.
+    static let demoPaneAgent: AgentInfo? = try? JSONDecoder().decode(
+        AgentInfo.self,
+        from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
 }
 #endif
