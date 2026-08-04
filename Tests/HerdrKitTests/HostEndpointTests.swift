@@ -57,6 +57,14 @@ final class HostEndpointTests: XCTestCase {
         }
     }
 
+    /// The port must read EXACTLY as a number — no leading sign or spaces that
+    /// UInt16(_:) would quietly normalise ("+22" would otherwise parse to 22).
+    func testNonDigitPortsAreRejected() {
+        for bad in ["host:+22", "host:-1", "host: 22", "[::1]:+1"] {
+            XCTAssertNil(HostEndpoint.parse(bad), "\(bad) should be rejected — port is not plain digits")
+        }
+    }
+
     func testMalformedBracketsAndEmptyAreRejected() {
         for bad in ["", "   ", "[::1", "[]", "[]:22", "[]:notaport"] {
             XCTAssertNil(HostEndpoint.parse(bad), "\(bad.debugDescription) should be rejected")
