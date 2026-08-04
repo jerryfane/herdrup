@@ -131,6 +131,60 @@ public actor HerdrClient {
         _ = try await call("agent.send_keys", SendKeysParams(target: pane, keys: keys), as: JSONNull.self)
     }
 
+    // MARK: - Spawning agents
+
+    /// A new pane splits off horizontally (`right`) or vertically (`down`). herdr
+    /// supports only these two — there is no left/up split.
+    public enum SplitDirection: String, Sendable {
+        case right, down
+    }
+
+    struct PaneSplitParams: Encodable {
+        let direction: String
+        let cwd: String?
+        let focus: Bool
+    }
+
+    struct PaneInfoResult: Decodable {
+        let pane: PaneRef
+        /// Only the id is needed here; the rest of `pane` is deliberately not
+        /// modelled so a schema addition on the server cannot break this decode.
+        struct PaneRef: Decodable {
+            let paneID: String
+            enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+        }
+    }
+
+    /// Splits the currently focused pane and returns the NEW pane's id. `cwd` is
+    /// the working directory the new pane (and the agent started in it) runs in —
+    /// the "folder" of the new-agent form; nil follows the split pane's cwd.
+    /// No target pane is sent, so the server splits whatever is focused.
+    public func splitPane(cwd: String?, direction: SplitDirection = .down) async throws -> String {
+        let params = PaneSplitParams(direction: direction.rawValue, cwd: cwd, focus: true)
+        return try await call("pane.split", params, as: PaneInfoResult.self).pane.paneID
+    }
+
+    struct AgentStartParams: Encodable {
+        let name: String
+        let kind: String
+        let paneID: String
+        enum CodingKeys: String, CodingKey {
+            case name, kind
+            case paneID = "pane_id"
+        }
+    }
+
+    struct AgentStartedResult: Decodable {
+        let agent: AgentInfo
+    }
+
+    /// Starts an agent of `kind` (claude/codex/gemini/…) named `name` in an
+    /// existing pane (the one from `splitPane`). Returns the started agent.
+    public func startAgent(name: String, kind: String, paneID: String) async throws -> AgentInfo {
+        let params = AgentStartParams(name: name, kind: kind, paneID: paneID)
+        return try await call("agent.start", params, as: AgentStartedResult.self).agent
+    }
+
     // MARK: - Events
 
     /// Opens the persistent event stream.
