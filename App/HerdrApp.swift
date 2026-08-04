@@ -405,6 +405,185 @@ struct ConnectView: View {
     }
 }
 
+/// New agent (screen 04): pick a folder, an agent kind, and a task, then spawn a
+/// real agent. HIGH-STAKES — "Start" splits a pane, launches the agent, and sends
+/// the task (splitPane → startAgent → prompt), which begins spending tokens. The
+/// footer says so.
+struct NewAgentView: View {
+    let client: HerdrClient
+    let onStarted: () -> Void
+    let onCancel: () -> Void
+
+    @State private var folder: String
+    @State private var kind: String
+    @State private var task: String
+    @State private var starting = false
+    @State private var errorMessage: String?
+
+    private static let kinds = ["claude", "codex", "gemini"]
+
+    init(client: HerdrClient, onStarted: @escaping () -> Void = {}, onCancel: @escaping () -> Void = {},
+         initialFolder: String = "", initialKind: String = "claude", initialTask: String = "") {
+        self.client = client
+        self.onStarted = onStarted
+        self.onCancel = onCancel
+        _folder = State(initialValue: initialFolder)
+        _kind = State(initialValue: initialKind)
+        _task = State(initialValue: initialTask)
+    }
+
+    private var canStart: Bool {
+        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !starting
+    }
+    /// The agent's name — the folder's basename, else the kind. herdr validates
+    /// the name; a duplicate surfaces as a start error rather than being guessed.
+    private var derivedName: String {
+        let f = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !f.isEmpty {
+            let base = URL(fileURLWithPath: f).lastPathComponent
+            if !base.isEmpty && base != "/" { return base }
+        }
+        return kind
+    }
+
+    var body: some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        sectionLabel("WHERE")
+                        folderRow
+                        sectionLabel("WHO")
+                        agentRow
+                        sectionLabel("WHAT")
+                        taskEditor
+                        if let errorMessage {
+                            Text(errorMessage).font(Typography.machine(12)).foregroundStyle(Palette.died)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16).padding(.top, 10)
+                        }
+                        startButton
+                        Text("Starts a real agent and begins spending tokens.")
+                            .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                            .frame(maxWidth: .infinity).multilineTextAlignment(.center)
+                            .padding(.horizontal, 24).padding(.top, 10)
+                    }
+                    .padding(.bottom, 16)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
+            Spacer()
+            Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+            Spacer()
+            Color.clear.frame(width: 52, height: 1)   // balances the Cancel button width
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
+        }
+        .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
+    }
+
+    private var folderRow: some View {
+        HStack {
+            Text("Folder").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            TextField("~/project", text: $folder)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 16)
+    }
+
+    private var agentRow: some View {
+        HStack {
+            Text("Agent").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            Spacer()
+            Menu {
+                ForEach(Self.kinds, id: \.self) { k in Button(k) { kind = k } }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(kind).font(Typography.machine(15)).foregroundStyle(Palette.text)
+                    Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    private var taskEditor: some View {
+        TextEditor(text: $task)
+            .font(Typography.app(15)).foregroundStyle(Palette.text)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 90)
+            .padding(8)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .overlay(alignment: .topLeading) {
+                if task.isEmpty {
+                    Text("What should it do?").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
+                        .padding(.horizontal, 13).padding(.top, 16).allowsHitTesting(false)
+                }
+            }
+            .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    private var startButton: some View {
+        Button { start() } label: {
+            HStack(spacing: 8) {
+                if starting { ProgressView().tint(.white) }
+                Text(starting ? "Starting…" : "Start").font(Typography.app(16, .semibold))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 15)
+            .background(canStart ? Palette.brand : Palette.surface)
+            .foregroundStyle(canStart ? .white : Palette.textFaint)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(!canStart)
+        .padding(.horizontal, 16).padding(.top, 16)
+    }
+
+    /// The three-step spawn. Steps are sequential and a failure at any step is
+    /// surfaced (never a silent half-spawn): split a pane in the folder, start the
+    /// agent kind in it, then send the task as its first prompt.
+    private func start() {
+        starting = true
+        errorMessage = nil
+        let cwd = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskText = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = derivedName
+        let chosenKind = kind
+        Task {
+            defer { starting = false }
+            do {
+                let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd, direction: .down)
+                _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
+                if !taskText.isEmpty {
+                    try await client.prompt(pane: paneID, text: taskText)
+                }
+                onStarted()
+            } catch {
+                errorMessage = "could not start: \(error)"
+            }
+        }
+    }
+}
+
 /// Lists the agents on the host; tapping one opens its pane. A failed load is
 /// recoverable (retry, or disconnect back to the connect form).
 struct TerminalHomeView: View {
