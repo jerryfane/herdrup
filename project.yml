@@ -55,3 +55,10 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        # VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. Defines SCREENSHOT_MOCK_DEFAULT
+        # so the buildbox's plain Debug launch boots into the mock list (mock data,
+        # no key) and can screenshot the redesign. main's Debug build must NOT carry
+        # this — it should boot to ConnectView. Paired with ScreenshotMock.mode.
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG SCREENSHOT_MOCK_DEFAULT

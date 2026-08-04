@@ -713,7 +713,16 @@ enum ScreenshotMock {
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
+        #if SCREENSHOT_MOCK_DEFAULT
+        // VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. The buildbox launches the
+        // app with no env and no args, so to screenshot a redesigned screen we
+        // default into the mock list. Defined ONLY in the Debug config of a
+        // design-iteration branch (project.yml); main's Debug build must still
+        // boot to ConnectView. Still mock-data-only — no key is ever rendered.
+        guard env != nil || arg else { return .list }
+        #else
         guard env != nil || arg else { return nil }
+        #endif
         return env == "pane" ? .pane : .list
     }
 }
