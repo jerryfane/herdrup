@@ -55,3 +55,9 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        # VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. Boots the Debug build into the
+        # new-agent mock so the buildbox screenshots that screen. Paired with
+        # ScreenshotMock.mode; revert before merge.
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG SCREENSHOT_MOCK_DEFAULT
