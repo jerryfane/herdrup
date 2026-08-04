@@ -182,8 +182,13 @@ public actor HerdrClient {
     /// existing pane (the one from `splitPane`). Returns the started agent.
     ///
     /// NOTE: this only INITIATES launch. `agent.start` returns while the agent is
-    /// still `launch_pending`, and `agent.prompt` refuses (agent_not_ready) until
-    /// launch completes — so a caller sending a task must `waitForReady` first.
+    /// still `launch_pending`, and `agent.prompt` refuses (agent_not_ready) for a
+    /// variable, sometimes-long window until the agent registers as a promptable
+    /// known agent with a composer. There is no reliable client-pollable readiness
+    /// flag (`interactive_ready` is not populated on this path), so we do NOT
+    /// auto-deliver a task after start. The caller opens the new pane instead and
+    /// lets the terminal's own input router send the task as a prompt once the
+    /// pane reports a composer (`InputMode.intent`). See `NewAgentView.start`.
     public func startAgent(name: String, kind: String, paneID: String) async throws -> AgentInfo {
         let params = AgentStartParams(name: name, kind: kind, paneID: paneID)
         return try await call("agent.start", params, as: AgentStartedResult.self).agent
@@ -198,23 +203,6 @@ public actor HerdrClient {
     /// retry does not accumulate orphan panes.
     public func closePane(paneID: String) async throws {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
-    }
-
-    public enum ReadyError: Error, Equatable { case timedOut(pane: String) }
-
-    /// Polls until the agent in `pane` reports `interactive_ready` (its composer
-    /// accepts a prompt), or throws `ReadyError.timedOut` after `timeoutMs`. The
-    /// readiness signal is the exact one `agent.prompt` gates on, so a caller that
-    /// awaits this then prompts will not hit agent_not_ready on the happy path.
-    public func waitForReady(pane: String, timeoutMs: Int = 60_000, pollMs: Int = 500) async throws {
-        var elapsed = 0
-        while true {
-            let ready = try await agentList().first { $0.paneID == pane }?.interactiveReady ?? false
-            if ready { return }
-            if elapsed >= timeoutMs { throw ReadyError.timedOut(pane: pane) }
-            try await Task.sleep(nanoseconds: UInt64(max(1, pollMs)) * 1_000_000)
-            elapsed += pollMs
-        }
     }
 
     // MARK: - Events
