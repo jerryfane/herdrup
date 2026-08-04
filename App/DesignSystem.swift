@@ -47,53 +47,29 @@ enum Typography {
     static let microLabel = Font.system(size: 11, weight: .semibold, design: .monospaced)
 }
 
-/// The four agent states the design distinguishes — by SHAPE and colour, so they
-/// survive a sideways glance or colour-blindness (brief §9.2).
-enum AgentState: Int, Comparable {
-    case needsYou   // amber, "!" — blocked on a question
-    case stopped    // red, "✕" — exited / died
-    case working    // blue, elapsed time
-    case done       // green, "✓"
-    case idle       // dim
-
-    static func < (l: AgentState, r: AgentState) -> Bool { l.rawValue < r.rawValue }
-
-    /// Best-effort mapping from the API's `agent_status` string.
-    static func from(_ status: String?) -> AgentState {
-        switch (status ?? "").lowercased() {
-        case let s where s.contains("wait") || s.contains("input") || s.contains("pending") || s.contains("ask") || s.contains("block"):
-            return .needsYou
-        case let s where s.contains("exit") || s.contains("dead") || s.contains("stop") || s.contains("error") || s.contains("crash") || s.contains("fail"):
-            return .stopped
-        case let s where s.contains("work") || s.contains("run"):
-            return .working
-        case let s where s.contains("done") || s.contains("complete") || s.contains("finish"):
-            return .done
-        default:
-            return .idle
-        }
-    }
-
+/// The VISUAL half of the status story. The CLASSIFICATION — which agent belongs
+/// in which section, fail-closed, stopped-from-liveness, unknowns surfaced — is
+/// HerdrKit's `AgentGroup` (Sources/HerdrKit/AgentList.swift), which is unit
+/// tested on Linux. This is only the colour + heading each group renders as, so
+/// the meaning and its picture cannot drift out of one file.
+///
+/// Colour = meaning (brief): amber = wants a look (blocked OR uninterpretable),
+/// red = the pane is gone, blue = working, faint = idle. `.unrecognised` is amber
+/// on purpose — "this build cannot read it" is nearer to needs-attention than to
+/// nothing-to-do, the same reasoning that sorts it high.
+extension AgentGroup {
     var color: Color {
         switch self {
         case .needsYou: return Palette.waiting
         case .stopped: return Palette.died
+        case .unrecognised: return Palette.waiting
         case .working: return Palette.working
-        case .done: return Palette.done
         case .idle: return Palette.textFaint
         }
     }
 
-    /// Uppercase section header for a group of this state.
-    var sectionTitle: String {
-        switch self {
-        case .needsYou: return "NEEDS YOU"
-        case .stopped: return "STOPPED"
-        case .working: return "WORKING"
-        case .done: return "DONE"
-        case .idle: return "IDLE"
-        }
-    }
+    /// Uppercase micro-label heading, from the model's own label.
+    var sectionTitle: String { label.uppercased() }
 }
 
 /// A subtle gradient carrying agent identity — the one place colour is allowed to
