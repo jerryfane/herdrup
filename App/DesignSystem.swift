@@ -92,7 +92,10 @@ enum AgentIdentity {
     /// The marks echo each vendor: Claude's spoked asterisk, a plain C for codex.
     static func glyph(for agent: String?) -> String {
         switch (agent ?? "").lowercased() {
-        case let s where s.contains("claude"): return "\u{2733}"   // ✳ eight-spoked asterisk
+        // U+2731 HEAVY ASTERISK, NOT U+2733: the eight-spoked asterisk has an
+        // emoji-presentation variant that iOS renders as a green emoji, ignoring
+        // the white foreground. U+2731 has no emoji form, so it stays white.
+        case let s where s.contains("claude"): return "\u{2731}"   // ✱
         case let s where s.contains("codex"):  return "C"
         case let s where s.contains("gemini"): return "\u{2726}"   // ✦ four-pointed star
         default:
