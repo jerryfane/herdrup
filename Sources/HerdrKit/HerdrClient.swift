@@ -131,6 +131,92 @@ public actor HerdrClient {
         _ = try await call("agent.send_keys", SendKeysParams(target: pane, keys: keys), as: JSONNull.self)
     }
 
+    // MARK: - Spawning agents
+
+    /// A new pane splits off horizontally (`right`) or vertically (`down`). herdr
+    /// supports only these two — there is no left/up split.
+    public enum SplitDirection: String, Sendable {
+        case right, down
+    }
+
+    struct PaneSplitParams: Encodable {
+        let direction: String
+        let cwd: String?
+        let focus: Bool
+    }
+
+    struct PaneInfoResult: Decodable {
+        let pane: PaneRef
+        /// Only the id is needed here; the rest of `pane` is deliberately not
+        /// modelled so a schema addition on the server cannot break this decode.
+        struct PaneRef: Decodable {
+            let paneID: String
+            enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+        }
+    }
+
+    /// Splits the currently focused pane and returns the NEW pane's id. `cwd` is
+    /// the working directory the new pane (and the agent started in it) runs in —
+    /// the "folder" of the new-agent form; nil follows the split pane's cwd.
+    /// No target pane is sent, so the server splits whatever is focused.
+    public func splitPane(cwd: String?, direction: SplitDirection = .down) async throws -> String {
+        let params = PaneSplitParams(direction: direction.rawValue, cwd: cwd, focus: true)
+        return try await call("pane.split", params, as: PaneInfoResult.self).pane.paneID
+    }
+
+    struct AgentStartParams: Encodable {
+        let name: String
+        let kind: String
+        let paneID: String
+        enum CodingKeys: String, CodingKey {
+            case name, kind
+            case paneID = "pane_id"
+        }
+    }
+
+    struct AgentStartedResult: Decodable {
+        let agent: AgentInfo
+    }
+
+    /// Starts an agent of `kind` (claude/codex/gemini/…) named `name` in an
+    /// existing pane (the one from `splitPane`). Returns the started agent.
+    ///
+    /// NOTE: this only INITIATES launch. `agent.start` returns while the agent is
+    /// still `launch_pending`, and `agent.prompt` refuses (agent_not_ready) until
+    /// launch completes — so a caller sending a task must `waitForReady` first.
+    public func startAgent(name: String, kind: String, paneID: String) async throws -> AgentInfo {
+        let params = AgentStartParams(name: name, kind: kind, paneID: paneID)
+        return try await call("agent.start", params, as: AgentStartedResult.self).agent
+    }
+
+    struct PaneTarget: Encodable {
+        let paneID: String
+        enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+    }
+
+    /// Closes a pane — used to clean up the pane a failed spawn left behind, so a
+    /// retry does not accumulate orphan panes.
+    public func closePane(paneID: String) async throws {
+        _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
+    }
+
+    public enum ReadyError: Error, Equatable { case timedOut(pane: String) }
+
+    /// Polls until the agent in `pane` reports `interactive_ready` (its composer
+    /// accepts a prompt), or throws `ReadyError.timedOut` after `timeoutMs`. The
+    /// readiness signal is the exact one `agent.prompt` gates on, so a caller that
+    /// awaits this then prompts will not hit agent_not_ready on the happy path.
+    public func waitForReady(pane: String, timeoutMs: Int = 60_000, pollMs: Int = 500) async throws {
+        var elapsed = 0
+        while true {
+            let ready = try await agentList().first { $0.paneID == pane }?.interactiveReady ?? false
+            if ready { return }
+            if elapsed >= timeoutMs { throw ReadyError.timedOut(pane: pane) }
+            try await Task.sleep(nanoseconds: UInt64(max(1, pollMs)) * 1_000_000)
+            elapsed += pollMs
+        }
+    }
+
     // MARK: - Events
 
     /// Opens the persistent event stream.
