@@ -262,10 +262,17 @@ struct ConnectView: View {
     @State private var showingKeySheet = false
 
     // Host accepts "host" or "host:port" (and "[ipv6]:port"); the port lives in
-    // the one field so the form stays the three rows the mockup shows.
-    private var hostPort: (host: String, port: UInt16) { Self.parseHostPort(host) }
+    // the one field so the form stays the three rows the mockup shows. Parsing is
+    // HerdrKit's HostEndpoint (Linux-tested); an explicit bad port yields nil, so
+    // it is rejected here rather than silently connecting to :22.
+    private var endpoint: HostEndpoint? { HostEndpoint.parse(host) }
+    private var trimmedUser: String { username.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedKey: String { keyPEM.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var hostInvalid: Bool {
+        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && endpoint == nil
+    }
     private var canConnect: Bool {
-        !hostPort.host.isEmpty && !username.trimmingCharacters(in: .whitespaces).isEmpty && !keyPEM.isEmpty
+        endpoint != nil && !trimmedUser.isEmpty && !trimmedKey.isEmpty
     }
 
     var body: some View {
@@ -281,15 +288,20 @@ struct ConnectView: View {
                     // The three settings-style rows: label left, value right.
                     VStack(spacing: 10) {
                         fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
+                        if hostInvalid {
+                            Text("check host or host:port")
+                                .font(Typography.app(12)).foregroundStyle(Palette.died)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+                        }
                         fieldRow("User", text: $username, placeholder: "jerry")
                         keyRow
                     }
 
                     Button {
-                        let hp = hostPort
+                        guard let ep = endpoint else { return }
                         onConnect(SSHCredentials(
-                            host: hp.host, port: hp.port,
-                            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                            host: ep.host, port: ep.port,
+                            username: trimmedUser,
                             privateKeyPEM: keyPEM, remoteSocketPath: ""))
                     } label: {
                         Text("Connect")
@@ -373,21 +385,6 @@ struct ConnectView: View {
                 Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.brand)
             } }
         }
-    }
-
-    /// "host" | "host:port" | "[ipv6]:port" → (host, port). Defaults to 22.
-    static func parseHostPort(_ raw: String) -> (host: String, port: UInt16) {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("["), let close = s.firstIndex(of: "]") {
-            let inner = String(s[s.index(after: s.startIndex)..<close])
-            let rest = s[s.index(after: close)...]
-            if rest.hasPrefix(":"), let p = UInt16(rest.dropFirst()), p >= 1 { return (inner, p) }
-            return (inner, 22)
-        }
-        // Exactly one colon splits host:port; a bare IPv6 (many colons) stays whole.
-        let parts = s.split(separator: ":", omittingEmptySubsequences: false)
-        if parts.count == 2, let p = UInt16(parts[1]), p >= 1 { return (String(parts[0]), p) }
-        return (s, 22)
     }
 }
 
@@ -756,7 +753,6 @@ struct TerminalPaneView: View {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
                 }
-                if group == .needsYou { approveReject }
                 controlBar
                 replyBar
             }
@@ -769,12 +765,11 @@ struct TerminalPaneView: View {
 
     private var header: some View {
         VStack(spacing: 8) {
-            HStack {
+            HStack(spacing: 12) {
                 Button { dismiss() } label: {
                     Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Palette.textDim)
                 }
-                Spacer()
                 Text(heading).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                 Spacer()
                 Button { Task { await refresh() } } label: {
@@ -827,26 +822,11 @@ struct TerminalPaneView: View {
 
     // MARK: input
 
-    /// Only for a blocked agent. Approve/Reject answer the numbered choice the
-    /// pane is showing (1 / 2); in intent mode that submits, in rawKeys it types
-    /// and the reader presses Enter — the deliberate second action.
-    private var approveReject: some View {
-        HStack(spacing: 10) {
-            Button { send(.submitText("1")) } label: {
-                actionLabel("Approve", .white, Palette.brand)
-            }.disabled(sending)
-            Button { send(.submitText("2")) } label: {
-                actionLabel("Reject", Palette.text, Palette.card)
-            }.disabled(sending)
-        }
-        .padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 2)
-    }
-
-    private func actionLabel(_ text: String, _ fg: Color, _ bg: Color) -> some View {
-        Text(text).font(Typography.app(15, .semibold)).frame(maxWidth: .infinity).padding(.vertical, 13)
-            .background(bg).foregroundStyle(fg).clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
+    // No Approve/Reject buttons: a fixed "1"/"2" mapping assumes a two-option
+    // menu shape the server never guarantees, and both reviewers found it could
+    // submit the OPPOSITE of the label (a menu with a broader grant at 2). Until
+    // the option list is delivered as structured data, the reader answers by
+    // typing the choice and pressing Return — which is the safe, verifiable path.
     private var controlBar: some View {
         HStack(spacing: 6) {
             keyCap(label: "esc", key: "Escape")
@@ -855,20 +835,25 @@ struct TerminalPaneView: View {
             keyCap(symbol: "chevron.down", key: "Down")
             keyCap(symbol: "chevron.right", key: "Right")
             keyCap(label: "tab", key: "Tab")
+            // The submit affordance rawKeys needs — typing never submits, so
+            // Return is the deliberate second action. Highlighted, as the mockup
+            // shows it.
+            keyCap(symbol: "return", key: "Enter", primary: true)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    private func keyCap(label: String? = nil, symbol: String? = nil, key: String) -> some View {
+    private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
         Button { send(.key(key)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
             }
-            .foregroundStyle(Palette.textDim)
+            .foregroundStyle(primary ? .white : Palette.textDim)
             .frame(maxWidth: .infinity, minHeight: 34)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(primary ? Palette.brand : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        .disabled(sending)
         .accessibilityLabel(Text(key))
     }
 
