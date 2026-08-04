@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for `xcodebuild -exportArchive` on the Mac, App Store / TestFlight
+  distribution. Consumed by scripts/testflight.sh. See docs/testflight-lane.md.
+
+  method: "app-store-connect" is the Xcode 15.3+/16+/26 spelling (the buildbox runs
+  Xcode 26 / SDK 26). On an older Xcode this must be "app-store".
+  destination: "export" produces a signed .ipa; the script uploads it as a separate,
+  explicitly-gated step so a first run can validate the archive before the App Store
+  Connect app record exists.
+  signingStyle: "automatic" pairs with `-allowProvisioningUpdates` + the API key, so
+  the Apple Distribution cert + App Store profile are created/renewed on demand.
+-->
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>app-store-connect</string>
+  <key>destination</key>
+  <string>export</string>
+  <key>teamID</key>
+  <string>FXQ5Z9HHY6</string>
+  <key>signingStyle</key>
+  <string>automatic</string>
+  <key>uploadSymbols</key>
+  <true/>
+  <key>manageAppVersionAndBuildNumber</key>
+  <false/>
+</dict>
+</plist>
