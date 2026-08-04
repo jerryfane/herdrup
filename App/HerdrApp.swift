@@ -339,7 +339,7 @@ struct ConnectView: View {
                 } else {
                     Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.done)
+                        .foregroundStyle(Palette.text)   // white ✓, per the mockup (not a status colour)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 14)
