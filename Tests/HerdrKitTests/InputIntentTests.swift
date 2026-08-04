@@ -56,6 +56,30 @@ final class InputRouterTests: XCTestCase {
         )
     }
 
+    /// AXIS: a newline in rawKeys text WOULD execute (send_text writes it to the
+    /// pty and the shell runs the line). The pre-existing "never submits" test
+    /// used a payload with no newline, so it proved nothing about this — it
+    /// survived because the input could not have submitted either way. These pass
+    /// CR/LF explicitly and require a REFUSAL, never a `.text` reaching the pane.
+    func testRawKeysRefusesNewlineBearingText() {
+        for payload in ["deploy\n", "cmd\r", "a\r\nb", "\n", "ok\n "] {
+            guard case .refused = router.plan(action: .submitText(payload), pane: "p1", mode: .rawKeys) else {
+                return XCTFail("newline-bearing rawKeys text was not refused: \(payload.debugDescription)")
+            }
+        }
+    }
+
+    /// The guarantee stated positively over both submitting and non-submitting
+    /// inputs: NO rawKeys `.text` plan may carry a newline into pane.send_text.
+    func testNoRawKeysTextPlanCarriesANewline() {
+        for payload in ["ls -la", "deploy\n", "x\r", "safe input"] {
+            if case .text(_, let sent) = router.plan(action: .submitText(payload), pane: "p1", mode: .rawKeys) {
+                XCTAssertFalse(sent.contains("\n") || sent.contains("\r"),
+                               "a .text plan carried a newline that would execute: \(sent.debugDescription)")
+            }
+        }
+    }
+
     /// Agent panes still route text as a prompt, not as literal keystrokes.
     func testAgentPanesStillUseIntent() {
         XCTAssertEqual(
