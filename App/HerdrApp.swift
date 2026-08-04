@@ -220,7 +220,7 @@ struct RootView: View {
             SettingsView(host: "mac.tail-scale.ts.net")
         case .newAgent:
             NewAgentView(client: mockClient,
-                         initialFolder: "~/herdr-ios", initialKind: "codex",
+                         initialFolder: "/root/herdr-ios", initialKind: "codex",
                          initialTask: "Fix the failing schema artifact test and push")
         }
     }
@@ -439,8 +439,15 @@ struct NewAgentView: View {
         _task = State(initialValue: initialTask)
     }
 
+    private var trimmedFolder: String { folder.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// A folder must be ABSOLUTE (or blank = follow the focused pane). The phone
+    /// cannot expand "~" or a relative path — the remote $HOME is unknown here —
+    /// and the server would silently drop a non-directory and spawn in $HOME. So
+    /// reject anything non-absolute at the form rather than run in the wrong place.
+    private var folderValid: Bool { trimmedFolder.isEmpty || trimmedFolder.hasPrefix("/") }
     private var canStart: Bool {
-        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !starting && !partialSpawn
+        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && folderValid && !starting && !partialSpawn
     }
     /// The agent's name — the folder's basename, else the kind. herdr validates
     /// the name; a duplicate surfaces as a start error rather than being guessed.
@@ -487,10 +494,8 @@ struct NewAgentView: View {
         HStack {
             Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
                 .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
-            Spacer()
             Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
             Spacer()
-            Color.clear.frame(width: 52, height: 1)   // balances the Cancel button width
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
@@ -505,15 +510,20 @@ struct NewAgentView: View {
     }
 
     private var folderRow: some View {
-        HStack {
-            Text("Folder").font(Typography.app(15)).foregroundStyle(Palette.textDim)
-            TextField("~/project", text: $folder)
-                .multilineTextAlignment(.trailing)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Folder").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                TextField("/root/project", text: $folder)
+                    .multilineTextAlignment(.trailing)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .font(Typography.machine(15)).foregroundStyle(Palette.text)
+            }
+            .rowShell()
+            if !folderValid {
+                Text("use an absolute path (starts with /), or leave blank to use the current folder")
+                    .font(Typography.app(12)).foregroundStyle(Palette.died).padding(.horizontal, 4)
+            }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
         .padding(.horizontal, 16)
     }
 
@@ -530,8 +540,7 @@ struct NewAgentView: View {
                 }
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .rowShell()
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
@@ -541,7 +550,7 @@ struct NewAgentView: View {
             .scrollContentBackground(.hidden)
             .frame(minHeight: 90)
             .padding(8)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))   // filled card, per the mockup
             .overlay(alignment: .topLeading) {
                 if task.isEmpty {
                     Text("What should it do?").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
@@ -636,8 +645,12 @@ struct TerminalHomeView: View {
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
     @State private var search = ""
-    @State private var showingSettings = false
-    @State private var showingNewAgent = false
+    @State private var activeCover: ActiveCover?
+
+    private enum ActiveCover: Int, Identifiable {
+        case settings, newAgent
+        var id: Int { rawValue }
+    }
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -677,22 +690,26 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
         }
-        .fullScreenCover(isPresented: $showingSettings) {
-            SettingsView(
-                host: host,
-                connected: error == nil && !loading,
-                // Withhold reconnect during a host-key rejection — reconnecting
-                // then would first-contact-trust the next key (same gate as the
-                // recovery screen's withheld retry).
-                canReconnect: rejectedFingerprint == nil,
-                onReconnect: { showingSettings = false; onReconnect() },
-                onClose: { showingSettings = false })
-        }
-        .fullScreenCover(isPresented: $showingNewAgent) {
-            NewAgentView(
-                client: client,
-                onStarted: { showingNewAgent = false; Task { await load() } },
-                onCancel: { showingNewAgent = false })
+        // ONE item-based cover, not two stacked isPresented covers (stacked
+        // presentation modifiers on a single view are historically fragile).
+        .fullScreenCover(item: $activeCover) { cover in
+            switch cover {
+            case .settings:
+                SettingsView(
+                    host: host,
+                    connected: error == nil && !loading,
+                    // Withhold reconnect during a host-key rejection — reconnecting
+                    // then would first-contact-trust the next key (same gate as the
+                    // recovery screen's withheld retry).
+                    canReconnect: rejectedFingerprint == nil,
+                    onReconnect: { activeCover = nil; onReconnect() },
+                    onClose: { activeCover = nil })
+            case .newAgent:
+                NewAgentView(
+                    client: client,
+                    onStarted: { activeCover = nil; Task { await load() } },
+                    onCancel: { activeCover = nil })
+            }
         }
     }
 
@@ -712,9 +729,7 @@ struct TerminalHomeView: View {
                     .frame(height: 15)
             }
             Spacer()
-            // The new-agent screen (04) does not exist yet — a visible but inert
-            // affordance, not a live control that does nothing.
-            circleButton("plus") { showingNewAgent = true }
+            circleButton("plus") { activeCover = .newAgent }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
@@ -754,7 +769,7 @@ struct TerminalHomeView: View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
             tabItem("terminal", "Terminal", active: false)
-            Button { showingSettings = true } label: {
+            Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
             .buttonStyle(.plain)
