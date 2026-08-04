@@ -31,6 +31,21 @@ final class InputRouterTests: XCTestCase {
         )
     }
 
+    /// AXIS (the new-agent pre-fill invariant): a pending pre-filled task delivers
+    /// as a PROMPT only when the agent is promptable, and WAITS otherwise — it must
+    /// never resolve to a normal (rawKeys-capable) reply. Both review witnesses
+    /// flagged that a pre-fill typed into a booting shell can be executed by a later
+    /// Return, so `.waitForComposer` (not `.normalReply`) for the not-ready case is
+    /// the security-bearing assertion. (Mutation guard: returning `.normalReply`
+    /// when not promptable KILLs the middle assertion.)
+    func testPendingPrefillNeverFallsToRawReply() {
+        XCTAssertEqual(router.prefillDelivery(pendingPrefill: true, isPromptable: true), .prompt)
+        XCTAssertEqual(router.prefillDelivery(pendingPrefill: true, isPromptable: false), .waitForComposer)
+        // No pre-fill pending → the usual reply routing, regardless of readiness.
+        XCTAssertEqual(router.prefillDelivery(pendingPrefill: false, isPromptable: true), .normalReply)
+        XCTAssertEqual(router.prefillDelivery(pendingPrefill: false, isPromptable: false), .normalReply)
+    }
+
     /// herdr-ios#3: a shell pane must be typeable. Refusing left those panes
     /// unable to receive a single character, so "keys elsewhere" was fictional.
     func testShellPanesAcceptLiteralTyping() {
