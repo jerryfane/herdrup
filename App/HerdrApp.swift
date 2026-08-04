@@ -1044,6 +1044,11 @@ struct TerminalPaneView: View {
     /// would EXECUTE it as a shell command — the task must go through agent.prompt,
     /// never send_text.
     @State private var pendingPrefill: Bool
+    /// True while `deliverPrefillIfNeeded` is actively polling. The manual Send is
+    /// withheld during this window (the auto-loop owns delivery); once it stops
+    /// (delivered or timed out) the button re-enables — but ALWAYS routes a pending
+    /// pre-fill through the prompt-only path, never rawKeys.
+    @State private var autoDelivering = false
 
     private let router = InputRouter()
 
@@ -1072,11 +1077,11 @@ struct TerminalPaneView: View {
         }
         return kind
     }
-    // Manual send is withheld while a pre-filled task is still awaiting the
-    // composer: in that window the pane is rawKeys (a booting shell), so a send
-    // would type-not-submit and a later Return would execute the task as a shell
-    // command. `deliverPrefillIfNeeded` owns delivery until the agent is ready.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !pendingPrefill }
+    // Send is withheld only while the auto-delivery loop is actively polling (it
+    // owns delivery then). A pending pre-fill does NOT disable the button once the
+    // loop stops — instead the button ROUTES a pre-fill through the prompt-only
+    // path (see the replyBar action), so it can never fall to rawKeys send_text.
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering }
 
     var body: some View {
         ZStack {
@@ -1191,7 +1196,10 @@ struct TerminalPaneView: View {
             .frame(maxWidth: .infinity, minHeight: 34)
             .background(primary ? Palette.brand : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
-        .disabled(sending)
+        // Disabled while a pre-fill is pending too: a stray Return during automatic
+        // delivery could race the in-flight agent.prompt (and Return into a booting
+        // shell is the execute-unintended hazard we are closing).
+        .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(key))
     }
 
@@ -1202,7 +1210,7 @@ struct TerminalPaneView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
-            Button { send(.submitText(reply)) } label: {
+            Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 40, height: 40)
                     .background(canSend ? Palette.brand : Palette.surface).clipShape(Circle())
@@ -1279,50 +1287,80 @@ struct TerminalPaneView: View {
     /// re-expose the raw-send path for a pane that was promptable a tick ago.
     private func reresolveAgent() async {
         guard let live = try? await client.agentList().first(where: { $0.paneID == paneID }) else { return }
+        // Hold the prior agent ONLY when the SAME NAMED agent transiently loses its
+        // composer (a server hiccup) — flipping intent → rawKeys there would
+        // re-expose the raw-send path for a pane promptable a tick ago. Identity is
+        // the agent NAME, not the kind: replacing one claude with another claude
+        // must ADOPT the new one, not inherit stale composer/status. An unnamed or
+        // renamed live entry is a different identity → adopt (fail loud, not sticky).
+        let sameNamedAgent = live.name != nil && live.name == agent?.name
         let priorWasIntent = agent.map { router.mode(for: $0) == .intent } ?? false
-        let liveLostComposer = router.mode(for: live) != .intent && live.agent == agent?.agent
-        if priorWasIntent && liveLostComposer { return }   // transient composer loss — hold
+        let liveLostComposer = sameNamedAgent && router.mode(for: live) != .intent
+        if priorWasIntent && liveLostComposer { return }
         agent = live
     }
 
-    /// Delivers a pre-filled task (from the new-agent flow) once the pane is
-    /// actually promptable. A just-started agent is not promptable for a variable
-    /// window and there is no reliable readiness flag, so we POLL `isPromptable`
-    /// (composer present == the InputRouter.intent gate) and refresh the visible
-    /// pane each tick so the boot is watchable. When ready, the task is sent as a
-    /// prompt (never rawKeys send_text). Bounded: on timeout the task is left in the
-    /// box and the manual send re-enabled, so nothing is lost.
+    /// One prompt-only delivery attempt for a pending pre-fill. The tested
+    /// `prefillDelivery` decision governs it: with a pending pre-fill it yields
+    /// `.prompt` (deliver) or `.waitForComposer` (do nothing) — NEVER a raw path —
+    /// so a pre-filled task can never be typed into a booting shell. Returns whether
+    /// it delivered.
+    @discardableResult
+    private func deliverPrefillOnce() async -> Bool {
+        let ready = (try? await client.isPromptable(pane: paneID)) == true
+        switch router.prefillDelivery(pendingPrefill: pendingPrefill, isPromptable: ready) {
+        case .prompt:
+            do {
+                try await client.prompt(pane: paneID, text: reply)
+                reply = ""
+                pendingPrefill = false
+                actionNote = nil
+                await refresh()
+                return true
+            } catch {
+                return false   // composer present but herdr not ready yet, or transient
+            }
+        case .waitForComposer, .normalReply:
+            return false
+        }
+    }
+
+    /// Auto-delivers a pre-filled task once the agent becomes promptable. Polls
+    /// (refreshing the visible pane each tick so the boot is watchable) and delivers
+    /// ONLY via prompt. Bounded polling: after ~120s it stops polling to save
+    /// round-trips but KEEPS the task protected (pendingPrefill stays true), so the
+    /// re-enabled Send still routes through the prompt-only path — never rawKeys.
+    /// Nothing is lost and the shell-execution hazard cannot reappear.
     private func deliverPrefillIfNeeded() async {
         guard pendingPrefill else { return }
+        autoDelivering = true
+        defer { autoDelivering = false }
         let maxTicks = 80                       // 80 × 1.5s ≈ 120s
         var ticks = 0
         while pendingPrefill && !Task.isCancelled {
-            let task = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !task.isEmpty else { pendingPrefill = false; return }
-            if (try? await client.isPromptable(pane: paneID)) == true {
-                do {
-                    try await client.prompt(pane: paneID, text: reply)
-                    reply = ""
-                    pendingPrefill = false
-                    actionNote = nil
-                    await refresh()
-                    return
-                } catch {
-                    // Composer present but herdr still not ready, or a transient
-                    // send error — keep waiting and retry rather than drop the task.
-                    actionNote = "starting \(title)…"
-                }
-            } else {
-                actionNote = "starting \(title)…"
-            }
+            if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { pendingPrefill = false; return }
+            if await deliverPrefillOnce() { return }
+            actionNote = "starting \(title)…"
             ticks += 1
             if ticks >= maxTicks {
-                pendingPrefill = false
                 actionNote = "still starting — tap Send when \(title) is ready"
-                return
+                return   // stop polling; pendingPrefill stays true → Send is prompt-only
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            await readPane()   // keep the booting pane visible while we wait
+            if Task.isCancelled { return }     // don't issue a stray read after teardown
+            await readPane()                   // keep the booting pane visible
+        }
+    }
+
+    /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
+    /// (never rawKeys, at any time); a normal reply uses the usual routing.
+    private func sendTapped() {
+        guard pendingPrefill else { send(.submitText(reply)); return }
+        Task {
+            sending = true
+            defer { sending = false }
+            if await deliverPrefillOnce() { return }
+            actionNote = "still starting — tap Send when \(title) is ready"
         }
     }
 }
