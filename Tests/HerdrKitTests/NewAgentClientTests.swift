@@ -91,42 +91,39 @@ final class NewAgentClientTests: XCTestCase {
         XCTAssertTrue(t.lastRequest.contains("w1:p9"))
     }
 
-    /// AXIS: the happy path must not prompt before the agent is ready. waitForReady
-    /// polls agent.list until interactive_ready is true; here it flips true on the
-    /// 2nd poll, so the call must poll at least twice and then return.
-    func testWaitForReadyPollsUntilInteractiveReady() async throws {
-        final class ReadyAfterTwo: HerdrTransport, @unchecked Sendable {
-            var listCalls = 0
-            func roundTrip(_ requestLine: String) async throws -> String {
-                if requestLine.contains("agent.list") {
-                    listCalls += 1
-                    let ready = listCalls >= 2 ? "true" : "false"
-                    return #"{"id":"x","result":{"type":"agent_list","agents":[{"pane_id":"w1:p9","interactive_ready":\#(ready)}]}}"#
-                }
-                return #"{"id":"x","result":{}}"#
-            }
-            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
-        }
-        let t = ReadyAfterTwo()
-        try await HerdrClient(transport: t).waitForReady(pane: "w1:p9", timeoutMs: 1000, pollMs: 1)
-        XCTAssertGreaterThanOrEqual(t.listCalls, 2, "should have polled until ready")
+    /// Serves one canned agent.list. The new-agent flow's readiness gate reads THIS
+    /// to know when a freshly-spawned agent can receive its pre-filled task.
+    private final class ListStub: HerdrTransport, @unchecked Sendable {
+        let json: String
+        init(_ json: String) { self.json = json }
+        func roundTrip(_ requestLine: String) async throws -> String { json }
+        func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
     }
 
-    /// AXIS: a never-ready agent must TIME OUT, not spin forever — the caller then
-    /// surfaces an honest error rather than blocking the UI.
-    func testWaitForReadyTimesOut() async throws {
-        final class NeverReady: HerdrTransport, @unchecked Sendable {
-            func roundTrip(_ r: String) async throws -> String {
-                #"{"id":"x","result":{"type":"agent_list","agents":[{"pane_id":"w1:p9","interactive_ready":false}]}}"#
-            }
-            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
-        }
-        do {
-            try await HerdrClient(transport: NeverReady()).waitForReady(pane: "w1:p9", timeoutMs: 5, pollMs: 1)
-            XCTFail("expected a timeout")
-        } catch let error as HerdrClient.ReadyError {
-            XCTAssertEqual(error, .timedOut(pane: "w1:p9"))
-        }
+    /// AXIS: isPromptable is TRUE only when the pane reports an agent WITH a
+    /// composer — the exact gate the pre-filled task delivery waits on. This is the
+    /// signal that replaces the nil interactive_ready.
+    func testIsPromptableTrueWhenAgentHasComposer() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:p9","agent":"claude","composer":{"state":"unknown"}}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertTrue(ready, "an agent with a composer must be promptable")
+    }
+
+    /// AXIS: a booting agent that has NOT registered a composer yet is NOT
+    /// promptable — delivering then would fall to rawKeys send_text into a shell.
+    /// (Mutation guard: dropping the composer half of the intent gate makes this
+    /// pass wrongly, so the assertion KILLs that mutation.)
+    func testIsPromptableFalseWithoutComposer() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:p9","agent":"claude"}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertFalse(ready, "an agent without a composer must NOT be promptable")
+    }
+
+    /// AXIS: an absent pane is not promptable (never crash / never assume ready).
+    func testIsPromptableFalseWhenPaneAbsent() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:pOTHER","agent":"claude","composer":{"state":"unknown"}}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertFalse(ready, "a pane not present in agent.list must NOT be promptable")
     }
 }
 

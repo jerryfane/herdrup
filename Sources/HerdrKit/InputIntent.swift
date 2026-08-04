@@ -98,6 +98,23 @@ public struct InputRouter: Sendable {
         }
     }
 
+    /// How a reply tap should be delivered when a pane may hold a PRE-FILLED task
+    /// (the new-agent flow opens the spawned agent's pane with its task ready).
+    ///
+    /// The invariant this encodes: a pre-filled task must ONLY ever reach the agent
+    /// as a prompt — NEVER as rawKeys `send_text`. A just-spawned pane is a booting
+    /// shell; typing the task there does not submit it, and a later Return would
+    /// EXECUTE it as a shell command (both review witnesses flagged this). So while
+    /// a pre-fill is pending we return `.prompt` when the agent is promptable and
+    /// `.waitForComposer` otherwise — but NEVER a raw path, at any time (including
+    /// after any UI timeout). A normal reply falls through to `.normalReply` and
+    /// the usual `plan(...)` routing.
+    public enum PrefillDelivery: Equatable, Sendable { case prompt, waitForComposer, normalReply }
+    public func prefillDelivery(pendingPrefill: Bool, isPromptable: Bool) -> PrefillDelivery {
+        guard pendingPrefill else { return .normalReply }
+        return isPromptable ? .prompt : .waitForComposer
+    }
+
     /// Keys the client is willing to send.
     ///
     /// Deliberately conservative. herdr#21 records that keys whose effect depends
