@@ -24,7 +24,7 @@ enum Palette {
     // Text tiers.
     static let text = Color(hex: 0xEEF0F7)         // primary
     static let textDim = Color(hex: 0x99A0BC)      // secondary
-    static let textFaint = Color(hex: 0x666D91)    // tertiary / micro-labels
+    static let textFaint = Color(hex: 0x7C83A6)    // tertiary / micro-labels (≥4.5:1 on ground)
 
     // Status = meaning. The ONLY palette that carries colour.
     static let waiting = Color(hex: 0xE9A63C)      // amber — an agent is asking you
@@ -80,7 +80,7 @@ enum AgentIdentity {
         switch (agent ?? "").lowercased() {
         case let s where s.contains("claude"): (a, b) = (0xCE58A4, 0xA32E77)  // magenta
         case let s where s.contains("codex"):  (a, b) = (0xE8923C, 0xC5622A)  // orange
-        case let s where s.contains("gemini"): (a, b) = (0x5B9BE8, 0x3E6FBF)  // blue
+        case let s where s.contains("gemini"): (a, b) = (0x4C6EF5, 0x2E44C4)  // indigo (kept off the working blue)
         default:                                 (a, b) = (0x8B79F6, 0x5B44C9)  // violet
         }
         return LinearGradient(colors: [Color(hex: a), Color(hex: b)],
@@ -95,7 +95,12 @@ enum AgentIdentity {
         case let s where s.contains("claude"): return "\u{2733}"   // ✳ eight-spoked asterisk
         case let s where s.contains("codex"):  return "C"
         case let s where s.contains("gemini"): return "\u{2726}"   // ✦ four-pointed star
-        default: return String((agent ?? "?").prefix(1)).uppercased()
+        default:
+            // First letter, but never an empty tile: an empty or whitespace kind
+            // falls back to "?" like a nil one. (Two kinds sharing a first letter
+            // still differ by gradient colour; a blank tile differs from nothing.)
+            let first = String((agent ?? "").trimmingCharacters(in: .whitespaces).prefix(1)).uppercased()
+            return first.isEmpty ? "?" : first
         }
     }
 }
