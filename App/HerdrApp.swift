@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import Security
+import UIKit    // UIPasteboard (Copy diagnostics)
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import HerdrKit
 
@@ -190,6 +191,7 @@ struct RootView: View {
             TerminalHomeView(
                 client: client,
                 onDisconnect: { disconnect() },
+                host: credentials.host,
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
             .id(session)
@@ -213,6 +215,8 @@ struct RootView: View {
                 TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .settings:
+            SettingsView(host: "mac.tail-scale.ts.net")
         }
     }
     #endif
@@ -396,6 +400,7 @@ struct ConnectView: View {
 struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
+    var host: String = ""
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
     /// means no census is available yet (the live default) — every agent is
@@ -409,6 +414,7 @@ struct TerminalHomeView: View {
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
     @State private var search = ""
+    @State private var showingSettings = false
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -447,6 +453,13 @@ struct TerminalHomeView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(
+                host: host,
+                connected: error == nil,
+                onReconnect: { showingSettings = false; onDisconnect() },
+                onClose: { showingSettings = false })
         }
     }
 
@@ -508,7 +521,10 @@ struct TerminalHomeView: View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
             tabItem("terminal", "Terminal", active: false)
-            tabItem("gearshape", "Settings", active: false)
+            Button { showingSettings = true } label: {
+                tabItem("gearshape", "Settings", active: false)
+            }
+            .buttonStyle(.plain)
         }
         .padding(6)
         .background(Palette.surface)
@@ -940,6 +956,112 @@ struct TerminalPaneView: View {
     }
 }
 
+/// Settings (screen 05): connection status, notification preferences, and the
+/// trouble actions. Preferences persist locally via @AppStorage; wiring them to
+/// real push delivery is a follow-up, so they record intent, not delivery.
+struct SettingsView: View {
+    var host: String
+    var connected: Bool = true
+    var onReconnect: () -> Void = {}
+    var onClose: () -> Void = {}
+
+    @AppStorage("notify.needsInput") private var notifyNeedsInput = true
+    @AppStorage("notify.dies") private var notifyDies = true
+    @AppStorage("notify.finishes") private var notifyFinishes = false
+    @State private var copied = false
+
+    var body: some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        sectionLabel("CONNECTION")
+                        connectionRow
+                        sectionLabel("NOTIFY ME WHEN")
+                        toggleRow("An agent needs input", $notifyNeedsInput)
+                        toggleRow("An agent dies", $notifyDies)
+                        toggleRow("An agent finishes", $notifyFinishes)
+                        sectionLabel("TROUBLE")
+                        actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+                        actionRow("Reconnect now") { onReconnect() }
+                    }
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Button { onClose() } label: {
+                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
+            }
+            Text("Settings").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .background(Palette.surface)
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
+        }
+        .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 8)
+    }
+
+    private var connectionRow: some View {
+        HStack(spacing: 10) {
+            Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
+            Text(connected ? "Connected" : "Disconnected").font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 16)
+    }
+
+    private func toggleRow(_ label: String, _ value: Binding<Bool>) -> some View {
+        Button { value.wrappedValue.toggle() } label: {
+            HStack {
+                Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                Spacer()
+                Text(value.wrappedValue ? "ON" : "OFF")
+                    .font(Typography.machine(13, .bold))
+                    .foregroundStyle(value.wrappedValue ? Palette.brand : Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 6)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func actionRow(_ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 6)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func copyDiagnostics() {
+        // Host + app version only — never anything sensitive (no key, ever).
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        UIPasteboard.general.string = "herdr-ios \(version) — host \(host), connected=\(connected)"
+        copied = true
+    }
+}
+
 #if DEBUG
 /// DEBUG-only screenshot mode: renders the list/pane views from MockTransport —
 /// no connection, no key, so the buildbox can screenshot them SAFELY (the app
@@ -947,21 +1069,25 @@ struct TerminalPaneView: View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 enum ScreenshotMock {
-    case list, pane
+    case list, pane, settings
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
         #if SCREENSHOT_MOCK_DEFAULT
         // VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. The buildbox launches the
-        // app with no env/args; this boots into the PANE mock so the terminal
-        // screen can be screenshotted. Debug-config-only (project.yml), mock data
-        // only — no key is ever rendered.
-        guard env != nil || arg else { return .pane }
+        // app with no env/args; this boots into the SETTINGS mock so that screen
+        // can be screenshotted. Debug-config-only (project.yml), mock data only —
+        // no key is ever rendered.
+        guard env != nil || arg else { return .settings }
         #else
         guard env != nil || arg else { return nil }
         #endif
-        return env == "pane" ? .pane : .list
+        switch env {
+        case "pane": return .pane
+        case "settings": return .settings
+        default: return .list
+        }
     }
 }
 
