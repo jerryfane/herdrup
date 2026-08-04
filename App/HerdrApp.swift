@@ -1131,15 +1131,7 @@ enum ScreenshotMock {
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
-        #if SCREENSHOT_MOCK_DEFAULT
-        // VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. The buildbox launches the
-        // app with no env/args; this boots into the SETTINGS mock so that screen
-        // can be screenshotted. Debug-config-only (project.yml), mock data only —
-        // no key is ever rendered.
-        guard env != nil || arg else { return .settings }
-        #else
         guard env != nil || arg else { return nil }
-        #endif
         switch env {
         case "pane": return .pane
         case "settings": return .settings
