@@ -31,12 +31,14 @@ final class NewAgentClientTests: XCTestCase {
         let pane = try await HerdrClient(transport: t).splitPane(cwd: "/root/herdr-ios", direction: .down)
 
         XCTAssertEqual(pane, "w1:p9", "did not decode pane_id from pane.split's PaneInfo{pane} result")
-        XCTAssertTrue(t.lastRequest.contains("pane.split"), "wrong method")
+        // Anchor the method to the whole value so a suffix (pane.splitx) fails.
+        XCTAssertTrue(t.lastRequest.contains(#""method":"pane.split""#), "wrong method")
         // Slash-independent: JSONEncoder escapes "/" as "\/", so match the key +
         // the (slashless) folder name rather than the literal path.
         XCTAssertTrue(t.lastRequest.contains("\"cwd\""), "cwd key (the folder) was not sent")
         XCTAssertTrue(t.lastRequest.contains("herdr-ios"), "cwd value (the folder) was not sent")
-        XCTAssertTrue(t.lastRequest.contains("down"), "direction was not sent")
+        XCTAssertTrue(t.lastRequest.contains(#""direction":"down""#), "direction was not sent")
+        XCTAssertTrue(t.lastRequest.contains(#""focus":true"#), "focus flag was not sent as expected")
     }
 
     func testSplitPaneOmitsCwdWhenNil() async throws {
@@ -54,11 +56,31 @@ final class NewAgentClientTests: XCTestCase {
         XCTAssertEqual(agent.paneID, "w1:p9")
         XCTAssertEqual(agent.agent, "codex")
         XCTAssertEqual(agent.displayName, "fix-tests")
-        XCTAssertTrue(t.lastRequest.contains("agent.start"), "wrong method")
-        // The pane id must go out under the wire key the server expects, not paneID.
-        XCTAssertTrue(t.lastRequest.contains("\"pane_id\""), "pane_id must use the snake_case wire key")
-        XCTAssertTrue(t.lastRequest.contains("\"kind\""), "kind was not sent")
-        XCTAssertTrue(t.lastRequest.contains("fix-tests"), "name was not sent")
+        XCTAssertTrue(t.lastRequest.contains(#""method":"agent.start""#), "wrong method")
+        // Pin the key:value PAIRS, not just the keys — otherwise transposing name
+        // and kind (spawn the wrong kind under the wrong name) survives.
+        XCTAssertTrue(t.lastRequest.contains(#""name":"fix-tests""#), "name/value not sent correctly")
+        XCTAssertTrue(t.lastRequest.contains(#""kind":"codex""#), "kind/value not sent correctly")
+        // The pane id must go out under the snake_case wire key the server expects.
+        XCTAssertTrue(t.lastRequest.contains(#""pane_id":"w1:p9""#), "pane_id must use the snake_case wire key")
+    }
+
+    /// AXIS: a server error envelope from these methods surfaces as a thrown
+    /// APIError — the property the whole spawn flow's error handling leans on.
+    func testServerErrorSurfacesAsAPIError() async throws {
+        struct ErrorTransport: HerdrTransport {
+            func roundTrip(_ r: String) async throws -> String {
+                #"{"id":"x","error":{"code":"agent_not_ready","message":"agent w1:p9 is not ready"}}"#
+            }
+            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+        }
+        let client = HerdrClient(transport: ErrorTransport())
+        do {
+            _ = try await client.splitPane(cwd: "/x")
+            XCTFail("expected the error envelope to throw")
+        } catch let e as APIError {
+            XCTAssertEqual(e.code, "agent_not_ready")
+        }
     }
 
     func testClosePaneSendsPaneID() async throws {
