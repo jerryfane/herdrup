@@ -44,6 +44,10 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: herdr
+        # Names the asset-catalog icon set for the runtime. actool also injects
+        # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
+        # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
+        CFBundleIconName: AppIcon
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -55,3 +59,8 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
+        # The lamb app icon ("Herdrup — The Lamb", the approved icon kit). The
+        # asset catalog lives under App/ (already a source path), so xcodegen
+        # bundles it; this names the icon set inside it. Single 1024 artwork —
+        # the mark survives to 48px, so iOS downscales it for every slot.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
