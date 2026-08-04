@@ -15,14 +15,7 @@ struct HerdrApp: App {
     }
 }
 
-/// Termius-inspired dark palette.
-enum Palette {
-    static let bg = Color(red: 0.043, green: 0.055, blue: 0.078)       // ~#0B0E14
-    static let surface = Color(red: 0.086, green: 0.102, blue: 0.137)  // ~#161A23
-    static let text = Color(red: 0.90, green: 0.91, blue: 0.93)
-    static let dim = Color(red: 0.55, green: 0.58, blue: 0.64)
-    static let accent = Color(red: 0.30, green: 0.85, blue: 0.68)      // teal-green
-}
+// Palette / Typography / status tokens now live in DesignSystem.swift.
 
 /// Cross-launch TOFU: the persistent `HostKeyPolicy` the transport contract
 /// assigns to the app (HerdrKit's `PinStore` is in-memory only and cannot be
@@ -213,7 +206,8 @@ struct RootView: View {
         let mockClient = HerdrClient(transport: MockTransport())
         switch mode {
         case .list:
-            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false })
+            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
+                             livePaneIDs: MockTransport.demoLivePaneIDs)
         case .pane:
             NavigationStack {
                 TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis")
@@ -278,15 +272,15 @@ struct ConnectView: View {
 
     var body: some View {
         ZStack {
-            Palette.bg.ignoresSafeArea()
+            Palette.ground.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("herdr")
                         .font(.system(size: 34, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Palette.accent)
+                        .foregroundStyle(Palette.text)   // wordmark is monochrome; blue means "working"
                     Text("connect to a host")
                         .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(Palette.dim)
+                        .foregroundStyle(Palette.textDim)
 
                     field("host", text: $host)
                     field("port", text: $port)
@@ -298,7 +292,7 @@ struct ConnectView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("private key (ed25519 PEM)")
-                            .font(.caption).foregroundStyle(Palette.dim)
+                            .font(.caption).foregroundStyle(Palette.textDim)
                         TextEditor(text: $keyPEM)
                             .font(.system(.footnote, design: .monospaced))
                             .foregroundStyle(Palette.text)
@@ -323,8 +317,8 @@ struct ConnectView: View {
                             .font(.system(.body, design: .monospaced).weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(canConnect ? Palette.accent : Palette.surface)
-                            .foregroundStyle(canConnect ? Palette.bg : Palette.dim)
+                            .background(canConnect ? Palette.cardRaised : Palette.surface)
+                            .foregroundStyle(canConnect ? Palette.text : Palette.textDim)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                     .disabled(!canConnect)
@@ -337,7 +331,7 @@ struct ConnectView: View {
     @ViewBuilder
     private func field(_ label: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundStyle(Palette.dim)
+            Text(label).font(.caption).foregroundStyle(Palette.textDim)
             TextField("", text: text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -356,103 +350,299 @@ struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
     var onTrustHostKey: (String) -> Bool
+    /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
+    /// means no census is available yet (the live default) — every agent is
+    /// treated as live, the only safe reading. The DEBUG mock passes one so the
+    /// stopped section has something to show.
+    var livePaneIDs: Set<String>? = nil
 
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
     @State private var loading = true
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
+    @State private var search = ""
+    // Only the quiet tail (idle) starts collapsed — the model forbids a
+    // collapsed group from ever hiding something that wants attention.
+    @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
+
+    /// The whole list derived from the current agents + census. The grouping,
+    /// fail-closed placement, stable order, count and quiet flag all live in
+    /// HerdrKit's tested `AgentList`, not here.
+    private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
+
+    /// Sections after applying the search box. Search filters the raw agents and
+    /// re-derives, so counts and grouping stay honest for the filtered view.
+    private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
+        guard !search.isEmpty else { return fullList.sections }
+        let filtered = agents.filter {
+            $0.displayName.localizedCaseInsensitiveContains(search)
+                || ($0.terminalTitleStripped ?? "").localizedCaseInsensitiveContains(search)
+        }
+        return AgentList(agents: filtered, livePaneIDs: livePaneIDs).sections
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
-                Palette.bg.ignoresSafeArea()
-                content
-            }
-            .navigationTitle("agents")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("disconnect") { onDisconnect() }
-                        .foregroundStyle(Palette.dim)
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    header
+                    if let error {
+                        errorView(error)
+                    } else if loading {
+                        Spacer(); ProgressView().tint(Palette.textDim); Spacer()
+                    } else {
+                        agentList
+                    }
+                    tabBar
                 }
             }
+            .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
         }
     }
 
-    @ViewBuilder
-    private var content: some View {
-        if let error {
-            VStack(spacing: 14) {
-                Text(error)
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-                if let fingerprint = rejectedFingerprint {
-                    VStack(spacing: 8) {
-                        Text("the host key changed. the server now presents:")
-                            .font(.caption).foregroundStyle(Palette.dim)
-                        Text(fingerprint)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(Palette.text)
-                            .textSelection(.enabled)
-                            .multilineTextAlignment(.center)
-                        Text("trust it ONLY if this exactly matches the key you verified out of band.")
-                            .font(.caption).foregroundStyle(Palette.dim)
-                            .multilineTextAlignment(.center)
-                    }
-                    Button("trust this key & reconnect") {
-                        trustFailed = !onTrustHostKey(fingerprint)
-                    }
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.red)
-                    if trustFailed {
-                        Text("could not save the verified key to the keychain — not reconnecting. try again.")
-                            .font(.caption).foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                // Plain retry ONLY for non-host-key errors. After a host-key
-                // rejection a bare reconnect could first-contact-trust whatever
-                // key next appears (bypassing the fingerprint the user must
-                // verify) — so the only routes then are the bound "trust this
-                // key" above or disconnect.
-                if rejectedFingerprint == nil {
-                    Button("retry") { Task { await load() } }
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(Palette.accent)
-                }
+    // MARK: chrome
+
+    private var header: some View {
+        HStack {
+            circleButton("chevron.left") { onDisconnect() }
+            Spacer()
+            VStack(spacing: 2) {
+                Text("Agents").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
+                // The line is ALWAYS present (reserved height) so the title does
+                // not jump as it appears; its text is the one number or its
+                // restful inverse.
+                Text(headerSubtitle.text)
+                    .font(Typography.machine(12)).foregroundStyle(headerSubtitle.color)
+                    .frame(height: 15)
             }
-            .padding()
-        } else if loading {
-            ProgressView().tint(Palette.accent)
-        } else if agents.isEmpty {
-            Text("no agents")
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(Palette.dim)
-        } else {
-            List(agents) { agent in
-                NavigationLink {
-                    TerminalPaneView(client: client, paneID: agent.paneID, title: agent.displayName)
-                } label: {
-                    HStack(spacing: 10) {
-                        Circle()
-                            .fill(agent.isWorking ? Palette.accent : Palette.dim)
-                            .frame(width: 8, height: 8)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(agent.displayName)
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(Palette.text)
-                            Text(agent.paneID)
-                                .font(.caption)
-                                .foregroundStyle(Palette.dim)
+            Spacer()
+            // The new-agent screen (04) does not exist yet — a visible but inert
+            // affordance, not a live control that does nothing.
+            circleButton("plus") { }.disabled(true).opacity(0.35)
+        }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+    }
+
+    /// The one number leads in amber; when the model reports nothing blocked AND
+    /// nothing uninterpretable, the quiet state says so. A space holds the line
+    /// while loading/empty so nothing above it moves.
+    private var headerSubtitle: (text: String, color: Color) {
+        if fullList.needsYouCount > 0 { return ("\(fullList.needsYouCount) need you", Palette.waiting) }
+        if fullList.isQuiet && !agents.isEmpty { return ("nothing needs you", Palette.textFaint) }
+        return (" ", Palette.textFaint)
+    }
+
+    private func circleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.textDim)
+                .frame(width: 36, height: 36)
+                .background(Palette.surface)
+                .clipShape(Circle())
+        }
+    }
+
+    private var searchField: some View {
+        TextField("Search", text: $search)
+            .font(Typography.app(15)).foregroundStyle(Palette.text)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            tabItem("square.grid.2x2.fill", "Agents", active: true)
+            tabItem("terminal", "Terminal", active: false)
+            tabItem("gearshape", "Settings", active: false)
+        }
+        .padding(6)
+        .background(Palette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+        .padding(.horizontal, 36).padding(.bottom, 4)
+    }
+
+    private func tabItem(_ system: String, _ label: String, active: Bool) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: system).font(.system(size: 16, weight: .medium))
+            Text(label).font(Typography.app(11, active ? .semibold : .regular))
+        }
+        .foregroundStyle(active ? Palette.text : Palette.textFaint)
+        .frame(maxWidth: .infinity).padding(.vertical, 8)
+        .background(active ? Palette.card : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: list
+
+    private var agentList: some View {
+        VStack(spacing: 0) {
+            searchField   // pinned above the scroll, as the mockup/Termius have it
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if agents.isEmpty {
+                        emptyLine("no agents")
+                    } else if visibleSections.isEmpty {
+                        // Agents exist but the search matched none — say so, rather
+                        // than leave a blank scroll that reads as "no agents".
+                        emptyLine("no matches")
+                    } else {
+                        ForEach(visibleSections, id: \.group) { section in
+                            sectionView(section.group, section.rows)
                         }
                     }
                 }
-                .listRowBackground(Palette.surface)
             }
-            .scrollContentBackground(.hidden)
         }
+    }
+
+    private func emptyLine(_ text: String) -> some View {
+        Text(text).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            .frame(maxWidth: .infinity).padding(.top, 44)
+    }
+
+    private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
+        // An active search overrides collapse — a match inside IDLE must not stay
+        // hidden behind a shut section the user did not open.
+        let isCollapsed = search.isEmpty && collapsed.contains(group)
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
+            } label: {
+                HStack(spacing: 8) {
+                    // Count is shown when collapsed (so hidden work is legible);
+                    // an expanded section speaks for itself through its cards.
+                    Text(isCollapsed ? "\(group.sectionTitle) · \(rows.count)" : group.sectionTitle)
+                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                    Rectangle().fill(Palette.hairline).frame(height: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16).padding(.top, 10)
+
+            if !isCollapsed {
+                ForEach(rows) { row in
+                    NavigationLink {
+                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title)
+                    } label: {
+                        card(row)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func card(_ row: AgentRow) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
+                    .frame(width: 40, height: 40)
+                Text(AgentIdentity.glyph(for: row.info.agent))
+                    .font(Typography.app(18, .bold)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
+                Text(subtitle(row.info))
+                    .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            statusBadge(row.group)
+        }
+        .padding(12)
+        .background(Palette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 16).padding(.vertical, 4)
+    }
+
+    /// "folder · activity": folder is the last path component of `cwd`, activity
+    /// is the stripped terminal title. Either may be missing; the pane id is the
+    /// last resort so a row is never subtitle-less.
+    private func subtitle(_ info: AgentInfo) -> String {
+        let folder = info.cwd
+            .map { URL(fileURLWithPath: $0).lastPathComponent }
+            .flatMap { $0.isEmpty || $0 == "/" ? nil : $0 }
+        switch (folder, info.terminalTitleStripped) {
+        case let (f?, a?): return "\(f) · \(a)"
+        case let (f?, nil): return f
+        case let (nil, a?): return a
+        case (nil, nil): return info.paneID
+        }
+    }
+
+    private func statusBadge(_ group: AgentGroup) -> some View {
+        // The status is colour+shape; name it for VoiceOver too.
+        badgeContent(group).accessibilityLabel(Text(group.label))
+    }
+
+    @ViewBuilder
+    private func badgeContent(_ group: AgentGroup) -> some View {
+        switch group {
+        case .needsYou: badgeCircle("exclamationmark", group.color)
+        case .stopped: badgeCircle("xmark", group.color)
+        case .unrecognised: badgeCircle("questionmark", group.color)
+        // "now" is a non-temporal "active" marker, not an elapsed timer — there
+        // is no start timestamp in AgentInfo to count from, so it does not claim
+        // a duration it cannot know.
+        case .working: Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+        case .idle:
+            // Not bare, not loud: a small hollow dot so an expanded idle row still
+            // has a right-edge anchor.
+            Circle().stroke(Palette.textFaint, lineWidth: 1.5).frame(width: 8, height: 8)
+        }
+    }
+
+    private func badgeCircle(_ system: String, _ color: Color) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
+            .frame(width: 26, height: 26)
+            .overlay(Circle().stroke(color.opacity(0.55), lineWidth: 1.5))
+    }
+
+    // MARK: error / host-key recovery (functional, restyled to the tokens)
+
+    @ViewBuilder
+    private func errorView(_ error: String) -> some View {
+        Spacer()
+        VStack(spacing: 14) {
+            Text(error).font(Typography.machine(13)).foregroundStyle(Palette.died)
+                .multilineTextAlignment(.center)
+            if let fingerprint = rejectedFingerprint {
+                VStack(spacing: 8) {
+                    Text("the host key changed. the server now presents:")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textDim)
+                    Text(fingerprint).font(Typography.machine(11)).foregroundStyle(Palette.text)
+                        .textSelection(.enabled).multilineTextAlignment(.center)
+                    Text("trust it ONLY if this exactly matches the key you verified out of band.")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textDim).multilineTextAlignment(.center)
+                }
+                Button("trust this key & reconnect") { trustFailed = !onTrustHostKey(fingerprint) }
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.died)
+                if trustFailed {
+                    Text("could not save the verified key to the keychain — not reconnecting. try again.")
+                        .font(Typography.app(12)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
+                }
+            }
+            // Plain retry ONLY for non-host-key errors. After a host-key
+            // rejection a bare reconnect could first-contact-trust whatever key
+            // next appears (bypassing the fingerprint the user must verify), so
+            // the only routes then are "trust this key" above or disconnect.
+            if rejectedFingerprint == nil {
+                Button("retry") { Task { await load() } }
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            }
+        }
+        .padding(24)
+        Spacer()
     }
 
     private func load() async {
@@ -486,7 +676,7 @@ struct TerminalPaneView: View {
 
     var body: some View {
         ZStack {
-            Palette.bg.ignoresSafeArea()
+            Palette.ground.ignoresSafeArea()
             GeometryReader { geo in
                 // Fold from the SETTLED layout width, but cache the result: re-fold
                 // ONLY when the width or the text changes (below), not on every body
@@ -523,7 +713,7 @@ struct TerminalPaneView: View {
             Button {
                 Task { await refresh() }
             } label: {
-                Image(systemName: "arrow.clockwise").foregroundStyle(Palette.accent)
+                Image(systemName: "arrow.clockwise").foregroundStyle(Palette.textDim)
             }
         }
     }
@@ -582,16 +772,32 @@ struct MockTransport: HerdrTransport {
         AsyncThrowingStream { $0.finish() }
     }
 
+    // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
+    // you" is `blocked`; the STOPPED row is NOT a status string — it comes from
+    // liveness (w2:p1 is absent from demoLivePaneIDs below), exactly as the real
+    // model derives it. done folds into idle.
     static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[
-      {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"working","terminal_title_stripped":"omp-runtime-adapter"},
-      {"pane_id":"w1:p2","name":"herdr-app","agent":"claude","agent_status":"done","terminal_title_stripped":"citadel-transport"},
-      {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","terminal_title_stripped":"digest-pipeline"}
+      {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"},
+      {"pane_id":"w1:p2","name":"vetrina","agent":"codex","agent_status":"blocked","cwd":"/root/vetrina","terminal_title_stripped":"overwrite config.ts?"},
+      {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","cwd":"/root/trend-scout","terminal_title_stripped":"exited, code 1"},
+      {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs"},
+      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold"},
+      {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
+      {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
+      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"}
     ]}}
     """#
 
+    /// The panes herdr still lists, for the mock render. Excludes w2:p1 so that
+    /// row lands in STOPPED via liveness (not a status string). MUST stay in sync
+    /// with the census the fixture test uses.
+    static let demoLivePaneIDs: Set<String> = [
+        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2",
+    ]
+
     static let agentRead = #"""
-    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent list\n3 agents running\n\n* jarvis      working   omp-runtime-adapter\n* herdr-app   done      citadel-transport\n* trend-scout idle      digest-pipeline\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
+    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> may I run `just test` on herdr-ios?\n  177 tests, ~30s, no network\n\n  [y] allow   [n] deny   [a] always\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
 }
 #endif
