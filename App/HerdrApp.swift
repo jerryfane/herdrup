@@ -1025,6 +1025,7 @@ struct SettingsView: View {
                 Spacer(minLength: 0)
             }
             .rowShell()
+            .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
         }
     }
 
