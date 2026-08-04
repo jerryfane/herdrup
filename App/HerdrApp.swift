@@ -192,6 +192,7 @@ struct RootView: View {
                 client: client,
                 onDisconnect: { disconnect() },
                 host: credentials.host,
+                onReconnect: { reconnect() },
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
             .id(session)
@@ -236,6 +237,20 @@ struct RootView: View {
         credentials = nil
     }
 
+    /// Drops and re-establishes the connection with the RETAINED credentials —
+    /// the transport is rebuilt and `session` bumped so the home view re-loads.
+    /// Distinct from disconnect(): the user stays connected, they do not fall back
+    /// to re-entering host/key. No pin change, so the existing pin still guards.
+    private func reconnect() {
+        guard let creds = credentials else { return }
+        let closing = transport
+        Task { await closing?.close() }
+        let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
+        transport = newTransport
+        client = HerdrClient(transport: newTransport)
+        session += 1
+    }
+
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
     /// of band (from the rejection), then reconnect. Because the pin is bound to
     /// that fingerprint before reconnecting, a substituted key during the
@@ -245,12 +260,7 @@ struct RootView: View {
     /// persisted — reconnecting then would reopen a first-contact TOFU window.
     private func trustAndReconnect(_ creds: SSHCredentials, fingerprint: String) -> Bool {
         guard pins.pin(host: creds.host, port: creds.port, fingerprint: fingerprint) else { return false }
-        let closing = transport
-        Task { await closing?.close() }
-        let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
-        transport = newTransport
-        client = HerdrClient(transport: newTransport)
-        session += 1
+        reconnect()   // pin bound above; the reconnect reuses `pins`, so the just-verified key is trusted
         return true
     }
 }
@@ -401,6 +411,7 @@ struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
     var host: String = ""   // shown in the Settings sheet's connection row
+    var onReconnect: () -> Void = {}
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
     /// means no census is available yet (the live default) — every agent is
@@ -454,11 +465,15 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
             .task { await load() }
         }
-        .sheet(isPresented: $showingSettings) {
+        .fullScreenCover(isPresented: $showingSettings) {
             SettingsView(
                 host: host,
-                connected: error == nil,
-                onReconnect: { showingSettings = false; onDisconnect() },
+                connected: error == nil && !loading,
+                // Withhold reconnect during a host-key rejection — reconnecting
+                // then would first-contact-trust the next key (same gate as the
+                // recovery screen's withheld retry).
+                canReconnect: rejectedFingerprint == nil,
+                onReconnect: { showingSettings = false; onReconnect() },
                 onClose: { showingSettings = false })
         }
     }
@@ -952,6 +967,11 @@ struct TerminalPaneView: View {
 struct SettingsView: View {
     var host: String
     var connected: Bool = true
+    /// Whether "Reconnect now" is safe to offer. FALSE while the connection is in
+    /// the host-key-rejection state — a bare reconnect there would first-contact-
+    /// trust whatever key appears next, routing around the very gate the recovery
+    /// screen enforces. The row is disabled with a reason in that state.
+    var canReconnect: Bool = true
     var onReconnect: () -> Void = {}
     var onClose: () -> Void = {}
 
@@ -966,32 +986,69 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 header
                 ScrollView {
+                    // Grouped into three subviews so the top-level builder stays
+                    // well under SwiftUI's 10-child ViewBuilder ceiling.
                     VStack(alignment: .leading, spacing: 0) {
-                        sectionLabel("CONNECTION")
-                        connectionRow
-                        sectionLabel("NOTIFY ME WHEN")
-                        toggleRow("An agent needs input", $notifyNeedsInput)
-                        toggleRow("An agent dies", $notifyDies)
-                        toggleRow("An agent finishes", $notifyFinishes)
-                        sectionLabel("TROUBLE")
-                        actionRow("Reconnect now") { onReconnect() }
-                        actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+                        connectionSection
+                        notifySection
+                        troubleSection
                     }
+                    .padding(.bottom, 16)
                 }
             }
         }
     }
 
+    // Header sits on the ground with a bottom hairline (not a filled bar); the
+    // one accent the kit uses here is the back affordance.
     private var header: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button { onClose() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
+                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.brand)
             }
             Text("Settings").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
             Spacer()
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
-        .background(Palette.surface)
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
+
+    private var connectionSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("CONNECTION")
+            HStack(spacing: 10) {
+                Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
+                Text(connected ? "Connected" : "Disconnected")
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
+                Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .rowShell()
+        }
+    }
+
+    private var notifySection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("NOTIFY ME WHEN")
+            toggleRow("An agent needs input", $notifyNeedsInput)
+            toggleRow("An agent dies", $notifyDies)
+            toggleRow("An agent finishes", $notifyFinishes)
+            // Honest about delivery: the toggles persist the choice, but push
+            // delivery is not wired yet — do not imply live notifications.
+            Text("Delivery is coming soon — these save your preference.")
+                .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                .padding(.horizontal, 20).padding(.top, 8)
+        }
+    }
+
+    private var troubleSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("TROUBLE")
+            actionRow("Reconnect now", enabled: canReconnect,
+                      note: "verify the host key first") { onReconnect() }
+            actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+        }
     }
 
     private func sectionLabel(_ text: String) -> some View {
@@ -999,56 +1056,65 @@ struct SettingsView: View {
             Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
             Rectangle().fill(Palette.hairline).frame(height: 1)
         }
-        .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 8)
-    }
-
-    private var connectionRow: some View {
-        HStack(spacing: 10) {
-            Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
-            Text(connected ? "Connected" : "Disconnected").font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
-            Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textDim).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
     }
 
     private func toggleRow(_ label: String, _ value: Binding<Bool>) -> some View {
         Button { value.wrappedValue.toggle() } label: {
             HStack {
-                Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
                 Spacer()
+                // ON and OFF are BOTH the primary tier — differentiated by the
+                // word, not colour. Brand violet is reserved for the primary
+                // action + active tab, never a toggle state.
                 Text(value.wrappedValue ? "ON" : "OFF")
-                    .font(Typography.machine(13, .bold))
-                    .foregroundStyle(value.wrappedValue ? Palette.brand : Palette.textFaint)
+                    .font(Typography.machine(13, .bold)).foregroundStyle(Palette.text)
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
-            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 16).padding(.top, 6)
+            .rowShell()
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.top, 10)
+        .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
     }
 
-    private func actionRow(_ label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func actionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
+        Button { if enabled { action() } } label: {
             HStack {
-                Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(Typography.app(15)).foregroundStyle(enabled ? Palette.text : Palette.textFaint)
+                    if !enabled, let note {
+                        Text(note).font(Typography.app(11)).foregroundStyle(Palette.textFaint)
+                    }
+                }
                 Spacer()
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
-            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 16).padding(.top, 6)
+            .rowShell()
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     private func copyDiagnostics() {
         // Host + app version only — never anything sensitive (no key, ever).
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        UIPasteboard.general.string = "herdr-ios \(version) — host \(host), connected=\(connected)"
+        UIPasteboard.general.string = "herdr-ios \(version) — host \(host)"
         copied = true
+        // Revert the confirmation so a second copy gives feedback.
+        Task { try? await Task.sleep(nanoseconds: 2_000_000_000); copied = false }
+    }
+}
+
+/// The kit's row shell: transparent fill, a 1px hairline border, and the tap
+/// shape confined to the card (so the outer gutter/gap is not a tap target).
+private extension View {
+    func rowShell() -> some View {
+        self
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
