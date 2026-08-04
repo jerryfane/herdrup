@@ -206,7 +206,8 @@ struct RootView: View {
         let mockClient = HerdrClient(transport: MockTransport())
         switch mode {
         case .list:
-            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false })
+            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
+                             livePaneIDs: MockTransport.demoLivePaneIDs)
         case .pane:
             NavigationStack {
                 TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis")
@@ -349,6 +350,11 @@ struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
     var onTrustHostKey: (String) -> Bool
+    /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
+    /// means no census is available yet (the live default) — every agent is
+    /// treated as live, the only safe reading. The DEBUG mock passes one so the
+    /// stopped section has something to show.
+    var livePaneIDs: Set<String>? = nil
 
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
@@ -356,27 +362,24 @@ struct TerminalHomeView: View {
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
     @State private var search = ""
-    // Idle agents are the quiet majority; collapse them by default so the
-    // sections that want attention lead (the mockup shows IDLE collapsed).
-    @State private var collapsed: Set<AgentState> = [.idle]
+    // Only the quiet tail (idle) starts collapsed — the model forbids a
+    // collapsed group from ever hiding something that wants attention.
+    @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
 
-    /// Order the status groups by urgency; drop empty ones. Idle is last.
-    private var groups: [(state: AgentState, agents: [AgentInfo])] {
-        let filtered = search.isEmpty ? agents : agents.filter {
+    /// The whole list derived from the current agents + census. The grouping,
+    /// fail-closed placement, stable order, count and quiet flag all live in
+    /// HerdrKit's tested `AgentList`, not here.
+    private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
+
+    /// Sections after applying the search box. Search filters the raw agents and
+    /// re-derives, so counts and grouping stay honest for the filtered view.
+    private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
+        guard !search.isEmpty else { return fullList.sections }
+        let filtered = agents.filter {
             $0.displayName.localizedCaseInsensitiveContains(search)
                 || ($0.terminalTitleStripped ?? "").localizedCaseInsensitiveContains(search)
         }
-        let byState = Dictionary(grouping: filtered) { AgentState.from($0.agentStatus) }
-        return [AgentState.needsYou, .stopped, .working, .done, .idle].compactMap { state in
-            guard let items = byState[state], !items.isEmpty else {
-                return nil as (state: AgentState, agents: [AgentInfo])?
-            }
-            return (state: state, agents: items)
-        }
-    }
-
-    private var needsYouCount: Int {
-        agents.filter { AgentState.from($0.agentStatus) == .needsYou }.count
+        return AgentList(agents: filtered, livePaneIDs: livePaneIDs).sections
     }
 
     var body: some View {
@@ -408,9 +411,15 @@ struct TerminalHomeView: View {
             Spacer()
             VStack(spacing: 2) {
                 Text("Agents").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-                if needsYouCount > 0 {
-                    Text("\(needsYouCount) need you")
+                // The one number, and its restful inverse. Blocked count leads in
+                // amber; when the model says nothing is blocked AND nothing is
+                // uninterpretable, say so plainly.
+                if fullList.needsYouCount > 0 {
+                    Text("\(fullList.needsYouCount) need you")
                         .font(Typography.machine(12)).foregroundStyle(Palette.waiting)
+                } else if fullList.isQuiet && !agents.isEmpty {
+                    Text("nothing needs you")
+                        .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
                 }
             }
             Spacer()
@@ -470,25 +479,34 @@ struct TerminalHomeView: View {
         ScrollView {
             searchField
             if agents.isEmpty {
-                Text("no agents").font(Typography.app(15)).foregroundStyle(Palette.textDim).padding(.top, 44)
+                emptyLine("no agents")
+            } else if visibleSections.isEmpty {
+                // Agents exist but the search matched none — say so, rather than
+                // leave a blank scroll that reads as "no agents".
+                emptyLine("no matches")
             } else {
-                ForEach(groups, id: \.state) { group in
-                    section(group.state, group.agents)
+                ForEach(visibleSections, id: \.group) { section in
+                    sectionView(section.group, section.rows)
                 }
             }
         }
     }
 
-    private func section(_ state: AgentState, _ items: [AgentInfo]) -> some View {
-        let isCollapsed = collapsed.contains(state)
+    private func emptyLine(_ text: String) -> some View {
+        Text(text).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            .frame(maxWidth: .infinity).padding(.top, 44)
+    }
+
+    private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
+        let isCollapsed = collapsed.contains(group)
         return VStack(alignment: .leading, spacing: 6) {
             Button {
-                if isCollapsed { collapsed.remove(state) } else { collapsed.insert(state) }
+                if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
             } label: {
                 HStack(spacing: 8) {
                     // Count is shown when collapsed (so hidden work is legible);
                     // an expanded section speaks for itself through its cards.
-                    Text(isCollapsed ? "\(state.sectionTitle) · \(items.count)" : state.sectionTitle)
+                    Text(isCollapsed ? "\(group.sectionTitle) · \(rows.count)" : group.sectionTitle)
                         .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
@@ -499,11 +517,11 @@ struct TerminalHomeView: View {
             .padding(.horizontal, 16).padding(.top, 10)
 
             if !isCollapsed {
-                ForEach(items) { agent in
+                ForEach(rows) { row in
                     NavigationLink {
-                        TerminalPaneView(client: client, paneID: agent.paneID, title: agent.displayName)
+                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title)
                     } label: {
-                        card(agent, state)
+                        card(row)
                     }
                     .buttonStyle(.plain)
                 }
@@ -511,21 +529,21 @@ struct TerminalHomeView: View {
         }
     }
 
-    private func card(_ agent: AgentInfo, _ state: AgentState) -> some View {
+    private func card(_ row: AgentRow) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: agent.agent))
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
                     .frame(width: 40, height: 40)
-                Text(AgentIdentity.glyph(for: agent.agent))
+                Text(AgentIdentity.glyph(for: row.info.agent))
                     .font(Typography.app(18, .bold)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(agent.displayName).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
-                Text(agent.terminalTitleStripped ?? agent.paneID)
+                Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
+                Text(row.info.terminalTitleStripped ?? row.info.paneID)
                     .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
             }
             Spacer(minLength: 8)
-            statusBadge(state)
+            statusBadge(row.group)
         }
         .padding(12)
         .background(Palette.card)
@@ -534,13 +552,16 @@ struct TerminalHomeView: View {
     }
 
     @ViewBuilder
-    private func statusBadge(_ state: AgentState) -> some View {
-        switch state {
-        case .needsYou: badgeCircle("exclamationmark", Palette.waiting)
-        case .stopped: badgeCircle("xmark", Palette.died)
-        case .working: Text("now").font(Typography.machine(12)).foregroundStyle(Palette.working)
-        case .done: badgeCircle("checkmark", Palette.done)
-        case .idle: EmptyView()
+    private func statusBadge(_ group: AgentGroup) -> some View {
+        switch group {
+        case .needsYou: badgeCircle("exclamationmark", group.color)
+        case .stopped: badgeCircle("xmark", group.color)
+        case .unrecognised: badgeCircle("questionmark", group.color)
+        case .working: Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+        case .idle:
+            // Not bare, not loud: a small hollow dot so an expanded idle row still
+            // has a right-edge anchor.
+            Circle().stroke(Palette.textFaint, lineWidth: 1.5).frame(width: 8, height: 8)
         }
     }
 
@@ -711,18 +732,29 @@ struct MockTransport: HerdrTransport {
         AsyncThrowingStream { $0.finish() }
     }
 
+    // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
+    // you" is `blocked`; the STOPPED row is NOT a status string — it comes from
+    // liveness (w2:p1 is absent from demoLivePaneIDs below), exactly as the real
+    // model derives it. done folds into idle.
     static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[
-      {"pane_id":"w1:p1","name":"codex","agent":"codex","agent_status":"input_pending","terminal_title_stripped":"herdr-ios · asking to run tests"},
-      {"pane_id":"w1:p2","name":"claude","agent":"claude","agent_status":"waiting","terminal_title_stripped":"vetrina · overwrite config.ts?"},
-      {"pane_id":"w2:p1","name":"codex","agent":"codex","agent_status":"exited","terminal_title_stripped":"trend-scout · exited, code 1"},
+      {"pane_id":"w1:p1","name":"codex","agent":"codex","agent_status":"blocked","terminal_title_stripped":"herdr-ios · asking to run tests"},
+      {"pane_id":"w1:p2","name":"claude","agent":"claude","agent_status":"blocked","terminal_title_stripped":"vetrina · overwrite config.ts?"},
+      {"pane_id":"w2:p1","name":"codex","agent":"codex","agent_status":"idle","terminal_title_stripped":"trend-scout · exited, code 1"},
       {"pane_id":"w2:p2","name":"claude","agent":"claude","agent_status":"working","terminal_title_stripped":"herdr · editing src/acp.rs"},
       {"pane_id":"w3:p1","name":"claude","agent":"claude","agent_status":"idle","terminal_title_stripped":"clientloop · amigo-poc scaffold"},
       {"pane_id":"w3:p2","name":"codex","agent":"codex","agent_status":"idle","terminal_title_stripped":"aste-screener · apify-harvest"},
       {"pane_id":"w4:p1","name":"gemini","agent":"gemini","agent_status":"idle","terminal_title_stripped":"discovery · redaction-pass v3"},
-      {"pane_id":"w4:p2","name":"claude","agent":"claude","agent_status":"idle","terminal_title_stripped":"bank-qa · deal-assistant rag"}
+      {"pane_id":"w4:p2","name":"claude","agent":"claude","agent_status":"done","terminal_title_stripped":"bank-qa · deal-assistant rag"}
     ]}}
     """#
+
+    /// The panes herdr still lists, for the mock render. Excludes w2:p1 so that
+    /// row lands in STOPPED via liveness (not a status string). MUST stay in sync
+    /// with the census the fixture test uses.
+    static let demoLivePaneIDs: Set<String> = [
+        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2",
+    ]
 
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach codex\n\n> may I run `just test` on herdr-ios?\n  177 tests, ~30s, no network\n\n  [y] allow   [n] deny   [a] always\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
