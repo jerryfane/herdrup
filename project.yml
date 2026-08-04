@@ -48,14 +48,14 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
-        # Export-compliance declaration for TestFlight/App Store. The app's only
-        # cryptography is standard SSH transport (swift-nio-ssh/Citadel) used for
-        # authentication + a secure channel — no proprietary or non-standard
-        # crypto — which qualifies for the exemption, so no annual self-
-        # classification is required. Set here so an archive upload does not stop
-        # to ask. (Owner asked to confirm; flip to true + self-classify if ever
-        # untrue.)
-        ITSAppUsesNonExemptEncryption: false
+        # NOTE: ITSAppUsesNonExemptEncryption is deliberately NOT predeclared. The
+        # app links third-party crypto (BoringSSL via swift-nio-ssh/Citadel) that
+        # provides confidentiality, not just OS-provided/authentication-only
+        # encryption, so it is not automatically exempt and may require annual
+        # self-classification. Leaving the key absent means App Store Connect asks
+        # the export-compliance question and the OWNER makes the determination
+        # there — the correct authority — rather than a wrong `false` suppressing
+        # it. See docs/testflight-lane.md.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

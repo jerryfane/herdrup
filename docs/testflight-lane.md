@@ -7,60 +7,73 @@ Xcode-UI state.
 
 ## Design
 
-- **Signing is automatic.** `scripts/testflight.sh` archives with
-  `-allowProvisioningUpdates` + an App Store Connect API key, so Xcode creates/renews
-  the **Apple Distribution** certificate and the **App Store** provisioning profile
-  on demand. Nothing is committed and nothing is hand-installed — *provided the API
-  key is an App Manager/Admin key*.
+- **Signing goes through the Mac's signed-in Xcode account.** `scripts/testflight.sh`
+  archives with `-allowProvisioningUpdates`, so Xcode creates/renews the **Apple
+  Distribution** certificate and **App Store** provisioning profile from the Apple ID
+  signed into Xcode. Nothing is committed and nothing is hand-installed. This path
+  does **not** require the App Store Connect API key to hold provisioning /
+  cloud-managed-distribution access (which an individual-account or non-Admin key may
+  not have).
+- **The API key is used only for the upload leg.** Upload is Xcode-native —
+  `xcodebuild -exportArchive` with `ci/ExportOptions-upload.plist`
+  (`destination: upload`) authenticated by the API key — so nothing depends on the
+  deprecated `xcrun altool`.
 - **`project.yml`** carries `DEVELOPMENT_TEAM: FXQ5Z9HHY6` + `CODE_SIGN_STYLE:
   Automatic`. These are **inert for the buildbox's iphonesimulator build** (the
   simulator is never code-signed), so the existing green sim build is unaffected;
   they take effect only for a device archive.
-- **`ci/ExportOptions.plist`** — `method: app-store-connect`, `destination: export`,
-  team `FXQ5Z9HHY6`, automatic signing. Produces a signed `.ipa`; the script uploads
-  it as a separate, explicitly-gated step (`TESTFLIGHT_UPLOAD=1`).
-- **Export compliance:** `ITSAppUsesNonExemptEncryption = false` in the Info.plist
-  properties — the only crypto is standard SSH transport (authentication + secure
-  channel), which qualifies for the exemption, so no annual self-classification.
+- **Export compliance is NOT predeclared.** The app links third-party crypto
+  (BoringSSL via swift-nio-ssh/Citadel) that provides confidentiality — not merely
+  OS-provided or authentication-only encryption — so it is **not automatically
+  exempt** and may require annual self-classification. `project.yml` deliberately
+  omits `ITSAppUsesNonExemptEncryption`; App Store Connect then asks the
+  export-compliance question and the **owner** makes the determination there (the
+  correct authority). See Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
 ## Running it (on the Mac)
 
 ```sh
+scripts/testflight.sh                          # archive + export a signed .ipa (no upload, no key needed)
+
+TESTFLIGHT_UPLOAD=1 \
 ASC_KEY_ID=REDACTED-KEYID \
 ASC_ISSUER_ID=<issuer-uuid> \
 ASC_KEY_PATH=/path/to/AuthKey_REDACTED-KEYID.p8 \
-scripts/testflight.sh                    # archive + export a signed .ipa (no upload)
-
-TESTFLIGHT_UPLOAD=1 <same env> scripts/testflight.sh   # ...and upload to TestFlight
+scripts/testflight.sh                          # ...and upload to TestFlight
 ```
 
-`BUILD_NUMBER` defaults to a timestamp (App Store requires a unique, monotonic build
-number per upload); override for a deterministic CI counter.
+A plain run is a self-contained signing dry-run (needs no API key) that proves the
+signing chain before the first upload. `BUILD_NUMBER` defaults to a second-precision
+timestamp (App Store requires a unique, monotonic build number per upload); pass a
+durable CI counter for rapid successive uploads.
 
 ## Discovered account state (App Store Connect, read-only, 2026-08-04)
 
 - Team **FXQ5Z9HHY6** (Jerry Fanelli, individual).
 - App record for `com.jerryfane.herdr`: **none yet**.
-- Bundle id `com.jerryfane.herdr`: **not registered** (auto-registers on first archive
-  with an App Manager key).
-- Distribution certificate: **none** (one Development cert exists); auto-created by the
-  archive.
-- App Store provisioning profile: **none**; auto-created by the archive.
+- Bundle id `com.jerryfane.herdr`: **not registered** (registers on the first archive
+  via the signed-in Xcode account).
+- Distribution certificate: **none** (one Development cert exists); created by the
+  first archive.
+- App Store provisioning profile: **none**; created by the first archive.
 
-## Needs the owner (sent via agentgram 2026-08-04)
+## Needs the owner
 
 1. **Create the App Store Connect app record** for `com.jerryfane.herdr` — public
    name (proposed **Herdrup**), primary language, SKU. Required before upload.
-2. **Set the API key `…REDACTED-KEYID` to App Manager/Admin** so the archive can create
-   the distribution cert + profile (else create them manually and wire in).
-3. **Confirm the encryption declaration** (`ITSAppUsesNonExemptEncryption=false`).
-4. **The Mac** must have Xcode signed into the account and the `.p8` key present so
-   the script can run.
+2. **On the Mac: sign Xcode into the Apple ID** for team FXQ5Z9HHY6 (this is what
+   signs the archive). And for the upload, provide an **upload-capable App Store
+   Connect API key** (App Manager or Admin). NOTE: an API key's role is **immutable** —
+   if the current key `…REDACTED-KEYID` is not upload-capable, **create a new key** with
+   the right role rather than trying to change it.
+3. **Complete the export-compliance determination** in App Store Connect (the app
+   uses third-party SSH crypto, so it is not automatically exempt — see above).
+4. **Put the `.p8` key file on the Mac** so the upload leg can read it.
 
 ## Verification
 
 - The signing config must NOT regress the buildbox iphonesimulator build (it is
   inert there) — buildbox green at the exact head is the gate.
-- The archive/export/upload itself is verified on the Mac once items 1–4 land; a
-  dry `scripts/testflight.sh` (no upload) produces a signed `.ipa` to confirm the
-  signing chain before the first TestFlight push.
+- The archive/export/upload is verified on the Mac once items 1–4 land; a plain
+  `scripts/testflight.sh` (no upload) produces a signed `.ipa` and proves the signing
+  chain before the first TestFlight push.
