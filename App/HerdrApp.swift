@@ -218,6 +218,10 @@ struct RootView: View {
             }
         case .settings:
             SettingsView(host: "mac.tail-scale.ts.net")
+        case .newAgent:
+            NewAgentView(client: mockClient,
+                         initialFolder: "~/herdr-ios", initialKind: "codex",
+                         initialTask: "Fix the failing schema artifact test and push")
         }
     }
     #endif
@@ -605,6 +609,7 @@ struct TerminalHomeView: View {
     @State private var trustFailed = false
     @State private var search = ""
     @State private var showingSettings = false
+    @State private var showingNewAgent = false
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -655,6 +660,12 @@ struct TerminalHomeView: View {
                 onReconnect: { showingSettings = false; onReconnect() },
                 onClose: { showingSettings = false })
         }
+        .fullScreenCover(isPresented: $showingNewAgent) {
+            NewAgentView(
+                client: client,
+                onStarted: { showingNewAgent = false; Task { await load() } },
+                onCancel: { showingNewAgent = false })
+        }
     }
 
     // MARK: chrome
@@ -675,7 +686,7 @@ struct TerminalHomeView: View {
             Spacer()
             // The new-agent screen (04) does not exist yet — a visible but inert
             // affordance, not a live control that does nothing.
-            circleButton("plus") { }.disabled(true).opacity(0.35)
+            circleButton("plus") { showingNewAgent = true }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
@@ -1305,15 +1316,23 @@ private extension View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 enum ScreenshotMock {
-    case list, pane, settings
+    case list, pane, settings, newAgent
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
+        #if SCREENSHOT_MOCK_DEFAULT
+        // VERIFICATION SCAFFOLD — REMOVE BEFORE MERGE. The buildbox launches the app
+        // with no env/args; this boots into the new-agent mock so that screen can be
+        // screenshotted. Debug-config-only (project.yml), mock data only — no key.
+        guard env != nil || arg else { return .newAgent }
+        #else
         guard env != nil || arg else { return nil }
+        #endif
         switch env {
         case "pane": return .pane
         case "settings": return .settings
+        case "newagent": return .newAgent
         default: return .list
         }
     }
