@@ -2,11 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Upload variant of the export options. `destination: upload` makes
-  `xcodebuild -exportArchive` sign AND upload to App Store Connect in one step,
-  authenticated by the App Store Connect API key passed on the command line
-  (-authenticationKey*). This replaces the deprecated `xcrun altool` upload path,
-  so nothing depends on a tool Apple has slated for removal. Used by
-  scripts/testflight.sh only when TESTFLIGHT_UPLOAD=1. See docs/testflight-lane.md.
+  `xcodebuild -exportArchive` distribution-sign AND upload to App Store Connect in
+  one step, authenticated by the Mac's SIGNED-IN XCODE ACCOUNT (no API key, no
+  deprecated `xcrun altool`). Used by scripts/testflight.sh only when
+  TESTFLIGHT_UPLOAD=1. See docs/testflight-lane.md.
 -->
 <plist version="1.0">
 <dict>
