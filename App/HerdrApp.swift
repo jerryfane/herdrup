@@ -423,6 +423,9 @@ struct NewAgentView: View {
     @State private var task: String
     @State private var starting = false
     @State private var errorMessage: String?
+    /// Set when the agent DID start but the task didn't land — the agent is live,
+    /// so we must not clean up or let a blind retry duplicate it.
+    @State private var partialSpawn = false
 
     private static let kinds = ["claude", "codex", "gemini"]
 
@@ -437,7 +440,7 @@ struct NewAgentView: View {
     }
 
     private var canStart: Bool {
-        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !starting
+        !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !starting && !partialSpawn
     }
     /// The agent's name — the folder's basename, else the kind. herdr validates
     /// the name; a duplicate surfaces as a start error rather than being guessed.
@@ -483,6 +486,7 @@ struct NewAgentView: View {
     private var header: some View {
         HStack {
             Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
+                .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
             Spacer()
             Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
             Spacer()
@@ -548,41 +552,65 @@ struct NewAgentView: View {
     }
 
     private var startButton: some View {
-        Button { start() } label: {
+        // After a partial spawn the agent already exists, so the primary action
+        // becomes "go see it", not "Start again" (which would duplicate it).
+        let enabled = partialSpawn ? true : canStart
+        return Button { partialSpawn ? onStarted() : start() } label: {
             HStack(spacing: 8) {
                 if starting { ProgressView().tint(.white) }
-                Text(starting ? "Starting…" : "Start").font(Typography.app(16, .semibold))
+                Text(partialSpawn ? "Go to the agent" : (starting ? "Starting…" : "Start"))
+                    .font(Typography.app(16, .semibold))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(canStart ? Palette.brand : Palette.surface)
-            .foregroundStyle(canStart ? .white : Palette.textFaint)
+            .background(enabled ? Palette.brand : Palette.surface)
+            .foregroundStyle(enabled ? .white : Palette.textFaint)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
-        .disabled(!canStart)
+        .disabled(!enabled)
         .padding(.horizontal, 16).padding(.top, 16)
     }
 
-    /// The three-step spawn. Steps are sequential and a failure at any step is
-    /// surfaced (never a silent half-spawn): split a pane in the folder, start the
-    /// agent kind in it, then send the task as its first prompt.
+    /// The spawn: split a pane in the folder, start the agent, WAIT for it to be
+    /// ready, then send the task. Every failure is surfaced honestly, and the
+    /// partial state is handled by WHERE it failed:
+    ///   - before the agent starts → clean up the orphan pane (safe), retry OK.
+    ///   - after the agent starts   → the agent is LIVE; do NOT clean up or retry
+    ///     (would kill it / duplicate the name) — disclose and send them to it.
     private func start() {
+        guard !starting else { return }   // re-entry invariant, not just Button.disabled
         starting = true
         errorMessage = nil
         let cwd = folder.trimmingCharacters(in: .whitespacesAndNewlines)
         let taskText = task.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = derivedName
+        let name = AgentName.normalize(derivedName)   // to the server grammar BEFORE splitting
         let chosenKind = kind
         Task {
             defer { starting = false }
+            var createdPane: String?
+            var agentStarted = false
             do {
-                let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd, direction: .down)
+                let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd)
+                createdPane = paneID
                 _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
+                agentStarted = true
+                // agent.start only INITIATES launch; prompting before ready returns
+                // agent_not_ready, so wait for the composer first.
+                try await client.waitForReady(pane: paneID)
                 if !taskText.isEmpty {
                     try await client.prompt(pane: paneID, text: taskText)
                 }
                 onStarted()
             } catch {
-                errorMessage = "could not start: \(error)"
+                if agentStarted {
+                    partialSpawn = true
+                    errorMessage = "'\(name)' started, but the task didn't send (\(error)). "
+                        + "Open it from the list to send the task."
+                } else if let pane = createdPane {
+                    try? await client.closePane(paneID: pane)
+                    errorMessage = "couldn't start the agent: \(error)"
+                } else {
+                    errorMessage = "couldn't create the pane: \(error)"
+                }
             }
         }
     }
