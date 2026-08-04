@@ -90,6 +90,41 @@ final class NewAgentClientTests: XCTestCase {
         XCTAssertTrue(t.lastRequest.contains("\"pane_id\""), "pane_id must use the snake_case wire key")
         XCTAssertTrue(t.lastRequest.contains("w1:p9"))
     }
+
+    /// Serves one canned agent.list. The new-agent flow's readiness gate reads THIS
+    /// to know when a freshly-spawned agent can receive its pre-filled task.
+    private final class ListStub: HerdrTransport, @unchecked Sendable {
+        let json: String
+        init(_ json: String) { self.json = json }
+        func roundTrip(_ requestLine: String) async throws -> String { json }
+        func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+    }
+
+    /// AXIS: isPromptable is TRUE only when the pane reports an agent WITH a
+    /// composer — the exact gate the pre-filled task delivery waits on. This is the
+    /// signal that replaces the nil interactive_ready.
+    func testIsPromptableTrueWhenAgentHasComposer() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:p9","agent":"claude","composer":{"state":"unknown"}}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertTrue(ready, "an agent with a composer must be promptable")
+    }
+
+    /// AXIS: a booting agent that has NOT registered a composer yet is NOT
+    /// promptable — delivering then would fall to rawKeys send_text into a shell.
+    /// (Mutation guard: dropping the composer half of the intent gate makes this
+    /// pass wrongly, so the assertion KILLs that mutation.)
+    func testIsPromptableFalseWithoutComposer() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:p9","agent":"claude"}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertFalse(ready, "an agent without a composer must NOT be promptable")
+    }
+
+    /// AXIS: an absent pane is not promptable (never crash / never assume ready).
+    func testIsPromptableFalseWhenPaneAbsent() async throws {
+        let t = ListStub(#"{"id":"x","result":{"agents":[{"pane_id":"w1:pOTHER","agent":"claude","composer":{"state":"unknown"}}]}}"#)
+        let ready = try await HerdrClient(transport: t).isPromptable(pane: "w1:p9")
+        XCTAssertFalse(ready, "a pane not present in agent.list must NOT be promptable")
+    }
 }
 
 /// Normalizing an arbitrary folder name to herdr's agent-name grammar, so

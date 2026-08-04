@@ -609,14 +609,22 @@ struct NewAgentView: View {
                 createdPane = paneID
                 _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
                 onStarted(paneID, name, taskText)
-            } catch {
+            } catch let startError {
                 if let pane = createdPane {
                     // startAgent failed after the split left an orphan pane; close
-                    // it so a retry does not accumulate empty panes.
-                    try? await client.closePane(paneID: pane)
-                    errorMessage = "couldn't start the agent: \(error)"
+                    // it so a retry does not accumulate empty panes. Disclose if the
+                    // cleanup ALSO failed — otherwise an invisible agent-less pane
+                    // lingers server-side and the next retry looks clean when it is
+                    // not.
+                    do {
+                        try await client.closePane(paneID: pane)
+                        errorMessage = "couldn't start the agent: \(startError)"
+                    } catch {
+                        errorMessage = "couldn't start the agent (\(startError)); also failed to "
+                            + "clean up the empty pane (\(error)) — it may need closing manually"
+                    }
                 } else {
-                    errorMessage = "couldn't create the pane: \(error)"
+                    errorMessage = "couldn't create the pane: \(startError)"
                 }
             }
         }
@@ -1028,19 +1036,30 @@ struct TerminalPaneView: View {
     @State private var agent: AgentInfo?
     @State private var sending = false
     @State private var actionNote: String?
+    /// True when the pane was opened with a pre-filled task (a just-spawned agent).
+    /// While true, the manual send is DISABLED and `deliverPrefillIfNeeded` polls
+    /// until the agent is promptable, then delivers the task as a prompt. This is
+    /// what closes the early-tap hazard: a just-started pane is a booting shell, so
+    /// tapping send in rawKeys would type the task literally and a later Return
+    /// would EXECUTE it as a shell command — the task must go through agent.prompt,
+    /// never send_text.
+    @State private var pendingPrefill: Bool
 
     private let router = InputRouter()
 
     /// `initialReply` pre-fills the reply box — used when opening a freshly-spawned
     /// agent's pane with the new-agent task ready to send. The agent is not
-    /// promptable at spawn, so the task waits here for one deliberate tap once the
-    /// composer is up, rather than being auto-delivered into a not-ready agent.
+    /// promptable at spawn; the task is delivered automatically (as a prompt) the
+    /// moment the pane reports a composer — never typed raw into the still-booting
+    /// pane. A non-empty `initialReply` puts the view into the pending-delivery
+    /// state.
     init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil, initialReply: String = "") {
         self.client = client
         self.paneID = paneID
         self.title = title
         _agent = State(initialValue: agent)
         _reply = State(initialValue: initialReply)
+        _pendingPrefill = State(initialValue: !initialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
@@ -1053,7 +1072,11 @@ struct TerminalPaneView: View {
         }
         return kind
     }
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending }
+    // Manual send is withheld while a pre-filled task is still awaiting the
+    // composer: in that window the pane is rawKeys (a booting shell), so a send
+    // would type-not-submit and a later Return would execute the task as a shell
+    // command. `deliverPrefillIfNeeded` owns delivery until the agent is ready.
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !pendingPrefill }
 
     var body: some View {
         ZStack {
@@ -1070,7 +1093,10 @@ struct TerminalPaneView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
-        .task(id: paneID) { await refresh() }
+        .task(id: paneID) {
+            await refresh()
+            await deliverPrefillIfNeeded()
+        }
     }
 
     // MARK: header
@@ -1227,6 +1253,14 @@ struct TerminalPaneView: View {
     }
 
     private func refresh() async {
+        await readPane()
+        await reresolveAgent()
+    }
+
+    /// Reads the pane's recent output into `rawText`. Isolated so a list hiccup in
+    /// `reresolveAgent` cannot blank the text we just read (and so the pre-fill
+    /// poll can refresh content without a second agent.list per tick).
+    private func readPane() async {
         do {
             let read = try await client.read(pane: paneID, source: .recentUnwrapped, format: .text, lines: 200)
             rawText = read.text
@@ -1234,14 +1268,61 @@ struct TerminalPaneView: View {
         } catch {
             self.error = "\(error)"
         }
-        // Re-resolve this pane's agent so the status badge and input mode track the
-        // live pane — a fresh spawn flips rawKeys→intent HERE once its composer is
-        // up. A failed lookup or an absent pane KEEPS the prior value: never
-        // downgrade a known agent to nil, which would drop intent mode back to
-        // rawKeys. Kept separate from the read above so a list hiccup does not blank
-        // the pane text we just read.
-        if let live = try? await client.agentList().first(where: { $0.paneID == paneID }) {
-            agent = live
+    }
+
+    /// Re-resolves this pane's agent so the status badge and input mode track the
+    /// live pane — a fresh spawn flips rawKeys→intent HERE once its composer is up.
+    /// A failed lookup or an absent pane KEEPS the prior value: never downgrade a
+    /// known agent to nil (would drop intent → rawKeys). It ALSO keeps the prior
+    /// agent when the live entry is the same agent but has transiently LOST its
+    /// composer (a server hiccup / restart) — flipping intent → rawKeys there would
+    /// re-expose the raw-send path for a pane that was promptable a tick ago.
+    private func reresolveAgent() async {
+        guard let live = try? await client.agentList().first(where: { $0.paneID == paneID }) else { return }
+        let priorWasIntent = agent.map { router.mode(for: $0) == .intent } ?? false
+        let liveLostComposer = router.mode(for: live) != .intent && live.agent == agent?.agent
+        if priorWasIntent && liveLostComposer { return }   // transient composer loss — hold
+        agent = live
+    }
+
+    /// Delivers a pre-filled task (from the new-agent flow) once the pane is
+    /// actually promptable. A just-started agent is not promptable for a variable
+    /// window and there is no reliable readiness flag, so we POLL `isPromptable`
+    /// (composer present == the InputRouter.intent gate) and refresh the visible
+    /// pane each tick so the boot is watchable. When ready, the task is sent as a
+    /// prompt (never rawKeys send_text). Bounded: on timeout the task is left in the
+    /// box and the manual send re-enabled, so nothing is lost.
+    private func deliverPrefillIfNeeded() async {
+        guard pendingPrefill else { return }
+        let maxTicks = 80                       // 80 × 1.5s ≈ 120s
+        var ticks = 0
+        while pendingPrefill && !Task.isCancelled {
+            let task = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !task.isEmpty else { pendingPrefill = false; return }
+            if (try? await client.isPromptable(pane: paneID)) == true {
+                do {
+                    try await client.prompt(pane: paneID, text: reply)
+                    reply = ""
+                    pendingPrefill = false
+                    actionNote = nil
+                    await refresh()
+                    return
+                } catch {
+                    // Composer present but herdr still not ready, or a transient
+                    // send error — keep waiting and retry rather than drop the task.
+                    actionNote = "starting \(title)…"
+                }
+            } else {
+                actionNote = "starting \(title)…"
+            }
+            ticks += 1
+            if ticks >= maxTicks {
+                pendingPrefill = false
+                actionNote = "still starting — tap Send when \(title) is ready"
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await readPane()   // keep the booting pane visible while we wait
         }
     }
 }
