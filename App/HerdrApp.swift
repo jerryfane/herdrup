@@ -1252,9 +1252,9 @@ struct TerminalPaneView: View {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
             }
-            .foregroundStyle(primary ? .white : Palette.textDim)
+            .foregroundStyle(primary ? Palette.ground : Palette.textDim)
             .frame(maxWidth: .infinity, minHeight: 34)
-            .background(primary ? Palette.brand : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(primary ? Palette.text : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
         // Disabled while a pre-fill is pending too: a stray Return during automatic
         // delivery could race the in-flight agent.prompt (and Return into a booting
@@ -1271,9 +1271,10 @@ struct TerminalPaneView: View {
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
             Button { sendTapped() } label: {
-                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
                     .frame(width: 40, height: 40)
-                    .background(canSend ? Palette.brand : Palette.surface).clipShape(Circle())
+                    .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
             }
             .disabled(!canSend)
         }
