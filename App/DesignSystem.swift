@@ -45,20 +45,23 @@ enum Palette {
 }
 
 /// Type roles. The contrast encodes WHO is speaking (brief §6). Both families are
-/// bundled (App/Fonts/) and addressed by PostScript name; `relativeTo:` keeps Dynamic
-/// Type scaling. A requested weight maps to the nearest of the four bundled cuts
-/// (400 Regular / 500 Medium / 600 SemiBold / 700 Bold).
+/// bundled (App/Fonts/) and addressed by PostScript name. Sizes are FIXED
+/// (`fixedSize:`) — the prior build used `.system(size:)`, which does NOT scale with
+/// Dynamic Type, and the layout relies on hard-coded frame heights (e.g. the reserved
+/// subtitle line, the terminal keycaps) that would clip if type scaled. Keeping the
+/// fixed contract avoids that regression; a Dynamic-Type pass is its own later audit.
+/// A requested weight maps to the nearest of the four bundled cuts (400/500/600/700).
 enum Typography {
     /// App voice — Geist (screen titles, names, buttons, labels).
     static func app(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .custom(geistName(weight), size: size, relativeTo: .body)
+        .custom(geistName(weight), fixedSize: size)
     }
     /// Machine voice — IBM Plex Mono (terminal, pane ids, status words, counts, keys).
     static func machine(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .custom(plexMonoName(weight), size: size, relativeTo: .body)
+        .custom(plexMonoName(weight), fixedSize: size)
     }
     /// Uppercase micro-label for section headers (machine voice, semibold).
-    static let microLabel = Font.custom("IBMPlexMono-SmBld", size: 11, relativeTo: .caption)
+    static let microLabel = Font.custom("IBMPlexMono-SmBld", fixedSize: 11)
 
     // Nearest bundled cut → its exact PostScript name. IBM Plex Mono's are irregular
     // (Regular is bare "IBMPlexMono"; Medium/SemiBold are abbreviated "-Medm"/"-SmBld").
