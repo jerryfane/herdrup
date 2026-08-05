@@ -1,87 +1,80 @@
 # TestFlight / App Store distribution lane (Herdrup)
 
-How a signed build of the herdr iOS app (bundle id `com.jerryfane.herdr`, marketed
-as **Herdrup**) gets to TestFlight. The app is authored on Linux; the archive can
-only run on a Mac, so this lane is a reviewable in-repo script + config rather than
-Xcode-UI state.
+How a signed build of the herdr iOS app (`com.jerryfane.herdr`, marketed **Herdrup**)
+reaches TestFlight. The app is authored on Linux; the archive runs on a Mac, so the
+lane is reviewable in-repo config + a workflow, not Xcode-UI state.
 
-## Design
+## Primary lane — headless GitHub Actions (no developer Mac)
 
-- **Signing AND upload go through the Mac's signed-in Xcode account.**
-  `scripts/testflight.sh` archives with `-allowProvisioningUpdates` (which
-  creates/renews the **Apple Distribution** certificate + **App Store** profile from
-  the Apple ID signed into Xcode) and, on upload, exports with `destination: upload`
-  through that same account. **No App Store Connect API key is used** — deliberately:
-  passing a key to `-exportArchive` makes it perform distribution *signing*, not
-  upload only, which would require the key to hold cloud-managed-distribution /
-  provisioning access that an individual-account or non-Admin key may lack.
-- **`project.yml`** carries `DEVELOPMENT_TEAM: FXQ5Z9HHY6` + `CODE_SIGN_STYLE:
-  Automatic`. These are **inert for the buildbox's iphonesimulator build** (the
-  simulator is never code-signed), so the existing green sim build is unaffected;
-  they take effect only for a device archive.
-- **Export compliance is NOT predeclared.** The app links third-party crypto
-  (BoringSSL via swift-nio-ssh/Citadel) that provides confidentiality — not merely
-  OS-provided or authentication-only encryption — so it is **not automatically
-  exempt** and may require annual self-classification. `project.yml` deliberately
-  omits `ITSAppUsesNonExemptEncryption`; App Store Connect then asks the
-  export-compliance question and the **owner** makes the determination there. See
-  Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+`.github/workflows/testflight.yml` (GitHub Actions, macOS runner), on
+`workflow_dispatch` or a `v*` tag:
 
-## Running it (on the Mac)
+- **Signs MANUALLY** from a distribution certificate + provisioning profile imported
+  from the repo's `testflight` GitHub **Environment** into a throwaway keychain.
+- Uses a **dedicated `Distribution` build configuration** (project.yml) so the manual
+  profile is scoped to the Herdr **app target** and never touches the SwiftPM
+  dependency targets (swift-crypto / swift-nio via Citadel) — libraries that "do not
+  support provisioning profiles" and would otherwise fail the archive.
+- Archives → exports → uploads → **verifies at the destination**: polls `/v1/builds`
+  and requires the build to reach `READY_FOR_BETA_TESTING` / `IN_BETA_TESTING` (failing
+  loudly on `FAILED` / `INVALID` / `MISSING_EXPORT_COMPLIANCE`), so a green run always
+  means the build actually arrived — not just that the pipeline was green.
+- **No developer Mac touches the signing material.** The Apple **Distribution
+  certificate + provisioning profile are created on Linux** via `openssl` + the App
+  Store Connect API key (the recipe the keephair seat proved). The team distribution
+  cert is shared across the owner's apps; herdr's profile is `Herdrup App Store`
+  against `com.jerryfane.herdr`.
 
-```sh
-scripts/testflight.sh                          # archive + export a signed .ipa (no upload)
-TESTFLIGHT_UPLOAD=1 scripts/testflight.sh      # ...and upload to TestFlight
-```
+**Environment secrets** (`testflight`, scoped to main + `v*` tags — a feature-branch
+run cannot read them): `DIST_CERT_P12_BASE64`, `DIST_CERT_PASSWORD`,
+`KEYCHAIN_PASSWORD`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_ISSUER_ID`,
+`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_P8_BASE64`, `PROVISIONING_PROFILE_BASE64`,
+`PROVISIONING_PROFILE_NAME`.
 
-A plain run is a self-contained signing dry-run that proves the signing chain before
-the first upload. `BUILD_NUMBER` defaults to a second-precision timestamp (App Store
-requires a unique, monotonic build number per upload); pass a durable CI counter for
-rapid successive uploads.
+## Signing config (project.yml)
 
-### Fully-headless CI — the actual release lane
+- Base `DEVELOPMENT_TEAM: FXQ5Z9HHY6` + `CODE_SIGN_STYLE: Automatic` — **inert for the
+  buildbox's iphonesimulator build** (the simulator is never code-signed).
+- `Distribution` config (release-type): manual signing on the app target
+  (`CODE_SIGN_STYLE: Manual`, `PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"`,
+  `CODE_SIGN_IDENTITY: "Apple Distribution"`). Used only by the CI archive.
+- `Release` stays automatic — it belongs to the Mac fallback lane, not the CI.
 
-The implemented no-Mac release lane is **`.github/workflows/testflight.yml`** (GitHub
-Actions, macOS runner). It signs MANUALLY from an imported cert + provisioning profile,
-using a **dedicated `Distribution` build configuration** (project.yml) so the manual
-profile is scoped to the app target and never touches the SwiftPM dependency targets
-(swift-crypto/swift-nio) — which cannot take a provisioning profile — and does not
-regress this Mac lane's automatic `Release` signing. That is the primary path now; the
-notes below are the manual equivalent if you ever run the pieces by hand.
+## Export compliance
 
-If the archive must run on a Mac with no interactive Xcode account, split the two
-concerns so the API key stays upload-only:
-1. Install a distribution certificate + App Store profile on the Mac keychain
-   (or use a non-`upload` export via a cloud-signing-capable **Admin** key), and
-2. export the `.ipa` (the plain run above), then upload it with the upload-only
-   Transporter: `xcrun iTMSTransporter -m upload -assetFile <path>.ipa
-   -apiKey <KEY_ID> -apiIssuer <ISSUER>` (place `AuthKey_<KEY_ID>.p8` in a
-   `private_keys` dir). Transporter uploads only — it never signs — so the key needs
-   no provisioning access.
+`ITSAppUsesNonExemptEncryption = true` (project.yml). herdr bundles third-party crypto
+(BoringSSL via swift-nio-ssh/Citadel) that encrypts the whole SSH channel — not exempt.
+It uses only standard encryption, so it qualifies for the mass-market (Cat. 5 Part 2)
+exemption via a one-time self-classification answered in App Store Connect
+(owner-approved determination, 2026-08-05). The CI verifier fails loudly on
+`MISSING_EXPORT_COMPLIANCE` rather than shipping a build that reaches no testers. See
+Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
-## Discovered account state (App Store Connect, read-only, 2026-08-04)
+## Fallback — run on a Mac by hand
 
-- Team **FXQ5Z9HHY6** (Jerry Fanelli, individual).
-- App record for `com.jerryfane.herdr`: **none yet**.
-- Bundle id, distribution certificate, App Store profile: **none** — all created by
-  the first archive via the signed-in Xcode account.
+`scripts/testflight.sh` archives the **`Release`** config with **automatic** signing via
+a Mac's signed-in Xcode account (`-allowProvisioningUpdates`) and exports/uploads through
+that same account (no API key). Use it only when building on a Mac without the CI; it is
+independent of the CI's `Distribution` config. `TESTFLIGHT_UPLOAD=1 scripts/testflight.sh`
+uploads; a plain run is a signing dry-run.
 
-## Needs the owner
+## What the owner set up (one-time)
 
-1. **Create the App Store Connect app record** for `com.jerryfane.herdr` — public
-   name (proposed **Herdrup**), primary language, SKU. Required before upload.
-2. **On the Mac: sign Xcode into the Apple ID** for team FXQ5Z9HHY6. That single
-   session does both the distribution signing and the upload — no API key needed for
-   the standard flow. (The API key is only for the headless alternative above; note
-   an API key's role is **immutable**, so a differently-scoped key means creating a
-   new one, not editing the old.)
-3. **Complete the export-compliance determination** in App Store Connect (the app
-   uses third-party SSH crypto, so it is not automatically exempt — see above).
+1. The App Store Connect **app record** for `com.jerryfane.herdr` (name Herdrup) —
+   created in the ASC web UI, because Apple's API forbids app creation (POST /v1/apps →
+   403; GET/UPDATE only).
+2. The `testflight` environment **secrets** (the nine above; the private keys never
+   transit a pane/transcript — written repo-to-repo).
+3. The export-compliance **answer** in App Store Connect on the first build ("standard
+   encryption, qualifies for exemption").
+
+The bundle id, the shared distribution certificate, and the `Herdrup App Store` profile
+are created via the ASC API on Linux, not by hand.
 
 ## Verification
 
-- The signing config must NOT regress the buildbox iphonesimulator build (it is
-  inert there) — buildbox green at the exact head is the gate.
-- The archive/export/upload is verified on the Mac once items 1–3 land; a plain
-  `scripts/testflight.sh` (no upload) produces a signed `.ipa` and proves the signing
-  chain before the first TestFlight push.
+- Every change must keep the buildbox iphonesimulator build green at the exact head (the
+  signing config is inert there).
+- The full archive/export/upload + the destination check run on GitHub Actions from
+  **main** (the environment secrets are gated to main + `v*` tags), so a run on main is
+  the end-to-end gate.
