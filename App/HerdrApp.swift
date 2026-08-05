@@ -715,7 +715,11 @@ struct TerminalHomeView: View {
     /// the highest-priority row (needs-you first), so the tab always lands on the most
     /// useful terminal rather than nothing. Nil only when there are no agents at all.
     private var terminalTarget: AgentRow? {
-        let rows = fullList.sections.flatMap { $0.rows }
+        // LIVE rows only. A stopped pane is absent from the census (not live) — its
+        // pane is gone, so never open it, not even if it is the focused one; and if
+        // every known agent is dead the list is empty and the tab correctly disables.
+        // (When there is no census, AgentRow defaults isLive=true, so nothing is lost.)
+        let rows = fullList.sections.flatMap { $0.rows }.filter(\.isLive)
         return rows.first(where: { $0.info.focused == true }) ?? rows.first
     }
 
