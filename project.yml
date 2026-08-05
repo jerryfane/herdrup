@@ -70,6 +70,20 @@ targets:
         # A public App Store release should confirm the self-classification paperwork
         # with a compliance specialist; for TestFlight this uploads cleanly.
         ITSAppUsesNonExemptEncryption: false
+        # Bundled design fonts (App/Fonts/, added as resources by xcodegen). Geist is
+        # the APP voice, IBM Plex Mono the MACHINE voice — the two families the Claude
+        # Design spec (herdr mobile.dc.html) is set in. Registered here so the runtime
+        # loads them; DesignSystem.Typography addresses them by PostScript name. Both
+        # are SIL OFL (licenses alongside the .ttf files).
+        UIAppFonts:
+          - Geist-Regular.ttf
+          - Geist-Medium.ttf
+          - Geist-SemiBold.ttf
+          - Geist-Bold.ttf
+          - IBMPlexMono-Regular.ttf
+          - IBMPlexMono-Medium.ttf
+          - IBMPlexMono-SemiBold.ttf
+          - IBMPlexMono-Bold.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
