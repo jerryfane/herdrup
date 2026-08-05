@@ -48,14 +48,18 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
-        # NOTE: ITSAppUsesNonExemptEncryption is deliberately NOT predeclared. The
-        # app links third-party crypto (BoringSSL via swift-nio-ssh/Citadel) that
-        # provides confidentiality, not just OS-provided/authentication-only
-        # encryption, so it is not automatically exempt and may require annual
-        # self-classification. Leaving the key absent means App Store Connect asks
-        # the export-compliance question and the OWNER makes the determination
-        # there — the correct authority — rather than a wrong `false` suppressing
-        # it. See docs/testflight-lane.md.
+        # Export compliance: the app uses NON-exempt encryption, so this is `true`
+        # (not the `false`/exempt bucket, which is HTTPS- or Apple-crypto-only apps).
+        # herdr bundles a third-party crypto library (BoringSSL via swift-nio-ssh/
+        # Citadel) that encrypts the whole SSH connection — a confidential channel,
+        # not just authentication — which is the documented non-exempt case. Owner
+        # (the legal authority) confirmed this determination 2026-08-05. It uses only
+        # STANDARD encryption (AES/SSH), so it qualifies for the mass-market
+        # (Cat. 5 Part 2) exemption via a one-time self-classification answered in
+        # App Store Connect; a public release should confirm the exact paperwork with
+        # a compliance specialist. The CI verifier fails loudly on Missing Compliance
+        # (docs/testflight-lane.md), so this can't silently reach no testers.
+        ITSAppUsesNonExemptEncryption: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
