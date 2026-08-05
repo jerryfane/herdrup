@@ -1175,9 +1175,6 @@ struct TerminalPaneView: View {
     let title: String
 
     @Environment(\.dismiss) private var dismiss
-    @State private var rawText = ""
-    @State private var lines: [String] = []
-    @State private var error: String?
     @State private var reply: String
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
@@ -1244,7 +1241,12 @@ struct TerminalPaneView: View {
             Palette.groundMachine.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
-                paneScroll
+                // The live terminal: a real SwiftTerm VT fed by the pane.stream raw
+                // byte firehose (#40), full-bleed as the machine ground. Read-only —
+                // input stays on the keycaps + reply bar below (sendText/sendKeys/
+                // prompt), never routed through the terminal itself.
+                LiveTerminalView(client: client, paneID: paneID)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -1288,35 +1290,6 @@ struct TerminalPaneView: View {
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .background(Palette.surface)
-    }
-
-    // MARK: pane output (fold cache preserved)
-
-    private var paneScroll: some View {
-        GeometryReader { geo in
-            // Fold from the SETTLED layout width, but cache the result: re-fold
-            // ONLY when the width or the text changes, not on every body eval —
-            // folding 200 lines each frame cost ~13ms during scroll.
-            let columns = columnCount(for: geo.size.width)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let error {
-                        Text(error).font(Typography.machine(12)).foregroundStyle(Palette.died)
-                    }
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        Text(line.isEmpty ? " " : line)
-                            .font(Typography.machine(Self.paneFontSize)).foregroundStyle(Palette.text)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(14)
-            }
-            // `initial: true` folds once on appear too, so `lines` is never left
-            // empty if the text arrives before the first width change.
-            .onChange(of: columns, initial: true) { _, newColumns in refold(columns: newColumns) }
-            .onChange(of: rawText) { _, _ in refold(columns: columns) }
-        }
     }
 
     // MARK: input
@@ -1405,41 +1378,12 @@ struct TerminalPaneView: View {
 
     // MARK: data
 
-    /// The pane's monospace size — shared by the renderer and the column math so the
-    /// two can't drift. IBM Plex Mono's advance is exactly 0.6 em (measured hmtx 600 /
-    /// head 1000 upem), so one glyph is `paneFontSize * 0.6` points.
-    static let paneFontSize: CGFloat = 12.5
-    static let paneAdvance: CGFloat = paneFontSize * 0.6   // 7.5pt at 12.5 (IBM Plex Mono)
-
-    /// Rough monospace column count for the pane font, less the 14pt horizontal
-    /// padding on each side. The advance is DERIVED from the font (0.6 em), not a
-    /// literal — the old 7.2 was calibrated for SF Mono, which this build replaced.
-    private func columnCount(for width: CGFloat) -> Int {
-        max(20, Int((width - 28) / Self.paneAdvance))
-    }
-
-    /// Folds `rawText` to `columns` into the cached `lines`. Called only from the
-    /// width/text `onChange`, so scrolling does not re-fold.
-    private func refold(columns: Int) {
-        lines = TerminalWrap.fold(rawText.components(separatedBy: "\n"), width: columns).flatMap { $0.lines }
-    }
-
+    /// The live terminal (`LiveTerminalView`) renders the pane output itself from
+    /// the raw byte stream, so refreshing here is only about the agent: re-resolve
+    /// it so the status badge and input mode track the live pane. (There is no
+    /// snapshot read anymore — the stream is the source of truth for output.)
     private func refresh() async {
-        await readPane()
         await reresolveAgent()
-    }
-
-    /// Reads the pane's recent output into `rawText`. Isolated so a list hiccup in
-    /// `reresolveAgent` cannot blank the text we just read (and so the pre-fill
-    /// poll can refresh content without a second agent.list per tick).
-    private func readPane() async {
-        do {
-            let read = try await client.read(pane: paneID, source: .recentUnwrapped, format: .text, lines: 200)
-            rawText = read.text
-            error = nil
-        } catch {
-            self.error = "\(error)"
-        }
     }
 
     /// Re-resolves this pane's agent so the status badge and input mode track the
@@ -1511,8 +1455,9 @@ struct TerminalPaneView: View {
                 return   // stop polling; pendingPrefill stays true → Send is prompt-only
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if Task.isCancelled { return }     // don't issue a stray read after teardown
-            await readPane()                   // keep the booting pane visible
+            if Task.isCancelled { return }     // don't spin after teardown
+            // The live terminal already shows the boot as it streams; no snapshot
+            // read is needed to keep the pane visible while we wait to deliver.
         }
     }
 
@@ -1735,11 +1680,22 @@ struct MockTransport: HerdrTransport {
     func roundTrip(_ requestLine: String) async throws -> String {
         if requestLine.contains("agent.list") { return Self.agentList }
         if requestLine.contains("agent.read") { return Self.agentRead }
+        if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { $0.finish() }
+        // `pane.stream` (the live terminal): reply with the stream_started ack, then
+        // a full-screen reset seed, then finish — so the DEBUG pane screenshot shows
+        // a rendered SwiftTerm terminal, not an empty one.
+        if requestLine.contains("pane.stream") {
+            return AsyncThrowingStream { continuation in
+                continuation.yield(Self.paneStreamAck)
+                continuation.yield(Self.paneStreamReset)
+                continuation.finish()
+            }
+        }
+        return AsyncThrowingStream { $0.finish() }
     }
 
     // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
@@ -1769,6 +1725,16 @@ struct MockTransport: HerdrTransport {
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
+
+    // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
+    // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is
+    // where they are machine-checked to decode through the real HerdrClient path.
+    static let paneStreamAck =
+        #"{"id":"mock","result":{"type":"stream_started","pane_id":"w1:p1","epoch":7,"cols":80,"rows":24,"base_seq":0,"resync":true}}"#
+    static let paneStreamReset =
+        #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"G1syShtbSBtbMTszODs1OzM5bWhlcmRyG1swbSBsaXZlIHRlcm1pbmFsIOKAlCBtb2NrIHJlbmRlcg0KDQokIGhlcmRyIGFnZW50IGF0dGFjaCBqYXJ2aXMNCj4gUmFuIDE0NiB0ZXN0cywgMCBmYWlsdXJlcw0KDQpbZGVtbyBkYXRhIOKAlCBubyBsaXZlIGNvbm5lY3Rpb25dDQo="}"#
+    static let panePtySize =
+        #"{"id":"mock","result":{"type":"pane_pty_size","pane_id":"w1:p1","cols":80,"rows":24,"locked":false}}"#
 
     /// A decoded blocked agent for the pane screenshot: status "blocked" groups
     /// as NEEDS YOU, so the pane renders its status badge. No composer field, so
