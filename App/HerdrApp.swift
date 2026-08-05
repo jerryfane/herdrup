@@ -1085,7 +1085,10 @@ struct TerminalPaneView: View {
 
     var body: some View {
         ZStack {
-            Palette.ground.ignoresSafeArea()
+            // The terminal is its own ground — one shade under the app (groundMachine
+            // #0B0D1C vs ground #13162A). Per the design, the output IS the ground and
+            // the chrome floats over it; this is that base shade.
+            Palette.groundMachine.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
                 paneScroll
