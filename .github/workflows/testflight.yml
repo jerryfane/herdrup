@@ -104,13 +104,22 @@ jobs:
       - name: Install provisioning profile
         env:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
             > ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision
-          echo "installed profile:"
-          /usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
-            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)"
+          INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
+            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)")
+          echo "installed profile: $INSTALLED"
+          # Preflight: three names must agree or the run fails deep — the installed
+          # profile, the export secret (PROVISIONING_PROFILE_NAME → ExportOptions), and
+          # the specifier project.yml archives with. Assert equality at the top.
+          SPECIFIER="Herdrup App Store"
+          if [ "$INSTALLED" != "$SPECIFIER" ] || [ "$PROFILE_NAME" != "$SPECIFIER" ]; then
+            echo "::error::profile-name mismatch — installed='$INSTALLED', secret PROVISIONING_PROFILE_NAME='$PROFILE_NAME', project.yml specifier='$SPECIFIER' (all three must match)."
+            exit 1
+          fi
 
       - name: Write ExportOptions.plist
         env:
@@ -144,7 +153,7 @@ jobs:
         # app the fix is target scoping, not a specifier on the command line).
         run: |
           xcodebuild -project Herdr.xcodeproj -scheme Herdr \
-            -configuration Release -destination 'generic/platform=iOS' \
+            -configuration Distribution -destination 'generic/platform=iOS' \
             -archivePath /tmp/Herdr.xcarchive \
             CURRENT_PROJECT_VERSION="$BUILD" \
             archive

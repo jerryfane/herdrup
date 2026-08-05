@@ -39,7 +39,15 @@ the first upload. `BUILD_NUMBER` defaults to a second-precision timestamp (App S
 requires a unique, monotonic build number per upload); pass a durable CI counter for
 rapid successive uploads.
 
-### Alternative: fully-headless CI (API-key upload)
+### Fully-headless CI — the actual release lane
+
+The implemented no-Mac release lane is **`.github/workflows/testflight.yml`** (GitHub
+Actions, macOS runner). It signs MANUALLY from an imported cert + provisioning profile,
+using a **dedicated `Distribution` build configuration** (project.yml) so the manual
+profile is scoped to the app target and never touches the SwiftPM dependency targets
+(swift-crypto/swift-nio) — which cannot take a provisioning profile — and does not
+regress this Mac lane's automatic `Release` signing. That is the primary path now; the
+notes below are the manual equivalent if you ever run the pieces by hand.
 
 If the archive must run on a Mac with no interactive Xcode account, split the two
 concerns so the API key stays upload-only:
