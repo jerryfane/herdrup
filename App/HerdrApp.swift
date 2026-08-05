@@ -297,11 +297,27 @@ struct ConnectView: View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("herdr")
-                        .font(Typography.app(24, .bold))
-                        .foregroundStyle(Palette.text)
-                        .padding(.bottom, 4)
+                VStack(spacing: 16) {
+                    // Centered identity header: the mark, the app name, one line of intent.
+                    VStack(spacing: 10) {
+                        Text("h")
+                            .font(Typography.app(22, .semibold))
+                            .foregroundStyle(Palette.text)
+                            .frame(width: 56, height: 56)
+                            .background(Palette.surface)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        VStack(spacing: 4) {
+                            Text("herdrup")
+                                .font(Typography.app(28, .bold))
+                                .foregroundStyle(Palette.text)
+                            Text("connect to your machine")
+                                .font(Typography.machine(13))
+                                .foregroundStyle(Palette.textDim)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 24)
+                    .padding(.bottom, 8)
 
                     // The three settings-style rows: label left, value right.
                     VStack(spacing: 10) {
@@ -315,6 +331,8 @@ struct ConnectView: View {
                         keyRow
                     }
 
+                    // Primary action — INK fill. The design carries NO accent colour; the
+                    // one near-white fill in the whole app marks the control that ACTS.
                     Button {
                         guard let ep = endpoint else { return }
                         onConnect(SSHCredentials(
@@ -328,16 +346,23 @@ struct ConnectView: View {
                         Text("Connect")
                             .font(Typography.app(16, .semibold))
                             .frame(maxWidth: .infinity).padding(.vertical, 15)
-                            .background(canConnect ? Palette.brand : Palette.surface)
-                            .foregroundStyle(canConnect ? .white : Palette.textFaint)
+                            .background(canConnect ? Palette.text : Palette.surface)
+                            .foregroundStyle(canConnect ? Palette.ground : Palette.textFaint)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .disabled(!canConnect)
                     .padding(.top, 6)
 
-                    Text("Connects over your Tailscale network. Nothing is exposed publicly.")
-                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                        .padding(.top, 2)
+                    // Two faint captions (design copy), centered.
+                    VStack(spacing: 10) {
+                        Text("over your tailscale network · nothing public")
+                            .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                        Text("Seen once. Fails with a reason, never a spinner that gives up quietly.")
+                            .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
                 }
                 .padding(22)
             }
@@ -372,7 +397,7 @@ struct ConnectView: View {
                 } else {
                     Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.text)   // white ✓, per the mockup (not a status colour)
+                        .foregroundStyle(Palette.done)   // green ✓ — the key is loaded (per the .dc.html)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 14)
@@ -822,7 +847,9 @@ struct TerminalHomeView: View {
         }
         .foregroundStyle(active ? Palette.text : Palette.textFaint)
         .frame(maxWidth: .infinity).padding(.vertical, 8)
-        .background(active ? Palette.card : Color.clear)
+        // surfaceRaised (#262A45), NOT surface: the tab bar itself is surface, so an
+        // active pill on surface would vanish (the design's "active tab" is raised).
+        .background(active ? Palette.surfaceRaised : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
@@ -1152,7 +1179,7 @@ struct TerminalPaneView: View {
                     }
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         Text(line.isEmpty ? " " : line)
-                            .font(Typography.machine(12.5)).foregroundStyle(Palette.text)
+                            .font(Typography.machine(Self.paneFontSize)).foregroundStyle(Palette.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
@@ -1251,10 +1278,17 @@ struct TerminalPaneView: View {
 
     // MARK: data
 
-    /// Rough monospace column count for the pane font (~7.2pt advance), less the
-    /// 14pt horizontal padding on each side.
+    /// The pane's monospace size — shared by the renderer and the column math so the
+    /// two can't drift. IBM Plex Mono's advance is exactly 0.6 em (measured hmtx 600 /
+    /// head 1000 upem), so one glyph is `paneFontSize * 0.6` points.
+    static let paneFontSize: CGFloat = 12.5
+    static let paneAdvance: CGFloat = paneFontSize * 0.6   // 7.5pt at 12.5 (IBM Plex Mono)
+
+    /// Rough monospace column count for the pane font, less the 14pt horizontal
+    /// padding on each side. The advance is DERIVED from the font (0.6 em), not a
+    /// literal — the old 7.2 was calibrated for SF Mono, which this build replaced.
     private func columnCount(for width: CGFloat) -> Int {
-        max(20, Int((width - 28) / 7.2))
+        max(20, Int((width - 28) / Self.paneAdvance))
     }
 
     /// Folds `rawText` to `columns` into the cached `lines`. Called only from the
@@ -1399,6 +1433,7 @@ struct SettingsView: View {
                         connectionSection
                         notifySection
                         troubleSection
+                        versionFooter
                     }
                     .padding(.bottom, 16)
                 }
@@ -1457,6 +1492,22 @@ struct SettingsView: View {
                       note: "verify the host key first") { onReconnect() }
             actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
         }
+    }
+
+    /// The app names itself here — "herdrup mobile <version> (<build>)" — with the
+    /// design's one-line stance. Version + build come from the bundle (MARKETING_VERSION
+    /// / CFBundleVersion), so they track the shipped build, not a hardcoded string.
+    private var versionFooter: some View {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        return VStack(spacing: 4) {
+            Text("herdrup mobile \(short) (\(build))")
+                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+            Text("dark only, on purpose")
+                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 28)
     }
 
     private func sectionLabel(_ text: String) -> some View {
