@@ -154,3 +154,19 @@ extension Color {
             opacity: 1)
     }
 }
+
+/// The "working" status shape — a thin broken ring, turning. Colour carries the
+/// meaning (the working blue); the motion says "live" without claiming a duration.
+struct TurningRing: View {
+    var color: Color
+    @State private var spin = false
+    var body: some View {
+        Circle().trim(from: 0, to: 0.72)
+            .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+            .frame(width: 13, height: 13)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .onAppear {
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+            }
+    }
+}

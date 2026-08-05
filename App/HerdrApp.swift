@@ -934,6 +934,7 @@ struct TerminalHomeView: View {
         .padding(12)
         .background(Palette.card)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(edgeTint(row.group), lineWidth: 1))
         .padding(.horizontal, 16).padding(.vertical, 4)
     }
 
@@ -960,13 +961,18 @@ struct TerminalHomeView: View {
     @ViewBuilder
     private func badgeContent(_ group: AgentGroup) -> some View {
         switch group {
+        // Status is SHAPE + colour, never colour alone — desaturate the screen and it
+        // still sorts: ! in a circle waits, × in a SQUARE stopped, a turning ring works.
         case .needsYou: badgeCircle("exclamationmark", group.color)
-        case .stopped: badgeCircle("xmark", group.color)
+        case .stopped: badgeSquare("xmark", group.color)
         case .unrecognised: badgeCircle("questionmark", group.color)
-        // "now" is a non-temporal "active" marker, not an elapsed timer — there
-        // is no start timestamp in AgentInfo to count from, so it does not claim
-        // a duration it cannot know.
-        case .working: Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+        // "now" is a non-temporal "active" marker, not an elapsed timer — there is no
+        // start timestamp in AgentInfo to count from — beside a turning ring for "live".
+        case .working:
+            HStack(spacing: 6) {
+                Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+                TurningRing(color: group.color)
+            }
         case .idle:
             // Not bare, not loud: a small hollow dot so an expanded idle row still
             // has a right-edge anchor.
@@ -979,6 +985,25 @@ struct TerminalHomeView: View {
             .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
             .frame(width: 26, height: 26)
             .overlay(Circle().stroke(color.opacity(0.55), lineWidth: 1.5))
+    }
+
+    /// Stopped's badge is a SQUARE (rounded) — a shape distinct from the waiting/
+    /// unrecognised circles, so "gone" reads without relying on the red alone.
+    private func badgeSquare(_ system: String, _ color: Color) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
+            .frame(width: 26, height: 26)
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.55), lineWidth: 1.5))
+    }
+
+    /// The 1px edge tint the design gives ONLY the two states you must not miss —
+    /// needs-you (amber) and stopped (red); every other card stays edgeless.
+    private func edgeTint(_ group: AgentGroup) -> Color {
+        switch group {
+        case .needsYou, .unrecognised: return Palette.waiting.opacity(0.5)
+        case .stopped: return Palette.died.opacity(0.5)
+        default: return .clear
+        }
     }
 
     // MARK: error / host-key recovery (functional, restyled to the tokens)
