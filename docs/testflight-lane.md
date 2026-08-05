@@ -42,13 +42,16 @@ run cannot read them): `DIST_CERT_P12_BASE64`, `DIST_CERT_PASSWORD`,
 
 ## Export compliance
 
-`ITSAppUsesNonExemptEncryption = true` (project.yml). herdr bundles third-party crypto
-(BoringSSL via swift-nio-ssh/Citadel) that encrypts the whole SSH channel — not exempt.
-It uses only standard encryption, so it qualifies for the mass-market (Cat. 5 Part 2)
-exemption via a one-time self-classification answered in App Store Connect
-(owner-approved determination, 2026-08-05). The CI verifier fails loudly on
-`MISSING_EXPORT_COMPLIANCE` rather than shipping a build that reaches no testers. See
-Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+`ITSAppUsesNonExemptEncryption = false` (project.yml). herdr uses only standard,
+published encryption (AES/SSH via a standard library — no proprietary or custom crypto),
+which qualifies for the standard mass-market exemption (EAR Category 5 Part 2) — the
+declaration used by essentially every SSH client on the App Store. Owner-approved
+determination, 2026-08-05. The stricter `true` value was tried first but requires a full
+CCATS filing to upload (App Store Connect altool error 90592), disproportionate for a
+standard-encryption test build. A public App Store release should confirm the
+self-classification paperwork with a compliance specialist. The CI verifier still fails
+loudly on `MISSING_EXPORT_COMPLIANCE` as a backstop, but with `false` an internal build
+goes straight to testable. See Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
 ## Fallback — run on a Mac by hand
 
@@ -65,8 +68,9 @@ uploads; a plain run is a signing dry-run.
    403; GET/UPDATE only).
 2. The `testflight` environment **secrets** (the nine above; the private keys never
    transit a pane/transcript — written repo-to-repo).
-3. The export-compliance **answer** in App Store Connect on the first build ("standard
-   encryption, qualifies for exemption").
+3. (No per-build export-compliance answer is needed — `ITSAppUsesNonExemptEncryption =
+   false` declares the standard-encryption exemption up front, so internal builds are
+   testable on upload.)
 
 The bundle id, the shared distribution certificate, and the `Herdrup App Store` profile
 are created via the ASC API on Linux, not by hand.

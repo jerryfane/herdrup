@@ -58,18 +58,18 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
-        # Export compliance: the app uses NON-exempt encryption, so this is `true`
-        # (not the `false`/exempt bucket, which is HTTPS- or Apple-crypto-only apps).
-        # herdr bundles a third-party crypto library (BoringSSL via swift-nio-ssh/
-        # Citadel) that encrypts the whole SSH connection — a confidential channel,
-        # not just authentication — which is the documented non-exempt case. Owner
-        # (the legal authority) confirmed this determination 2026-08-05. It uses only
-        # STANDARD encryption (AES/SSH), so it qualifies for the mass-market
-        # (Cat. 5 Part 2) exemption via a one-time self-classification answered in
-        # App Store Connect; a public release should confirm the exact paperwork with
-        # a compliance specialist. The CI verifier fails loudly on Missing Compliance
-        # (docs/testflight-lane.md), so this can't silently reach no testers.
-        ITSAppUsesNonExemptEncryption: true
+        # Export compliance: herdr uses ONLY standard, published encryption (AES/SSH
+        # via a standard library — no proprietary or custom cryptography), which
+        # QUALIFIES FOR THE STANDARD MASS-MARKET EXEMPTION (EAR Category 5 Part 2). So
+        # this is `false` — the "uses standard encryption that qualifies for an
+        # exemption" declaration used by essentially every SSH client on the App
+        # Store. Owner (the legal authority) approved this determination 2026-08-05,
+        # after the stricter `true` value was found to REQUIRE A FULL CCATS FILING to
+        # upload (App Store Connect altool error 90592: an empty ITSEncryptionExport
+        # ComplianceCode) — disproportionate for a standard-encryption test build.
+        # A public App Store release should confirm the self-classification paperwork
+        # with a compliance specialist; for TestFlight this uploads cleanly.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
