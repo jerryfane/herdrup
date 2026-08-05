@@ -104,13 +104,22 @@ jobs:
       - name: Install provisioning profile
         env:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
             > ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision
-          echo "installed profile:"
-          /usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
-            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)"
+          INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
+            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)")
+          echo "installed profile: $INSTALLED"
+          # Preflight: three names must agree or the run fails deep — the installed
+          # profile, the export secret (PROVISIONING_PROFILE_NAME → ExportOptions), and
+          # the specifier project.yml archives with. Assert equality at the top.
+          SPECIFIER="Herdrup App Store"
+          if [ "$INSTALLED" != "$SPECIFIER" ] || [ "$PROFILE_NAME" != "$SPECIFIER" ]; then
+            echo "::error::profile-name mismatch — installed='$INSTALLED', secret PROVISIONING_PROFILE_NAME='$PROFILE_NAME', project.yml specifier='$SPECIFIER' (all three must match)."
+            exit 1
+          fi
 
       - name: Write ExportOptions.plist
         env:
@@ -135,21 +144,17 @@ jobs:
           EOF
 
       - name: Archive
-        # CODE_SIGN_STYLE=Manual → the profile MUST be named at ARCHIVE time via
-        # PROVISIONING_PROFILE_SPECIFIER (keephair trap b: naming it only in
-        # ExportOptions is one step too late; an absent profile and an inadequate one
-        # emit the IDENTICAL misleading "requires a provisioning profile with the
-        # <capability> feature", sending you to the portal when the fix is here).
-        env:
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
+        # Manual signing (team, style, profile specifier, Apple Distribution identity)
+        # is scoped to the Herdr APP target in project.yml (configs.Release) — NOT
+        # passed here on the command line. Passing it globally applied the provisioning
+        # profile to the SwiftPM dependency targets (swift-crypto / swift-nio via
+        # Citadel), which are libraries that "do not support provisioning profiles",
+        # and the archive failed (keephair trap b's cousin — but for a dependency-heavy
+        # app the fix is target scoping, not a specifier on the command line).
         run: |
           xcodebuild -project Herdr.xcodeproj -scheme Herdr \
-            -configuration Release -destination 'generic/platform=iOS' \
+            -configuration Distribution -destination 'generic/platform=iOS' \
             -archivePath /tmp/Herdr.xcarchive \
-            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             CURRENT_PROJECT_VERSION="$BUILD" \
             archive
 
