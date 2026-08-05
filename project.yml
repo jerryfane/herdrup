@@ -18,6 +18,16 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+# Debug + Release are the defaults (buildbox builds Debug-iphonesimulator; the Mac
+# lane scripts/testflight.sh archives Release with AUTOMATIC account signing).
+# Distribution is a release-type config used ONLY by the GitHub Actions CI archive,
+# which needs MANUAL signing — isolated here so the CI's manual profile does not
+# regress the Mac lane's automatic Release signing.
+configs:
+  Debug: debug
+  Release: release
+  Distribution: release
+
 packages:
   # The local package, consumed unchanged. HerdrKit contains no UIKit or SwiftUI
   # so it keeps building and testing on Linux; the app depends on it, never the
@@ -85,3 +95,17 @@ targets:
         # they take effect only for a device archive. See scripts/testflight.sh.
         DEVELOPMENT_TEAM: FXQ5Z9HHY6
         CODE_SIGN_STYLE: Automatic
+      # The Distribution config (GitHub Actions CI archive) signs MANUALLY, scoped to
+      # THIS app target. It must NOT be passed on the xcodebuild command line: that
+      # applies the provisioning profile to EVERY target, including the SwiftPM
+      # dependency targets (swift-crypto / swift-nio, pulled via Citadel), which are
+      # libraries that "do not support provisioning profiles" — and the archive fails.
+      # Scoped here, only the app target carries the profile. It lives on Distribution,
+      # NOT Release, so the Mac lane's automatic Release signing (scripts/testflight.sh)
+      # is unaffected; Debug (the buildbox sim build) is never code-signed. The
+      # specifier matches the profile minted into the `testflight` GitHub environment.
+      configs:
+        Distribution:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
