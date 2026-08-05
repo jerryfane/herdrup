@@ -57,10 +57,16 @@ final class SavedHostsStore: ObservableObject {
     /// — the caller must treat that as "cannot reconnect", not "empty key".
     func key(for host: SavedHost) -> String? { keychain.load(account: host.id.uuidString) }
 
-    func delete(_ host: SavedHost) {
-        keychain.delete(account: host.id.uuidString)
+    /// Removes a saved host. Deletes the KEY first and drops the host record ONLY if
+    /// the key is confirmed gone — a failed Keychain delete must not leave the private
+    /// key orphaned while the host vanishes from the UI. Returns whether it removed;
+    /// on false the row stays put (a visible "it didn't remove") so the user can retry.
+    @discardableResult
+    func delete(_ host: SavedHost) -> Bool {
+        guard keychain.delete(account: host.id.uuidString) else { return false }
         hosts.removeAll { $0.id == host.id }
         persist()
+        return true
     }
 
     private func persist() {
@@ -113,12 +119,18 @@ struct KeychainCredentialStore {
         return secret
     }
 
-    func delete(account: String) {
+    /// Deletes the secret. Returns true only when it is actually GONE — errSecSuccess
+    /// (deleted) or errSecItemNotFound (already absent). Any other OSStatus (e.g. the
+    /// Keychain temporarily unavailable) returns false, so the caller does not drop the
+    /// host record while the key still lives here.
+    @discardableResult
+    func delete(account: String) -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)   // idempotent: errSecItemNotFound is fine
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 }
