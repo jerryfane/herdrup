@@ -35,6 +35,20 @@ packages:
   # covering the layer the app runs on.
   HerdrKit:
     path: .
+  # The VT emulator that renders the live terminal (#40). Added to the APP target
+  # ONLY — never to Package.swift/HerdrKit, which must stay UIKit-free and
+  # Linux-buildable (SwiftTerm is UIKit/AppKit). We use SwiftTerm's default
+  # CoreText renderer, NOT its Metal backend. Pinned to v1.11.2 — the NEWEST tag
+  # that predates the bundled `Shaders.metal` (added in v1.12.0): Xcode 26 makes
+  # the Metal shader-compiler toolchain a separate download the local buildbox
+  # lacks, so a metal-bearing SwiftTerm fails `CompileMetalFile` there. (SwiftTerm
+  # itself only drops the shader when GITHUB_ACTIONS=true, which reaches the SPM
+  # manifest on GH runners but not the local Mac — hence a metal-free pin builds on
+  # BOTH.) iOS floor is under the app's. xcodegen's key is `exactVersion` (SwiftPM's
+  # `exact:` is Package.swift syntax and xcodegen rejects it).
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    exactVersion: "1.11.2"
 
 targets:
   Herdr:
@@ -50,6 +64,11 @@ targets:
       # against ten lines of UI, than later against a thousand.
       - package: HerdrKit
         product: HerdrKit
+      # SwiftTerm rides on the APP target only (it is UIKit/AppKit) — it renders
+      # the live terminal in TerminalPaneView. HerdrKit deliberately does NOT
+      # depend on it so the Linux build/test of the protocol layer stays intact.
+      - package: SwiftTerm
+        product: SwiftTerm
     info:
       path: App/Info.plist
       properties:

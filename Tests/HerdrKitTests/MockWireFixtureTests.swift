@@ -13,10 +13,20 @@ final class MockWireFixtureTests: XCTestCase {
         func roundTrip(_ requestLine: String) async throws -> String {
             if requestLine.contains("agent.list") { return MockWireFixtures.agentList }
             if requestLine.contains("agent.read") { return MockWireFixtures.agentRead }
+            if requestLine.contains("pane.set_pty_size") { return MockWireFixtures.panePtySize }
             return #"{"id":"x","result":{}}"#
         }
         func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
+            // Mirror MockTransport: `pane.stream` replies with the stream_started
+            // ack, then a full-screen reset seed, then finishes.
+            if requestLine.contains("pane.stream") {
+                return AsyncThrowingStream { continuation in
+                    continuation.yield(MockWireFixtures.paneStreamAck)
+                    continuation.yield(MockWireFixtures.paneStreamReset)
+                    continuation.finish()
+                }
+            }
+            return AsyncThrowingStream { $0.finish() }
         }
     }
 
@@ -77,6 +87,116 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(read.paneID, "w1:p1")
         XCTAssertTrue(read.text.contains("demo data"), "mock pane text missing its marker: \(read.text.prefix(80))")
     }
+
+    // MARK: - Live terminal stream (pane.stream / pane.set_pty_size)
+
+    /// The mock `pane.stream` reply must decode through `streamTerminal`: the
+    /// stream_started ack first (carrying the geometry the app lacked), then a
+    /// reset seed whose base64 payload decodes to the demo screen. The App's
+    /// MockTransport embeds the same two fixtures verbatim.
+    func testMockPaneStreamDecodesAckThenResetSeed() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        var events: [TerminalStreamEvent] = []
+        for try await ev in client.streamTerminal(pane: "w1:p1") { events.append(ev) }
+
+        XCTAssertEqual(events.count, 2, "expected the ack + one reset seed")
+        guard case .started(let started)? = events.first else {
+            return XCTFail("first stream event was not the stream_started ack")
+        }
+        XCTAssertEqual(started.paneID, "w1:p1")
+        XCTAssertEqual(started.cols, 80)
+        XCTAssertEqual(started.rows, 24)
+        XCTAssertEqual(started.epoch, 7)
+        XCTAssertTrue(started.resync)
+
+        guard events.count >= 2, case .frame(let frame) = events[1],
+              case .reset(_, let epoch, let cols, let rows, let data, let lagged) = frame else {
+            return XCTFail("second stream event was not a reset frame")
+        }
+        XCTAssertEqual(epoch, 7)
+        XCTAssertEqual(cols, 80)
+        XCTAssertEqual(rows, 24)
+        XCTAssertFalse(lagged, "the initial seed is not a lagged resync")
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("mock render"),
+                      "reset seed base64 did not decode to the demo screen")
+    }
+
+    /// `setPTYSize` round-trips the applied geometry. The result mirrors the server's
+    /// `PanePtySize` EXACTLY — pane_id/cols/rows/locked, no `epoch`.
+    func testSetPTYSizeDecodesAppliedSize() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let size = try await client.setPTYSize(pane: "w1:p1", cols: 80, rows: 24)
+        XCTAssertEqual(size.paneID, "w1:p1")
+        XCTAssertEqual(size.cols, 80)
+        XCTAssertEqual(size.rows, 24)
+        XCTAssertFalse(size.locked)
+    }
+
+    /// Decodes every `StreamFrame` variant off its `frame` discriminator, mirroring
+    /// the herdr Rust frame-shape tests (pane_output_stream.rs): a `data` frame's
+    /// payload is base64 ("aGk=" -> "hi"), `resize` carries cols/rows, a `reset`
+    /// with `lagged:true` flags the resync, and an unknown frame is rejected.
+    func testStreamFrameDecodesEachVariant() throws {
+        let decoder = JSONDecoder()
+        func frame(_ json: String) throws -> StreamFrame {
+            try decoder.decode(StreamFrame.self, from: Data(json.utf8))
+        }
+
+        guard case .data(let seq, let epoch, let bytes) =
+            try frame(#"{"stream":"pane.bytes","frame":"data","seq":42,"epoch":7,"data_b64":"aGk="}"#) else {
+            return XCTFail("data frame did not decode")
+        }
+        XCTAssertEqual(seq, 42)
+        XCTAssertEqual(epoch, 7)
+        XCTAssertEqual(String(decoding: bytes, as: UTF8.self), "hi")
+
+        guard case .resize(_, _, let cols, let rows) =
+            try frame(#"{"stream":"pane.bytes","frame":"resize","seq":5,"epoch":7,"cols":100,"rows":30}"#) else {
+            return XCTFail("resize frame did not decode")
+        }
+        XCTAssertEqual(cols, 100)
+        XCTAssertEqual(rows, 30)
+
+        guard case .reset(_, _, _, _, _, let lagged) =
+            try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"","lagged":true}"#) else {
+            return XCTFail("lagged reset frame did not decode")
+        }
+        XCTAssertTrue(lagged)
+
+        if case .ping = try frame(#"{"stream":"pane.bytes","frame":"ping","seq":9,"epoch":7}"#) {} else {
+            XCTFail("ping frame did not decode")
+        }
+        if case .exited = try frame(#"{"stream":"pane.bytes","frame":"exited","seq":9,"epoch":7}"#) {} else {
+            XCTFail("exited frame did not decode")
+        }
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"wat","seq":1,"epoch":7}"#),
+                             "an unknown frame discriminator must be rejected")
+    }
+
+    /// STRICT decode is a stream-integrity guard (PR #47 review): a stateful byte
+    /// stream cannot skip a corrupt line without desyncing the emulator, so a
+    /// malformed frame must THROW — the client then tears the stream down and
+    /// reconnects to a fresh reset instead of feeding a plausible-but-wrong frame.
+    /// Covers a foreign stream tag, missing required fields, and bad base64.
+    func testMalformedStreamFramesAreRejected() throws {
+        let decoder = JSONDecoder()
+        func frame(_ json: String) throws -> StreamFrame {
+            try decoder.decode(StreamFrame.self, from: Data(json.utf8))
+        }
+        // Foreign stream tag — a line from another channel must not be fed as bytes.
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.graphics","frame":"data","seq":1,"epoch":7,"data_b64":"aGk="}"#),
+                             "a non pane.bytes stream tag must be rejected")
+        // seq/epoch are required — never silently defaulted to 0 (that would hide a gap).
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"data","epoch":7,"data_b64":"aGk="}"#),
+                             "a frame missing seq must be rejected")
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"data","seq":1,"data_b64":"aGk="}"#),
+                             "a frame missing epoch must be rejected")
+        // A data/reset frame must carry a valid base64 payload — no empty-degrade.
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"data","seq":1,"epoch":7}"#),
+                             "a data frame with no data_b64 must be rejected")
+        XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"data","seq":1,"epoch":7,"data_b64":"@@not base64@@"}"#),
+                             "an invalid base64 payload must be rejected")
+    }
 }
 
 /// THE FIXTURES. Duplicated verbatim in App/HerdrApp.swift's MockTransport (the
@@ -105,4 +225,20 @@ enum MockWireFixtures {
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
+
+    // MARK: pane.stream / pane.set_pty_size fixtures (mirrored in App MockTransport)
+
+    /// The `pane.stream` open ack: the geometry-carrying `stream_started` line.
+    static let paneStreamAck =
+        #"{"id":"mock","result":{"type":"stream_started","pane_id":"w1:p1","epoch":7,"cols":80,"rows":24,"base_seq":0,"resync":true}}"#
+
+    /// The reset seed frame. `data_b64` is a full-screen ANSI snapshot (clear +
+    /// home + a demo screen); it decodes to text containing "mock render".
+    static let paneStreamReset =
+        #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"G1syShtbSBtbMTszODs1OzM5bWhlcmRyG1swbSBsaXZlIHRlcm1pbmFsIOKAlCBtb2NrIHJlbmRlcg0KDQokIGhlcmRyIGFnZW50IGF0dGFjaCBqYXJ2aXMNCj4gUmFuIDE0NiB0ZXN0cywgMCBmYWlsdXJlcw0KDQpbZGVtbyBkYXRhIOKAlCBubyBsaXZlIGNvbm5lY3Rpb25dDQo="}"#
+
+    /// The `pane.set_pty_size` reply. The current server's `PanePtySize` variant is
+    /// exactly {pane_id, cols, rows, locked} — no epoch.
+    static let panePtySize =
+        #"{"id":"mock","result":{"type":"pane_pty_size","pane_id":"w1:p1","cols":80,"rows":24,"locked":false}}"#
 }
