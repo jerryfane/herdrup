@@ -85,3 +85,16 @@ targets:
         # they take effect only for a device archive. See scripts/testflight.sh.
         DEVELOPMENT_TEAM: FXQ5Z9HHY6
         CODE_SIGN_STYLE: Automatic
+      # Release (the CI TestFlight archive) signs MANUALLY, scoped to THIS app target.
+      # It must NOT be passed on the xcodebuild command line: that applies the
+      # provisioning profile to EVERY target, including the SwiftPM dependency targets
+      # (swift-crypto / swift-nio, pulled via Citadel), which are libraries that "do
+      # not support provisioning profiles" — and the archive fails. Scoped here, only
+      # the app target carries the profile. Debug (the buildbox simulator build) stays
+      # on base Automatic and is never code-signed. The specifier matches the profile
+      # minted into the `testflight` GitHub environment.
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
