@@ -428,7 +428,7 @@ struct ConnectView: View {
             }
             .navigationTitle("Private key")
             .toolbar { ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.brand)
+                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.textDim)
             } }
         }
     }
@@ -518,11 +518,15 @@ struct NewAgentView: View {
     }
 
     private var header: some View {
-        HStack {
-            Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
-                .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
+        // Title centered (ZStack) with Cancel pinned left — the design centers screen
+        // titles. Cancel is a secondary affordance → dim, not the retired violet accent.
+        ZStack {
             Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
-            Spacer()
+            HStack {
+                Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                    .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
+                Spacer()
+            }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
@@ -595,8 +599,8 @@ struct NewAgentView: View {
                     .font(Typography.app(16, .semibold))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(canStart ? Palette.brand : Palette.surface)
-            .foregroundStyle(canStart ? .white : Palette.textFaint)
+            .background(canStart ? Palette.text : Palette.surface)
+            .foregroundStyle(canStart ? Palette.ground : Palette.textFaint)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .disabled(!canStart)
@@ -1469,12 +1473,14 @@ struct SettingsView: View {
     // Header sits on the ground with a bottom hairline (not a filled bar); the
     // one accent the kit uses here is the back affordance.
     private var header: some View {
-        HStack(spacing: 12) {
-            Button { onClose() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.brand)
-            }
+        ZStack {
             Text("Settings").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-            Spacer()
+            HStack {
+                Button { onClose() } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
+                }
+                Spacer()
+            }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
