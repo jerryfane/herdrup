@@ -17,12 +17,10 @@
 name: TestFlight
 
 on:
+  # Manual (a release is deliberate) or a v* tag. No inputs: TestFlight "what to test"
+  # notes require a betaBuildLocalizations call AFTER processing (a follow-up), so a
+  # notes input here would be silently discarded — omitted rather than misleading.
   workflow_dispatch:
-    inputs:
-      notes:
-        description: "What changed in this build (shown to testers)"
-        required: false
-        default: "Internal build"
   push:
     tags: ["v*"]
 
@@ -169,9 +167,15 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_P8_BASE64 }}
         run: |
+          # Record when THIS upload began so the verifier can reject any older build
+          # of the same number (offset mistake / reused number) as a false green.
+          echo "UPLOAD_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           mkdir -p ~/private_keys
-          echo "$ASC_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
-          trap 'rm -f ~/private_keys/AuthKey_${ASC_KEY_ID}.p8' EXIT
+          KEYFILE=~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          # Register cleanup BEFORE writing the key, so a failure mid-write cannot
+          # leave private-key material behind (the always() step is a second net).
+          trap 'rm -f "$KEYFILE"' EXIT
+          echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
           # Do NOT hardcode the .ipa name — it is PRODUCT_NAME (keephair trap c). Herdr's
           # is "Herdr" (no space) but glob anyway and fail loudly with a listing.
           echo "exported artifacts:"; ls -la /tmp/export/
@@ -181,53 +185,91 @@ jobs:
           xcrun altool --upload-app -f "$IPA" -t ios \
             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
-      - name: Verify the build reached App Store Connect
+      - name: Set up the destination verifier (no secrets)
+        # Install the verifier's deps in an isolated venv, in a step with NO release
+        # secrets in scope, so pip and any build subprocess never inherit the ASC key
+        # (codex: a credential must not be exposed to third-party install code).
+        run: |
+          python3 -m venv /tmp/ascverify
+          /tmp/ascverify/bin/pip install --quiet --disable-pip-version-check 'pyjwt~=2.9' 'cryptography~=43.0'
+
+      - name: Verify the build is TestFlight-ready at App Store Connect
         # keephair's hardest lesson: a green run is NOT an artifact arriving. altool
-        # reports UPLOAD SUCCEEDED (delivery UUID) but INGEST lags delivery, and a
-        # build can still reach nobody (Missing Compliance — see the encryption note
-        # in project.yml). VERIFY AT THE DESTINATION: poll /v1/builds until this
-        # exact build (CFBundleVersion == $BUILD) actually appears for the app.
+        # reports UPLOAD SUCCEEDED but INGEST lags delivery, and even VALID can reach
+        # NOBODY when the build is Missing Compliance. So do not trust "present" —
+        # require the build to reach a beta-testable state:
+        #   processingState FAILED/INVALID  -> fail now
+        #   internalBuildState MISSING_EXPORT_COMPLIANCE -> fail now (trap f, actionable)
+        #   internalBuildState READY_FOR_BETA_TESTING / IN_BETA_TESTING -> success
+        #   anything still processing -> keep waiting
+        # Bind to uploadedDate >= this run's upload so a reused/older build number can
+        # never satisfy the check (codex: exact-build false green).
         env:
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_P8_BASE64 }}
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check --break-system-packages pyjwt cryptography \
-            || python3 -m pip install --quiet pyjwt cryptography
-          python3 - "$BUILD" <<'PY'
+          /tmp/ascverify/bin/python - <<'PY'
           import base64, json, os, sys, time, urllib.request
-          import jwt  # PyJWT (installed just above)
-          build = sys.argv[1]
+          from datetime import datetime, timedelta
+          import jwt
+          build = os.environ["BUILD"]
           key = base64.b64decode(os.environ["ASC_P8_BASE64"]).decode()
-          now = int(time.time())
-          tok = jwt.encode({"iss": os.environ["ASC_ISSUER_ID"], "iat": now, "exp": now+600,
-                            "aud": "appstoreconnect-v1"}, key, algorithm="ES256",
-                           headers={"kid": os.environ["ASC_KEY_ID"], "typ": "JWT"})
+          def token():
+              now = int(time.time())
+              return jwt.encode({"iss": os.environ["ASC_ISSUER_ID"], "iat": now, "exp": now+600,
+                                 "aud": "appstoreconnect-v1"}, key, algorithm="ES256",
+                                headers={"kid": os.environ["ASC_KEY_ID"], "typ": "JWT"})
           def get(path):
               r = urllib.request.Request("https://api.appstoreconnect.apple.com"+path,
-                                         headers={"Authorization": "Bearer "+tok})
+                                         headers={"Authorization": "Bearer "+token()})
               with urllib.request.urlopen(r, timeout=30) as resp:
                   return json.load(resp)
-          appid = None
-          for a in get("/v1/apps?filter[bundleId]=com.jerryfane.herdr&limit=1").get("data", []):
-              appid = a["id"]
+          def die(msg):
+              print("::error::"+msg); sys.exit(1)
+          appid = next((a["id"] for a in
+                        get("/v1/apps?filter[bundleId]=com.jerryfane.herdr&limit=1").get("data", [])), None)
           if not appid:
-              print("::error::No App Store Connect app record for com.jerryfane.herdr yet — create it first."); sys.exit(1)
-          for attempt in range(20):  # ~10 min: ingest lags delivery
-              builds = get(f"/v1/builds?filter[app]={appid}&filter[version]={build}&limit=1").get("data", [])
-              if builds:
-                  st = builds[0]["attributes"].get("processingState")
-                  print(f"build {build} present, processingState={st}")
-                  if st in ("VALID", "PROCESSING"):
-                      sys.exit(0)
-              print(f"build {build} not visible yet (attempt {attempt+1}/20); waiting 30s")
+              die("No App Store Connect app record for com.jerryfane.herdr yet — create it first.")
+          started = os.environ.get("UPLOAD_STARTED", "")
+          cutoff = (datetime.fromisoformat(started.replace("Z", "+00:00")) - timedelta(minutes=2)) if started else None
+          for attempt in range(30):  # ~15 min: ingest lags delivery
+              resp = get(f"/v1/builds?filter[app]={appid}&filter[version]={build}"
+                         f"&limit=10&include=buildBetaDetail")
+              beta = {r["id"]: r["attributes"] for r in resp.get("included", [])
+                      if r["type"] == "buildBetaDetails"}
+              ours = None
+              for b in resp.get("data", []):
+                  up = b["attributes"].get("uploadedDate")
+                  if cutoff and up and datetime.fromisoformat(up.replace("Z", "+00:00")) < cutoff:
+                      continue  # an OLDER build carrying this number — not this run's
+                  ours = b; break
+              if ours:
+                  ps = ours["attributes"].get("processingState")
+                  if ps in ("FAILED", "INVALID"):
+                      die(f"build {build} processingState={ps} — the upload failed at Apple.")
+                  bid = ((ours.get("relationships", {}).get("buildBetaDetail", {}) or {}).get("data") or {}).get("id")
+                  ibs = beta.get(bid, {}).get("internalBuildState") if bid else None
+                  print(f"build {build}: processingState={ps} internalBuildState={ibs}")
+                  if ibs == "MISSING_EXPORT_COMPLIANCE":
+                      die(f"build {build} is Missing Compliance — set ITSAppUsesNonExemptEncryption in "
+                          f"project.yml (or answer export compliance in App Store Connect), else it reaches no testers.")
+                  if ibs in ("READY_FOR_BETA_TESTING", "IN_BETA_TESTING"):
+                      print(f"build {build} is available to testers (internalBuildState={ibs})."); sys.exit(0)
+              else:
+                  print(f"build {build} not visible yet (attempt {attempt+1}/30)")
               time.sleep(30)
-          print(f"::error::build {build} never appeared in App Store Connect within the window — delivery != ingest.")
-          sys.exit(1)
+          die(f"build {build} did not become beta-ready within the window — check App Store Connect "
+              f"(delivery != ingest, and Missing Compliance stalls silently).")
           PY
 
-      - name: Clean up keychain
+      - name: Clean up signing material
+        # Second net for the private-key material: the throwaway keychain, the
+        # profile, the decoded .p12, and the decoded .p8 — removed even on the
+        # failure paths where a step's own trap/rm did not run.
         if: always()
         run: |
           security delete-keychain build.keychain || true
           rm -f ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision || true
+          rm -f /tmp/dist.p12 || true
+          rm -f ~/private_keys/AuthKey_*.p8 || true
