@@ -298,14 +298,15 @@ struct ConnectView: View {
             Palette.ground.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 16) {
-                    // Centered identity header: the mark, the app name, one line of intent.
+                    // Centered identity header: the app logo (the Lamb), the name, one
+                    // line of intent. The icon carries its own dark ground, so it reads
+                    // as the app mark — no surface tile behind it.
                     VStack(spacing: 10) {
-                        Text("h")
-                            .font(Typography.app(22, .semibold))
-                            .foregroundStyle(Palette.text)
-                            .frame(width: 56, height: 56)
-                            .background(Palette.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        Image("AppLogo")
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         VStack(spacing: 4) {
                             Text("herdrup")
                                 .font(Typography.app(28, .bold))
