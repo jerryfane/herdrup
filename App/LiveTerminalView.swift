@@ -117,11 +117,18 @@ struct LiveTerminalView: UIViewRepresentable {
                     let maxY = max(0, contentSize.height - bounds.height)
                     if super.contentOffset.y > maxY {
                         super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
-                        // The shrink parked us at the tail (there is nothing below to
-                        // hold onto). Re-arm follow so a live pane doesn't sit at the
-                        // bottom looking frozen until the user manually drags — the
-                        // symptom is indistinguishable from a dead stream.
-                        followsBottom = isAtBottom(super.contentOffset)
+                        // Re-arm follow ONLY for a NON-INTERACTIVE clamp: a content
+                        // shrink (screen clear / alt-screen exit) parks us at the tail
+                        // with nothing below to hold, so resume follow — otherwise a
+                        // live pane sits at the bottom looking frozen. A finger-driven
+                        // bottom-edge rubber-band ALSO transiently pushes the offset
+                        // past maxY; re-arming there would re-affirm follow mid-drag
+                        // (the very bug this file fixes, milder). While a gesture is in
+                        // flight the end-dragging / end-decelerating callbacks own the
+                        // follow state, so leave it to them.
+                        if !isDragging && !isTracking && !isDecelerating {
+                            followsBottom = isAtBottom(super.contentOffset)
+                        }
                     }
                 }
             }
