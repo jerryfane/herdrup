@@ -153,6 +153,27 @@ struct PaneReadResult: Decodable {
     let read: PaneRead
 }
 
+// MARK: - Prompt delivery
+
+/// herdr's `AgentPromptDelivery`: whether the prompt bytes only reached the pane's
+/// composer (`writtenToPty`) or a turn actually STARTED (`submitted`). Mirrors the
+/// server enum's snake_case wire values (src/api/schema/agents.rs). These are
+/// different facts — the whole point of herdr#18/#26 lives in the gap between them
+/// — so the app decodes which one the server confirmed rather than collapsing both
+/// into "sent".
+public enum PromptDelivery: String, Decodable, Sendable, Equatable {
+    case writtenToPty = "written_to_pty"
+    case submitted
+}
+
+/// The `agent.prompt` result (`type: "agent_prompted"`). Only `delivery` is
+/// decoded — the echoed `agent` is deliberately not modelled so a schema change on
+/// it cannot break this decode. `delivery` is optional: the server omits it on
+/// paths that do not determine one.
+public struct PromptResult: Decodable, Sendable, Equatable {
+    public let delivery: PromptDelivery?
+}
+
 // MARK: - Events
 
 /// Subscription types the server actually accepts.

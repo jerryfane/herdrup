@@ -127,6 +127,70 @@ final class NewAgentClientTests: XCTestCase {
     }
 }
 
+/// `agent.prompt`'s wait/delivery contract (Fix E): the app passes `wait` to get a
+/// real `delivery` back and surfaces rejections instead of failing silently.
+final class PromptDeliveryTests: XCTestCase {
+
+    /// Records the request and replies with a canned `agent_prompted` result whose
+    /// `delivery` the caller chooses.
+    private final class DeliveryTransport: HerdrTransport, @unchecked Sendable {
+        var lastRequest = ""
+        let delivery: String
+        init(delivery: String) { self.delivery = delivery }
+        func roundTrip(_ requestLine: String) async throws -> String {
+            lastRequest = requestLine
+            return #"{"id":"x","result":{"type":"agent_prompted","agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"working"},"delivery":"\#(delivery)"}}"#
+        }
+        func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+    }
+
+    func testPromptSendsWaitUntilAndTimeoutAndDecodesSubmitted() async throws {
+        let t = DeliveryTransport(delivery: "submitted")
+        let delivery = try await HerdrClient(transport: t)
+            .prompt(pane: "w1:p1", text: "ship it", waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
+
+        XCTAssertEqual(delivery, .submitted, "a started turn must decode as .submitted")
+        XCTAssertTrue(t.lastRequest.contains(#""method":"agent.prompt""#), "wrong method")
+        XCTAssertTrue(t.lastRequest.contains(#""text":"ship it""#), "text not sent")
+        // The wait block must carry the until set and the snake_case timeout key.
+        XCTAssertTrue(t.lastRequest.contains(#""until":["#), "wait.until not sent")
+        XCTAssertTrue(t.lastRequest.contains(#""working""#), "wait.until values not sent")
+        XCTAssertTrue(t.lastRequest.contains(#""timeout_ms":6000"#), "timeout_ms not sent under its wire key")
+    }
+
+    func testPromptDecodesWrittenToPtyAsDistinctFromSubmitted() async throws {
+        let delivery = try await HerdrClient(transport: DeliveryTransport(delivery: "written_to_pty"))
+            .prompt(pane: "w1:p1", text: "hi", waitUntil: HerdrClient.anyAgentStatus)
+        XCTAssertEqual(delivery, .writtenToPty,
+                       "bytes-in-composer must NOT collapse into submitted (the stranded-draft state)")
+    }
+
+    /// No wait requested → the `wait` block is omitted entirely (not sent as null).
+    func testPromptOmitsWaitWhenNotRequested() async throws {
+        let t = DeliveryTransport(delivery: "written_to_pty")
+        _ = try await HerdrClient(transport: t).prompt(pane: "w1:p1", text: "hi")
+        XCTAssertFalse(t.lastRequest.contains("\"wait\""), "an unrequested wait must be omitted")
+    }
+
+    /// AXIS: a rejection surfaces as a thrown APIError so the app can show a clear
+    /// reason instead of silently not delivering.
+    func testPromptRejectionSurfacesAsAPIError() async throws {
+        struct RejectTransport: HerdrTransport {
+            func roundTrip(_ r: String) async throws -> String {
+                #"{"id":"x","error":{"code":"agent_input_pending","message":"agent has a pending input prompt"}}"#
+            }
+            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+        }
+        do {
+            _ = try await HerdrClient(transport: RejectTransport())
+                .prompt(pane: "w1:p1", text: "hi", waitUntil: HerdrClient.anyAgentStatus)
+            XCTFail("a rejection must throw, not return silently")
+        } catch let e as APIError {
+            XCTAssertEqual(e.code, "agent_input_pending")
+        }
+    }
+}
+
 /// Normalizing an arbitrary folder name to herdr's agent-name grammar, so
 /// agent.start never fails on the name AFTER a pane was created.
 final class AgentNameTests: XCTestCase {
