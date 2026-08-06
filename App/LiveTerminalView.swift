@@ -49,40 +49,74 @@ struct LiveTerminalView: UIViewRepresentable {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
+        /// Follow intent, driven by the scroll-view DELEGATE (which SwiftTerm leaves free
+        /// and which DOES fire for the native pan). RELEASED the instant a drag begins, so
+        /// even sub-line drag progress is preserved under continuous streaming; RE-ARMED
+        /// only when a gesture settles at the tail. Read by the source-level holds below.
+        private var followsBottom = true
+
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
+            delegate = self
             // Keep the tail-detection math inset-free: an automatic safe-area / keyboard
             // inset would shift the true maximum offset and mis-classify "at the tail".
             contentInsetAdjustmentBehavior = .never
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the source. `scrolled(source:yDisp:)` is the
+        @objc func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            followsBottom = false
+        }
+        @objc func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { followsBottom = isAtBottom(scrollView.contentOffset) }
+        }
+        @objc func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            followsBottom = isAtBottom(scrollView.contentOffset)
+        }
+
+        private func isAtBottom(_ offset: CGPoint) -> Bool {
+            let maxY = max(0, contentSize.height - bounds.height)
+            return offset.y >= maxY - max(1, font.lineHeight)
+        }
+
+        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the SOURCE. `scrolled(source:yDisp:)` is the
         /// emulator's "buffer scrolled" callback — the STREAM's scroll, fired once per
         /// scrolled line, whose only job is `updateScroller()` snapping `contentOffset` to
-        /// the new bottom. The reader's FINGER scroll never routes through here (it drives
-        /// the native `UIScrollView` pan directly), so this is the unambiguous place to
-        /// hold: remember where the reader is, let super snap, then restore if they had
-        /// scrolled up.
+        /// the bottom. The reader's FINGER scroll never routes through here (it drives the
+        /// native `UIScrollView` pan directly), so this is the unambiguous place to hold:
+        /// while the reader is NOT following (they began dragging away), remember where they
+        /// were, let super snap, then restore.
         ///
-        /// This replaces the earlier contentOffset-setter heuristics: overriding the setter
-        /// risked swallowing the finger's own writes (the v0.1.5/0.1.6 DEAD-scroll
-        /// regression — interactive drags DO pass through the setter), and the
-        /// content-growth guess broke once SwiftTerm's 500-line scrollback fills and stops
-        /// growing (both reviewers' finding). Restoring here works whether the buffer grew,
-        /// recycled, or reflowed — the finger is never touched, so scrolling stays alive.
+        /// Uses the explicit `followsBottom` intent, NOT a distance tolerance: a tolerance
+        /// let a slow drag from the tail get erased by each streamed line before it crossed
+        /// the threshold (reviewer finding). Because follow is released at drag START, even
+        /// a few-pixel drag holds. Works whether the 500-line scrollback grew, recycled, or
+        /// reflowed — the finger is never touched, so scrolling stays alive. (Replaces the
+        /// earlier contentOffset-setter heuristics, which either swallowed finger writes —
+        /// the DEAD-scroll regression — or broke once the buffer stopped growing.)
         override func scrolled(source terminal: SwiftTerm.Terminal, yDisp: Int) {
-            let tolerance = max(1, font.lineHeight * 2)
-            let maxYBefore = max(0, contentSize.height - bounds.height)
             let held = contentOffset.y
-            let wasScrolledUp = held < maxYBefore - tolerance
             super.scrolled(source: terminal, yDisp: yDisp)   // updateScroller: grow/recycle + snap to bottom
-            if wasScrolledUp {
-                // Undo the snap-to-bottom; keep the reader where they were reading (clamped
-                // to the possibly-grown range). A tail-follower (not scrolled up) is left
-                // snapped, so it keeps following.
-                let maxYAfter = max(0, contentSize.height - bounds.height)
-                contentOffset = CGPoint(x: 0, y: min(held, maxYAfter))
+            if !followsBottom {
+                let maxY = max(0, contentSize.height - bounds.height)
+                contentOffset = CGPoint(x: 0, y: min(held, maxY))
+            }
+        }
+
+        /// The OTHER updateScroller path: a PTY resize / reflow (rotation, or the keyboard
+        /// showing/hiding, changes rows) routes through `sizeChanged(source:)`, which snaps
+        /// to the bottom too but bypasses `scrolled()` (reviewer finding). super dispatches
+        /// updateScroller ASYNC on the main queue, so we re-assert on the main queue AFTER
+        /// it (FIFO) when the reader isn't following. Offset is approximate across a reflow,
+        /// but not snapping to the tail is the point.
+        override func sizeChanged(source: SwiftTerm.Terminal) {
+            let held = contentOffset.y
+            super.sizeChanged(source: source)
+            guard !followsBottom else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let maxY = max(0, self.contentSize.height - self.bounds.height)
+                self.contentOffset = CGPoint(x: 0, y: min(held, maxY))
             }
         }
     }
