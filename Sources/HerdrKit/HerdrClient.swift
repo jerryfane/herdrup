@@ -73,12 +73,13 @@ public actor HerdrClient {
     /// Requesting `.ansi` with `.detection` silently yields plain text, so this
     /// refuses that combination rather than returning unstyled output that the
     /// caller believes is styled.
-    /// Defaults to `.recentUnwrapped` on the panel's ruling: the API exposes no
-    /// pane geometry and no PTY resize (`PaneInfo` carries no cols/rows), so the
-    /// phone renders whatever width the desktop chose and cannot change it. A
-    /// 100-column pane at readable size does not fit a phone, which makes
-    /// grid-faithful and readable mutually exclusive. Reflowed transcript is
-    /// therefore the default reading surface, not a toggle. Styling survives it.
+    /// Defaults to `.recentUnwrapped`: `read` is the REFLOWED-SNAPSHOT surface —
+    /// a 100-column pane at readable size does not fit a phone, so a transcript
+    /// reflowed to the phone's width is the right default for skimming. Styling
+    /// survives it. This is now the COMPLEMENT to the live path, not the only
+    /// option: `streamTerminal(pane:)` renders a real grid-faithful VT from the
+    /// raw byte stream, and `setPTYSize(...)` drives the actual PTY geometry that
+    /// `PaneInfo` never exposed. `read` stays the cheap, reflowed snapshot.
     public func read(
         pane: String,
         source: ReadSource = .recentUnwrapped,
@@ -271,6 +272,127 @@ public actor HerdrClient {
             return .event(kind: kind, paneID: obj["pane_id"] as? String, raw: line)
         }
         return .other(raw: line)
+    }
+
+    // MARK: - Live terminal stream
+
+    /// Opens `pane.stream` — herdr's persistent server->client raw PTY byte firehose
+    /// — and yields the opening `stream_started` ack (geometry + epoch) followed by
+    /// the ordered `\n`-delimited frames. Cloned from `subscribe()`: same Transport
+    /// line framing, no busy-poll (the server pushes as bytes arrive off the PTY). A
+    /// line that fails to decode as a valid frame THROWS and finishes the stream — a
+    /// stateful byte stream can't skip a corrupt line without desyncing the emulator,
+    /// so the view surfaces the failure and re-opening the pane reseeds a fresh reset.
+    /// The connection also ends when the peer closes or the task is cancelled (closing
+    /// the SSH channel = unsubscribe).
+    public nonisolated func streamTerminal(
+        pane: String,
+        includeHistory: Bool = true,
+        maxFrameBytes: Int? = nil,
+        scrollbackLines: Int? = nil
+    ) -> AsyncThrowingStream<TerminalStreamEvent, Error> {
+        let encoder = JSONEncoder()
+        let env = RequestEnvelope(
+            id: "herdrkit:pane.stream:\(pane)",
+            method: "pane.stream",
+            params: PaneStreamParams(
+                paneID: pane, includeHistory: includeHistory,
+                resumeFrom: nil, epoch: nil,
+                maxFrameBytes: maxFrameBytes, scrollbackLines: scrollbackLines)
+        )
+        guard let data = try? encoder.encode(env) else {
+            return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
+        }
+        let requestLine = String(decoding: data, as: UTF8.self)
+        let raw = transport.stream(requestLine)
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                let decoder = JSONDecoder()
+                var sawAck = false
+                do {
+                    for try await line in raw {
+                        if !sawAck {
+                            sawAck = true
+                            switch Self.decodeStreamAck(line, decoder) {
+                            case .started(let started):
+                                continuation.yield(.started(started))
+                                continue
+                            case .error(let apiError):
+                                // pane_not_found, or an older server rejecting the
+                                // unknown method — surface it and stop cleanly.
+                                continuation.finish(throwing: apiError)
+                                return
+                            case .undecodable:
+                                // Not the ack we expected: fall through and try this
+                                // line as a frame. If it is a valid frame it is
+                                // yielded; if not, the strict decode below THROWS and
+                                // ends the stream (a stray non-frame leading line is
+                                // not silently swallowed).
+                                break
+                            }
+                        }
+                        // STRICT: every line after the ack must be a valid pane.bytes
+                        // frame. A stateful byte stream cannot skip a corrupt line
+                        // without desyncing the emulator (feeding the next frame mid
+                        // escape-sequence), so a decode failure THROWS — the stream
+                        // ends with an error, the view surfaces it, and re-opening the
+                        // pane reseeds a fresh full-screen reset. The ack fall-through
+                        // above lands here too, so a non-ack/non-frame leading line
+                        // also fails loudly rather than being silently swallowed.
+                        let frame = try decoder.decode(StreamFrame.self, from: Data(line.utf8))
+                        continuation.yield(.frame(frame))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private enum StreamAck {
+        case started(StreamStarted)
+        case error(APIError)
+        case undecodable
+    }
+
+    /// Classifies the first `pane.stream` line: the `stream_started` ack, a server
+    /// error envelope, or something else (which the caller then re-tries as a frame).
+    private nonisolated static func decodeStreamAck(_ line: String, _ decoder: JSONDecoder) -> StreamAck {
+        let data = Data(line.utf8)
+        if let err = try? decoder.decode(ErrorEnvelope.self, from: data) {
+            return .error(err.error)
+        }
+        if let ok = try? decoder.decode(ResultEnvelope<StreamStarted>.self, from: data) {
+            return .started(ok.result)
+        }
+        return .undecodable
+    }
+
+    /// Sets the pane's real PTY winsize and takes/releases geometry ownership.
+    /// One-shot request/response on the single-shot control socket, dispatched via
+    /// the same `call(...)` path as `read`/`sendText`. NOTE `lock:false` (the
+    /// default) is NOT side-effect-free: the server applies the winsize resize FIRST
+    /// and only then releases ownership, so this DOES resize the shared PTY (a
+    /// co-viewing desktop reflows until its next render reclaims the size). `false`
+    /// only means "don't PIN the geometry"; it does not mean "don't resize". cols/
+    /// rows are clamped to the server's floor (cols>=4, rows>=2) before the round-trip.
+    public func setPTYSize(
+        pane: String,
+        cols: Int,
+        rows: Int,
+        cellWidthPx: UInt32? = nil,
+        cellHeightPx: UInt32? = nil,
+        lock: Bool = false
+    ) async throws -> PanePtySize {
+        let clampedCols = min(max(cols, 4), Int(UInt16.max))
+        let clampedRows = min(max(rows, 2), Int(UInt16.max))
+        let params = PaneSetPtySizeParams(
+            paneID: pane, cols: clampedCols, rows: clampedRows,
+            cellWidthPx: cellWidthPx, cellHeightPx: cellHeightPx, lock: lock)
+        return try await call("pane.set_pty_size", params, as: PanePtySize.self)
     }
 }
 
