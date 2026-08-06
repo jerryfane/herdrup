@@ -123,10 +123,13 @@ struct LiveTerminalView: UIViewRepresentable {
                         // live pane sits at the bottom looking frozen. A finger-driven
                         // bottom-edge rubber-band ALSO transiently pushes the offset
                         // past maxY; re-arming there would re-affirm follow mid-drag
-                        // (the very bug this file fixes, milder). While a gesture is in
-                        // flight the end-dragging / end-decelerating callbacks own the
-                        // follow state, so leave it to them.
-                        if !isDragging && !isTracking && !isDecelerating {
+                        // (the very bug this file fixes, milder). A rubber-band only
+                        // occurs while DRAGGING or DECELERATING, so those two flags
+                        // fully exclude it. We must NOT also gate on isTracking: a
+                        // finger merely resting (touch-hold, no drag) sets isTracking
+                        // but fires no didEndDragging, so gating on it would strand
+                        // follow OFF through a content shrink under a still finger.
+                        if !isDragging && !isDecelerating {
                             followsBottom = isAtBottom(super.contentOffset)
                         }
                     }
