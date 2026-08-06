@@ -1265,12 +1265,11 @@ struct TerminalPaneView: View {
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
                     .padding(.horizontal, 8)
-                    // Tap the (read-only) terminal to dismiss the keyboard. Best-effort
-                    // alongside the toolbar chevron; the terminal takes no first
-                    // responder, so a tap here is otherwise unused (the alt-scroll pan
-                    // still handles drags).
-                    .contentShape(Rectangle())
-                    .onTapGesture { replyFocused = false }
+                    // NOTE: do NOT attach a SwiftUI .onTapGesture here. A tap gesture on
+                    // this UIViewRepresentable competes with the wrapped UIScrollView's
+                    // native pan and starves the terminal of scroll drags (it broke
+                    // scrolling in v0.1.5). Keyboard dismissal lives on the reply bar's
+                    // own collapse button instead (see replyBar).
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -1405,23 +1404,26 @@ struct TerminalPaneView: View {
 
     private var replyBar: some View {
         HStack(spacing: 8) {
+            // Collapse-keyboard button — shown only while the keyboard is up. It lives
+            // INSIDE the bar's HStack (laid out beside the field/send), NOT in a
+            // `.keyboard` accessory toolbar: that toolbar floated on top of the send
+            // button. Matched to the send button's circular footprint.
+            if replyFocused {
+                Button { replyFocused = false } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .frame(width: 40, height: 40)
+                        .background(Palette.surface).clipShape(Circle())
+                }
+                .accessibilityLabel("Collapse keyboard")
+            }
             TextField("type a reply…", text: $reply)
                 .font(Typography.app(15)).foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
                 .focused($replyFocused)
-                // A chevron in the keyboard's accessory toolbar so the software
-                // keyboard can be collapsed once it has been raised.
-                .toolbar {
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button { replyFocused = false } label: {
-                            Image(systemName: "keyboard.chevron.compact.down")
-                                .foregroundStyle(Palette.text)
-                        }
-                    }
-                }
                 // Ctrl-toggle interception: while armed, the next character typed
                 // here becomes a control byte instead of message text.
                 .onChange(of: reply) { oldValue, newValue in
