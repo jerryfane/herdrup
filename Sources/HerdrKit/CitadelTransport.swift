@@ -29,6 +29,12 @@ public actor CitadelTransport: HerdrTransport {
     /// A connect in flight, so concurrent first-use awaits one attempt (see
     /// `connectedClient`) rather than each opening — and leaking — its own session.
     private var connectTask: Task<SSHClient, Error>?
+    /// Bumped by `close()`. A connect that resolves after its starting generation is
+    /// STALE: close() has already torn down and believes there is no live session, so
+    /// the resolved client must be reaped, never installed. This closes the residual
+    /// window where a handshake completing exactly as the user disconnects would
+    /// otherwise re-install a live session behind close()'s back (leak).
+    private var generation = 0
 
     /// - Parameters:
     ///   - credentials: host/port/username, the Ed25519 private key, and the
@@ -71,17 +77,36 @@ public actor CitadelTransport: HerdrTransport {
     /// task instead.
     private func connectedClient() async throws -> SSHClient {
         if let client, client.isConnected { return client }
-        if let connectTask { return try await connectTask.value }
 
-        let task = Task<SSHClient, Error> { try await self.makeConnection() }
-        connectTask = task
+        // Capture the generation BEFORE awaiting: if close() runs during the
+        // handshake it bumps `generation`, marking whatever resolves as stale.
+        let gen = generation
+        let task: Task<SSHClient, Error>
+        if let connectTask {
+            task = connectTask                      // join the in-flight attempt
+        } else {
+            let created = Task<SSHClient, Error> { try await self.makeConnection() }
+            connectTask = created
+            task = created
+        }
         do {
             let connected = try await task.value
+            // Validate AFTER the suspension, under actor isolation. If close() ran
+            // while we awaited, this session is orphaned — close() already believes
+            // there is nothing to tear down, so reap it rather than installing a live
+            // client behind close()'s back. BOTH the creator and any joined waiter
+            // pass through this same check.
+            guard gen == generation else {
+                try? await connected.close()
+                throw CancellationError()
+            }
             client = connected
-            connectTask = nil
+            if connectTask == task { connectTask = nil }
             return connected
         } catch {
-            connectTask = nil   // a failed attempt must not wedge every later call
+            // Only clear the slot if it still holds OUR task — never clobber a newer
+            // connect started after a close() bumped the generation.
+            if connectTask == task { connectTask = nil }
             throw error
         }
     }
@@ -91,6 +116,9 @@ public actor CitadelTransport: HerdrTransport {
             sshEd25519: Data(credentials.privateKeyPEM.utf8),
             decryptionKey: credentials.passphrase.map { Data($0.utf8) }
         )
+        // A client that resolves after a concurrent close() is reaped by the
+        // generation check in connectedClient() (the only publisher of `self.client`),
+        // so no cancellation handling is needed here.
         return try await SSHClient.connect(
             host: credentials.host,
             port: Int(credentials.port),
@@ -216,10 +244,20 @@ public actor CitadelTransport: HerdrTransport {
 
     /// Closes the held SSH connection. Idempotent.
     public func close() async {
+        // Invalidate any in-flight connect so a handshake that resolves after this
+        // point is reaped by connectedClient() rather than installed post-close.
+        generation &+= 1
         connectTask?.cancel()
         connectTask = nil
-        try? await client?.close()
+        // Snapshot and CLEAR the slot BEFORE awaiting teardown. Awaiting the old
+        // client's close is a suspension point, and actor reentrancy lets a NEW
+        // generation connect install a fresh client during it (a legitimate
+        // reconnect). A trailing unconditional `client = nil` would then discard that
+        // live session unclosed. Nil-before-await confines this teardown to the OLD
+        // client and never clobbers a reconnect that lands mid-close.
+        let old = client
         client = nil
+        try? await old?.close()
     }
 }
 
