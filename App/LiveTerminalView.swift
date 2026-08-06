@@ -49,23 +49,6 @@ struct LiveTerminalView: UIViewRepresentable {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
-        /// HOLD-POSITION-WHEN-SCROLLED-UP. `TerminalView` is a `UIScrollView` whose
-        /// `updateScroller` slams `contentOffset` to the bottom on EVERY streamed frame
-        /// — it sets `contentSize` then `contentOffset` synchronously, once per scrolled
-        /// line. Without intervention a scrolled-up reader is yanked back to the tail.
-        ///
-        /// We distinguish the STREAM's snap from the reader's own FINGER scroll by
-        /// CONTENT GROWTH, not by interaction flags. (Interaction flags fail: streamed
-        /// output arriving mid-drag or during post-flick momentum has isDragging /
-        /// isDecelerating set too, so honoring "any interactive write" — the v0.1.7
-        /// behaviour — let the snap through and yanked the reader down.) An interactive
-        /// finger write NEVER changes `contentSize`; `updateScroller`'s snap ALWAYS grows
-        /// it, and (being synchronous) its `contentOffset` write is the FIRST one after
-        /// the growth. So we DROP a write iff content just grew AND the reader is scrolled
-        /// up — holding position even mid-drag — while every finger write is honored,
-        /// which is what keeps scrolling alive. No delegate, no cached follow flag.
-        private var lastContentHeight: CGFloat = 0
-
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
             // Keep the tail-detection math inset-free: an automatic safe-area / keyboard
@@ -74,31 +57,32 @@ struct LiveTerminalView: UIViewRepresentable {
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        override var contentOffset: CGPoint {
-            get { super.contentOffset }
-            set {
-                let h = contentSize.height
-                let grew = h > lastContentHeight      // true ONLY for updateScroller's snap (stream / reflow)
-                lastContentHeight = h
-                let maxY = max(0, h - bounds.height)
-                // Two lines of slack: streaming grows one line per write (updateScroller
-                // fires per scrolled line), so a tail-follower stays following; the extra
-                // line absorbs a rotate/reflow that grows by more than one in a single write.
-                let tolerance = max(1, font.lineHeight * 2)
-                if super.contentOffset.y > maxY {
-                    // Content SHRANK (screen clear / alt-screen exit / scrollback trim):
-                    // honor a CLAMP so the offset isn't stranded out of range over blank
-                    // space. (`grew` is false here.)
-                    super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
-                } else if grew && super.contentOffset.y < maxY - tolerance {
-                    // updateScroller's snap-to-bottom (content just grew) AND the reader
-                    // has scrolled up → DROP it so their position holds, even mid-drag /
-                    // mid-momentum. A finger write never grows contentSize, so it is
-                    // never dropped here — scrolling stays alive.
-                } else {
-                    // The finger's own move, or a legitimate follow at/near the tail.
-                    super.contentOffset = newValue
-                }
+        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the source. `scrolled(source:yDisp:)` is the
+        /// emulator's "buffer scrolled" callback — the STREAM's scroll, fired once per
+        /// scrolled line, whose only job is `updateScroller()` snapping `contentOffset` to
+        /// the new bottom. The reader's FINGER scroll never routes through here (it drives
+        /// the native `UIScrollView` pan directly), so this is the unambiguous place to
+        /// hold: remember where the reader is, let super snap, then restore if they had
+        /// scrolled up.
+        ///
+        /// This replaces the earlier contentOffset-setter heuristics: overriding the setter
+        /// risked swallowing the finger's own writes (the v0.1.5/0.1.6 DEAD-scroll
+        /// regression — interactive drags DO pass through the setter), and the
+        /// content-growth guess broke once SwiftTerm's 500-line scrollback fills and stops
+        /// growing (both reviewers' finding). Restoring here works whether the buffer grew,
+        /// recycled, or reflowed — the finger is never touched, so scrolling stays alive.
+        override func scrolled(source terminal: SwiftTerm.Terminal, yDisp: Int) {
+            let tolerance = max(1, font.lineHeight * 2)
+            let maxYBefore = max(0, contentSize.height - bounds.height)
+            let held = contentOffset.y
+            let wasScrolledUp = held < maxYBefore - tolerance
+            super.scrolled(source: terminal, yDisp: yDisp)   // updateScroller: grow/recycle + snap to bottom
+            if wasScrolledUp {
+                // Undo the snap-to-bottom; keep the reader where they were reading (clamped
+                // to the possibly-grown range). A tail-follower (not scrolled up) is left
+                // snapped, so it keeps following.
+                let maxYAfter = max(0, contentSize.height - bounds.height)
+                contentOffset = CGPoint(x: 0, y: min(held, maxYAfter))
             }
         }
     }
