@@ -103,20 +103,33 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
-        /// The OTHER updateScroller path: a PTY resize / reflow (rotation, or the keyboard
-        /// showing/hiding, changes rows) routes through `sizeChanged(source:)`, which snaps
-        /// to the bottom too but bypasses `scrolled()` (reviewer finding). super dispatches
-        /// updateScroller ASYNC on the main queue, so we re-assert on the main queue AFTER
-        /// it (FIFO) when the reader isn't following. Offset is approximate across a reflow,
-        /// but not snapping to the tail is the point.
-        override func sizeChanged(source: SwiftTerm.Terminal) {
+        private var lastLayoutSize: CGSize = .zero
+
+        /// The OTHER updateScroller snap path: an iOS layout-driven resize (device rotation,
+        /// or the keyboard showing/hiding changes the row count) runs
+        /// `layoutSubviews -> processSizeChange -> updateScroller()` — SYNCHRONOUSLY (see
+        /// SwiftTerm AppleTerminalView.processSizeChange, which calls updateScroller inline)
+        /// — and snaps to the bottom, bypassing `scrolled()`. (The `sizeChanged(source:)`
+        /// TerminalView callback is a DIFFERENT, terminal-requested path e.g. DECCOLM, not
+        /// this one — reviewer finding.) We only act on a genuine bounds-SIZE change (never a
+        /// scroll, which changes bounds.ORIGIN, so the finger is never fought), and because
+        /// the snap is synchronous within super we can restore right after.
+        override func layoutSubviews() {
+            let resized = bounds.size != lastLayoutSize
             let held = contentOffset.y
-            super.sizeChanged(source: source)
-            guard !followsBottom else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let maxY = max(0, self.contentSize.height - self.bounds.height)
-                self.contentOffset = CGPoint(x: 0, y: min(held, maxY))
+            super.layoutSubviews()          // size change → processSizeChange → updateScroller → snap
+            lastLayoutSize = bounds.size
+            guard resized, !followsBottom else { return }
+            let maxY = max(0, contentSize.height - bounds.height)
+            if held < maxY - max(1, font.lineHeight) {
+                // Still genuinely scrolled up in the new geometry → keep the reader there.
+                // Exact for a height-only change (keyboard, no reflow); approximate across a
+                // width reflow (rotation) — but not snapping to the tail is the point.
+                contentOffset = CGPoint(x: 0, y: min(held, maxY))
+            } else {
+                // The resize clamped the viewport to the tail → resume follow, so the view
+                // doesn't sit frozen behind subsequent output.
+                followsBottom = true
             }
         }
     }
