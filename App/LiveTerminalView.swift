@@ -45,42 +45,94 @@ struct LiveTerminalView: UIViewRepresentable {
     /// A `TerminalView` that never accepts keyboard input — display + scroll only.
     /// Blocking first-responder status is what keeps this observe-only: no keyboard
     /// appears and no keystroke can reach the (unwired) PTY input path.
+    /// NOTE: `TerminalView` already conforms to `UIScrollViewDelegate` (SwiftTerm
+    /// declares it on the base class) but implements none of the `scrollView*`
+    /// methods and never assigns `self.delegate` — so we inherit the conformance
+    /// (re-declaring it errors "redundant conformance") and simply claim the free
+    /// delegate slot. The three methods below are marked `@objc` explicitly so the
+    /// runtime's optional-protocol dispatch (`respondsToSelector:`) finds them:
+    /// inferred `@objc` is not guaranteed when the conformance is inherited rather
+    /// than stated here, and without it the follow-logic would be dead code.
     final class ReadOnlyTerminalView: TerminalView {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
-        /// FOLLOW-ONLY-AT-BOTTOM (Fix B). `TerminalView` is a `UIScrollView`, and its
+        /// FOLLOW-ONLY-AT-BOTTOM. `TerminalView` is a `UIScrollView` whose
         /// `updateScroller` slams `contentOffset` to the bottom on EVERY streamed
-        /// frame — so a drag-up is snapped straight back and the transcript "looks
-        /// stuck". We intercept PROGRAMMATIC offset writes: while the reader has
-        /// scrolled UP (not following), the auto-snap is ignored so their position
-        /// holds; a user-driven scroll (dragging / decelerating / tracking) is always
-        /// honored and updates the follow state, so returning to the bottom resumes
-        /// auto-follow. This governs only WHERE WE LOOK — it opens no input path, so
-        /// the read-only guarantee is untouched.
+        /// frame — so without intervention a scrolled-up reader is yanked back ("scrolls
+        /// back automatically to the bottom"). We DROP that programmatic snap while the
+        /// reader has scrolled up, and resume auto-follow when they return to the tail.
+        /// Governs only WHERE WE LOOK — opens no input path.
+        ///
+        /// `followsBottom` is driven from GENUINE user scrolls via the scroll-view
+        /// DELEGATE, NOT the `contentOffset` setter: UIKit moves an interactive drag
+        /// through `bounds.origin`, which never invokes the property setter (the classic
+        /// trap that made the setter-based version never register a drag, so it stayed
+        /// following and always snapped). SwiftTerm never claims the delegate slot on
+        /// iOS, so we take it.
         private var followsBottom = true
+
+        override init(frame: CGRect, font: UIFont?) {
+            super.init(frame: frame, font: font)
+            delegate = self
+            // Keep the bottom-detection math inset-free. With automatic inset
+            // adjustment a safe-area / keyboard inset would shift the true maximum
+            // offset out from under `isAtBottom`, silently wedging follow off.
+            contentInsetAdjustmentBehavior = .never
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        // A user drag RELEASES follow at its very first movement, so the streamed
+        // snap-to-bottom (in the contentOffset setter) stops fighting the finger.
+        //
+        // We deliberately do NOT track follow in `scrollViewDidScroll`: SwiftTerm's
+        // updateScroller writes `contentOffset` once per streamed line, and because
+        // `contentOffset` is an ObjC property that programmatic write RE-ENTERS the
+        // delegate while `isDragging == true` (the finger is still down). A
+        // "does this look like the bottom?" check there would re-affirm follow
+        // mid-drag and pin a slow drag back to the tail under continuous output —
+        // the exact reported bug, one layer up from the setter version it replaced.
+        // Instead: release on drag-start; re-arm only when the gesture SETTLES at
+        // the tail (end-dragging without momentum, or end-decelerating).
+        @objc func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            followsBottom = false
+        }
+        @objc func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { followsBottom = isAtBottom(scrollView.contentOffset) }
+        }
+        @objc func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            followsBottom = isAtBottom(scrollView.contentOffset)
+        }
 
         override var contentOffset: CGPoint {
             get { super.contentOffset }
             set {
-                let userDriven = isDragging || isDecelerating || isTracking
-                if userDriven {
-                    super.contentOffset = newValue
-                    followsBottom = isAtBottom(newValue)
-                } else if followsBottom {
+                if followsBottom {
                     super.contentOffset = newValue
                 } else {
-                    // Programmatic write while the reader is scrolled up. Distinguish
-                    // SwiftTerm's auto-snap-to-bottom (DROP it — hold the reader's
-                    // position) from UIKit's legitimate CLAMP after contentSize shrank
-                    // (HONOR it — else the offset is stranded out of bounds over a
-                    // blank area; review finding). It's a clamp iff our CURRENT offset
-                    // now exceeds the valid range.
+                    // Not following: a programmatic write while the reader is scrolled
+                    // up. Honor it ONLY as a legit CLAMP (current offset now out of
+                    // range because contentSize shrank — else the offset strands over
+                    // blank space); DROP an in-range snap-to-bottom so position holds.
                     let maxY = max(0, contentSize.height - bounds.height)
                     if super.contentOffset.y > maxY {
                         super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
+                        // Re-arm follow ONLY for a NON-INTERACTIVE clamp: a content
+                        // shrink (screen clear / alt-screen exit) parks us at the tail
+                        // with nothing below to hold, so resume follow — otherwise a
+                        // live pane sits at the bottom looking frozen. A finger-driven
+                        // bottom-edge rubber-band ALSO transiently pushes the offset
+                        // past maxY; re-arming there would re-affirm follow mid-drag
+                        // (the very bug this file fixes, milder). A rubber-band only
+                        // occurs while DRAGGING or DECELERATING, so those two flags
+                        // fully exclude it. We must NOT also gate on isTracking: a
+                        // finger merely resting (touch-hold, no drag) sets isTracking
+                        // but fires no didEndDragging, so gating on it would strand
+                        // follow OFF through a content shrink under a still finger.
+                        if !isDragging && !isDecelerating {
+                            followsBottom = isAtBottom(super.contentOffset)
+                        }
                     }
-                    // else: an in-range snap-to-bottom → drop it.
                 }
             }
         }
