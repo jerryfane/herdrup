@@ -710,6 +710,19 @@ struct TerminalHomeView: View {
     /// HerdrKit's tested `AgentList`, not here.
     private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
 
+    /// The agent the Terminal tab opens: the herdr-focused pane if the session
+    /// reports one (`AgentInfo.focused`), else the top of the sorted list — which is
+    /// the highest-priority row (needs-you first), so the tab always lands on the most
+    /// useful terminal rather than nothing. Nil only when there are no agents at all.
+    private var terminalTarget: AgentRow? {
+        // LIVE rows only. A stopped pane is absent from the census (not live) — its
+        // pane is gone, so never open it, not even if it is the focused one; and if
+        // every known agent is dead the list is empty and the tab correctly disables.
+        // (When there is no census, AgentRow defaults isLive=true, so nothing is lost.)
+        let rows = fullList.sections.flatMap { $0.rows }.filter(\.isLive)
+        return rows.first(where: { $0.info.focused == true }) ?? rows.first
+    }
+
     /// Sections after applying the search box. Search filters the raw agents and
     /// re-derives, so counts and grouping stay honest for the filtered view.
     private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
@@ -833,7 +846,18 @@ struct TerminalHomeView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
-            tabItem("terminal", "Terminal", active: false)
+            // Terminal → the focused agent's pane (or the top of the list). Reuses the
+            // openedPane push with an EMPTY task, so there is no pre-fill/auto-delivery
+            // (pendingPrefill stays false); the pane re-resolves its own agent identity.
+            Button {
+                if let t = terminalTarget {
+                    openedPane = PaneToOpen(paneID: t.info.paneID, name: t.title, task: "")
+                }
+            } label: {
+                tabItem("terminal", "Terminal", active: false)
+            }
+            .buttonStyle(.plain)
+            .disabled(terminalTarget == nil)
             Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
