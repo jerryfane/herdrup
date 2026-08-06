@@ -109,6 +109,21 @@ struct LiveTerminalView: UIViewRepresentable {
             contentOffset = CGPoint(x: 0, y: min(held, maxY))
         }
 
+        /// Normalize follow intent back to the tail. Called when a keyframe deliberately
+        /// abandons the reader's old position — a `reset`/reseed repaints the whole screen,
+        /// so a stale `followsBottom == false` would otherwise make the next `.data` frame
+        /// pin the fresh tail and fall progressively behind (reviewer finding).
+        func resumeFollow() { followsBottom = true }
+
+        // KNOWN LIMITATION (extreme edge, documented not fixed): SwiftTerm's DEC-2026
+        // synchronized-output TIMEOUT fires via `DispatchQueue.main.asyncAfter` and snaps
+        // to the tail OUTSIDE any feed — only reached if a program opens `ESC[?2026h` and
+        // the stream STALLS before the closing `ESC[?2026l` past SwiftTerm's timeout. A
+        // scrolled-up reader is then snapped to the tail (recoverable by scrolling up
+        // again). `feed`/`synchronizedOutputChanged` are `public` not `open`, so this async
+        // path is not interceptable via override; catching it would need a fragile
+        // scroll-delegate backstop. Never occurs for a shell (omp); deferred.
+
         private var lastLayoutSize: CGSize = .zero
 
         /// The OTHER updateScroller snap path: an iOS layout-driven resize (device rotation,
@@ -294,6 +309,10 @@ struct LiveTerminalView: UIViewRepresentable {
                     view.feed(byteArray: Self.clearSequence[...])
                     resizeEmulator(cols: cols, rows: rows, in: view)
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    // A reset repaints the whole screen — abandon any scrolled-up position
+                    // and follow the fresh tail (else the flag stays false and later data
+                    // pins the stale tail and falls behind).
+                    view.resumeFollow()
                 case .data(_, _, let data):
                     // Stream data: hold the reader's scroll position if they've scrolled up
                     // (covers scrolled / synchronized-output / buffer-switch snaps in one).
