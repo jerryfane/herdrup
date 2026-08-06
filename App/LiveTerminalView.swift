@@ -45,59 +45,25 @@ struct LiveTerminalView: UIViewRepresentable {
     /// A `TerminalView` that never accepts keyboard input — display + scroll only.
     /// Blocking first-responder status is what keeps this observe-only: no keyboard
     /// appears and no keystroke can reach the (unwired) PTY input path.
-    /// NOTE: `TerminalView` already conforms to `UIScrollViewDelegate` (SwiftTerm
-    /// declares it on the base class) but implements none of the `scrollView*`
-    /// methods and never assigns `self.delegate` — so we inherit the conformance
-    /// (re-declaring it errors "redundant conformance") and simply claim the free
-    /// delegate slot. The three methods below are marked `@objc` explicitly so the
-    /// runtime's optional-protocol dispatch (`respondsToSelector:`) finds them:
-    /// inferred `@objc` is not guaranteed when the conformance is inherited rather
-    /// than stated here, and without it the follow-logic would be dead code.
     final class ReadOnlyTerminalView: TerminalView {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
-        /// FOLLOW-ONLY-AT-BOTTOM. `TerminalView` is a `UIScrollView` whose
-        /// `updateScroller` slams `contentOffset` to the bottom on EVERY streamed
-        /// frame — so without intervention a scrolled-up reader is yanked back ("scrolls
-        /// back automatically to the bottom"). We DROP that programmatic snap while the
-        /// reader has scrolled up, and resume auto-follow when they return to the tail.
-        /// Governs only WHERE WE LOOK — opens no input path.
-        ///
-        /// `followsBottom` is driven from GENUINE user scrolls via the scroll-view
-        /// DELEGATE, NOT the `contentOffset` setter: UIKit moves an interactive drag
-        /// through `bounds.origin`, which never invokes the property setter (the classic
-        /// trap that made the setter-based version never register a drag, so it stayed
-        /// following and always snapped). SwiftTerm never claims the delegate slot on
-        /// iOS, so we take it.
+        /// Follow intent, driven by the scroll-view DELEGATE (which SwiftTerm leaves free
+        /// and which DOES fire for the native pan). RELEASED the instant a drag begins, so
+        /// even sub-line drag progress is preserved under continuous streaming; RE-ARMED
+        /// only when a gesture settles at the tail. Read by the source-level holds below.
         private var followsBottom = true
 
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
             delegate = self
-            // Keep the bottom-detection math inset-free. With automatic inset
-            // adjustment a safe-area / keyboard inset would shift the true maximum
-            // offset out from under `isAtBottom`, silently wedging follow off.
+            // Keep the tail-detection math inset-free: an automatic safe-area / keyboard
+            // inset would shift the true maximum offset and mis-classify "at the tail".
             contentInsetAdjustmentBehavior = .never
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        // `followsBottom` state machine, driven by the scroll-view delegate (SwiftTerm
-        // leaves the delegate slot free on iOS): RELEASE follow the moment a drag
-        // begins, and re-arm it only when the gesture SETTLES at the tail. The
-        // contentOffset setter honors interactive writes regardless of this flag, so
-        // releasing follow here does NOT disable scrolling — it only decides whether
-        // a PROGRAMMATIC snap-to-bottom (finger up) is dropped so the reader's
-        // position holds.
-        //
-        // We do NOT track follow in `scrollViewDidScroll`: SwiftTerm's updateScroller
-        // writes contentOffset once per streamed line, re-entering the delegate while
-        // isDragging == true, so a "does this look like the bottom?" check there would
-        // re-affirm follow mid-drag. (Known limit: under CONTINUOUS streaming the snap
-        // is still honored mid-drag because the finger's write and the stream's write
-        // are indistinguishable while isDragging; the reader's position holds cleanly
-        // once they lift during an output gap. Truly holding through a firehose needs
-        // intercepting updateScroller — a SwiftTerm-level change, deferred.)
         @objc func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             followsBottom = false
         }
@@ -108,47 +74,84 @@ struct LiveTerminalView: UIViewRepresentable {
             followsBottom = isAtBottom(scrollView.contentOffset)
         }
 
-        override var contentOffset: CGPoint {
-            get { super.contentOffset }
-            set {
-                // CRITICAL — the finger's OWN scroll commits pass through THIS setter:
-                // the UIScrollView pan writes the `contentOffset` PROPERTY, not merely
-                // `bounds.origin`. (Proven by the v0.1.5/0.1.6 dead-scroll regression —
-                // an earlier version dropped in-range writes whenever followsBottom was
-                // false, and since scrollViewWillBeginDragging sets it false at drag
-                // start, the finger's own writes were dropped and scrolling died on
-                // BOTH omp and Claude Code, which share this native-scrollback path.)
-                //
-                // So an INTERACTIVE write (finger down, or post-lift momentum) is
-                // ALWAYS honored; only a PROGRAMMATIC write — no touch, no momentum —
-                // may be held. The hold branch below is therefore unreachable while a
-                // gesture is active, so it can NEVER swallow a drag.
-                if isDragging || isDecelerating || isTracking || followsBottom {
-                    super.contentOffset = newValue
-                } else {
-                    // Programmatic snap while the reader has scrolled up and lifted:
-                    // DROP an in-range snap-to-bottom so their position holds; HONOR a
-                    // legit CLAMP (contentSize shrank so the current offset is now out
-                    // of range — else it strands over blank space) and re-arm follow,
-                    // since a shrink parks us at the tail with nothing below to hold.
-                    // No interaction flag can be set here (checked above), so the
-                    // re-arm cannot fire mid-drag.
-                    let maxY = max(0, contentSize.height - bounds.height)
-                    if super.contentOffset.y > maxY {
-                        super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
-                        followsBottom = isAtBottom(super.contentOffset)
-                    }
-                }
-            }
-        }
-
-        /// True when `offset` sits within a line of the bottom — i.e. the reader is
-        /// (or is returning to) the live tail. A one-line tolerance keeps sub-pixel
-        /// content-size jitter from spuriously dropping follow.
         private func isAtBottom(_ offset: CGPoint) -> Bool {
             let maxY = max(0, contentSize.height - bounds.height)
-            let tolerance = max(1, font.lineHeight)
-            return offset.y >= maxY - tolerance
+            return offset.y >= maxY - max(1, font.lineHeight)
+        }
+
+        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the FEED boundary. Every emulator
+        /// snap-to-bottom path — `scrolled()` per streamed line, `synchronizedOutputChanged`
+        /// (DEC 2026 begin/end), a `bufferActivated` buffer switch — fires SYNCHRONOUSLY
+        /// inside `feed()` and calls `updateScroller()` directly. Rather than override each
+        /// (feed itself is `public`, not `open`, and the individual callbacks are
+        /// whack-a-mole — reviewer finding), we wrap ONE save/restore around the stream
+        /// feed. Feeds are the STREAM, never the finger's pan, so scrolling is never
+        /// touched. Uses the explicit delegate-driven `followsBottom` intent (released at
+        /// drag START, so even a few-pixel slow drag holds); works whether the 500-line
+        /// scrollback grew, recycled, or reflowed. A layout-driven resize snaps via a
+        /// DIFFERENT path (`layoutSubviews`, below), so that stays hooked separately.
+        ///
+        /// Call this for STREAM DATA only — a `reset` reseed or an end-of-stream notice
+        /// should snap to show the fresh screen / notice, so those feed plainly.
+        func feedHoldingPosition(_ byteArray: ArraySlice<UInt8>) {
+            let held = contentOffset.y
+            let wasAlternate = getTerminal().isCurrentBufferAlternate
+            feed(byteArray: byteArray)   // scrolled / synchronizedOutputChanged / bufferActivated → snap
+            if getTerminal().isCurrentBufferAlternate != wasAlternate {
+                // A buffer switch makes the old offset meaningless in the new buffer;
+                // follow the new tail (super already snapped there). Normalizes follow
+                // state on normal↔alternate transitions (reviewer finding).
+                followsBottom = true
+                return
+            }
+            guard !followsBottom else { return }
+            let maxY = max(0, contentSize.height - bounds.height)
+            contentOffset = CGPoint(x: 0, y: min(held, maxY))
+        }
+
+        /// Normalize follow intent back to the tail. Called when a keyframe deliberately
+        /// abandons the reader's old position — a `reset`/reseed repaints the whole screen,
+        /// so a stale `followsBottom == false` would otherwise make the next `.data` frame
+        /// pin the fresh tail and fall progressively behind (reviewer finding).
+        func resumeFollow() { followsBottom = true }
+
+        // KNOWN LIMITATION (extreme edge, documented not fixed): SwiftTerm's DEC-2026
+        // synchronized-output TIMEOUT fires via `DispatchQueue.main.asyncAfter` and snaps
+        // to the tail OUTSIDE any feed — only reached if a program opens `ESC[?2026h` and
+        // the stream STALLS before the closing `ESC[?2026l` past SwiftTerm's timeout. A
+        // scrolled-up reader is then snapped to the tail (recoverable by scrolling up
+        // again). `feed`/`synchronizedOutputChanged` are `public` not `open`, so this async
+        // path is not interceptable via override; catching it would need a fragile
+        // scroll-delegate backstop. Never occurs for a shell (omp); deferred.
+
+        private var lastLayoutSize: CGSize = .zero
+
+        /// The OTHER updateScroller snap path: an iOS layout-driven resize (device rotation,
+        /// or the keyboard showing/hiding changes the row count) runs
+        /// `layoutSubviews -> processSizeChange -> updateScroller()` — SYNCHRONOUSLY (see
+        /// SwiftTerm AppleTerminalView.processSizeChange, which calls updateScroller inline)
+        /// — and snaps to the bottom, bypassing `scrolled()`. (The `sizeChanged(source:)`
+        /// TerminalView callback is a DIFFERENT, terminal-requested path e.g. DECCOLM, not
+        /// this one — reviewer finding.) We only act on a genuine bounds-SIZE change (never a
+        /// scroll, which changes bounds.ORIGIN, so the finger is never fought), and because
+        /// the snap is synchronous within super we can restore right after.
+        override func layoutSubviews() {
+            let resized = bounds.size != lastLayoutSize
+            let held = contentOffset.y
+            super.layoutSubviews()          // size change → processSizeChange → updateScroller → snap
+            lastLayoutSize = bounds.size
+            guard resized, !followsBottom else { return }
+            let maxY = max(0, contentSize.height - bounds.height)
+            if held < maxY - max(1, font.lineHeight) {
+                // Still genuinely scrolled up in the new geometry → keep the reader there.
+                // Exact for a height-only change (keyboard, no reflow); approximate across a
+                // width reflow (rotation) — but not snapping to the tail is the point.
+                contentOffset = CGPoint(x: 0, y: min(held, maxY))
+            } else {
+                // The resize clamped the viewport to the tail → resume follow, so the view
+                // doesn't sit frozen behind subsequent output.
+                followsBottom = true
+            }
         }
     }
 
@@ -306,8 +309,14 @@ struct LiveTerminalView: UIViewRepresentable {
                     view.feed(byteArray: Self.clearSequence[...])
                     resizeEmulator(cols: cols, rows: rows, in: view)
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    // A reset repaints the whole screen — abandon any scrolled-up position
+                    // and follow the fresh tail (else the flag stays false and later data
+                    // pins the stale tail and falls behind).
+                    view.resumeFollow()
                 case .data(_, _, let data):
-                    if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    // Stream data: hold the reader's scroll position if they've scrolled up
+                    // (covers scrolled / synchronized-output / buffer-switch snaps in one).
+                    if !data.isEmpty { view.feedHoldingPosition([UInt8](data)[...]) }
                 case .resize(_, _, let cols, let rows):
                     resizeEmulator(cols: cols, rows: rows, in: view)
                 case .ping:
