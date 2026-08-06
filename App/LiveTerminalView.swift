@@ -75,16 +75,27 @@ struct LiveTerminalView: UIViewRepresentable {
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
             delegate = self
+            // Keep the bottom-detection math inset-free. With automatic inset
+            // adjustment a safe-area / keyboard inset would shift the true maximum
+            // offset out from under `isAtBottom`, silently wedging follow off.
+            contentInsetAdjustmentBehavior = .never
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        // Real user scrolling moves bounds.origin and fires the delegate (NOT the
-        // property setter). Programmatic writes also fire this, but with dragging/
-        // decelerating false, so they don't disturb the follow state.
-        @objc func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            if scrollView.isDragging || scrollView.isDecelerating {
-                followsBottom = isAtBottom(scrollView.contentOffset)
-            }
+        // A user drag RELEASES follow at its very first movement, so the streamed
+        // snap-to-bottom (in the contentOffset setter) stops fighting the finger.
+        //
+        // We deliberately do NOT track follow in `scrollViewDidScroll`: SwiftTerm's
+        // updateScroller writes `contentOffset` once per streamed line, and because
+        // `contentOffset` is an ObjC property that programmatic write RE-ENTERS the
+        // delegate while `isDragging == true` (the finger is still down). A
+        // "does this look like the bottom?" check there would re-affirm follow
+        // mid-drag and pin a slow drag back to the tail under continuous output —
+        // the exact reported bug, one layer up from the setter version it replaced.
+        // Instead: release on drag-start; re-arm only when the gesture SETTLES at
+        // the tail (end-dragging without momentum, or end-decelerating).
+        @objc func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            followsBottom = false
         }
         @objc func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { followsBottom = isAtBottom(scrollView.contentOffset) }
@@ -106,6 +117,11 @@ struct LiveTerminalView: UIViewRepresentable {
                     let maxY = max(0, contentSize.height - bounds.height)
                     if super.contentOffset.y > maxY {
                         super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
+                        // The shrink parked us at the tail (there is nothing below to
+                        // hold onto). Re-arm follow so a live pane doesn't sit at the
+                        // bottom looking frozen until the user manually drags — the
+                        // symptom is indistinguishable from a dead stream.
+                        followsBottom = isAtBottom(super.contentOffset)
                     }
                 }
             }

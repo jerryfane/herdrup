@@ -91,13 +91,24 @@ public actor CitadelTransport: HerdrTransport {
             sshEd25519: Data(credentials.privateKeyPEM.utf8),
             decryptionKey: credentials.passphrase.map { Data($0.utf8) }
         )
-        return try await SSHClient.connect(
+        let connected = try await SSHClient.connect(
             host: credentials.host,
             port: Int(credentials.port),
             authenticationMethod: .ed25519(username: credentials.username, privateKey: privateKey),
             hostKeyValidator: hostKeyValidator,
             reconnect: .never
         )
+        // If close() cancelled us WHILE the handshake was in flight — e.g. the user
+        // disconnected right after the connect-time prewarm started the session —
+        // the freshly opened client would otherwise be handed back to
+        // connectedClient() and re-assigned to `self.client` AFTER close() already
+        // nil'd it, leaking a live SSH session. Reap it here and abort instead.
+        // (connectTask is the ONLY thing close() cancels, so isCancelled ⟺ abandon.)
+        if Task.isCancelled {
+            try? await connected.close()
+            throw CancellationError()
+        }
+        return connected
     }
 
     /// Conservative ceiling on the full command line, well under the kernel's
