@@ -45,42 +45,60 @@ struct LiveTerminalView: UIViewRepresentable {
     /// A `TerminalView` that never accepts keyboard input — display + scroll only.
     /// Blocking first-responder status is what keeps this observe-only: no keyboard
     /// appears and no keystroke can reach the (unwired) PTY input path.
-    final class ReadOnlyTerminalView: TerminalView {
+    final class ReadOnlyTerminalView: TerminalView, UIScrollViewDelegate {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
-        /// FOLLOW-ONLY-AT-BOTTOM (Fix B). `TerminalView` is a `UIScrollView`, and its
+        /// FOLLOW-ONLY-AT-BOTTOM. `TerminalView` is a `UIScrollView` whose
         /// `updateScroller` slams `contentOffset` to the bottom on EVERY streamed
-        /// frame — so a drag-up is snapped straight back and the transcript "looks
-        /// stuck". We intercept PROGRAMMATIC offset writes: while the reader has
-        /// scrolled UP (not following), the auto-snap is ignored so their position
-        /// holds; a user-driven scroll (dragging / decelerating / tracking) is always
-        /// honored and updates the follow state, so returning to the bottom resumes
-        /// auto-follow. This governs only WHERE WE LOOK — it opens no input path, so
-        /// the read-only guarantee is untouched.
+        /// frame — so without intervention a scrolled-up reader is yanked back ("scrolls
+        /// back automatically to the bottom"). We DROP that programmatic snap while the
+        /// reader has scrolled up, and resume auto-follow when they return to the tail.
+        /// Governs only WHERE WE LOOK — opens no input path.
+        ///
+        /// `followsBottom` is driven from GENUINE user scrolls via the scroll-view
+        /// DELEGATE, NOT the `contentOffset` setter: UIKit moves an interactive drag
+        /// through `bounds.origin`, which never invokes the property setter (the classic
+        /// trap that made the setter-based version never register a drag, so it stayed
+        /// following and always snapped). SwiftTerm never claims the delegate slot on
+        /// iOS, so we take it.
         private var followsBottom = true
+
+        override init(frame: CGRect, font: UIFont?) {
+            super.init(frame: frame, font: font)
+            delegate = self
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        // Real user scrolling moves bounds.origin and fires the delegate (NOT the
+        // property setter). Programmatic writes also fire this, but with dragging/
+        // decelerating false, so they don't disturb the follow state.
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if scrollView.isDragging || scrollView.isDecelerating {
+                followsBottom = isAtBottom(scrollView.contentOffset)
+            }
+        }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { followsBottom = isAtBottom(scrollView.contentOffset) }
+        }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            followsBottom = isAtBottom(scrollView.contentOffset)
+        }
 
         override var contentOffset: CGPoint {
             get { super.contentOffset }
             set {
-                let userDriven = isDragging || isDecelerating || isTracking
-                if userDriven {
-                    super.contentOffset = newValue
-                    followsBottom = isAtBottom(newValue)
-                } else if followsBottom {
+                if followsBottom {
                     super.contentOffset = newValue
                 } else {
-                    // Programmatic write while the reader is scrolled up. Distinguish
-                    // SwiftTerm's auto-snap-to-bottom (DROP it — hold the reader's
-                    // position) from UIKit's legitimate CLAMP after contentSize shrank
-                    // (HONOR it — else the offset is stranded out of bounds over a
-                    // blank area; review finding). It's a clamp iff our CURRENT offset
-                    // now exceeds the valid range.
+                    // Not following: a programmatic write while the reader is scrolled
+                    // up. Honor it ONLY as a legit CLAMP (current offset now out of
+                    // range because contentSize shrank — else the offset strands over
+                    // blank space); DROP an in-range snap-to-bottom so position holds.
                     let maxY = max(0, contentSize.height - bounds.height)
                     if super.contentOffset.y > maxY {
                         super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
                     }
-                    // else: an in-range snap-to-bottom → drop it.
                 }
             }
         }
