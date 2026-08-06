@@ -16,10 +16,12 @@ import HerdrKit
 /// `TerminalPaneView`, which use the existing `sendText`/`sendKeys`/`prompt` paths.
 ///
 /// Geometry: the view reports its own laid-out grid to the server via `setPTYSize`
-/// so the stream is generated at the phone's width. This resizes the SHARED PTY
-/// (one winsize per pane), so a co-viewing desktop reflows to the phone's grid until
-/// it re-asserts — we pass `lock:false` so we never PIN that shrink, but we do cause
-/// it transiently. Rendering the agent's real TUI at the phone's width is the point.
+/// so the stream is generated at the phone's width. While the terminal view is open
+/// the phone OWNS the pane geometry (`lock:true`, Fix A): the server pins the shared
+/// PTY to the phone's fit, so the agent's TUI lays out at the phone's width and fits
+/// crisply with no horizontal overflow. A co-viewing desktop narrows to that width
+/// while the phone views the pane; on teardown we fire one `lock:false` to hand
+/// ownership back (see `releaseGeometryOwnership`) so the desktop reclaims its width.
 struct LiveTerminalView: UIViewRepresentable {
     let client: HerdrClient
     let paneID: String
@@ -44,6 +46,51 @@ struct LiveTerminalView: UIViewRepresentable {
     final class ReadOnlyTerminalView: TerminalView {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
+
+        /// FOLLOW-ONLY-AT-BOTTOM (Fix B). `TerminalView` is a `UIScrollView`, and its
+        /// `updateScroller` slams `contentOffset` to the bottom on EVERY streamed
+        /// frame — so a drag-up is snapped straight back and the transcript "looks
+        /// stuck". We intercept PROGRAMMATIC offset writes: while the reader has
+        /// scrolled UP (not following), the auto-snap is ignored so their position
+        /// holds; a user-driven scroll (dragging / decelerating / tracking) is always
+        /// honored and updates the follow state, so returning to the bottom resumes
+        /// auto-follow. This governs only WHERE WE LOOK — it opens no input path, so
+        /// the read-only guarantee is untouched.
+        private var followsBottom = true
+
+        override var contentOffset: CGPoint {
+            get { super.contentOffset }
+            set {
+                let userDriven = isDragging || isDecelerating || isTracking
+                if userDriven {
+                    super.contentOffset = newValue
+                    followsBottom = isAtBottom(newValue)
+                } else if followsBottom {
+                    super.contentOffset = newValue
+                } else {
+                    // Programmatic write while the reader is scrolled up. Distinguish
+                    // SwiftTerm's auto-snap-to-bottom (DROP it — hold the reader's
+                    // position) from UIKit's legitimate CLAMP after contentSize shrank
+                    // (HONOR it — else the offset is stranded out of bounds over a
+                    // blank area; review finding). It's a clamp iff our CURRENT offset
+                    // now exceeds the valid range.
+                    let maxY = max(0, contentSize.height - bounds.height)
+                    if super.contentOffset.y > maxY {
+                        super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
+                    }
+                    // else: an in-range snap-to-bottom → drop it.
+                }
+            }
+        }
+
+        /// True when `offset` sits within a line of the bottom — i.e. the reader is
+        /// (or is returning to) the live tail. A one-line tolerance keeps sub-pixel
+        /// content-size jitter from spuriously dropping follow.
+        private func isAtBottom(_ offset: CGPoint) -> Bool {
+            let maxY = max(0, contentSize.height - bounds.height)
+            let tolerance = max(1, font.lineHeight)
+            return offset.y >= maxY - tolerance
+        }
     }
 
     /// Owns the stream task and marshals frames onto the main actor. Retained by
@@ -75,6 +122,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
+        /// Set in `stop()` so a LATE async `sizeChanged` callback (SwiftTerm
+        /// dispatches them asynchronously) cannot start a NEW `lock:true` resize
+        /// AFTER we've released geometry ownership — which would re-pin the pane and
+        /// defeat the release (review HIGH). Once stopped, `sendPTYSize` is inert.
+        private var stopped = false
 
         /// IBM Plex Mono (the design's MACHINE voice) at the pane size, falling back
         /// to the system monospace if the bundled face is unavailable. The
@@ -97,10 +149,40 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         func stop() {
+            stopped = true                  // no new resize may start after this
+            view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
             streamTask?.cancel()
             streamTask = nil
-            resizeTask?.cancel()
+            releaseGeometryOwnership()
+        }
+
+        /// RELEASE the phone's geometry lock (Fix A) when the terminal view closes,
+        /// so a co-viewing desktop reclaims its own width. While the view is open we
+        /// take ownership with `lock:true` (see `sendPTYSize`) so the shared PTY —
+        /// and therefore the agent's TUI — lays out at the phone's width and fits
+        /// crisply; on teardown we fire ONE best-effort `lock:false` at the last
+        /// known size to hand ownership back. Fire-and-forget: errors are ignored
+        /// (the view is going away regardless); it uses the last SENT size, or the
+        /// desired size if nothing was confirmed yet.
+        ///
+        /// ORDERING (review HIGH): the release must land strictly AFTER any in-flight
+        /// `lock:true` resize. We do NOT cancel the resize drain — a cancelled task's
+        /// already-dispatched request can still apply server-side, and if it lands
+        /// AFTER our `lock:false` the pane stays locked (desktop pinned narrow). So we
+        /// hand the drain off and AWAIT it first, so its last `lock:true` round-trip
+        /// completes before we send the releasing `lock:false`.
+        private func releaseGeometryOwnership() {
+            let cols = lastSentCols > 0 ? lastSentCols : desiredCols
+            let rows = lastSentRows > 0 ? lastSentRows : desiredRows
+            let inflight = resizeTask
             resizeTask = nil
+            guard cols >= 4, rows >= 2 else { return }
+            let client = self.client
+            let pane = self.paneID
+            Task.detached {
+                _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
+                _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
+            }
         }
 
         // MARK: styling (the design's machine voice)
@@ -149,9 +231,10 @@ struct LiveTerminalView: UIViewRepresentable {
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
-                    // Clear screen + scrollback + home, then paint the full-screen
-                    // seed. `lagged` resets seed identically (the server already
-                    // collapsed the backlog into this keyframe).
+                    // Clear the VISIBLE screen + home (NOT scrollback — see
+                    // clearSequence, Fix B), then paint the full-screen seed.
+                    // `lagged` resets seed identically (the server already collapsed
+                    // the backlog into this keyframe).
                     view.feed(byteArray: Self.clearSequence[...])
                     resizeEmulator(cols: cols, rows: rows, in: view)
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
@@ -213,10 +296,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// target we're driving toward), NOT `lastSent` — so a request that matches
         /// the committed size while a different resize is in flight still supersedes
         /// it. A failed target is retried by the drain itself (0.5s backoff, capped)
-        /// so convergence never depends on a future layout callback. `lock:false`
-        /// still resizes the shared PTY (herdr resizes then releases ownership); we
-        /// accept the transient co-viewer reflow but never pin it.
+        /// so convergence never depends on a future layout callback. `lock:true`
+        /// (Fix A) PINS the shared PTY to the phone's fit so the agent's TUI stops
+        /// overflowing the screen width; `releaseGeometryOwnership` hands ownership
+        /// back with a `lock:false` on teardown so the desktop reclaims its width.
         private func sendPTYSize(cols: Int, rows: Int) {
+            guard !stopped else { return }   // teardown began — no new lock:true (review HIGH)
             guard cols >= 4, rows >= 2 else { return }
             // Redundant ONLY if we are already driving toward (or sitting at) this
             // exact size: same as the current target with a drain in flight, or same
@@ -239,7 +324,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     do {
                         _ = try await self.client.setPTYSize(
                             pane: self.paneID, cols: c, rows: r,
-                            cellWidthPx: cell.width, cellHeightPx: cell.height, lock: false)
+                            cellWidthPx: cell.width, cellHeightPx: cell.height, lock: true)
                         self.lastSentCols = c        // confirmed
                         self.lastSentRows = r
                         self.resizeRetries = 0
@@ -288,8 +373,14 @@ struct LiveTerminalView: UIViewRepresentable {
 
         // MARK: palette helpers
 
-        /// Clear screen + clear scrollback + cursor home, fed before a reset seed.
-        private static let clearSequence = [UInt8]("\u{1b}[2J\u{1b}[3J\u{1b}[H".utf8)
+        /// Clear the VISIBLE screen + cursor home, fed before a reset seed. NOTE we
+        /// deliberately do NOT feed `ESC[3J` (clear SCROLLBACK) here (Fix B): wiping
+        /// scrollback on every reset is what left the normal-buffer (shell) history
+        /// un-scrollable — "it looks stuck". Dropping it lets that history accumulate
+        /// in SwiftTerm so a drag-up actually reveals earlier output. (Alt-screen TUIs
+        /// keep no scrollback of their own regardless; that case is the deferred
+        /// alt-scroll follow-up — see the class note.)
+        private static let clearSequence = [UInt8]("\u{1b}[2J\u{1b}[H".utf8)
         /// The dim terminated marker shown when the process exits.
         private static let exitedNotice = [UInt8]("\r\n\u{1b}[2m— process exited —\u{1b}[0m\r\n".utf8)
 

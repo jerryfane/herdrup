@@ -1199,6 +1199,10 @@ struct TerminalPaneView: View {
     /// (delivered or timed out) the button re-enables — but ALWAYS routes a pending
     /// pre-fill through the prompt-only path, never rawKeys.
     @State private var autoDelivering = false
+    /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
+    /// typed in the reply field is then sent as its control byte (and consumed, not
+    /// added to the message), and the modifier disarms. See `handleReplyChange`.
+    @State private var ctrlArmed = false
 
     private let router = InputRouter()
 
@@ -1299,20 +1303,33 @@ struct TerminalPaneView: View {
     // submit the OPPOSITE of the label (a menu with a broader grant at 2). Until
     // the option list is delivered as structured data, the reader answers by
     // typing the choice and pressing Return — which is the safe, verifiable path.
+    // The keycap row is HORIZONTALLY SCROLLABLE so it can hold more than fits the
+    // phone's width (esc/arrows/tab plus Shift+Tab, Ctrl, ^C, Return) without
+    // collapsing each cap. Caps are intrinsic width (not maxWidth:.infinity, which
+    // would expand infinitely inside a horizontal scroll view).
     private var controlBar: some View {
-        HStack(spacing: 6) {
-            keyCap(label: "esc", key: "Escape")
-            keyCap(symbol: "chevron.left", key: "Left")
-            keyCap(symbol: "chevron.up", key: "Up")
-            keyCap(symbol: "chevron.down", key: "Down")
-            keyCap(symbol: "chevron.right", key: "Right")
-            keyCap(label: "tab", key: "Tab")
-            // The submit affordance rawKeys needs — typing never submits, so
-            // Return is the deliberate second action. Highlighted, as the mockup
-            // shows it.
-            keyCap(symbol: "return", key: "Enter", primary: true)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                keyCap(label: "esc", key: "Escape")
+                keyCap(symbol: "chevron.left", key: "Left")
+                keyCap(symbol: "chevron.up", key: "Up")
+                keyCap(symbol: "chevron.down", key: "Down")
+                keyCap(symbol: "chevron.right", key: "Right")
+                keyCap(label: "tab", key: "Tab")
+                // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
+                // raw escape sequence, not a named key: delivered verbatim to the PTY.
+                rawCap(label: "S-Tab", sequence: "\u{1b}[Z")
+                // Sticky Ctrl: arm, then the next typed char becomes its control byte.
+                ctrlCap
+                // ^C (interrupt) — the common one-tap case; a raw control byte.
+                rawCap(label: "^C", sequence: "\u{03}")
+                // The submit affordance rawKeys needs — typing never submits, so
+                // Return is the deliberate second action. Highlighted, as the mockup
+                // shows it.
+                keyCap(symbol: "return", key: "Enter", primary: true)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
     private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
@@ -1322,7 +1339,8 @@ struct TerminalPaneView: View {
                 else { Text(label ?? key).font(Typography.machine(12)) }
             }
             .foregroundStyle(primary ? Palette.ground : Palette.textDim)
-            .frame(maxWidth: .infinity, minHeight: 34)
+            .padding(.horizontal, 10)
+            .frame(minWidth: 44, minHeight: 34)
             .background(primary ? Palette.text : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
         // Disabled while a pre-fill is pending too: a stray Return during automatic
@@ -1332,6 +1350,39 @@ struct TerminalPaneView: View {
         .accessibilityLabel(Text(key))
     }
 
+    /// A cap that sends a raw byte SEQUENCE (a control byte or an escape sequence)
+    /// straight to the PTY via `pane.send_text` — for keys herdr's named allow-list
+    /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
+    /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
+    private func rawCap(label: String, sequence: String) -> some View {
+        Button { send(.rawSequence(sequence)) } label: {
+            Text(label).font(Typography.machine(12))
+                .foregroundStyle(Palette.textDim)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 44, minHeight: 34)
+                .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(sending || pendingPrefill)
+        .accessibilityLabel(Text(label))
+    }
+
+    /// The sticky Ctrl toggle. Tap to arm (it highlights in the working blue); the
+    /// next character typed in the reply field is consumed and sent as its control
+    /// byte (see `handleReplyChange`), then it disarms. Tapping again while armed
+    /// cancels it.
+    private var ctrlCap: some View {
+        Button { ctrlArmed.toggle() } label: {
+            Text("ctrl").font(Typography.machine(12))
+                .foregroundStyle(ctrlArmed ? Palette.ground : Palette.textDim)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 44, minHeight: 34)
+                .background(ctrlArmed ? Palette.working : Palette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(sending || pendingPrefill)
+        .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
+    }
+
     private var replyBar: some View {
         HStack(spacing: 8) {
             TextField("type a reply…", text: $reply)
@@ -1339,6 +1390,11 @@ struct TerminalPaneView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
+                // Ctrl-toggle interception: while armed, the next character typed
+                // here becomes a control byte instead of message text.
+                .onChange(of: reply) { oldValue, newValue in
+                    handleReplyChange(old: oldValue, new: newValue)
+                }
             Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
@@ -1351,7 +1407,7 @@ struct TerminalPaneView: View {
     }
 
     /// Routes a reader action through InputRouter, then executes the plan. A
-    /// refusal is shown, never a silent no-op.
+    /// refusal is shown, never a silent no-op; a rejection surfaces a clear reason.
     private func send(_ action: InputAction) {
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
@@ -1360,19 +1416,91 @@ struct TerminalPaneView: View {
             defer { sending = false }
             do {
                 switch plan {
-                case .prompt(let pane, let text): try await client.prompt(pane: pane, text: text)
-                case .text(let pane, let text): try await client.sendText(pane: pane, text: text)
-                case .keys(let pane, let keys): try await client.sendKeys(pane: pane, keys: keys)
-                case .refused(let reason): actionNote = "not sent: \(reason)"; return
+                case .prompt(let pane, let text):
+                    // submitPrompt confirms delivery and sets the note from it.
+                    try await submitPrompt(pane: pane, text: text)
+                case .text(let pane, let text):
+                    try await client.sendText(pane: pane, text: text); actionNote = nil
+                case .rawText(let pane, let text):
+                    try await client.sendText(pane: pane, text: text); actionNote = nil
+                case .keys(let pane, let keys):
+                    try await client.sendKeys(pane: pane, keys: keys); actionNote = nil
+                case .refused(let reason):
+                    actionNote = "not sent: \(reason)"; return
                 }
-                actionNote = nil
                 if case .submitText = action { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
+            } catch let apiError as APIError {
+                actionNote = Self.promptFailureNote(for: apiError)
             } catch {
                 actionNote = "send failed: \(error)"
             }
+        }
+    }
+
+    /// While the Ctrl toggle is armed, consume the next TYPED character and send it
+    /// as its control byte instead of adding it to the message. Only reacts to a
+    /// single added character (typing) — not deletion or the programmatic clear
+    /// after a send — so a backspace can never be misread as a chord.
+    private func handleReplyChange(old: String, new: String) {
+        guard ctrlArmed else { return }
+        // Treat ONLY a clean single-char APPEND as a chord: `new` must be `old`
+        // plus one trailing character. A mid-cursor insertion or paste (where the
+        // added char is NOT the suffix) must NOT be read as a chord — otherwise
+        // `removeLast()` would delete the wrong character and `new.last` would send
+        // the wrong Ctrl byte (a spurious ^C could interrupt the pane; review HIGH).
+        // In that case leave the text untouched and just disarm.
+        guard new.count == old.count + 1, new.hasPrefix(old), let typed = new.last else {
+            ctrlArmed = false
+            return
+        }
+        guard let ctrl = InputRouter.controlByte(for: typed) else {
+            // No control code for this character (a digit, space, emoji…): disarm
+            // without consuming it, so the character stays as ordinary text.
+            ctrlArmed = false
+            return
+        }
+        ctrlArmed = false
+        reply.removeLast()     // the appended char was a chord, not message text
+        send(.rawSequence(String(ctrl)))
+    }
+
+    /// Submits a reply as a prompt WITH delivery confirmation. Sets the visible note
+    /// from herdr's `delivery`: a confirmed turn (`submitted`) clears it, while a
+    /// stranded draft (`writtenToPty` — bytes in the composer but no turn started,
+    /// the herdr#18/#26 state) is surfaced rather than shown as sent. Throws the
+    /// server's APIError on rejection so `send` can show a clear reason.
+    private func submitPrompt(pane: String, text: String) async throws {
+        // agent.prompt writes the text AND schedules a guarded Enter, so the reply
+        // submits regardless of the immediate `delivery` — which on the fast
+        // wait-match path is always `written_to_pty` (the Enter is still ~300ms
+        // out). Showing a "waiting to submit" note after every reply would read as
+        // "it didn't send" for the very bug this fixes, and invite a re-send. A
+        // GENUINE non-delivery (occupant changed, agent not ready, input pending)
+        // THROWS an APIError that `send` surfaces via `promptFailureNote`; so on a
+        // clean return, clear the note.
+        _ = try await client.prompt(
+            pane: pane, text: text,
+            waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
+        actionNote = nil
+    }
+
+    /// Maps a prompt rejection to a note the reader can act on — no more silent
+    /// non-delivery.
+    private static func promptFailureNote(for error: APIError) -> String {
+        switch error.code {
+        case "agent_input_pending":
+            return "answer the on-screen prompt first (use the keys), then send"
+        case "agent_not_ready":
+            return "agent not ready — try again"
+        case "agent_prompt_not_received":
+            return "not delivered — try again"
+        case "timeout":
+            return "sent — awaiting confirmation"
+        default:
+            return "send failed: \(error)"
         }
     }
 
