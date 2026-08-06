@@ -45,7 +45,15 @@ struct LiveTerminalView: UIViewRepresentable {
     /// A `TerminalView` that never accepts keyboard input — display + scroll only.
     /// Blocking first-responder status is what keeps this observe-only: no keyboard
     /// appears and no keystroke can reach the (unwired) PTY input path.
-    final class ReadOnlyTerminalView: TerminalView, UIScrollViewDelegate {
+    /// NOTE: `TerminalView` already conforms to `UIScrollViewDelegate` (SwiftTerm
+    /// declares it on the base class) but implements none of the `scrollView*`
+    /// methods and never assigns `self.delegate` — so we inherit the conformance
+    /// (re-declaring it errors "redundant conformance") and simply claim the free
+    /// delegate slot. The three methods below are marked `@objc` explicitly so the
+    /// runtime's optional-protocol dispatch (`respondsToSelector:`) finds them:
+    /// inferred `@objc` is not guaranteed when the conformance is inherited rather
+    /// than stated here, and without it the follow-logic would be dead code.
+    final class ReadOnlyTerminalView: TerminalView {
         override var canBecomeFirstResponder: Bool { false }
         override func becomeFirstResponder() -> Bool { false }
 
@@ -73,15 +81,15 @@ struct LiveTerminalView: UIViewRepresentable {
         // Real user scrolling moves bounds.origin and fires the delegate (NOT the
         // property setter). Programmatic writes also fire this, but with dragging/
         // decelerating false, so they don't disturb the follow state.
-        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        @objc func scrollViewDidScroll(_ scrollView: UIScrollView) {
             if scrollView.isDragging || scrollView.isDecelerating {
                 followsBottom = isAtBottom(scrollView.contentOffset)
             }
         }
-        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        @objc func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { followsBottom = isAtBottom(scrollView.contentOffset) }
         }
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        @objc func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
             followsBottom = isAtBottom(scrollView.contentOffset)
         }
 
