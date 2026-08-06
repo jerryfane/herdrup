@@ -24,6 +24,13 @@ public enum InputMode: Equatable, Sendable {
 public enum InputAction: Equatable, Sendable {
     case submitText(String)
     case key(String)
+    /// A raw byte SEQUENCE from a dedicated keycap — a Shift+Tab (`ESC[Z`), a
+    /// `Ctrl+<key>` control byte, a `^C` (`\u{03}`). Unlike `.submitText` in
+    /// rawKeys this is an explicit KEYPRESS, not typed message text, so it is
+    /// delivered verbatim and is NOT newline-guarded: `Ctrl+J`/`Ctrl+M` are
+    /// legitimate here. Produced only by the terminal's fixed control caps /
+    /// the Ctrl-toggle, never by the free-text reply field.
+    case rawSequence(String)
 }
 
 /// What the client should actually send.
@@ -38,6 +45,12 @@ public enum InputPlan: Equatable, Sendable {
     /// unintended; typing without submitting cannot execute anything, and the
     /// reader sees exactly what landed before choosing to run it.
     case text(pane: String, String)
+    /// Raw bytes from a dedicated control cap, delivered via `pane.send_text`
+    /// WITHOUT the newline refusal `.text` enforces. This path exists ONLY for
+    /// explicit control/escape keycaps (Shift+Tab, `Ctrl+<key>`, `^C`) — never for
+    /// typed message text — so an intentional `Ctrl+J`/`Ctrl+M` reaches the PTY
+    /// while typed text still cannot smuggle a submitting newline through `.text`.
+    case rawText(pane: String, String)
     case keys(pane: String, [String])
     /// Refused, with a reason fit to show the reader.
     case refused(reason: String)
@@ -48,13 +61,36 @@ public struct InputRouter: Sendable {
 
     /// Chooses the input mode for a pane from what `agent.list` reports.
     ///
-    /// A pane only qualifies for intent mode when the server both names an agent
-    /// and exposes composer state for it. Absent either, treating text as a
-    /// prompt risks pasting into a shell — the exact "text lands somewhere
-    /// unintended" failure that herdr#26 and #18 are about.
+    /// Gate on the presence of a NAMED agent ALONE — not on composer state.
+    ///
+    /// A pane that hosts a named agent is not a shell, so routing its reply to
+    /// `agent.prompt` is safe. And `agent.prompt` is SERVER-gated: it returns
+    /// agent_not_ready / agent_input_pending when it genuinely cannot deliver, so
+    /// the extra `composer != nil` belt-and-suspenders here bought nothing except
+    /// a silent failure mode. A LIVE agent's composer is TRANSIENTLY nil, and
+    /// requiring it DOWNGRADED that agent to `.rawKeys` — where the reply was
+    /// TYPED into the composer via `send_text` but never submitted, so "the agent
+    /// never received it" (the reported terminal bug). Let the server, which
+    /// actually knows readiness, decide; the client only needs to know a real
+    /// agent is present. (The new-agent PRE-FILL gate is a separate, stricter
+    /// signal — see `isPromptable(for:)` — because auto-delivering an unattended
+    /// task warrants holding out for a confirmed composer.)
     public func mode(for agent: AgentInfo) -> InputMode {
-        guard agent.agent != nil, agent.composer != nil else { return .rawKeys }
+        guard agent.agent != nil else { return .rawKeys }
         return .intent
+    }
+
+    /// The composer-aware readiness gate the new-agent PRE-FILL delivery polls on.
+    ///
+    /// Distinct from `mode(for:)` on purpose: routing a reader's reply only needs
+    /// to know a real agent is there (the server gates actual delivery), but the
+    /// pre-fill loop AUTO-delivers a just-spawned agent's task unattended, so it
+    /// holds out for a positive "a prompt will land now" signal — a present
+    /// composer — before it fires. A named agent WITHOUT a composer is promptable
+    /// enough to ROUTE a manual reply to (`mode == .intent`, server-gated) but is
+    /// not yet a confirmed landing spot for an unattended pre-fill.
+    public func isPromptable(for agent: AgentInfo) -> Bool {
+        agent.agent != nil && agent.composer != nil
     }
 
     /// Turns a reader action into a concrete plan, or refuses it.
@@ -90,12 +126,38 @@ public struct InputRouter: Sendable {
             }
             return .text(pane: pane, text)
 
+        case (.rawSequence(let seq), _):
+            // Deliberate keypress bytes from a dedicated control cap — not typed
+            // message text, so the `.text` newline refusal does NOT apply: a
+            // bracketed `ESC[Z` (Shift+Tab) or a `Ctrl+J`/`Ctrl+M` is exactly what
+            // the reader asked for. Only emptiness is refused; the byte(s) go raw
+            // to the PTY via `pane.send_text`. Mode is irrelevant — a named agent's
+            // TUI and a shell both take a raw keypress the same way.
+            guard !seq.isEmpty else { return .refused(reason: "empty sequence") }
+            return .rawText(pane: pane, seq)
+
         case (.key(let k), _):
             guard let canonical = Self.canonicalKey(k) else {
                 return .refused(reason: "unsupported key \(k)")
             }
             return .keys(pane: pane, [canonical])
         }
+    }
+
+    /// The control byte for a "Ctrl + `character`" chord, or nil if the character
+    /// has no control code. Letters map case-insensitively (`Ctrl+C` == `Ctrl+c`
+    /// == `\u{03}`) and the `@ A-Z [ \ ] ^ _` block maps into `0x00...0x1f`;
+    /// everything else returns nil so the caller leaves the character untouched.
+    /// `Ctrl+J`/`Ctrl+M` legitimately yield LF/CR here — they are delivered via
+    /// the `.rawSequence` keypress path, which (unlike typed text) is not
+    /// newline-guarded, so the intended control byte reaches the PTY.
+    public static func controlByte(for character: Character) -> Character? {
+        guard let ascii = character.asciiValue else { return nil }
+        // 0x40–0x5f (@ A-Z [ \ ] ^ _) and 0x61–0x7a (a-z) have control codes.
+        guard (ascii >= 0x40 && ascii <= 0x5f) || (ascii >= 0x61 && ascii <= 0x7a) else {
+            return nil
+        }
+        return Character(UnicodeScalar(ascii & 0x1f))
     }
 
     /// How a reply tap should be delivered when a pane may hold a PRE-FILLED task
