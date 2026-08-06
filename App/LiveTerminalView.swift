@@ -9,11 +9,13 @@ import HerdrKit
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
 /// instead of a reflowed snapshot.
 ///
-/// READ-ONLY on purpose: #40 is render + resize only; raw-bytes-to-PTY INPUT is a
-/// separate follow-up. The view never becomes first responder (no keyboard) and
-/// its delegate `send` is a no-op, so SwiftTerm keystrokes are never routed to the
-/// PTY. Input stays exclusively on the reply/Send + keycap affordances in
-/// `TerminalPaneView`, which use the existing `sendText`/`sendKeys`/`prompt` paths.
+/// READ-ONLY for keyboard/typed input: the view never becomes first responder (no
+/// keyboard) and its delegate `send` is a no-op, so SwiftTerm keystrokes are never
+/// routed to the PTY. Command/message input stays exclusively on the reply/Send +
+/// keycap affordances in `TerminalPaneView` (`sendText`/`sendKeys`/`prompt`). The
+/// ONE narrow input exception is SCROLL: a pan on the alternate screen sends
+/// constrained wheel/arrow sequences to the agent so its full-screen view can scroll
+/// (see `handleScrollPan`) — never a keystroke, never arbitrary typed text.
 ///
 /// Geometry: the view reports its own laid-out grid to the server via `setPTYSize`
 /// so the stream is generated at the phone's width. While the terminal view is open
@@ -96,7 +98,7 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Owns the stream task and marshals frames onto the main actor. Retained by
     /// SwiftUI (via `makeCoordinator`); the `TerminalView` holds only a weak ref
     /// back through `terminalDelegate`.
-    final class Coordinator: NSObject, TerminalViewDelegate {
+    final class Coordinator: NSObject, TerminalViewDelegate, UIGestureRecognizerDelegate {
         private let client: HerdrClient
         private let paneID: String
         private weak var view: ReadOnlyTerminalView?
@@ -144,13 +146,22 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
+            // Alt-screen scroll: a dedicated pan that scrolls the AGENT (see
+            // handleScrollPan). Simultaneous with the view's own scroll-view pan.
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
+            pan.delegate = self
+            view.addGestureRecognizer(pan)
+            scrollPan = pan
             style(view)
             start()
         }
 
         func stop() {
-            stopped = true                  // no new resize may start after this
+            stopped = true                  // no new resize/scroll may start after this
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
+            scrollPan?.isEnabled = false    // no drag can send bytes to an exited/replaced pane
+            scrollSendTask?.cancel()
+            scrollSendTask = nil
             streamTask?.cancel()
             streamTask = nil
             releaseGeometryOwnership()
@@ -359,8 +370,11 @@ struct LiveTerminalView: UIViewRepresentable {
 
         // MARK: TerminalViewDelegate — read-only, so most are inert
 
-        /// READ-ONLY: swallow any bytes SwiftTerm would send upstream. #40 does not
-        /// wire input; the PTY is never written from here.
+        /// READ-ONLY: swallow any bytes SwiftTerm would send upstream (keystrokes,
+        /// mouse events it generates). Keyboard/typed input is never routed to the
+        /// PTY through this delegate. (The one deliberate write from this view is the
+        /// alt-screen SCROLL path in `handleScrollPan`, which sends only wheel/arrow
+        /// sequences directly via `sendText` — not through this no-op.)
         func send(source: TerminalView, data: ArraySlice<UInt8>) {}
         func scrolled(source: TerminalView, position: Double) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
@@ -371,6 +385,100 @@ struct LiveTerminalView: UIViewRepresentable {
         /// later version added one). No-op: the read-only terminal never copies.
         func clipboardCopy(source: TerminalView, content: Data) {}
 
+        // MARK: alt-screen scroll — drag to scroll the AGENT's own view
+
+        /// Accumulated vertical drag since the last emitted scroll tick.
+        private var scrollAccum: CGFloat = 0
+        /// The alt-screen scroll pan recognizer, disabled on teardown so a drag can't
+        /// send bytes to a pane that has exited/been replaced.
+        private var scrollPan: UIPanGestureRecognizer?
+        /// Serialized scroll-send queue: bytes waiting to go to the agent, drained one
+        /// send at a time by `scrollSendTask` — so a fast drag coalesces into batched
+        /// writes instead of a flood of concurrent, possibly-reordered SSH channels.
+        private var pendingScroll = ""
+        private var scrollSendTask: Task<Void, Never>?
+
+        /// A drag on the terminal while a full-screen agent owns the ALTERNATE
+        /// screen. The alt screen has no SwiftTerm scrollback (nothing for the
+        /// UIScrollView to scroll — dragging does nothing), so we translate the drag
+        /// into scroll INPUT for the agent: SGR mouse-wheel events when the app
+        /// reports mouse (Claude Code enables DECSET 1006), else Up/Down arrows as a
+        /// best-effort. This is the ONLY byte path this read-only view opens and it
+        /// emits ONLY wheel/arrow sequences — never a keystroke — so the keyboard
+        /// stays fully blocked. On the NORMAL buffer this is inert and the native
+        /// scroll view scrolls the retained scrollback.
+        @objc private func handleScrollPan(_ gr: UIPanGestureRecognizer) {
+            guard !stopped, let view else { return }   // teardown began — send nothing
+            let term = view.getTerminal()
+            guard term.isCurrentBufferAlternate else { return }   // normal buffer scrolls natively
+            switch gr.state {
+            case .began:
+                scrollAccum = 0
+            case .changed:
+                scrollAccum += gr.translation(in: view).y
+                gr.setTranslation(.zero, in: view)
+                let line = max(1, Self.paneFont.lineHeight)
+                let ticks = Int(scrollAccum / line)
+                guard ticks != 0 else { return }
+                scrollAccum -= CGFloat(ticks) * line
+                emitScroll(up: ticks > 0, count: min(abs(ticks), 4),
+                           at: gr.location(in: view), term: term)
+            default:
+                break
+            }
+        }
+
+        /// Emit `count` scroll ticks toward the agent. Drag DOWN (`up == true`)
+        /// reveals OLDER content → wheel-up (button 64); drag UP → wheel-down (65).
+        /// SGR mouse-wheel is pure ASCII, safe through the String `send_text` path;
+        /// with no mouse reporting, fall back to arrow keys (best-effort).
+        private func emitScroll(up: Bool, count: Int, at point: CGPoint, term: SwiftTerm.Terminal) {
+            guard count > 0 else { return }
+            let seq: String
+            if term.mouseMode != .off {
+                // NOTE: SwiftTerm 1.11.2 keeps the mouse ENCODING (mouseProtocol)
+                // private, so we can't read whether the app negotiated SGR (DECSET
+                // 1006) vs legacy X10. We emit SGR — what Claude Code and effectively
+                // every modern mouse-reporting TUI uses (X10's 223-cell limit is why
+                // apps opt into 1006). An X10-only-mouse app (rare, legacy) would not
+                // understand these; a documented limit of the private protocol, not a
+                // runtime bug.
+                let code = up ? 64 : 65
+                let cw = ("W" as NSString).size(withAttributes: [.font: Self.paneFont]).width
+                let ch = Self.paneFont.lineHeight
+                let col = max(1, min(Int(point.x / max(1, cw)) + 1, max(1, term.cols)))
+                let row = max(1, min(Int(point.y / max(1, ch)) + 1, max(1, term.rows)))
+                seq = String(repeating: "\u{1b}[<\(code);\(col);\(row)M", count: count)
+            } else {
+                seq = String(repeating: up ? "\u{1b}[A" : "\u{1b}[B", count: count)
+            }
+            // Serialize: queue the bytes and drain ONE send at a time (coalescing all
+            // pending into each batch), so a fast drag can't spawn a flood of
+            // concurrent SSH channels that deliver direction changes out of order.
+            // Bound the queue: if the sole send stalls under a long drag, don't
+            // accumulate an unbounded burst — it could exceed CitadelTransport's
+            // ~120KB argument limit (dropped) or replay a huge stale scroll when the
+            // link resumes. ~4KB is far more scroll than any real drag needs; past
+            // that we drop further ticks (a stalled link can't scroll smoothly anyway).
+            guard pendingScroll.utf8.count + seq.utf8.count <= 4096 else { return }
+            pendingScroll += seq
+            guard scrollSendTask == nil else { return }   // a drain is running; it will pick this up
+            scrollSendTask = Task { @MainActor [weak self] in
+                while let self, !self.stopped, !self.pendingScroll.isEmpty {
+                    let batch = self.pendingScroll
+                    self.pendingScroll = ""
+                    _ = try? await self.client.sendText(pane: self.paneID, text: batch)
+                }
+                self?.scrollSendTask = nil
+            }
+        }
+
+        /// Coexist with the TerminalView's own scroll-view pan: on the alt screen the
+        /// native pan has no range, so recognizing both simultaneously is harmless and
+        /// lets our handler drive the agent scroll.
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
         // MARK: palette helpers
 
         /// Clear the VISIBLE screen + cursor home, fed before a reset seed. NOTE we
@@ -378,8 +486,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// scrollback on every reset is what left the normal-buffer (shell) history
         /// un-scrollable — "it looks stuck". Dropping it lets that history accumulate
         /// in SwiftTerm so a drag-up actually reveals earlier output. (Alt-screen TUIs
-        /// keep no scrollback of their own regardless; that case is the deferred
-        /// alt-scroll follow-up — see the class note.)
+        /// keep no scrollback of their own regardless; scrolling THOSE is handled by
+        /// `handleScrollPan`, which sends wheel/arrow scroll INTO the agent.)
         private static let clearSequence = [UInt8]("\u{1b}[2J\u{1b}[H".utf8)
         /// The dim terminated marker shown when the process exits.
         private static let exitedNotice = [UInt8]("\r\n\u{1b}[2m— process exited —\u{1b}[0m\r\n".utf8)
