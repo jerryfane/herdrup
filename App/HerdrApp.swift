@@ -228,9 +228,17 @@ struct RootView: View {
 
     private func connect(_ creds: SSHCredentials) {
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
+        let newClient = HerdrClient(transport: newTransport)
         credentials = creds
         transport = newTransport
-        client = HerdrClient(transport: newTransport)
+        client = newClient
+        // PRE-WARM: start the SSH handshake + first agent fetch the instant Connect
+        // is tapped, so it overlaps the ConnectView→TerminalHomeView transition
+        // instead of following it. The transport dedups concurrent connects, so this
+        // and the home view's own load() coalesce into ONE session — no double
+        // connect. Result is discarded; the view re-fetches (and reuses the warm
+        // connection). Best-effort: a failure here surfaces normally in load().
+        Task { _ = try? await newClient.agentList() }
     }
 
     private func disconnect() {
@@ -1203,6 +1211,9 @@ struct TerminalPaneView: View {
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
     @State private var ctrlArmed = false
+    /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
+    /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
+    @FocusState private var replyFocused: Bool
 
     private let router = InputRouter()
 
@@ -1251,6 +1262,15 @@ struct TerminalPaneView: View {
                 // prompt), never routed through the terminal itself.
                 LiveTerminalView(client: client, paneID: paneID)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // A small horizontal inset so the grid gets a clean, symmetric
+                    // margin instead of the last column hugging the right edge.
+                    .padding(.horizontal, 8)
+                    // Tap the (read-only) terminal to dismiss the keyboard. Best-effort
+                    // alongside the toolbar chevron; the terminal takes no first
+                    // responder, so a tap here is otherwise unused (the alt-scroll pan
+                    // still handles drags).
+                    .contentShape(Rectangle())
+                    .onTapGesture { replyFocused = false }
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -1390,6 +1410,18 @@ struct TerminalPaneView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
+                .focused($replyFocused)
+                // A chevron in the keyboard's accessory toolbar so the software
+                // keyboard can be collapsed once it has been raised.
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button { replyFocused = false } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .foregroundStyle(Palette.text)
+                        }
+                    }
+                }
                 // Ctrl-toggle interception: while armed, the next character typed
                 // here becomes a control byte instead of message text.
                 .onChange(of: reply) { oldValue, newValue in
