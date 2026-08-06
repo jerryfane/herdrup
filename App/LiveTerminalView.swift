@@ -82,18 +82,22 @@ struct LiveTerminalView: UIViewRepresentable {
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        // A user drag RELEASES follow at its very first movement, so the streamed
-        // snap-to-bottom (in the contentOffset setter) stops fighting the finger.
+        // `followsBottom` state machine, driven by the scroll-view delegate (SwiftTerm
+        // leaves the delegate slot free on iOS): RELEASE follow the moment a drag
+        // begins, and re-arm it only when the gesture SETTLES at the tail. The
+        // contentOffset setter honors interactive writes regardless of this flag, so
+        // releasing follow here does NOT disable scrolling — it only decides whether
+        // a PROGRAMMATIC snap-to-bottom (finger up) is dropped so the reader's
+        // position holds.
         //
-        // We deliberately do NOT track follow in `scrollViewDidScroll`: SwiftTerm's
-        // updateScroller writes `contentOffset` once per streamed line, and because
-        // `contentOffset` is an ObjC property that programmatic write RE-ENTERS the
-        // delegate while `isDragging == true` (the finger is still down). A
-        // "does this look like the bottom?" check there would re-affirm follow
-        // mid-drag and pin a slow drag back to the tail under continuous output —
-        // the exact reported bug, one layer up from the setter version it replaced.
-        // Instead: release on drag-start; re-arm only when the gesture SETTLES at
-        // the tail (end-dragging without momentum, or end-decelerating).
+        // We do NOT track follow in `scrollViewDidScroll`: SwiftTerm's updateScroller
+        // writes contentOffset once per streamed line, re-entering the delegate while
+        // isDragging == true, so a "does this look like the bottom?" check there would
+        // re-affirm follow mid-drag. (Known limit: under CONTINUOUS streaming the snap
+        // is still honored mid-drag because the finger's write and the stream's write
+        // are indistinguishable while isDragging; the reader's position holds cleanly
+        // once they lift during an output gap. Truly holding through a firehose needs
+        // intercepting updateScroller — a SwiftTerm-level change, deferred.)
         @objc func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             followsBottom = false
         }
@@ -107,31 +111,32 @@ struct LiveTerminalView: UIViewRepresentable {
         override var contentOffset: CGPoint {
             get { super.contentOffset }
             set {
-                if followsBottom {
+                // CRITICAL — the finger's OWN scroll commits pass through THIS setter:
+                // the UIScrollView pan writes the `contentOffset` PROPERTY, not merely
+                // `bounds.origin`. (Proven by the v0.1.5/0.1.6 dead-scroll regression —
+                // an earlier version dropped in-range writes whenever followsBottom was
+                // false, and since scrollViewWillBeginDragging sets it false at drag
+                // start, the finger's own writes were dropped and scrolling died on
+                // BOTH omp and Claude Code, which share this native-scrollback path.)
+                //
+                // So an INTERACTIVE write (finger down, or post-lift momentum) is
+                // ALWAYS honored; only a PROGRAMMATIC write — no touch, no momentum —
+                // may be held. The hold branch below is therefore unreachable while a
+                // gesture is active, so it can NEVER swallow a drag.
+                if isDragging || isDecelerating || isTracking || followsBottom {
                     super.contentOffset = newValue
                 } else {
-                    // Not following: a programmatic write while the reader is scrolled
-                    // up. Honor it ONLY as a legit CLAMP (current offset now out of
-                    // range because contentSize shrank — else the offset strands over
-                    // blank space); DROP an in-range snap-to-bottom so position holds.
+                    // Programmatic snap while the reader has scrolled up and lifted:
+                    // DROP an in-range snap-to-bottom so their position holds; HONOR a
+                    // legit CLAMP (contentSize shrank so the current offset is now out
+                    // of range — else it strands over blank space) and re-arm follow,
+                    // since a shrink parks us at the tail with nothing below to hold.
+                    // No interaction flag can be set here (checked above), so the
+                    // re-arm cannot fire mid-drag.
                     let maxY = max(0, contentSize.height - bounds.height)
                     if super.contentOffset.y > maxY {
                         super.contentOffset = CGPoint(x: newValue.x, y: min(newValue.y, maxY))
-                        // Re-arm follow ONLY for a NON-INTERACTIVE clamp: a content
-                        // shrink (screen clear / alt-screen exit) parks us at the tail
-                        // with nothing below to hold, so resume follow — otherwise a
-                        // live pane sits at the bottom looking frozen. A finger-driven
-                        // bottom-edge rubber-band ALSO transiently pushes the offset
-                        // past maxY; re-arming there would re-affirm follow mid-drag
-                        // (the very bug this file fixes, milder). A rubber-band only
-                        // occurs while DRAGGING or DECELERATING, so those two flags
-                        // fully exclude it. We must NOT also gate on isTracking: a
-                        // finger merely resting (touch-hold, no drag) sets isTracking
-                        // but fires no didEndDragging, so gating on it would strand
-                        // follow OFF through a content shrink under a still finger.
-                        if !isDragging && !isDecelerating {
-                            followsBottom = isAtBottom(super.contentOffset)
-                        }
+                        followsBottom = isAtBottom(super.contentOffset)
                     }
                 }
             }
