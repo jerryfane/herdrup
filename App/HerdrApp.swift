@@ -278,6 +278,8 @@ struct ConnectView: View {
     @State private var username = ""
     @State private var keyPEM = ""
     @State private var showingKeySheet = false
+    @ObservedObject private var savedHosts = SavedHostsStore.shared
+    @State private var saveThisHost = false
 
     // Host accepts "host" or "host:port" (and "[ipv6]:port"); the port lives in
     // the one field so the form stays the three rows the mockup shows. Parsing is
@@ -320,6 +322,12 @@ struct ConnectView: View {
                     .padding(.top, 24)
                     .padding(.bottom, 8)
 
+                    // Saved hosts — one-tap reconnect. Hidden on first launch so the
+                    // screen stays the clean three-row form until there is one to show.
+                    if !savedHosts.hosts.isEmpty {
+                        savedHostsSection
+                    }
+
                     // The three settings-style rows: label left, value right.
                     VStack(spacing: 10) {
                         fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
@@ -330,12 +338,27 @@ struct ConnectView: View {
                         }
                         fieldRow("User", text: $username, placeholder: "jerry")
                         keyRow
+                        // Save affordance: only offered once the form is complete, so
+                        // it never implies saving an empty/partial host.
+                        if canConnect {
+                            Toggle(isOn: $saveThisHost) {
+                                Text("Save this host for one-tap reconnect")
+                                    .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                            }
+                            .tint(Palette.text)
+                            .padding(.horizontal, 4).padding(.top, 2)
+                        }
                     }
 
                     // Primary action — INK fill. The design carries NO accent colour; the
                     // one near-white fill in the whole app marks the control that ACTS.
                     Button {
                         guard let ep = endpoint else { return }
+                        // Persist BEFORE connecting (the key is in hand here). save()
+                        // stores host+user in UserDefaults + the key in the Keychain.
+                        if saveThisHost {
+                            savedHosts.save(host: host, username: trimmedUser, privateKeyPEM: trimmedKey)
+                        }
                         onConnect(SSHCredentials(
                             host: ep.host, port: ep.port,
                             username: trimmedUser,
@@ -382,6 +405,55 @@ struct ConnectView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
         .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var savedHostsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("SAVED").font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+            }
+            ForEach(savedHosts.hosts) { saved in savedHostRow(saved) }
+        }
+    }
+
+    private func savedHostRow(_ saved: SavedHost) -> some View {
+        Button { tapSavedHost(saved) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 15, weight: .medium)).foregroundStyle(Palette.textDim)
+                    .frame(width: 36, height: 36)
+                    .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(saved.host).font(Typography.machine(14)).foregroundStyle(Palette.text).lineLimit(1)
+                    Text(saved.username).font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.system(size: 18)).foregroundStyle(Palette.textDim)
+            }
+            .padding(12)
+            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) { savedHosts.delete(saved) } label: {
+                Label("Remove", systemImage: "trash")
+            }
+        }
+    }
+
+    /// One-tap connect from a saved host. Pre-fills host+user FIRST, so if the key
+    /// is unreadable (deleted/device locked) the form is ready for a quick re-entry
+    /// rather than a silent dead tap; otherwise it builds the credentials and connects.
+    private func tapSavedHost(_ saved: SavedHost) {
+        host = saved.host
+        username = saved.username
+        guard let ep = HostEndpoint.parse(saved.host),
+              let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else { return }
+        onConnect(SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
+                                 privateKeyPEM: key, remoteSocketPath: ""))
     }
 
     /// The key row NEVER renders the key itself — only whether one is loaded.
@@ -710,6 +782,19 @@ struct TerminalHomeView: View {
     /// HerdrKit's tested `AgentList`, not here.
     private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
 
+    /// The agent the Terminal tab opens: the herdr-focused pane if the session
+    /// reports one (`AgentInfo.focused`), else the top of the sorted list — which is
+    /// the highest-priority row (needs-you first), so the tab always lands on the most
+    /// useful terminal rather than nothing. Nil only when there are no agents at all.
+    private var terminalTarget: AgentRow? {
+        // LIVE rows only. A stopped pane is absent from the census (not live) — its
+        // pane is gone, so never open it, not even if it is the focused one; and if
+        // every known agent is dead the list is empty and the tab correctly disables.
+        // (When there is no census, AgentRow defaults isLive=true, so nothing is lost.)
+        let rows = fullList.sections.flatMap { $0.rows }.filter(\.isLive)
+        return rows.first(where: { $0.info.focused == true }) ?? rows.first
+    }
+
     /// Sections after applying the search box. Search filters the raw agents and
     /// re-derives, so counts and grouping stay honest for the filtered view.
     private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
@@ -833,7 +918,18 @@ struct TerminalHomeView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
-            tabItem("terminal", "Terminal", active: false)
+            // Terminal → the focused agent's pane (or the top of the list). Reuses the
+            // openedPane push with an EMPTY task, so there is no pre-fill/auto-delivery
+            // (pendingPrefill stays false); the pane re-resolves its own agent identity.
+            Button {
+                if let t = terminalTarget {
+                    openedPane = PaneToOpen(paneID: t.info.paneID, name: t.title, task: "")
+                }
+            } label: {
+                tabItem("terminal", "Terminal", active: false)
+            }
+            .buttonStyle(.plain)
+            .disabled(terminalTarget == nil)
             Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
