@@ -297,11 +297,28 @@ struct ConnectView: View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("herdr")
-                        .font(Typography.app(24, .bold))
-                        .foregroundStyle(Palette.text)
-                        .padding(.bottom, 4)
+                VStack(spacing: 16) {
+                    // Centered identity header: the app logo (the Lamb), the name, one
+                    // line of intent. The icon carries its own dark ground, so it reads
+                    // as the app mark — no surface tile behind it.
+                    VStack(spacing: 10) {
+                        Image("AppLogo")
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        VStack(spacing: 4) {
+                            Text("herdrup")
+                                .font(Typography.app(28, .bold))
+                                .foregroundStyle(Palette.text)
+                            Text("connect to your machine")
+                                .font(Typography.machine(13))
+                                .foregroundStyle(Palette.textDim)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 24)
+                    .padding(.bottom, 8)
 
                     // The three settings-style rows: label left, value right.
                     VStack(spacing: 10) {
@@ -315,6 +332,8 @@ struct ConnectView: View {
                         keyRow
                     }
 
+                    // Primary action — INK fill. The design carries NO accent colour; the
+                    // one near-white fill in the whole app marks the control that ACTS.
                     Button {
                         guard let ep = endpoint else { return }
                         onConnect(SSHCredentials(
@@ -328,16 +347,23 @@ struct ConnectView: View {
                         Text("Connect")
                             .font(Typography.app(16, .semibold))
                             .frame(maxWidth: .infinity).padding(.vertical, 15)
-                            .background(canConnect ? Palette.brand : Palette.surface)
-                            .foregroundStyle(canConnect ? .white : Palette.textFaint)
+                            .background(canConnect ? Palette.text : Palette.surface)
+                            .foregroundStyle(canConnect ? Palette.ground : Palette.textFaint)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .disabled(!canConnect)
                     .padding(.top, 6)
 
-                    Text("Connects over your Tailscale network. Nothing is exposed publicly.")
-                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                        .padding(.top, 2)
+                    // Two faint captions (design copy), centered.
+                    VStack(spacing: 10) {
+                        Text("over your tailscale network · nothing public")
+                            .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                        Text("Seen once. Fails with a reason, never a spinner that gives up quietly.")
+                            .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
                 }
                 .padding(22)
             }
@@ -372,7 +398,7 @@ struct ConnectView: View {
                 } else {
                     Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.text)   // white ✓, per the mockup (not a status colour)
+                        .foregroundStyle(Palette.done)   // green ✓ — the key is loaded (per the .dc.html)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 14)
@@ -403,7 +429,7 @@ struct ConnectView: View {
             }
             .navigationTitle("Private key")
             .toolbar { ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.brand)
+                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.textDim)
             } }
         }
     }
@@ -493,11 +519,15 @@ struct NewAgentView: View {
     }
 
     private var header: some View {
-        HStack {
-            Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.brand)
-                .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
+        // Title centered (ZStack) with Cancel pinned left — the design centers screen
+        // titles. Cancel is a secondary affordance → dim, not the retired violet accent.
+        ZStack {
             Text("New agent").font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
-            Spacer()
+            HStack {
+                Button("Cancel") { onCancel() }.font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                    .disabled(starting)   // no dismiss mid-spawn — the op would keep running off-screen
+                Spacer()
+            }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
@@ -570,8 +600,8 @@ struct NewAgentView: View {
                     .font(Typography.app(16, .semibold))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(canStart ? Palette.brand : Palette.surface)
-            .foregroundStyle(canStart ? .white : Palette.textFaint)
+            .background(canStart ? Palette.text : Palette.surface)
+            .foregroundStyle(canStart ? Palette.ground : Palette.textFaint)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .disabled(!canStart)
@@ -822,7 +852,9 @@ struct TerminalHomeView: View {
         }
         .foregroundStyle(active ? Palette.text : Palette.textFaint)
         .frame(maxWidth: .infinity).padding(.vertical, 8)
-        .background(active ? Palette.card : Color.clear)
+        // surfaceRaised (#262A45), NOT surface: the tab bar itself is surface, so an
+        // active pill on surface would vanish (the design's "active tab" is raised).
+        .background(active ? Palette.surfaceRaised : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
@@ -907,6 +939,7 @@ struct TerminalHomeView: View {
         .padding(12)
         .background(Palette.card)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(edgeTint(row.group), lineWidth: 1))
         .padding(.horizontal, 16).padding(.vertical, 4)
     }
 
@@ -933,13 +966,18 @@ struct TerminalHomeView: View {
     @ViewBuilder
     private func badgeContent(_ group: AgentGroup) -> some View {
         switch group {
+        // Status is SHAPE + colour, never colour alone — desaturate the screen and it
+        // still sorts: ! in a circle waits, × in a SQUARE stopped, a turning ring works.
         case .needsYou: badgeCircle("exclamationmark", group.color)
-        case .stopped: badgeCircle("xmark", group.color)
+        case .stopped: badgeSquare("xmark", group.color)
         case .unrecognised: badgeCircle("questionmark", group.color)
-        // "now" is a non-temporal "active" marker, not an elapsed timer — there
-        // is no start timestamp in AgentInfo to count from, so it does not claim
-        // a duration it cannot know.
-        case .working: Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+        // "now" is a non-temporal "active" marker, not an elapsed timer — there is no
+        // start timestamp in AgentInfo to count from — beside a turning ring for "live".
+        case .working:
+            HStack(spacing: 6) {
+                Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
+                TurningRing(color: group.color)
+            }
         case .idle:
             // Not bare, not loud: a small hollow dot so an expanded idle row still
             // has a right-edge anchor.
@@ -952,6 +990,25 @@ struct TerminalHomeView: View {
             .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
             .frame(width: 26, height: 26)
             .overlay(Circle().stroke(color.opacity(0.55), lineWidth: 1.5))
+    }
+
+    /// Stopped's badge is a SQUARE (rounded) — a shape distinct from the waiting/
+    /// unrecognised circles, so "gone" reads without relying on the red alone.
+    private func badgeSquare(_ system: String, _ color: Color) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
+            .frame(width: 26, height: 26)
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.55), lineWidth: 1.5))
+    }
+
+    /// The 1px edge tint the design gives ONLY the two states you must not miss —
+    /// needs-you (amber) and stopped (red); every other card stays edgeless.
+    private func edgeTint(_ group: AgentGroup) -> Color {
+        switch group {
+        case .needsYou, .unrecognised: return Palette.waiting.opacity(0.5)
+        case .stopped: return Palette.died.opacity(0.5)
+        default: return .clear
+        }
     }
 
     // MARK: error / host-key recovery (functional, restyled to the tokens)
@@ -1085,7 +1142,10 @@ struct TerminalPaneView: View {
 
     var body: some View {
         ZStack {
-            Palette.ground.ignoresSafeArea()
+            // The terminal is its own ground — one shade under the app (groundMachine
+            // #0B0D1C vs ground #13162A). Per the design, the output IS the ground and
+            // the chrome floats over it; this is that base shade.
+            Palette.groundMachine.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
                 paneScroll
@@ -1149,7 +1209,7 @@ struct TerminalPaneView: View {
                     }
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         Text(line.isEmpty ? " " : line)
-                            .font(Typography.machine(12.5)).foregroundStyle(Palette.text)
+                            .font(Typography.machine(Self.paneFontSize)).foregroundStyle(Palette.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
@@ -1192,9 +1252,9 @@ struct TerminalPaneView: View {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
             }
-            .foregroundStyle(primary ? .white : Palette.textDim)
+            .foregroundStyle(primary ? Palette.ground : Palette.textDim)
             .frame(maxWidth: .infinity, minHeight: 34)
-            .background(primary ? Palette.brand : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(primary ? Palette.text : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
         // Disabled while a pre-fill is pending too: a stray Return during automatic
         // delivery could race the in-flight agent.prompt (and Return into a booting
@@ -1211,9 +1271,10 @@ struct TerminalPaneView: View {
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
             Button { sendTapped() } label: {
-                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
                     .frame(width: 40, height: 40)
-                    .background(canSend ? Palette.brand : Palette.surface).clipShape(Circle())
+                    .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
             }
             .disabled(!canSend)
         }
@@ -1248,10 +1309,17 @@ struct TerminalPaneView: View {
 
     // MARK: data
 
-    /// Rough monospace column count for the pane font (~7.2pt advance), less the
-    /// 14pt horizontal padding on each side.
+    /// The pane's monospace size — shared by the renderer and the column math so the
+    /// two can't drift. IBM Plex Mono's advance is exactly 0.6 em (measured hmtx 600 /
+    /// head 1000 upem), so one glyph is `paneFontSize * 0.6` points.
+    static let paneFontSize: CGFloat = 12.5
+    static let paneAdvance: CGFloat = paneFontSize * 0.6   // 7.5pt at 12.5 (IBM Plex Mono)
+
+    /// Rough monospace column count for the pane font, less the 14pt horizontal
+    /// padding on each side. The advance is DERIVED from the font (0.6 em), not a
+    /// literal — the old 7.2 was calibrated for SF Mono, which this build replaced.
     private func columnCount(for width: CGFloat) -> Int {
-        max(20, Int((width - 28) / 7.2))
+        max(20, Int((width - 28) / Self.paneAdvance))
     }
 
     /// Folds `rawText` to `columns` into the cached `lines`. Called only from the
@@ -1396,6 +1464,7 @@ struct SettingsView: View {
                         connectionSection
                         notifySection
                         troubleSection
+                        versionFooter
                     }
                     .padding(.bottom, 16)
                 }
@@ -1406,12 +1475,14 @@ struct SettingsView: View {
     // Header sits on the ground with a bottom hairline (not a filled bar); the
     // one accent the kit uses here is the back affordance.
     private var header: some View {
-        HStack(spacing: 12) {
-            Button { onClose() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.brand)
-            }
+        ZStack {
             Text("Settings").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-            Spacer()
+            HStack {
+                Button { onClose() } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
+                }
+                Spacer()
+            }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
@@ -1454,6 +1525,22 @@ struct SettingsView: View {
                       note: "verify the host key first") { onReconnect() }
             actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
         }
+    }
+
+    /// The app names itself here — "herdrup mobile <version> (<build>)" — with the
+    /// design's one-line stance. Version + build come from the bundle (MARKETING_VERSION
+    /// / CFBundleVersion), so they track the shipped build, not a hardcoded string.
+    private var versionFooter: some View {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        return VStack(spacing: 4) {
+            Text("herdrup mobile \(short) (\(build))")
+                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+            Text("dark only, on purpose")
+                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 28)
     }
 
     private func sectionLabel(_ text: String) -> some View {
