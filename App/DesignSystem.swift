@@ -7,49 +7,80 @@ import HerdrKit
 // (amber = waiting on you, red = died, blue = working, green = done); monospace is
 // the MACHINE voice, a proportional sans is the APP voice.
 //
-// Fonts: the design specifies Geist (app) + IBM Plex Mono (machine). Those font
-// files are not yet bundled, so this uses the system proportional + monospaced
-// faces as stand-ins; swapping in the real families is a later refinement that
-// won't touch call sites (they go through Typography, not Font directly).
+// Fonts: Geist (app voice) + IBM Plex Mono (machine voice) — the families the Claude
+// Design is set in — are bundled under App/Fonts/ and registered via UIAppFonts.
+// Typography addresses them by PostScript name, so call sites never touch Font directly.
 
 enum Palette {
-    // Ground → elevated. Deep desaturated indigo/navy, not black.
-    static let ground = Color(hex: 0x0B0D1C)      // app background
-    static let groundDeep = Color(hex: 0x0A0C18)  // behind the ground (device edges)
-    static let surface = Color(hex: 0x13162A)      // search field, tab bar
-    static let card = Color(hex: 0x1D2038)         // list cards
-    static let cardRaised = Color(hex: 0x232742)
-    static let hairline = Color(hex: 0x2E3358)     // section rules, borders
+    // Named for the Claude Design token table (herdr mobile.dc.html). Each token is a
+    // ROLE, not just a colour: the app floats on `ground`; the terminal is its own
+    // darker `groundMachine`, one shade under; surfaces sit above the ground; rules
+    // divide them. (The earlier build shifted these — app ground was the terminal's
+    // near-black and every surface was one step off; this restores the spec.)
+    static let ground = Color(hex: 0x13162A)        // app ground — deep desaturated indigo, NEVER black
+    static let groundMachine = Color(hex: 0x0B0D1C) // terminal ONLY — its own ground, one shade under
+    static let groundDeep = Color(hex: 0x0A0C18)    // behind everything (device edges / safe-area fill)
+    static let surface = Color(hex: 0x1D2038)       // cards, fields, rows
+    static let card = surface                       // a card IS a surface (alias, kept for call sites)
+    static let surfaceRaised = Color(hex: 0x262A45) // active tab, pressed state, key panel
+    static let cardRaised = surfaceRaised           // alias, kept for call sites
+    static let hairline = Color(hex: 0x2E3358)      // rule — hairline around a surface
+    static let hairlineQuiet = Color(hex: 0x232742) // rule-quiet — section rules and dividers
 
-    // Text tiers.
-    static let text = Color(hex: 0xEEF0F7)         // primary
-    static let textDim = Color(hex: 0x99A0BC)      // secondary
-    static let textFaint = Color(hex: 0x7C83A6)    // tertiary / micro-labels (≥4.5:1 on ground)
+    // Text tiers (ink).
+    static let text = Color(hex: 0xEEF0F7)          // ink — what matters; also the only fill on acting controls
+    static let textDim = Color(hex: 0x99A0BC)       // ink-second — supporting text, terminal body
+    static let textFaint = Color(hex: 0x666D91)     // ink-third — machine metadata, ages, folder names
 
-    // The app's ONE interactive/brand colour — violet. Not a status meaning; it
-    // marks the primary action (Connect CTA) and the active tab, matching the
-    // mockups. Distinct from the working blue so colour-as-meaning stays intact.
+    // The design has NO accent colour: acting controls (Connect, Approve) are filled
+    // with `text` (ink). `brand` (violet) is retired per-screen in the layout slices;
+    // kept here unchanged until those call sites migrate to the ink fill.
     static let brand = Color(hex: 0x7A6FF0)
 
     // Status = meaning. The ONLY palette that carries colour.
-    static let waiting = Color(hex: 0xE9A63C)      // amber — an agent is asking you
-    static let died = Color(hex: 0xE2584E)         // red — exited / crashed
-    static let working = Color(hex: 0x5B9BE8)      // blue — running
-    static let done = Color(hex: 0x5FB37F)         // green — finished
+    static let waiting = Color(hex: 0xE9A63C)       // amber — an agent is asking you
+    static let died = Color(hex: 0xE2584E)          // red — exited / crashed
+    static let working = Color(hex: 0x5B9BE8)       // blue — running
+    static let done = Color(hex: 0x5FB37F)          // green — finished
 }
 
-/// Type roles. The contrast encodes WHO is speaking (brief §6).
+/// Type roles. The contrast encodes WHO is speaking (brief §6). Both families are
+/// bundled (App/Fonts/) and addressed by PostScript name. Sizes are FIXED
+/// (`fixedSize:`) — the prior build used `.system(size:)`, which does NOT scale with
+/// Dynamic Type, and the layout relies on hard-coded frame heights (e.g. the reserved
+/// subtitle line, the terminal keycaps) that would clip if type scaled. Keeping the
+/// fixed contract avoids that regression; a Dynamic-Type pass is its own later audit.
+/// A requested weight maps to the nearest of the four bundled cuts (400/500/600/700).
 enum Typography {
-    /// App voice — proportional sans (screen titles, names, buttons, labels).
+    /// App voice — Geist (screen titles, names, buttons, labels).
     static func app(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .default)
+        .custom(geistName(weight), fixedSize: size)
     }
-    /// Machine voice — monospace (terminal, pane ids, status words, counts, keys).
+    /// Machine voice — IBM Plex Mono (terminal, pane ids, status words, counts, keys).
     static func machine(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        .custom(plexMonoName(weight), fixedSize: size)
     }
-    /// Uppercase micro-label for section headers, with letter-spacing.
-    static let microLabel = Font.system(size: 11, weight: .semibold, design: .monospaced)
+    /// Uppercase micro-label for section headers (machine voice, semibold).
+    static let microLabel = Font.custom("IBMPlexMono-SmBld", fixedSize: 11)
+
+    // Nearest bundled cut → its exact PostScript name. IBM Plex Mono's are irregular
+    // (Regular is bare "IBMPlexMono"; Medium/SemiBold are abbreviated "-Medm"/"-SmBld").
+    private static func geistName(_ w: Font.Weight) -> String {
+        switch w {
+        case .medium: return "Geist-Medium"
+        case .semibold: return "Geist-SemiBold"
+        case .bold, .heavy, .black: return "Geist-Bold"
+        default: return "Geist-Regular"
+        }
+    }
+    private static func plexMonoName(_ w: Font.Weight) -> String {
+        switch w {
+        case .medium: return "IBMPlexMono-Medm"
+        case .semibold: return "IBMPlexMono-SmBld"
+        case .bold, .heavy, .black: return "IBMPlexMono-Bold"
+        default: return "IBMPlexMono"
+        }
+    }
 }
 
 /// The VISUAL half of the status story. The CLASSIFICATION — which agent belongs
@@ -121,5 +152,21 @@ extension Color {
             green: Double((hex >> 8) & 0xFF) / 255,
             blue: Double(hex & 0xFF) / 255,
             opacity: 1)
+    }
+}
+
+/// The "working" status shape — a thin broken ring, turning. Colour carries the
+/// meaning (the working blue); the motion says "live" without claiming a duration.
+struct TurningRing: View {
+    var color: Color
+    @State private var spin = false
+    var body: some View {
+        Circle().trim(from: 0, to: 0.72)
+            .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+            .frame(width: 13, height: 13)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .onAppear {
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+            }
     }
 }

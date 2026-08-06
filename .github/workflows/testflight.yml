@@ -78,6 +78,18 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      - name: Stamp build number into the generated Info.plist
+        # THE FIX: xcodegen bakes CFBundleVersion into App/Info.plist at GENERATE time
+        # (from project.yml CURRENT_PROJECT_VERSION="1"). Passing CURRENT_PROJECT_VERSION
+        # on the xcodebuild command line does NOT rewrite an already-generated plist
+        # (GENERATE_INFOPLIST_FILE=NO), so every prior upload shipped CFBundleVersion "1"
+        # and collided as a duplicate. Set it explicitly on the generated plist after
+        # generate, before archive (keephair-proven). $BUILD (= run_number + offset) is
+        # monotonic and already > the single existing ASC build ("1").
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" App/Info.plist
+          echo "CFBundleVersion is now $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' App/Info.plist)"
+
       - name: Import signing certificate (throwaway keychain)
         # Signing material lives ONLY in a throwaway keychain deleted in the always()
         # step below — never the login keychain (a runner is shared infra whose
