@@ -79,28 +79,34 @@ struct LiveTerminalView: UIViewRepresentable {
             return offset.y >= maxY - max(1, font.lineHeight)
         }
 
-        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the SOURCE. `scrolled(source:yDisp:)` is the
-        /// emulator's "buffer scrolled" callback — the STREAM's scroll, fired once per
-        /// scrolled line, whose only job is `updateScroller()` snapping `contentOffset` to
-        /// the bottom. The reader's FINGER scroll never routes through here (it drives the
-        /// native `UIScrollView` pan directly), so this is the unambiguous place to hold:
-        /// while the reader is NOT following (they began dragging away), remember where they
-        /// were, let super snap, then restore.
+        /// HOLD-POSITION-WHEN-SCROLLED-UP, at the FEED boundary. Every emulator
+        /// snap-to-bottom path — `scrolled()` per streamed line, `synchronizedOutputChanged`
+        /// (DEC 2026 begin/end), a `bufferActivated` buffer switch — fires SYNCHRONOUSLY
+        /// inside `feed()` and calls `updateScroller()` directly. Rather than override each
+        /// (feed itself is `public`, not `open`, and the individual callbacks are
+        /// whack-a-mole — reviewer finding), we wrap ONE save/restore around the stream
+        /// feed. Feeds are the STREAM, never the finger's pan, so scrolling is never
+        /// touched. Uses the explicit delegate-driven `followsBottom` intent (released at
+        /// drag START, so even a few-pixel slow drag holds); works whether the 500-line
+        /// scrollback grew, recycled, or reflowed. A layout-driven resize snaps via a
+        /// DIFFERENT path (`layoutSubviews`, below), so that stays hooked separately.
         ///
-        /// Uses the explicit `followsBottom` intent, NOT a distance tolerance: a tolerance
-        /// let a slow drag from the tail get erased by each streamed line before it crossed
-        /// the threshold (reviewer finding). Because follow is released at drag START, even
-        /// a few-pixel drag holds. Works whether the 500-line scrollback grew, recycled, or
-        /// reflowed — the finger is never touched, so scrolling stays alive. (Replaces the
-        /// earlier contentOffset-setter heuristics, which either swallowed finger writes —
-        /// the DEAD-scroll regression — or broke once the buffer stopped growing.)
-        override func scrolled(source terminal: SwiftTerm.Terminal, yDisp: Int) {
+        /// Call this for STREAM DATA only — a `reset` reseed or an end-of-stream notice
+        /// should snap to show the fresh screen / notice, so those feed plainly.
+        func feedHoldingPosition(_ byteArray: ArraySlice<UInt8>) {
             let held = contentOffset.y
-            super.scrolled(source: terminal, yDisp: yDisp)   // updateScroller: grow/recycle + snap to bottom
-            if !followsBottom {
-                let maxY = max(0, contentSize.height - bounds.height)
-                contentOffset = CGPoint(x: 0, y: min(held, maxY))
+            let wasAlternate = getTerminal().isCurrentBufferAlternate
+            feed(byteArray: byteArray)   // scrolled / synchronizedOutputChanged / bufferActivated → snap
+            if getTerminal().isCurrentBufferAlternate != wasAlternate {
+                // A buffer switch makes the old offset meaningless in the new buffer;
+                // follow the new tail (super already snapped there). Normalizes follow
+                // state on normal↔alternate transitions (reviewer finding).
+                followsBottom = true
+                return
             }
+            guard !followsBottom else { return }
+            let maxY = max(0, contentSize.height - bounds.height)
+            contentOffset = CGPoint(x: 0, y: min(held, maxY))
         }
 
         private var lastLayoutSize: CGSize = .zero
@@ -289,7 +295,9 @@ struct LiveTerminalView: UIViewRepresentable {
                     resizeEmulator(cols: cols, rows: rows, in: view)
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
                 case .data(_, _, let data):
-                    if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    // Stream data: hold the reader's scroll position if they've scrolled up
+                    // (covers scrolled / synchronized-output / buffer-switch snaps in one).
+                    if !data.isEmpty { view.feedHoldingPosition([UInt8](data)[...]) }
                 case .resize(_, _, let cols, let rows):
                     resizeEmulator(cols: cols, rows: rows, in: view)
                 case .ping:
