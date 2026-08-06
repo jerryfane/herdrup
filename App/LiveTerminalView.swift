@@ -104,7 +104,14 @@ struct LiveTerminalView: UIViewRepresentable {
                 followsBottom = true
                 return
             }
-            guard !followsBottom else { return }
+            // CRITICAL: never write contentOffset while a pan/momentum is LIVE — a
+            // programmatic write into an active UIScrollView pan re-baselines its
+            // translation and, once per streamed frame under a firehose, swamps the
+            // finger → DEAD scroll (the v0.1.8 regression). `isDragging` (active drag)
+            // and `isDecelerating` (momentum) are excluded; `isTracking` is NOT — a
+            // finger merely RESTING (touch down, not moving) still holds position, which
+            // is the reader's "output snapped me down while I was resting" case.
+            guard !followsBottom, !isDragging, !isDecelerating else { return }
             let maxY = max(0, contentSize.height - bounds.height)
             contentOffset = CGPoint(x: 0, y: min(held, maxY))
         }
@@ -140,7 +147,9 @@ struct LiveTerminalView: UIViewRepresentable {
             let held = contentOffset.y
             super.layoutSubviews()          // size change → processSizeChange → updateScroller → snap
             lastLayoutSize = bounds.size
-            guard resized, !followsBottom else { return }
+            // Same rule: don't fight a live pan/momentum if a resize lands mid-gesture
+            // (a resting-finger resize still holds — isTracking not excluded).
+            guard resized, !followsBottom, !isDragging, !isDecelerating else { return }
             let maxY = max(0, contentSize.height - bounds.height)
             if held < maxY - max(1, font.lineHeight) {
                 // Still genuinely scrolled up in the new geometry → keep the reader there.
