@@ -100,11 +100,49 @@ public actor HerdrClient {
     struct PromptParams: Encodable {
         let target: String
         let text: String
+        let wait: PromptWaitOptions?
     }
 
+    /// The `wait` block herdr's `agent.prompt` accepts: block until the agent
+    /// settles into one of `until` (an AgentStatus set) or `timeoutMs` elapses.
+    /// Passing it is what makes the server report a REAL `delivery` (submitted vs
+    /// written_to_pty); the no-wait path returns an unconditional written_to_pty.
+    struct PromptWaitOptions: Encodable {
+        let until: [String]
+        let timeoutMs: Int?
+        enum CodingKeys: String, CodingKey {
+            case until
+            case timeoutMs = "timeout_ms"
+        }
+    }
+
+    /// The full AgentStatus set. Passed as `agent.prompt`'s `wait.until` so the
+    /// server returns AS SOON AS it has classified delivery (every real status is
+    /// in the set, so the initial wait-match succeeds immediately and no status
+    /// timeout can fire) — the point is the truthful `delivery`, not to block for a
+    /// particular status.
+    public static let anyAgentStatus = ["working", "idle", "blocked", "done", "unknown"]
+
     /// Submits prompt text as intent rather than as raw keystrokes.
-    public func prompt(pane: String, text: String) async throws {
-        _ = try await call("agent.prompt", PromptParams(target: pane, text: text), as: JSONNull.self)
+    ///
+    /// Pass `waitUntil` (a set of AgentStatus wire values, e.g. `anyAgentStatus`)
+    /// to have the server report a real `delivery`; without it herdr returns an
+    /// unconditional `writtenToPty`, so the app cannot tell a started turn from a
+    /// stranded draft. Returns the server's `delivery` (nil when it did not
+    /// determine one). THROWS the server's `APIError` on rejection (agent_not_ready
+    /// / agent_input_pending / agent_prompt_not_received / timeout), so a
+    /// non-delivery is never silent.
+    @discardableResult
+    public func prompt(
+        pane: String,
+        text: String,
+        waitUntil: [String]? = nil,
+        timeoutMs: Int? = nil
+    ) async throws -> PromptDelivery? {
+        let wait = waitUntil.map { PromptWaitOptions(until: $0, timeoutMs: timeoutMs) }
+        let result = try await call(
+            "agent.prompt", PromptParams(target: pane, text: text, wait: wait), as: PromptResult.self)
+        return result.delivery
     }
 
     struct SendTextParams: Encodable {
@@ -206,17 +244,19 @@ public actor HerdrClient {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
     }
 
-    /// True when `pane` reports an agent WITH a composer — the same gate
-    /// `InputRouter` uses to enter intent mode, and the observable proxy for "a
-    /// prompt will be accepted". A freshly-started agent is not promptable for a
-    /// variable window, and there is no reliable readiness flag (interactive_ready
-    /// is nil on this path), so the UI polls THIS to learn when a just-spawned
-    /// agent can receive its pre-filled task — then delivers it as a prompt, never
-    /// as rawKeys send_text into a not-ready agent. Absent pane, or an agent with
-    /// no composer, is NOT promptable (false).
+    /// True when `pane` reports an agent WITH a composer — the observable proxy for
+    /// "a prompt will land NOW". This is the STRICTER new-agent PRE-FILL gate
+    /// (`InputRouter.isPromptable(for:)`), deliberately NOT the reply-routing gate
+    /// (`mode(for:)`, which needs only a named agent): auto-delivering a just-
+    /// spawned agent's task unattended warrants holding out for a confirmed
+    /// composer, since there is no reliable readiness flag (interactive_ready is nil
+    /// on this path). The UI polls THIS to learn when a just-spawned agent can
+    /// receive its pre-filled task — then delivers it as a prompt, never as rawKeys
+    /// send_text into a not-ready agent. Absent pane, or an agent with no composer,
+    /// is NOT promptable (false).
     public func isPromptable(pane: String) async throws -> Bool {
         guard let info = try await agentList().first(where: { $0.paneID == pane }) else { return false }
-        return InputRouter().mode(for: info) == .intent
+        return InputRouter().isPromptable(for: info)
     }
 
     // MARK: - Events

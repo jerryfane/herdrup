@@ -17,11 +17,33 @@ final class InputRouterTests: XCTestCase {
         XCTAssertEqual(router.mode(for: a), .intent)
     }
 
-    /// A shell pane must not be treated as promptable — that is how text ends up
+    /// A pane with NO named agent is a shell — it must stay rawKeys so text is not
     /// pasted somewhere it was never meant to go.
     func testPaneWithoutAgentFallsBackToRawKeys() throws {
         XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: nil, hasComposer: true)), .rawKeys)
-        XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: "claude", hasComposer: false)), .rawKeys)
+    }
+
+    /// THE BUG (herdr-ios terminal): a pane that hosts a NAMED agent whose composer
+    /// is transiently nil must STILL route its reply as intent (→ `agent.prompt`,
+    /// which submits) — not fall to rawKeys `send_text`, which types the reply into
+    /// the composer but never submits it ("the agent never received it"). The gate
+    /// is the agent alone; `agent.prompt` is server-gated for real readiness.
+    /// (Mutation guard: restoring the `composer != nil` half returns `.rawKeys` here
+    /// and re-opens the never-submitted bug, so this assertion KILLs that mutation.)
+    func testNamedAgentWithoutComposerStillRoutesAsIntent() throws {
+        XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: "claude", hasComposer: false)), .intent)
+    }
+
+    /// The pre-fill readiness gate stays STRICTER than routing on purpose: an
+    /// unattended just-spawned task holds out for a confirmed composer, even though
+    /// a manual reply to the same pane would already route as intent. Composer
+    /// present → promptable; agent-but-no-composer / no-agent → not promptable.
+    func testIsPromptableRequiresComposerEvenThoughRoutingDoesNot() throws {
+        let named = try makeAgent(pane: "p1", agent: "claude", hasComposer: false)
+        XCTAssertEqual(router.mode(for: named), .intent, "routing needs only a named agent")
+        XCTAssertFalse(router.isPromptable(for: named), "pre-fill delivery still needs a composer")
+        XCTAssertTrue(router.isPromptable(for: try makeAgent(pane: "p1", agent: "claude", hasComposer: true)))
+        XCTAssertFalse(router.isPromptable(for: try makeAgent(pane: "p1", agent: nil, hasComposer: true)))
     }
 
     func testTextBecomesAPromptInIntentMode() {
@@ -136,6 +158,49 @@ final class InputRouterTests: XCTestCase {
         XCTAssertNil(InputRouter.canonicalKey("Ctrl+U"))
         XCTAssertNil(InputRouter.canonicalKey(""))
         XCTAssertNotNil(InputRouter.canonicalKey("PageDown"))
+    }
+
+    /// A dedicated control cap's raw sequence goes out as `.rawText` — verbatim, in
+    /// either mode (a named agent's TUI and a shell both take a raw keypress).
+    func testRawSequenceBecomesRawTextInBothModes() {
+        for mode in [InputMode.intent, .rawKeys] {
+            XCTAssertEqual(
+                router.plan(action: .rawSequence("\u{1b}[Z"), pane: "p1", mode: mode),
+                .rawText(pane: "p1", "\u{1b}[Z"))
+        }
+    }
+
+    /// AXIS: `.rawText` is the DELIBERATE-keypress path, so — unlike typed `.text`
+    /// — it is NOT newline-guarded: `Ctrl+J` (LF) and `Ctrl+M` (CR) must pass
+    /// through so those chords actually reach the PTY. (Mutation guard: adding the
+    /// `.text` newline refusal to this path would refuse `Ctrl+J`/`Ctrl+M` and this
+    /// KILLs it.)
+    func testRawSequenceIsNotNewlineGuarded() {
+        XCTAssertEqual(router.plan(action: .rawSequence("\n"), pane: "p1", mode: .intent), .rawText(pane: "p1", "\n"))
+        XCTAssertEqual(router.plan(action: .rawSequence("\r"), pane: "p1", mode: .rawKeys), .rawText(pane: "p1", "\r"))
+        XCTAssertEqual(router.plan(action: .rawSequence("\u{03}"), pane: "p1", mode: .intent), .rawText(pane: "p1", "\u{03}"))
+    }
+
+    func testEmptyRawSequenceIsRefused() {
+        guard case .refused = router.plan(action: .rawSequence(""), pane: "p1", mode: .intent) else {
+            return XCTFail("empty raw sequence must be refused")
+        }
+    }
+
+    /// The Ctrl-toggle chord math: letters map case-insensitively into the control
+    /// range, `Ctrl+J`/`Ctrl+M` are the intentional LF/CR, and a non-control
+    /// character returns nil so the caller leaves it in the message untouched.
+    func testControlByteMapsChordsAndRejectsNonControl() {
+        XCTAssertEqual(InputRouter.controlByte(for: "c"), "\u{03}")
+        XCTAssertEqual(InputRouter.controlByte(for: "C"), "\u{03}", "Ctrl is case-insensitive")
+        XCTAssertEqual(InputRouter.controlByte(for: "a"), "\u{01}")
+        XCTAssertEqual(InputRouter.controlByte(for: "z"), "\u{1a}")
+        XCTAssertEqual(InputRouter.controlByte(for: "j"), "\u{0a}", "Ctrl+J is LF")
+        XCTAssertEqual(InputRouter.controlByte(for: "m"), "\u{0d}", "Ctrl+M is CR")
+        XCTAssertEqual(InputRouter.controlByte(for: "["), "\u{1b}", "Ctrl+[ is ESC")
+        XCTAssertNil(InputRouter.controlByte(for: "1"))
+        XCTAssertNil(InputRouter.controlByte(for: " "))
+        XCTAssertNil(InputRouter.controlByte(for: "é"), "non-ASCII has no control code")
     }
 }
 
