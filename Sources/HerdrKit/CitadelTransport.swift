@@ -249,8 +249,15 @@ public actor CitadelTransport: HerdrTransport {
         generation &+= 1
         connectTask?.cancel()
         connectTask = nil
-        try? await client?.close()
+        // Snapshot and CLEAR the slot BEFORE awaiting teardown. Awaiting the old
+        // client's close is a suspension point, and actor reentrancy lets a NEW
+        // generation connect install a fresh client during it (a legitimate
+        // reconnect). A trailing unconditional `client = nil` would then discard that
+        // live session unclosed. Nil-before-await confines this teardown to the OLD
+        // client and never clobbers a reconnect that lands mid-close.
+        let old = client
         client = nil
+        try? await old?.close()
     }
 }
 
