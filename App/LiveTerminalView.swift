@@ -136,8 +136,34 @@ struct LiveTerminalView: UIViewRepresentable {
             pan.delegate = self
             view.addGestureRecognizer(pan)
             scrollPan = pan
+            // Double-tap → jump to the live tail. A UIKit recognizer (NOT a SwiftUI
+            // .onTapGesture, which starves the scroll pan — HerdrApp.swift note) that
+            // recognizes simultaneously with everything (delegate below); SwiftTerm's own
+            // double-tap word-select is inert on this read-only view.
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.delegate = self
+            view.addGestureRecognizer(doubleTap)
             style(view)
             start()
+        }
+
+        /// Double-tap the terminal → jump to the live tail. A mouse-mode/alt agent
+        /// (Claude Code) captures the wheel and keeps its own viewport, so send it
+        /// Ctrl+End (`ESC[1;5F` → scroll-to-bottom + re-enable auto-follow) — read-only,
+        /// exactly like the scroll bytes, never a keystroke. A plain shell has native
+        /// SwiftTerm scrollback, so jump its UIScrollView to the maximum offset.
+        @objc private func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, let view else { return }
+            if view.getTerminal().isCurrentBufferAlternate || view.getTerminal().mouseMode != .off {
+                Task { @MainActor [weak self] in
+                    guard let self, !self.stopped else { return }
+                    _ = try? await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                }
+            } else {
+                let maxY = max(0, view.contentSize.height - view.bounds.height)
+                view.setContentOffset(CGPoint(x: 0, y: maxY), animated: true)
+            }
         }
 
         func stop() {
