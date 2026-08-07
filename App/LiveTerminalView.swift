@@ -143,6 +143,8 @@ struct LiveTerminalView: UIViewRepresentable {
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
+            view?.isScrollEnabled = true    // restore native scroll if we disabled it mid-drag
+                                            // (stop() also runs on .exited while on screen)
             scrollPan?.isEnabled = false    // no drag can send bytes to an exited/replaced pane
             scrollSendTask?.cancel()
             scrollSendTask = nil
@@ -395,15 +397,17 @@ struct LiveTerminalView: UIViewRepresentable {
         /// path this read-only view opens and it emits ONLY wheel/arrow sequences —
         /// never a keystroke — so the keyboard stays fully blocked.
         @objc private func handleScrollPan(_ gr: UIPanGestureRecognizer) {
-            guard !stopped, let view else { return }   // teardown began — send nothing
-            // ALWAYS restore native scroll when the gesture ends — BEFORE the buffer/mouse
-            // gate below, because that state can flip DURING a drag (an agent can exit the
-            // alt screen or turn mouse mode off). If this restore lived under the gate, a
-            // mid-drag flip would make the gate return early and strand
-            // isScrollEnabled=false, killing native scroll permanently (reviewer HIGH).
+            // Restore native scroll on gesture-end FIRST — before ANY early return,
+            // including the teardown guard below. Two ways the state can change under an
+            // active drag: (1) the agent flips buffer/mouse mode, and (2) the agent EXITS
+            // — stop() runs from handle(.exited) while the pane STAYS on screen. Either
+            // must not strand isScrollEnabled=false on a live, still-visible pane
+            // (reviewer). `view?` keeps this safe during teardown; only undoes a flag a
+            // .began below set (idempotent otherwise).
             if gr.state == .ended || gr.state == .cancelled || gr.state == .failed {
-                view.isScrollEnabled = true   // no-op unless a .began below disabled it
+                view?.isScrollEnabled = true
             }
+            guard !stopped, let view else { return }   // teardown began — send nothing further
             let term = view.getTerminal()
             // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
             guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
