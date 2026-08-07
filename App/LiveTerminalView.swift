@@ -123,8 +123,18 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
-            // Alt-screen scroll: a dedicated pan that scrolls the AGENT (see
-            // handleScrollPan). Simultaneous with the view's own scroll-view pan.
+            // We are READ-ONLY and drive scroll ourselves (handleScrollPan → SGR wheel).
+            // Turn OFF SwiftTerm's own gesture→mouse-event generation: when an agent
+            // enables mouse reporting (Claude Code does), SwiftTerm otherwise adds a
+            // panMouseHandler that turns a drag into button press/drag/release events
+            // and COMPETES with / starves our scroll-wheel pan — so the finger-drag
+            // does nothing. Disabling it makes SwiftTerm emit FEWER upstream events
+            // (never more — read-only intact); `term.mouseMode` (what emitScroll reads)
+            // is the terminal's own state and is UNAFFECTED, so we still send wheel.
+            view.allowMouseReporting = false
+            // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
+            // alt screen OR any mouse-reporting program. Simultaneous with the view's
+            // own scroll-view pan (which handles a plain shell's native scrollback).
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
             pan.delegate = self
             view.addGestureRecognizer(pan)
@@ -375,22 +385,33 @@ struct LiveTerminalView: UIViewRepresentable {
         private var pendingScroll = ""
         private var scrollSendTask: Task<Void, Never>?
 
-        /// A drag on the terminal while a full-screen agent owns the ALTERNATE
-        /// screen. The alt screen has no SwiftTerm scrollback (nothing for the
-        /// UIScrollView to scroll — dragging does nothing), so we translate the drag
-        /// into scroll INPUT for the agent: SGR mouse-wheel events when the app
-        /// reports mouse (Claude Code enables DECSET 1006), else Up/Down arrows as a
-        /// best-effort. This is the ONLY byte path this read-only view opens and it
-        /// emits ONLY wheel/arrow sequences — never a keystroke — so the keyboard
-        /// stays fully blocked. On the NORMAL buffer this is inert and the native
-        /// scroll view scrolls the retained scrollback.
+        /// A drag on the terminal while a full-screen or MOUSE-REPORTING agent owns the
+        /// view. Two cases we handle by sending scroll INPUT to the agent (SGR
+        /// mouse-wheel when it reports mouse — Claude Code enables DECSET 1000/1006 —
+        /// else Up/Down arrows):
+        ///  • ALTERNATE screen (vim/htop-style TUIs): no SwiftTerm scrollback to scroll.
+        ///  • MOUSE MODE on a normal buffer (Claude Code "fullscreen" captures the wheel
+        ///    to scroll its OWN viewport): a native scrollback scroll would move the
+        ///    wrong thing / nothing.
+        /// A PLAIN shell (omp: normal buffer, mouse OFF) is left to SwiftTerm's native
+        /// scrollback pan (fixed in 1.15.0) — we return early. This is the ONLY byte
+        /// path this read-only view opens and it emits ONLY wheel/arrow sequences —
+        /// never a keystroke — so the keyboard stays fully blocked.
         @objc private func handleScrollPan(_ gr: UIPanGestureRecognizer) {
             guard !stopped, let view else { return }   // teardown began — send nothing
             let term = view.getTerminal()
-            guard term.isCurrentBufferAlternate else { return }   // normal buffer scrolls natively
+            // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
+            guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
             switch gr.state {
             case .began:
                 scrollAccum = 0
+                // A mouse-mode program on a NORMAL buffer still has retained scrollback;
+                // suppress the native scrollback pan for this drag so it can't
+                // double-scroll against the wheel we send. Moot on the alt screen (no
+                // scrollback); never reached for omp (returned above).
+                if term.mouseMode != .off && !term.isCurrentBufferAlternate {
+                    view.isScrollEnabled = false
+                }
             case .changed:
                 scrollAccum += gr.translation(in: view).y
                 gr.setTranslation(.zero, in: view)
@@ -400,6 +421,8 @@ struct LiveTerminalView: UIViewRepresentable {
                 scrollAccum -= CGFloat(ticks) * line
                 emitScroll(up: ticks > 0, count: min(abs(ticks), 4),
                            at: gr.location(in: view), term: term)
+            case .ended, .cancelled, .failed:
+                view.isScrollEnabled = true   // restore native scroll (no-op unless we disabled it)
             default:
                 break
             }
