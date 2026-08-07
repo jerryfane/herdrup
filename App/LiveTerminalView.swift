@@ -152,6 +152,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// separate SSH channel and leave the VISIBLE pane unlocked. The deferred re-lock clears
         /// it and then drives toward the LIVE grid.
         private var relockPending = false
+        /// The generation whose lock has already been handed back (a `lock:false` release). A
+        /// generation is released AT MOST ONCE: `releaseGeometryOwnership` runs from both
+        /// `setForeground(false)` and `stop()` (which itself can run twice — `.exited` then
+        /// dismantle — and follows a hide at the SAME generation), and none of those bump the
+        /// generation. Without this idempotence a second same-generation release would fire a
+        /// redundant `lock:false` (re-resizing the shared PTY) AND let the first release's
+        /// generation-keyed self-prune clobber the newer release's registry handle.
+        private var releasedGeneration: Int?
         /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
@@ -188,7 +196,7 @@ struct LiveTerminalView: UIViewRepresentable {
             relockPending = true
             let pane = paneID
             Task { @MainActor [weak self] in
-                await Self.geometryReleaseTask[pane]?.value
+                await Coordinator.awaitRelease(Self.geometryReleaseTask[pane], timeout: 5)
                 guard let self, !self.stopped, self.myGeometryGeneration == gen else { return }
                 self.relockPending = false
                 if self.desiredCols >= 4, self.desiredRows >= 2 {
@@ -313,6 +321,13 @@ struct LiveTerminalView: UIViewRepresentable {
             // laid out): an older release may still be in flight, and its entry is the only handle
             // a future re-lock has to await it.
             guard cols >= 4, rows >= 2 else { return }
+            // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
+            // same-generation release — stop() after a hide, or stop()'s .exited+dismantle double
+            // call — is a no-op: after a hide the drain is already nil'd and sendPTYSize is gated,
+            // so there is nothing left to release, and skipping it prevents both a redundant
+            // lock:false and the prune-clobber of a newer chained release's registry handle.
+            guard releasedGeneration != myGeometryGeneration else { return }
+            releasedGeneration = myGeometryGeneration
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
@@ -361,7 +376,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 relockPending = true            // hold off ALL sendPTYSize until the release lands
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
-                    await pending?.value        // let any committed lock:false land FIRST
+                    await Coordinator.awaitRelease(pending, timeout: 5)   // let any committed lock:false land first (bounded)
                     guard let self, self.foreground, !self.stopped,
                           self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
                     self.relockPending = false
@@ -374,6 +389,22 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         // MARK: styling (the design's machine voice)
+
+        /// Await a pending release, but give up after `seconds`. CitadelTransport's RPC has no
+        /// timeout and the detached release tasks are never cancelled, so a wedged SSH channel
+        /// could otherwise pin a deferred re-lock forever (relockPending stuck true → the visible
+        /// pane never re-locks). On timeout the caller clears relockPending and re-locks anyway; if
+        /// the stale `lock:false` lands afterwards the pane simply re-locks on its next layout —
+        /// strictly better than staying unlocked indefinitely.
+        private static func awaitRelease(_ task: Task<Void, Never>?, timeout seconds: Double) async {
+            guard let task else { return }
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await task.value }
+                group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+                _ = await group.next()      // return as soon as the release lands OR the timeout fires
+                group.cancelAll()
+            }
+        }
 
         private func style(_ view: ReadOnlyTerminalView) {
             view.font = Self.paneFont
