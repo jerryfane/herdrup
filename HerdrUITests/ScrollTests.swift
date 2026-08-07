@@ -54,6 +54,44 @@ final class ScrollTests: XCTestCase {
             "Terminal did NOT scroll: rendered content is unchanged after swiping (diff=\(movedDiff)). This is the dead-scroll symptom.")
     }
 
+    /// The CLAUDE CODE receipt. Launches a pane in alt-screen + mouse-mode (Claude Code
+    /// fullscreen shape) whose stand-in agent (CCScrollDriver) redraws shifted content
+    /// ONLY when the app sends it an SGR wheel event. Swiping must therefore move the
+    /// rendered content — which only happens if the app translated the drag into a wheel
+    /// event for the mouse-mode agent (the fix). Dead path (the bug: SwiftTerm's mouse-pan
+    /// eats the drag, no wheel emitted) = unchanged pixels = this fails.
+    func testClaudeCodeScrollsViaWheel() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "ccscroll"
+        app.launch()
+        Thread.sleep(forTimeInterval: 3.0)   // launch + enter alt-screen/mouse + render
+
+        // Static baseline (cursor hidden by the seed): untouched frames ~identical.
+        let before = app.screenshot()
+        Thread.sleep(forTimeInterval: 1.0)
+        let beforeAgain = app.screenshot()
+        let idleDiff = pixelDiffFraction(before, beforeAgain)
+        attach(before, name: "cc-01-before")
+        XCTAssertLessThan(idleDiff, 0.02,
+            "Claude-Code mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
+
+        // Swipe DOWN → the fix emits wheel-up (SGR 64) → the stand-in agent redraws an
+        // earlier window → content moves.
+        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        for _ in 0..<3 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        let after = app.screenshot()
+        attach(after, name: "cc-02-after-swipe")
+        let movedDiff = pixelDiffFraction(before, after)
+        XCTAssertGreaterThan(movedDiff, 0.10,
+            "Claude Code pane did NOT scroll: content unchanged after swipe (diff=\(movedDiff)). The drag was not translated into an SGR wheel event for the mouse-mode agent.")
+    }
+
     // MARK: - helpers
 
     private func attach(_ shot: XCUIScreenshot, name: String) {
