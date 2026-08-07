@@ -179,6 +179,22 @@ struct LiveTerminalView: UIViewRepresentable {
             let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
             Self.geometryGeneration[paneID] = gen
             myGeometryGeneration = gen
+            // Symmetric with setForeground(true): on a fast evict→reopen (or a transient
+            // double-mount) of the SAME pane id, a prior coordinator's ALREADY-committed
+            // lock:false could otherwise overtake this fresh mount's first lock:true and strand
+            // the visible pane unlocked. Defer this mount's first lock (relockPending) until any
+            // pending release for this pane has landed. A fresh pane id has no entry → awaits nil
+            // → clears at once.
+            relockPending = true
+            let pane = paneID
+            Task { @MainActor [weak self] in
+                await Self.geometryReleaseTask[pane]?.value
+                guard let self, !self.stopped, self.myGeometryGeneration == gen else { return }
+                self.relockPending = false
+                if self.desiredCols >= 4, self.desiredRows >= 2 {
+                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)
+                }
+            }
             // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
             // alt screen OR any mouse-reporting program (Claude Code). It recognizes
             // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
@@ -293,11 +309,21 @@ struct LiveTerminalView: UIViewRepresentable {
             let rows = lastSentRows > 0 ? lastSentRows : desiredRows
             let inflight = resizeTask
             resizeTask = nil
-            guard cols >= 4, rows >= 2 else { Self.geometryReleaseTask[paneID] = nil; return }
+            // Leave any existing registry entry in place on this early bail (a pane that never
+            // laid out): an older release may still be in flight, and its entry is the only handle
+            // a future re-lock has to await it.
+            guard cols >= 4, rows >= 2 else { return }
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
+            // CHAIN releases: await the PREVIOUS entry first, so awaiting the newest release
+            // transitively awaits every older one. Without this, overwriting the map here would
+            // orphan an older ALREADY-committed lock:false (past its generation guard), and a later
+            // re-lock — which awaits only the newest entry — could send lock:true before that older
+            // lock:false lands, leaving the visible pane unlocked.
+            let previous = Self.geometryReleaseTask[pane]
             Self.geometryReleaseTask[pane] = Task.detached {
+                await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
                 // If a newer coordinator OR a re-show claimed this pane while we awaited, it owns
                 // the lock now — releasing would unlock a pane still on screen. Bail so its
