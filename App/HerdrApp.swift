@@ -1353,6 +1353,14 @@ struct TerminalPaneView: View {
                 keyCap(symbol: "chevron.up", key: "Up")
                 keyCap(symbol: "chevron.down", key: "Down")
                 keyCap(symbol: "chevron.right", key: "Right")
+                // End (end-of-line cursor) + the two scroll jumps for a mouse-mode agent
+                // like Claude Code: Ctrl+Home = jump to TOP, Ctrl+End = jump to BOTTOM
+                // (and re-enable auto-follow). ESC[1;5H / ESC[1;5F are the xterm Ctrl+Home
+                // / Ctrl+End sequences Claude Code's readline keymap honors (End alone is a
+                // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
+                keyCap(label: "end", key: "End")
+                rawCap(symbol: "arrow.up.to.line", sequence: "\u{1b}[1;5H")
+                rawCap(symbol: "arrow.down.to.line", sequence: "\u{1b}[1;5F")
                 keyCap(label: "tab", key: "Tab")
                 // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
                 // raw escape sequence, not a named key: delivered verbatim to the PTY.
@@ -1392,16 +1400,19 @@ struct TerminalPaneView: View {
     /// straight to the PTY via `pane.send_text` — for keys herdr's named allow-list
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
-    private func rawCap(label: String, sequence: String) -> some View {
+    private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
         Button { send(.rawSequence(sequence)) } label: {
-            Text(label).font(Typography.machine(12))
-                .foregroundStyle(Palette.textDim)
-                .padding(.horizontal, 10)
-                .frame(minWidth: 44, minHeight: 34)
-                .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            Group {
+                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
+                else { Text(label ?? "").font(Typography.machine(12)) }
+            }
+            .foregroundStyle(Palette.textDim)
+            .padding(.horizontal, 10)
+            .frame(minWidth: 44, minHeight: 34)
+            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .disabled(sending || pendingPrefill)
-        .accessibilityLabel(Text(label))
+        .accessibilityLabel(Text(label ?? symbol ?? "key"))
     }
 
     /// The sticky Ctrl toggle. Tap to arm (it highlights in the working blue); the
