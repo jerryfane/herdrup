@@ -118,6 +118,17 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
         var onNavigate: ((Int) -> Void)?
+
+        /// Per-pane geometry-ownership generation. Each `attach` for a pane id bumps this and
+        /// records the value it claimed; the releasing `lock:false` — which can be DELAYED
+        /// awaiting an in-flight `lock:true` — is skipped if a NEWER coordinator has since
+        /// claimed the same pane. Without it a fast A→B→A swap can leave the pane you are
+        /// LOOKING at unlocked: the outgoing coordinator's release lands after the newcomer's
+        /// `lock:true`, and `sendPTYSize`'s dedup then never re-locks it. Accessed only on the
+        /// main actor (attach/stop) except the post-await read in `releaseGeometryOwnership`,
+        /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
+        private static var geometryGeneration: [String: Int] = [:]
+        private var myGeometryGeneration = 0
         /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
@@ -139,6 +150,12 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
+            // Claim geometry ownership for this pane (see geometryGeneration): the newest
+            // attach wins, and an older coordinator's delayed release checks this before
+            // unlocking.
+            let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
+            Self.geometryGeneration[paneID] = gen
+            myGeometryGeneration = gen
             // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
             // alt screen OR any mouse-reporting program (Claude Code). It recognizes
             // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
@@ -209,8 +226,14 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// Horizontal swipe → move to the previous/next agent. The pane view owns the
         /// ordered list and the clamping; here we only report the direction.
+        ///
+        /// Deliberately NOT gated on `stopped`: onNavigate writes NO bytes to the PTY (it
+        /// only moves a SwiftUI @State to the neighbour), so it is safe after stop(). And
+        /// stop() also runs on an `.exited` pane that is STILL on screen — a `stopped` guard
+        /// there would strand the reader on a dead terminal with no way to page to a live
+        /// neighbour. After dismantle the recognizer dies with the view, so nothing else can
+        /// fire this.
         @objc private func handleSwipeNav(_ gr: UISwipeGestureRecognizer) {
-            guard !stopped else { return }
             onNavigate?(gr.direction == .left ? 1 : -1)
         }
 
@@ -250,8 +273,14 @@ struct LiveTerminalView: UIViewRepresentable {
             guard cols >= 4, rows >= 2 else { return }
             let client = self.client
             let pane = self.paneID
+            let myGen = self.myGeometryGeneration
             Task.detached {
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
+                // If a newer coordinator claimed this pane while we awaited (a fast A→B→A
+                // swap), it owns the lock now — releasing here would unlock a pane still on
+                // screen. Bail so the newcomer's lock:true stands.
+                let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
+                guard current == myGen else { return }
                 _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
             }
         }
@@ -583,8 +612,13 @@ struct LiveTerminalView: UIViewRepresentable {
         /// while a right-swipe further in pages to the previous agent. All other
         /// recognizers (scroll pan, double-tap, the next-agent swipe) accept every touch.
         func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            guard g === swipeAgentPrev, let v = g.view else { return true }
-            return touch.location(in: v).x > 32
+            guard g === swipeAgentPrev else { return true }
+            // Measured in WINDOW space (location(in: nil)), not the terminal view's: the view
+            // sits inside horizontal padding and the safe area, so a view-relative cutoff
+            // drifts with orientation (a landscape dead band between the system edge zone and
+            // the reserved band). 44pt is a true screen-edge band that clears the ~20-30pt
+            // system edge-pan zone with margin in both orientations.
+            return touch.location(in: nil).x > 44
         }
 
         // MARK: palette helpers
