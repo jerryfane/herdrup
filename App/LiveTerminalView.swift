@@ -145,6 +145,13 @@ struct LiveTerminalView: UIViewRepresentable {
         /// `setForeground`) so it can't pin a co-viewing desktop while hidden, and a
         /// hidden pane's async `sizeChanged` tracks the grid but never re-locks.
         private var foreground = true
+        /// True between a re-show (`setForeground(true)`) and its deferred re-lock completing —
+        /// i.e. while we're awaiting the in-flight background `lock:false` before re-taking the
+        /// lock. During this window EVERY `sendPTYSize` caller (including `sizeChanged`) must NOT
+        /// start a drain, or a `lock:true` could race the still-in-flight `lock:false` on a
+        /// separate SSH channel and leave the VISIBLE pane unlocked. The deferred re-lock clears
+        /// it and then drives toward the LIVE grid.
+        private var relockPending = false
         /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
@@ -299,18 +306,23 @@ struct LiveTerminalView: UIViewRepresentable {
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
                 _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
+                // Drop our own registry entry once settled (no newer show/hide bumped the
+                // generation), so the static map doesn't accumulate one entry per pane id opened.
+                await MainActor.run {
+                    if Coordinator.geometryGeneration[pane] == myGen { Coordinator.geometryReleaseTask[pane] = nil }
+                }
             }
         }
 
         /// Front↔background transition for a KEEP-MOUNTED pane. Only the front pane holds the
         /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing re-takes
-        /// it at the current grid. Ordering is guaranteed two ways so the VISIBLE pane is never
-        /// left unlocked: (1) bumping `geometryGeneration` makes a not-yet-sent background
-        /// `lock:false` bail on its generation guard; (2) if the release ALREADY committed to its
-        /// send, the re-lock below AWAITS that release task before issuing `lock:true`, so the
-        /// lock can't be overtaken by a reordered release. Different panes own different PTYs +
-        /// generation keys, so a background-release on one and a foreground-retake on another
-        /// never order against each other.
+        /// it. The VISIBLE pane is never left unlocked because the re-lock's `lock:true` is
+        /// guaranteed to be the LAST geometry op: (1) bumping `geometryGeneration` makes a
+        /// not-yet-sent background `lock:false` bail on its generation guard; (2) `relockPending`
+        /// makes EVERY `sendPTYSize` caller (the re-lock itself AND any `sizeChanged` in the
+        /// window) defer while we await the in-flight release, so no `lock:true` can race the
+        /// `lock:false`; the deferred re-lock then drives toward the LIVE grid. Different panes own
+        /// different PTYs + generation keys, so releases/retakes across panes never contend.
         func setForeground(_ f: Bool) {
             guard !stopped, f != foreground else { return }
             foreground = f
@@ -320,17 +332,18 @@ struct LiveTerminalView: UIViewRepresentable {
                 myGeometryGeneration = gen
                 lastSentCols = 0                // defeat sendPTYSize's dedup so the re-lock re-sends
                 lastSentRows = 0
-                guard desiredCols >= 4, desiredRows >= 2 else { return }
-                let cols = desiredCols, rows = desiredRows
+                relockPending = true            // hold off ALL sendPTYSize until the release lands
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
                     await pending?.value        // let any committed lock:false land FIRST
                     guard let self, self.foreground, !self.stopped,
                           self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
-                    self.sendPTYSize(cols: cols, rows: rows)   // re-take lock:true, now guaranteed last
+                    self.relockPending = false
+                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)   // re-take lock:true at the LIVE grid, now last
                 }
             } else {
-                releaseGeometryOwnership()   // release lock:false, keep the stream + emulator warm
+                relockPending = false           // a hide cancels any pending re-lock intent
+                releaseGeometryOwnership()       // release lock:false, keep the stream + emulator warm
             }
         }
 
@@ -463,11 +476,12 @@ struct LiveTerminalView: UIViewRepresentable {
             desiredCols = cols
             desiredRows = rows
             resizeRetries = 0        // a new target gets a fresh retry budget
-            // A backgrounded (keep-mounted) pane TRACKS the latest grid above but does not
-            // send `lock:true` while hidden — it would re-pin a co-viewing desktop to the
-            // phone's width with nobody looking. `setForeground(true)` re-locks at the
-            // tracked size when the pane returns to screen.
-            guard foreground else { return }
+            // A backgrounded pane (or one whose re-lock is still awaiting the in-flight release,
+            // `relockPending`) TRACKS the latest grid above but does not start a drain: a hidden
+            // pane would re-pin a co-viewing desktop, and a `lock:true` sent during the release
+            // window could race the `lock:false` and strand the visible pane unlocked. The
+            // deferred re-lock re-sends at the LIVE grid once the release lands.
+            guard foreground, !relockPending else { return }
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = Self.cellPixels()
             resizeTask = Task { @MainActor [weak self] in
