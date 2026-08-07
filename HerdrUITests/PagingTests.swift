@@ -53,16 +53,17 @@ final class PagingTests: XCTestCase {
 
     private enum Dir { case left, right }
 
-    /// A firm, fast horizontal flick on the terminal body at mid-height. Both directions start
-    /// well clear of the left screen edge (dx ≥ 0.45 ≫ the ~44pt edge-back zone), so the
-    /// previous-agent (rightward) swipe is never ceded to the edge-back gesture. A short press
-    /// before the drag gives the discrete `UISwipeGestureRecognizer` the velocity it needs.
+    /// A firm, FAST horizontal flick on the terminal body at mid-height. The discrete
+    /// `UISwipeGestureRecognizer` fires only on real velocity — a plain drag is read as the
+    /// scroll pan and never pages — so we drive the drag at `.fast` velocity explicitly. Both
+    /// directions start well clear of the left screen edge (dx ≥ 0.45 ≫ the ~44pt edge-back
+    /// zone), so the previous-agent (rightward) swipe is never ceded to the edge-back gesture.
     private func swipe(_ app: XCUIApplication, _ dir: Dir) {
         let startX: CGFloat = dir == .left ? 0.85 : 0.45
         let endX:   CGFloat = dir == .left ? 0.15 : 0.95
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
         let end   = app.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
-        start.press(forDuration: 0.03, thenDragTo: end)
+        start.press(forDuration: 0.0, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0.0)
         Thread.sleep(forTimeInterval: 1.2)   // let the front swap + repaint
     }
 
