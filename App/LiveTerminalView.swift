@@ -136,8 +136,45 @@ struct LiveTerminalView: UIViewRepresentable {
             pan.delegate = self
             view.addGestureRecognizer(pan)
             scrollPan = pan
+            // Double-tap → jump to the live tail. A UIKit recognizer (NOT a SwiftUI
+            // .onTapGesture, which starves the scroll pan — HerdrApp.swift note).
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.delegate = self
+            view.addGestureRecognizer(doubleTap)
+            // SUPERSEDE SwiftTerm's own double-tap (word-select): make it wait for ours to
+            // FAIL, so a double-tap jumps to the tail without starting a word selection and
+            // its lingering selection pan (which would otherwise fight the next scroll on an
+            // idle shell pane — SwiftTerm's doubleTap has no read-only guard).
+            for gr in view.gestureRecognizers ?? [] where gr !== doubleTap {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
+                    t.require(toFail: doubleTap)
+                }
+            }
             style(view)
             start()
+        }
+
+        /// Double-tap the terminal → jump to the live tail. A mouse-mode/alt agent
+        /// (Claude Code) captures the wheel and keeps its own viewport, so send it
+        /// Ctrl+End (`ESC[1;5F` → scroll-to-bottom + re-enable auto-follow) — read-only,
+        /// exactly like the scroll bytes, never a keystroke. A plain shell has native
+        /// SwiftTerm scrollback, so jump its UIScrollView to the maximum offset.
+        @objc private func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, let view else { return }
+            if view.getTerminal().isCurrentBufferAlternate || view.getTerminal().mouseMode != .off {
+                Task { @MainActor [weak self] in
+                    guard let self, !self.stopped else { return }
+                    _ = try? await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                }
+            } else {
+                // animated:false — an animated jump is cancelled mid-flight on a streaming
+                // pane (SwiftTerm's updateScroller writes the offset back and leaves
+                // userScrolling stuck true). A direct set runs contentOffset's didSet →
+                // syncYDispFromContentOffset synchronously and re-engages auto-follow.
+                let maxY = max(0, view.contentSize.height - view.bounds.height)
+                view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
+            }
         }
 
         func stop() {

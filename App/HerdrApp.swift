@@ -1038,6 +1038,21 @@ struct TerminalHomeView: View {
                         card(row)
                     }
                     .buttonStyle(.plain)
+                    // Long-press an agent → quick actions. Stop = close the pane
+                    // (`pane.close`, the only stop RPC — its inverse is start), then reload;
+                    // disclose a failure rather than swallowing it (file convention).
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            Task {
+                                do {
+                                    try await client.closePane(paneID: row.info.paneID)
+                                    await load()
+                                } catch let e {
+                                    error = "couldn't stop \(row.title): \(e.localizedDescription)"
+                                }
+                            }
+                        } label: { Label("Stop agent", systemImage: "stop.circle") }
+                    }
                 }
             }
         }
@@ -1196,6 +1211,54 @@ struct TerminalHomeView: View {
 /// a raw byte pipe. Answering a blocked agent is by typing the choice + Return;
 /// there are deliberately no Approve/Reject buttons (a fixed 1/2 mapping cannot be
 /// verified against an agent-specific menu — structured menu actions are a follow-up).
+/// A LEFT-EDGE swipe-back for a view whose nav bar is hidden (which disables UIKit's
+/// default interactive-pop). The recognizer is attached to a SHARED ANCESTOR (the window),
+/// with a delegate that recognizes SIMULTANEOUSLY with everything, so it coexists with the
+/// terminal scroll + the buttons rather than carving a touch dead-zone. This view itself
+/// never intercepts a touch (`hitTest` → nil). Fires `action` (dismiss) on a committed
+/// rightward edge swipe; removes the recognizer on teardown.
+struct EdgeSwipeBack: UIViewRepresentable {
+    let action: () -> Void
+    func makeCoordinator() -> Coord { Coord(action: action) }
+    func makeUIView(context: Context) -> UIView {
+        let v = PassthroughView()
+        DispatchQueue.main.async { context.coordinator.attach(from: v) }
+        return v
+    }
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.action = action }
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coord) { coordinator.detach() }
+
+    final class Coord: NSObject, UIGestureRecognizerDelegate {
+        var action: () -> Void
+        private weak var host: UIView?
+        private var edge: UIScreenEdgePanGestureRecognizer?
+        init(action: @escaping () -> Void) { self.action = action }
+        func attach(from v: UIView) {
+            guard edge == nil else { return }
+            guard let window = v.window else {   // not in the hierarchy yet — retry next runloop
+                DispatchQueue.main.async { [weak self, weak v] in if let v { self?.attach(from: v) } }
+                return
+            }
+            let g = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(fired(_:)))
+            g.edges = .left
+            g.delegate = self
+            window.addGestureRecognizer(g)
+            host = window; edge = g
+        }
+        func detach() { if let g = edge { host?.removeGestureRecognizer(g) }; edge = nil; host = nil }
+        @objc func fired(_ gr: UIScreenEdgePanGestureRecognizer) {
+            guard gr.state == .ended, let v = gr.view else { return }
+            if gr.translation(in: v).x > 40 || gr.velocity(in: v).x > 300 { action() }   // real swipe, not a twitch
+        }
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+    /// Never intercepts touches — the recognizer lives on the window, not this view.
+    final class PassthroughView: UIView {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+    }
+}
+
 struct TerminalPaneView: View {
     let client: HerdrClient
     let paneID: String
@@ -1297,6 +1360,9 @@ struct TerminalPaneView: View {
                 replyBar
             }
         }
+        // Left-edge swipe → back to the agents list (the hidden nav bar disables the
+        // default interactive-pop). Edge-only, so it never fights the terminal scroll.
+        .overlay(EdgeSwipeBack { dismiss() })
         .toolbar(.hidden, for: .navigationBar)
         .task(id: paneID) {
             await refresh()
