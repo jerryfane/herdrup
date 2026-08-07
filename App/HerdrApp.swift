@@ -1985,12 +1985,20 @@ final class CCScrollDriver: @unchecked Sendable {
     private var seq: UInt64 = 1
     private var offset = 0            // 0 = newest window (bottom); grows toward older
 
-    /// Called when `pane.stream` opens: keep the continuation, enter alt-screen + mouse
-    /// tracking, and render the initial window.
+    /// Called when `pane.stream` opens: keep the continuation, turn on mouse tracking on
+    /// the NORMAL (main) buffer, and render the initial window.
+    ///
+    /// Deliberately NOT the alternate screen: on the alt buffer the OLD gate
+    /// (`guard isCurrentBufferAlternate`) already passed, so an alt seed couldn't prove
+    /// the new `|| mouseMode != .off` branch is what makes a mouse-mode agent scrollable
+    /// (reviewer HIGH). Seeding mouse-mode on the NORMAL buffer exercises exactly the new
+    /// branch AND the isScrollEnabled toggle — and would be RED on the old alt-only gate
+    /// (a normal-buffer drag returned early → no wheel → static).
     func attach(_ c: AsyncThrowingStream<String, Error>.Continuation) {
         lock.lock(); cont = c; offset = 0; lock.unlock()
-        // ?1049h enter alt screen · ?1000h+?1006h mouse tracking (SGR) · ?25l hide cursor.
-        let body = "\u{1b}[?1049h\u{1b}[?1000h\u{1b}[?1006h\u{1b}[?25l" + renderWindow()
+        // ?1000h+?1006h mouse tracking (SGR), like Claude Code · ?25l hide cursor. NO
+        // ?1049h — stays on the normal buffer so `isCurrentBufferAlternate == false`.
+        let body = "\u{1b}[?1000h\u{1b}[?1006h\u{1b}[?25l" + renderWindow()
         c.yield(resetFrame(body))
     }
 

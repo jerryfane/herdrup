@@ -123,18 +123,15 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
-            // We are READ-ONLY and drive scroll ourselves (handleScrollPan → SGR wheel).
-            // Turn OFF SwiftTerm's own gesture→mouse-event generation: when an agent
-            // enables mouse reporting (Claude Code does), SwiftTerm otherwise adds a
-            // panMouseHandler that turns a drag into button press/drag/release events
-            // and COMPETES with / starves our scroll-wheel pan — so the finger-drag
-            // does nothing. Disabling it makes SwiftTerm emit FEWER upstream events
-            // (never more — read-only intact); `term.mouseMode` (what emitScroll reads)
-            // is the terminal's own state and is UNAFFECTED, so we still send wheel.
-            view.allowMouseReporting = false
             // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
-            // alt screen OR any mouse-reporting program. Simultaneous with the view's
-            // own scroll-view pan (which handles a plain shell's native scrollback).
+            // alt screen OR any mouse-reporting program (Claude Code). It recognizes
+            // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
+            // RecognizeSimultaneouslyWith:)` returns true below, and UIKit guarantees
+            // simultaneous recognition when EITHER delegate says yes — so SwiftTerm's
+            // mouse-pan (which has no delegate) cannot starve this one, and any mouse
+            // button/motion events it emits are discarded by our no-op `send` delegate
+            // (read-only). We therefore do NOT disable `allowMouseReporting` — leaving it
+            // at its default keeps SwiftTerm's selection-clear-on-linefeed working.
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
             pan.delegate = self
             view.addGestureRecognizer(pan)
@@ -399,6 +396,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// never a keystroke — so the keyboard stays fully blocked.
         @objc private func handleScrollPan(_ gr: UIPanGestureRecognizer) {
             guard !stopped, let view else { return }   // teardown began — send nothing
+            // ALWAYS restore native scroll when the gesture ends — BEFORE the buffer/mouse
+            // gate below, because that state can flip DURING a drag (an agent can exit the
+            // alt screen or turn mouse mode off). If this restore lived under the gate, a
+            // mid-drag flip would make the gate return early and strand
+            // isScrollEnabled=false, killing native scroll permanently (reviewer HIGH).
+            if gr.state == .ended || gr.state == .cancelled || gr.state == .failed {
+                view.isScrollEnabled = true   // no-op unless a .began below disabled it
+            }
             let term = view.getTerminal()
             // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
             guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
@@ -421,8 +426,6 @@ struct LiveTerminalView: UIViewRepresentable {
                 scrollAccum -= CGFloat(ticks) * line
                 emitScroll(up: ticks > 0, count: min(abs(ticks), 4),
                            at: gr.location(in: view), term: term)
-            case .ended, .cancelled, .failed:
-                view.isScrollEnabled = true   // restore native scroll (no-op unless we disabled it)
             default:
                 break
             }
