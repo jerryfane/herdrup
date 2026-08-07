@@ -428,7 +428,14 @@ struct LiveTerminalView: UIViewRepresentable {
                 let ticks = Int(scrollAccum / line)
                 guard ticks != 0 else { return }
                 scrollAccum -= CGFloat(ticks) * line
-                emitScroll(up: ticks > 0, count: min(abs(ticks), 4),
+                // Emit ONE wheel tick per gesture frame (not a coalesced burst): a
+                // mouse-mode agent like Claude Code accelerates its own scroll by the
+                // GAP between wheel events, so 4 events slammed into one send arrive
+                // ~simultaneously and trip its fast-scroll cap (~36 lines/tick) — the
+                // jumpy leaps. One-per-frame spaces them so its gentle ~3-line regime
+                // applies → smooth, finger-proportional (its own accel still gives fling
+                // speed). scrollAccum already carries the leftover for the next frame.
+                emitScroll(up: ticks > 0, count: 1,
                            at: gr.location(in: view), term: term)
             default:
                 break
