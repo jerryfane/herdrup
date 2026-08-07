@@ -38,17 +38,25 @@ packages:
   # The VT emulator that renders the live terminal (#40). Added to the APP target
   # ONLY — never to Package.swift/HerdrKit, which must stay UIKit-free and
   # Linux-buildable (SwiftTerm is UIKit/AppKit). We use SwiftTerm's default
-  # CoreText renderer, NOT its Metal backend. Pinned to v1.11.2 — the NEWEST tag
-  # that predates the bundled `Shaders.metal` (added in v1.12.0): Xcode 26 makes
-  # the Metal shader-compiler toolchain a separate download the local buildbox
-  # lacks, so a metal-bearing SwiftTerm fails `CompileMetalFile` there. (SwiftTerm
-  # itself only drops the shader when GITHUB_ACTIONS=true, which reaches the SPM
-  # manifest on GH runners but not the local Mac — hence a metal-free pin builds on
-  # BOTH.) iOS floor is under the app's. xcodegen's key is `exactVersion` (SwiftPM's
+  # CoreText renderer, NOT its Metal backend.
+  #
+  # v1.15.0 (was 1.11.2): 1.11.2's iOS `updateScroller()` force-pinned contentOffset
+  # to the bottom every frame with no contentOffset→yDisp sync, so finger-scroll of
+  # the scrollback was BROKEN — a library bug (SwiftTerm issue #486) fixed in v1.14.0
+  # (PR #587: contentOffset override + syncYDispFromContentOffset + terminal.userScrolling).
+  # No app-side workaround exists (proven by ~7 builds); the fix is this upgrade.
+  #
+  # METAL: v1.12.0+ bundles `Apple/Metal/Shaders.metal` UNCONDITIONALLY (v1.15.0
+  # Package.swift `.process("Apple/Metal/Shaders.metal")`; the GITHUB_ACTIONS check
+  # only gates benchmarks now — no shader opt-out). Xcode 26 makes the Metal
+  # shader-compiler toolchain a separate download; both CI and the local buildbox run
+  # `xcodebuild -downloadComponent MetalToolchain` so `CompileMetalFile` succeeds. We
+  # still use CoreText at runtime — the shader is compiled but unused.
+  # iOS floor is under the app's. xcodegen's key is `exactVersion` (SwiftPM's
   # `exact:` is Package.swift syntax and xcodegen rejects it).
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm.git
-    exactVersion: "1.11.2"
+    exactVersion: "1.15.0"
 
 targets:
   Herdr:
@@ -69,6 +77,13 @@ targets:
       # depend on it so the Linux build/test of the protocol layer stays intact.
       - package: SwiftTerm
         product: SwiftTerm
+    # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
+    # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
+    # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
+    # archive) is unaffected.
+    scheme:
+      testTargets:
+        - HerdrUITests
     info:
       path: App/Info.plist
       properties:
@@ -145,3 +160,23 @@ targets:
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"
+
+  # UI-test bundle — the automated SCROLL RECEIPT. Launches the app in the
+  # HERDR_SCREENSHOT_MOCK=scroll pane (a real SwiftTerm view fed 200 lines), swipes it,
+  # and asserts the rendered content MOVED (proving the SwiftTerm 1.15.0 scroll fix on a
+  # simulator — the on-device gesture proof JARVIS rule 47874 requires). Simulator only,
+  # never signed, never archived. GENERATE_INFOPLIST_FILE builds the test bundle plist.
+  HerdrUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: HerdrUITests
+    dependencies:
+      - target: Herdr
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.uitests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: NO
