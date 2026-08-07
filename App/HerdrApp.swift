@@ -241,6 +241,12 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "claude",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .paging:
+            // Three distinctively-named agents in the real keep-mounted container. A swipe
+            // fronts the neighbour and the header heading changes (ALFA→BRAVO→ALFA) — the
+            // swipe-between-agents receipt. The pane ids are NOT in the mock agent.list, so
+            // reresolveAgent leaves the seeded identity in place and the header stays stable.
+            PagingTestHarness(client: mockClient)
         }
     }
     #endif
@@ -2018,8 +2024,56 @@ private extension View {
 /// otherwise launches to the empty ConnectView). Enable by launching with env
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
+#if DEBUG
+/// Swipe-between-agents receipt harness (`HERDR_SCREENSHOT_MOCK=paging`). Holds three agents
+/// in the REAL `PaneKeepAliveContainer`, mirroring `TerminalHomeView`'s open/navigate, so an
+/// XCUITest swipe pages the front pane and the header heading changes. No LRU eviction here —
+/// three panes stay mounted so swipe-back is a proven warm hit.
+struct PagingTestHarness: View {
+    let client: HerdrClient
+    @State private var slots: [PaneSlot]
+    @State private var frontID: String?
+
+    init(client: HerdrClient) {
+        self.client = client
+        let sibs = [
+            MockTransport.pagingAgent(kind: "ALFA", pane: "pg:a"),
+            MockTransport.pagingAgent(kind: "BRAVO", pane: "pg:b"),
+            MockTransport.pagingAgent(kind: "CHARLIE", pane: "pg:c"),
+        ]
+        _slots = State(initialValue: [PaneSlot(paneID: "pg:a", title: "ALFA", agent: sibs[0],
+                                               initialReply: "", siblings: sibs)])
+        _frontID = State(initialValue: "pg:a")
+    }
+
+    var body: some View {
+        PaneKeepAliveContainer(
+            client: client, slots: slots, frontID: frontID,
+            onClose: { frontID = nil },
+            onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
+    }
+
+    private func open(_ slot: PaneSlot) {
+        if let i = slots.firstIndex(where: { $0.paneID == slot.paneID }) {
+            let existing = slots.remove(at: i); slots.append(existing)
+        } else {
+            slots.append(slot)
+        }
+        frontID = slot.paneID
+    }
+
+    private func navigate(from slot: PaneSlot, delta: Int) {
+        guard let i = slot.siblings.firstIndex(where: { $0.paneID == frontID }),
+              slot.siblings.indices.contains(i + delta) else { return }
+        let next = slot.siblings[i + delta]
+        open(PaneSlot(paneID: next.paneID, title: next.displayName, agent: next,
+                      initialReply: "", siblings: slot.siblings))
+    }
+}
+#endif
+
 enum ScreenshotMock {
-    case list, pane, settings, newAgent, scroll, ccscroll
+    case list, pane, settings, newAgent, scroll, ccscroll, paging
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -2037,6 +2091,9 @@ enum ScreenshotMock {
         // agent redraws shifted content when it RECEIVES an SGR wheel event — so a swipe
         // proves drag → app emits wheel → content moves.
         case "ccscroll": return .ccscroll
+        // `paging` drives the swipe-between-agents receipt: three distinctively-named agents
+        // in the keep-mounted container; a swipe fronts the neighbour and the header changes.
+        case "paging": return .paging
         default: return .list
         }
     }
@@ -2148,6 +2205,14 @@ struct MockTransport: HerdrTransport {
     static let demoPaneAgent: AgentInfo? = try? JSONDecoder().decode(
         AgentInfo.self,
         from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
+
+    /// A distinctively-named agent for the `paging` receipt. Its header heading renders
+    /// "<kind> · <kind>" (agent kind · cwd folder), so an XCUITest can assert the header
+    /// CHANGED after a swipe fronts the neighbour. Force-decoded: the literal is fixed + valid.
+    static func pagingAgent(kind: String, pane: String) -> AgentInfo {
+        try! JSONDecoder().decode(AgentInfo.self, from: Data(
+            #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
+    }
 }
 
 /// Stateful stand-in for a Claude-Code pane in the `ccscroll` UI test. It puts the REAL
