@@ -222,6 +222,15 @@ struct RootView: View {
             NewAgentView(client: mockClient,
                          initialFolder: "/root/herdr-ios", initialKind: "codex",
                          initialTask: "Fix the failing schema artifact test and push")
+        case .scroll:
+            // A REAL SwiftTerm pane (not a stub) fed 200 lines of scrollback, so the
+            // HerdrUITests swipe exercises the actual library scroll path — the only
+            // test that proves the SwiftTerm 1.15.0 scroll fix on device.
+            NavigationStack {
+                TerminalPaneView(client: HerdrClient(transport: MockTransport(scrollback: true)),
+                                 paneID: "w1:p1", title: "scrolltest",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         }
     }
     #endif
@@ -1820,7 +1829,7 @@ private extension View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 enum ScreenshotMock {
-    case list, pane, settings, newAgent
+    case list, pane, settings, newAgent, scroll
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -1830,6 +1839,9 @@ enum ScreenshotMock {
         case "pane": return .pane
         case "settings": return .settings
         case "newagent": return .newAgent
+        // `scroll` drives the HerdrUITests scroll receipt: a real SwiftTerm pane seeded
+        // with 200 distinct lines of scrollback so a swipe visibly moves the content.
+        case "scroll": return .scroll
         default: return .list
         }
     }
@@ -1839,6 +1851,11 @@ enum ScreenshotMock {
 /// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
 /// compiled on Linux) — keep the two fixtures in sync.
 struct MockTransport: HerdrTransport {
+    /// When true, `pane.stream` seeds MANY lines of scrollback (for the UI scroll
+    /// receipt) instead of the short screenshot seed. Default false keeps the
+    /// buildbox screenshot fixtures unchanged.
+    var scrollback = false
+
     func roundTrip(_ requestLine: String) async throws -> String {
         if requestLine.contains("agent.list") { return Self.agentList }
         if requestLine.contains("agent.read") { return Self.agentRead }
@@ -1848,16 +1865,34 @@ struct MockTransport: HerdrTransport {
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         // `pane.stream` (the live terminal): reply with the stream_started ack, then
-        // a full-screen reset seed, then finish — so the DEBUG pane screenshot shows
-        // a rendered SwiftTerm terminal, not an empty one.
+        // a reset seed, then finish — so the DEBUG pane shows a rendered SwiftTerm
+        // terminal, not an empty one. The scrollback seed (UI test) feeds 200 lines so
+        // there is real history to scroll; the default seed is the short screenshot one.
         if requestLine.contains("pane.stream") {
+            let reset = scrollback ? Self.scrollbackResetFrame() : Self.paneStreamReset
             return AsyncThrowingStream { continuation in
                 continuation.yield(Self.paneStreamAck)
-                continuation.yield(Self.paneStreamReset)
+                continuation.yield(reset)
                 continuation.finish()
             }
         }
         return AsyncThrowingStream { $0.finish() }
+    }
+
+    /// A reset frame carrying 200 DISTINCT numbered lines so the terminal has real
+    /// scrollback and a swipe visibly changes the rendered content. Hides the cursor
+    /// (ESC[?25l) so an un-swiped terminal renders byte-identically frame to frame —
+    /// which makes the UI test's "did the content move?" an exact before/after image
+    /// compare with no blinking-cursor false positive. Same reset shape as
+    /// `paneStreamReset`; base64 built at runtime (DEBUG/UI-test-only, not a fixture).
+    static func scrollbackResetFrame() -> String {
+        var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        for i in 1...200 {
+            body += String(format: "SCROLLTEST line %03d  the quick brown fox jumps over the lazy dog\r\n", i)
+        }
+        body += "SCROLLTEST end — swipe down to reveal earlier lines"
+        let b64 = Data(body.utf8).base64EncodedString()
+        return "{\"stream\":\"pane.bytes\",\"frame\":\"reset\",\"seq\":0,\"epoch\":7,\"cols\":80,\"rows\":24,\"data_b64\":\"\(b64)\"}"
     }
 
     // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
