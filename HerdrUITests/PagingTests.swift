@@ -27,20 +27,35 @@ final class PagingTests: XCTestCase {
             "Paging harness did not open on the first agent (ALFA).")
         attach(app, "01-alfa")
 
-        // Swipe LEFT → next agent (BRAVO) is now the FRONT (hittable) pane. If the swipe never
-        // paged, BRAVO would be absent and ALFA would still be the hittable front → fail.
-        swipe(app, .left)
-        XCTAssertTrue(frontIs(app, "BRAVO"),
+        // Swipe LEFT → next agent (BRAVO) becomes the FRONT (hittable) pane. The discrete swipe
+        // recognizer is velocity-sensitive, so retry the flick until it lands (a swipe that never
+        // fires leaves ALFA fronted; a swipe that pages makes BRAVO the hittable front). Retrying
+        // can only ADVANCE when it actually fires, and stops the instant BRAVO is front, so it
+        // cannot overshoot.
+        XCTAssertTrue(pageUntilFront(app, .left, to: "BRAVO"),
             "Swipe-left did not page to the next agent (BRAVO).")
         XCTAssertFalse(frontIs(app, "ALFA", timeout: 1),
             "ALFA is still the front pane after paging to BRAVO — the swap did not front BRAVO.")
         attach(app, "02-bravo")
 
         // Swipe RIGHT → previous agent (back to ALFA), a warm keep-mounted hit that re-fronts it.
-        swipe(app, .right)
-        XCTAssertTrue(frontIs(app, "ALFA"),
+        XCTAssertTrue(pageUntilFront(app, .right, to: "ALFA"),
             "Swipe-right did not page back to the previous agent (ALFA).")
         attach(app, "03-alfa-again")
+    }
+
+    /// Flick in `dir` until the named agent is the hittable front pane, or give up after a few
+    /// tries. Each attempt only pages when the discrete recognizer actually fires, and returns as
+    /// soon as `to` is front — so it recovers a dropped flick without overshooting past the target.
+    private func pageUntilFront(_ app: XCUIApplication, _ dir: Dir, to name: String) -> Bool {
+        // A generous per-attempt wait (the neighbour's header renders within ~1s of a fired
+        // flick), so a retry fires only when the flick genuinely dropped — never overshooting a
+        // target that just hadn't rendered yet.
+        for _ in 0..<3 {
+            swipe(app, dir)
+            if frontIs(app, name, timeout: 4) { return true }
+        }
+        return false
     }
 
     // MARK: helpers
