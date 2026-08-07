@@ -56,6 +56,10 @@ struct PaneKeepAliveContainer: View {
                     .opacity(isFront ? 1 : 0)
                     .allowsHitTesting(isFront)
                     .zIndex(isFront ? 1 : 0)
+                    // A hidden warm pane is invisible AND inert — keep it out of the
+                    // accessibility tree too (VoiceOver shouldn't read an offscreen pane; it
+                    // also makes the paging XCUITest's assertions unambiguous).
+                    .accessibilityHidden(!isFront)
             }
         }
     }
