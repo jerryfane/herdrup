@@ -12,7 +12,7 @@ import HerdrKit
 /// READ-ONLY for keyboard/typed input: the view never becomes first responder (no
 /// keyboard) and its delegate `send` is a no-op, so SwiftTerm keystrokes are never
 /// routed to the PTY. Command/message input stays exclusively on the reply/Send +
-/// keycap affordances in `TerminalPaneView` (`sendText`/`sendKeys`/`prompt`). The
+/// keycap affordances in `TerminalPaneContent` (`sendText`/`sendKeys`/`prompt`). The
 /// ONE narrow input exception is SCROLL: a pan on the alternate screen sends
 /// constrained wheel/arrow sequences to the agent so its full-screen view can scroll
 /// (see `handleScrollPan`) — never a keystroke, never arbitrary typed text.
@@ -32,6 +32,12 @@ struct LiveTerminalView: UIViewRepresentable {
     /// there is no list context to page through. Refreshed on every update so the
     /// closure never captures a stale view.
     var onNavigate: ((Int) -> Void)? = nil
+    /// Whether this pane is the one on screen. A keep-mounted pane that goes offscreen
+    /// (another agent is fronted, or we're back on the list) stays subscribed but must
+    /// RELEASE the PTY width-lock so it stops pinning a co-viewing desktop to the phone's
+    /// width while nobody's looking; it re-takes the lock when fronted again. Only the
+    /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
+    var isForeground: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -44,6 +50,7 @@ struct LiveTerminalView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
+        context.coordinator.setForeground(isForeground)
     }
 
     static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
@@ -129,6 +136,30 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
         private static var geometryGeneration: [String: Int] = [:]
         private var myGeometryGeneration = 0
+        /// The in-flight background `lock:false` release per pane, so a re-show
+        /// (`setForeground(true)`) can AWAIT it before re-locking — the re-lock can then never
+        /// be overtaken by a reordered release that would leave the visible pane unlocked.
+        private static var geometryReleaseTask: [String: Task<Void, Never>] = [:]
+        /// Whether this (keep-mounted) pane is currently on screen. Only the FOREGROUND
+        /// pane holds the PTY width-lock; a backgrounded pane releases it (see
+        /// `setForeground`) so it can't pin a co-viewing desktop while hidden, and a
+        /// hidden pane's async `sizeChanged` tracks the grid but never re-locks.
+        private var foreground = true
+        /// True between a re-show (`setForeground(true)`) and its deferred re-lock completing —
+        /// i.e. while we're awaiting the in-flight background `lock:false` before re-taking the
+        /// lock. During this window EVERY `sendPTYSize` caller (including `sizeChanged`) must NOT
+        /// start a drain, or a `lock:true` could race the still-in-flight `lock:false` on a
+        /// separate SSH channel and leave the VISIBLE pane unlocked. The deferred re-lock clears
+        /// it and then drives toward the LIVE grid.
+        private var relockPending = false
+        /// The generation whose lock has already been handed back (a `lock:false` release). A
+        /// generation is released AT MOST ONCE: `releaseGeometryOwnership` runs from both
+        /// `setForeground(false)` and `stop()` (which itself can run twice — `.exited` then
+        /// dismantle — and follows a hide at the SAME generation), and none of those bump the
+        /// generation. Without this idempotence a second same-generation release would fire a
+        /// redundant `lock:false` (re-resizing the shared PTY) AND let the first release's
+        /// generation-keyed self-prune clobber the newer release's registry handle.
+        private var releasedGeneration: Int?
         /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
@@ -156,6 +187,22 @@ struct LiveTerminalView: UIViewRepresentable {
             let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
             Self.geometryGeneration[paneID] = gen
             myGeometryGeneration = gen
+            // Symmetric with setForeground(true): on a fast evict→reopen (or a transient
+            // double-mount) of the SAME pane id, a prior coordinator's ALREADY-committed
+            // lock:false could otherwise overtake this fresh mount's first lock:true and strand
+            // the visible pane unlocked. Defer this mount's first lock (relockPending) until any
+            // pending release for this pane has landed. A fresh pane id has no entry → awaits nil
+            // → clears at once.
+            relockPending = true
+            let pane = paneID
+            Task { @MainActor [weak self] in
+                await Self.geometryReleaseTask[pane]?.value   // let a prior coordinator's release land first
+                guard let self, !self.stopped, self.myGeometryGeneration == gen else { return }
+                self.relockPending = false
+                if self.desiredCols >= 4, self.desiredRows >= 2 {
+                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)
+                }
+            }
             // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
             // alt screen OR any mouse-reporting program (Claude Code). It recognizes
             // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
@@ -270,18 +317,77 @@ struct LiveTerminalView: UIViewRepresentable {
             let rows = lastSentRows > 0 ? lastSentRows : desiredRows
             let inflight = resizeTask
             resizeTask = nil
+            // Leave any existing registry entry in place on this early bail (a pane that never
+            // laid out): an older release may still be in flight, and its entry is the only handle
+            // a future re-lock has to await it.
             guard cols >= 4, rows >= 2 else { return }
+            // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
+            // same-generation release — stop() after a hide, or stop()'s .exited+dismantle double
+            // call — is a no-op: after a hide the drain is already nil'd and sendPTYSize is gated,
+            // so there is nothing left to release, and skipping it prevents both a redundant
+            // lock:false and the prune-clobber of a newer chained release's registry handle.
+            guard releasedGeneration != myGeometryGeneration else { return }
+            releasedGeneration = myGeometryGeneration
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
-            Task.detached {
+            // CHAIN releases: await the PREVIOUS entry first, so awaiting the newest release
+            // transitively awaits every older one. Without this, overwriting the map here would
+            // orphan an older ALREADY-committed lock:false (past its generation guard), and a later
+            // re-lock — which awaits only the newest entry — could send lock:true before that older
+            // lock:false lands, leaving the visible pane unlocked.
+            let previous = Self.geometryReleaseTask[pane]
+            Self.geometryReleaseTask[pane] = Task.detached {
+                await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
-                // If a newer coordinator claimed this pane while we awaited (a fast A→B→A
-                // swap), it owns the lock now — releasing here would unlock a pane still on
-                // screen. Bail so the newcomer's lock:true stands.
+                // If a newer coordinator OR a re-show claimed this pane while we awaited, it owns
+                // the lock now — releasing would unlock a pane still on screen. Bail so its
+                // lock:true stands. (And if this release DID commit before the re-show bumped the
+                // generation, `setForeground(true)` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
                 _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
+                // Best-effort: drop our own registry entry once settled (no newer show/hide/attach
+                // bumped the generation). This only runs when the release actually SENT; a release
+                // that bailed on the generation guard above leaves the entry for the newer owner
+                // (which is correct — clearing it there could clobber a live newer release). So the
+                // map holds at most one entry per pane id, overwritten by the next release.
+                await MainActor.run {
+                    if Coordinator.geometryGeneration[pane] == myGen { Coordinator.geometryReleaseTask[pane] = nil }
+                }
+            }
+        }
+
+        /// Front↔background transition for a KEEP-MOUNTED pane. Only the front pane holds the
+        /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing re-takes
+        /// it. The VISIBLE pane is never left unlocked because the re-lock's `lock:true` is
+        /// guaranteed to be the LAST geometry op: (1) bumping `geometryGeneration` makes a
+        /// not-yet-sent background `lock:false` bail on its generation guard; (2) `relockPending`
+        /// makes EVERY `sendPTYSize` caller (the re-lock itself AND any `sizeChanged` in the
+        /// window) defer while we await the in-flight release, so no `lock:true` can race the
+        /// `lock:false`; the deferred re-lock then drives toward the LIVE grid. Different panes own
+        /// different PTYs + generation keys, so releases/retakes across panes never contend.
+        func setForeground(_ f: Bool) {
+            guard !stopped, f != foreground else { return }
+            foreground = f
+            if f {
+                let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
+                Self.geometryGeneration[paneID] = gen
+                myGeometryGeneration = gen
+                lastSentCols = 0                // defeat sendPTYSize's dedup so the re-lock re-sends
+                lastSentRows = 0
+                relockPending = true            // hold off ALL sendPTYSize until the release lands
+                let pending = Self.geometryReleaseTask[paneID]
+                Task { @MainActor [weak self] in
+                    await pending?.value        // let any committed lock:false land FIRST
+                    guard let self, self.foreground, !self.stopped,
+                          self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
+                    self.relockPending = false
+                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)   // re-take lock:true at the LIVE grid, now last
+                }
+            } else {
+                relockPending = false           // a hide cancels any pending re-lock intent
+                releaseGeometryOwnership()       // release lock:false, keep the stream + emulator warm
             }
         }
 
@@ -414,10 +520,20 @@ struct LiveTerminalView: UIViewRepresentable {
             desiredCols = cols
             desiredRows = rows
             resizeRetries = 0        // a new target gets a fresh retry budget
+            // A backgrounded pane (or one whose re-lock is still awaiting the in-flight release,
+            // `relockPending`) TRACKS the latest grid above but does not start a drain: a hidden
+            // pane would re-pin a co-viewing desktop, and a `lock:true` sent during the release
+            // window could race the `lock:false` and strand the visible pane unlocked. The
+            // deferred re-lock re-sends at the LIVE grid once the release lands.
+            guard foreground, !relockPending else { return }
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = Self.cellPixels()
             resizeTask = Task { @MainActor [weak self] in
-                while let self, !Task.isCancelled,
+                // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
+                // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
+                // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then
+                // proceeds to `lock:false`.
+                while let self, !Task.isCancelled, self.foreground,
                       self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
