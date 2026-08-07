@@ -799,6 +799,10 @@ struct TerminalHomeView: View {
     /// slot's view unmounts ⇒ its stream/SSH connection closes). See `open(_:)`.
     @State private var slots: [PaneSlot] = []
     @State private var frontID: String?
+    /// Pane ids ever OBSERVED live in `agent.list`. A slot is pruned only once it has been seen
+    /// live and then vanishes — so a still-BOOTING spawn pane (absent from agent.list by design
+    /// while its composer comes up) is never reaped mid-delivery.
+    @State private var everLive: Set<String> = []
     /// A freshly-spawned pane held while the New-agent cover animates away, then opened in the
     /// cover's onDismiss (fronting a keep-mounted pane, not a nav push, so the historically
     /// fragile "push while dismissing a cover" no longer applies — but the deferral is kept as
@@ -840,8 +844,16 @@ struct TerminalHomeView: View {
     /// (removal unmounts it → `Coordinator.stop()` closes its stream + SSH connection).
     private func open(_ slot: PaneSlot) {
         if let i = slots.firstIndex(where: { $0.paneID == slot.paneID }) {
+            // Already mounted → keep it warm (instant), but REFRESH its metadata: a re-open from
+            // the list carries a fresh title/agent/roster. Identity is the pane id (`.id`), so
+            // replacing the struct does NOT remount the pane or reset its @State. Guard so a spawn
+            // re-open (`siblings:[]`, which must not page mid-delivery) can't clobber a good
+            // roster, and keep the ORIGINAL one-shot prefill.
             let existing = slots.remove(at: i)
-            slots.append(existing)          // keep the LIVE mounted slot; do not replace it
+            slots.append(PaneSlot(paneID: existing.paneID, title: slot.title,
+                                  agent: slot.agent ?? existing.agent,
+                                  initialReply: existing.initialReply,
+                                  siblings: slot.siblings.isEmpty ? existing.siblings : slot.siblings))
         } else {
             slots.append(slot)
             while slots.count > Self.maxLivePanes {
@@ -1252,10 +1264,13 @@ struct TerminalHomeView: View {
             rejectedFingerprint = nil
             trustFailed = false
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
-            // terminal lingers warm — but never the FRONT pane, so the reader isn't yanked off
-            // an exited terminal they may still be looking at.
+            // terminal lingers warm — but only a slot that was ONCE seen live and has now
+            // vanished (never a still-booting spawn pane, which is absent by design while its
+            // composer comes up — pruning it would cancel its one-shot prefill delivery). Never
+            // prune the FRONT pane, so the reader isn't yanked off an exited terminal.
             let live = Set(fetched.map(\.paneID))
-            slots.removeAll { $0.paneID != frontID && !live.contains($0.paneID) }
+            everLive.formUnion(live)
+            slots.removeAll { $0.paneID != frontID && everLive.contains($0.paneID) && !live.contains($0.paneID) }
         } catch {
             let rejected: String?
             if let transportError = error as? TransportError,

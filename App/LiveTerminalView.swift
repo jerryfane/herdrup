@@ -136,6 +136,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
         private static var geometryGeneration: [String: Int] = [:]
         private var myGeometryGeneration = 0
+        /// The in-flight background `lock:false` release per pane, so a re-show
+        /// (`setForeground(true)`) can AWAIT it before re-locking — the re-lock can then never
+        /// be overtaken by a reordered release that would leave the visible pane unlocked.
+        private static var geometryReleaseTask: [String: Task<Void, Never>] = [:]
         /// Whether this (keep-mounted) pane is currently on screen. Only the FOREGROUND
         /// pane holds the PTY width-lock; a backgrounded pane releases it (see
         /// `setForeground`) so it can't pin a co-viewing desktop while hidden, and a
@@ -282,15 +286,16 @@ struct LiveTerminalView: UIViewRepresentable {
             let rows = lastSentRows > 0 ? lastSentRows : desiredRows
             let inflight = resizeTask
             resizeTask = nil
-            guard cols >= 4, rows >= 2 else { return }
+            guard cols >= 4, rows >= 2 else { Self.geometryReleaseTask[paneID] = nil; return }
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
-            Task.detached {
+            Self.geometryReleaseTask[pane] = Task.detached {
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
-                // If a newer coordinator claimed this pane while we awaited (a fast A→B→A
-                // swap), it owns the lock now — releasing here would unlock a pane still on
-                // screen. Bail so the newcomer's lock:true stands.
+                // If a newer coordinator OR a re-show claimed this pane while we awaited, it owns
+                // the lock now — releasing would unlock a pane still on screen. Bail so its
+                // lock:true stands. (And if this release DID commit before the re-show bumped the
+                // generation, `setForeground(true)` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
                 _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
@@ -298,24 +303,32 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// Front↔background transition for a KEEP-MOUNTED pane. Only the front pane holds the
-        /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing
-        /// re-takes it at the current grid. Reuses `releaseGeometryOwnership` + the
-        /// `geometryGeneration` guard, so a hide's still-in-flight `lock:false` that lands
-        /// after a re-show is skipped (its generation is now stale) and the visible pane is
-        /// never left unlocked. Different panes own different PTYs, so a background-release on
-        /// one and a foreground-retake on another never order against each other.
+        /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing re-takes
+        /// it at the current grid. Ordering is guaranteed two ways so the VISIBLE pane is never
+        /// left unlocked: (1) bumping `geometryGeneration` makes a not-yet-sent background
+        /// `lock:false` bail on its generation guard; (2) if the release ALREADY committed to its
+        /// send, the re-lock below AWAITS that release task before issuing `lock:true`, so the
+        /// lock can't be overtaken by a reordered release. Different panes own different PTYs +
+        /// generation keys, so a background-release on one and a foreground-retake on another
+        /// never order against each other.
         func setForeground(_ f: Bool) {
             guard !stopped, f != foreground else { return }
             foreground = f
             if f {
-                // Claim a new generation (supersede any background lock:false still in flight),
-                // then re-lock at the tracked grid — reset lastSent to defeat sendPTYSize's dedup.
                 let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
                 Self.geometryGeneration[paneID] = gen
                 myGeometryGeneration = gen
-                lastSentCols = 0
+                lastSentCols = 0                // defeat sendPTYSize's dedup so the re-lock re-sends
                 lastSentRows = 0
-                if desiredCols >= 4, desiredRows >= 2 { sendPTYSize(cols: desiredCols, rows: desiredRows) }
+                guard desiredCols >= 4, desiredRows >= 2 else { return }
+                let cols = desiredCols, rows = desiredRows
+                let pending = Self.geometryReleaseTask[paneID]
+                Task { @MainActor [weak self] in
+                    await pending?.value        // let any committed lock:false land FIRST
+                    guard let self, self.foreground, !self.stopped,
+                          self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
+                    self.sendPTYSize(cols: cols, rows: rows)   // re-take lock:true, now guaranteed last
+                }
             } else {
                 releaseGeometryOwnership()   // release lock:false, keep the stream + emulator warm
             }
@@ -458,7 +471,11 @@ struct LiveTerminalView: UIViewRepresentable {
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = Self.cellPixels()
             resizeTask = Task { @MainActor [weak self] in
-                while let self, !Task.isCancelled,
+                // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
+                // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
+                // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then
+                // proceeds to `lock:false`.
+                while let self, !Task.isCancelled, self.foreground,
                       self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
