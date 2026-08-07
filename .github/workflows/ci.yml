@@ -1,0 +1,96 @@
+# Simulator compile-check + UI scroll-test for herdr-ios. Runs on feature-branch
+# pushes and PRs — NO signing secrets, NO TestFlight upload (that stays in
+# testflight.yml, gated to main + v* tags). This is the fast feedback loop for the
+# SwiftTerm 1.15.0 upgrade: it proves the Metal-bearing SwiftTerm compiles (with the
+# downloaded Metal toolchain) and that the app builds against the 1.15.0 API, then
+# runs the XCUITest that drags a scrollback-seeded REAL SwiftTerm and asserts the
+# content moves (the on-device gesture receipt JARVIS rule 47874 requires).
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-uitest:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode and assert the iOS SDK
+        run: |
+          echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "selecting: $LATEST"; sudo xcode-select -s "$LATEST"; xcodebuild -version
+          SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator[0-9.]+' | sed 's/iphonesimulator//' | sort -V | tail -1)
+          echo "newest iOS simulator SDK: ${SDK:-<none>}"
+
+      - name: Download the Metal toolchain
+        # SwiftTerm >=1.12.0 bundles Apple/Metal/Shaders.metal unconditionally; Xcode 26
+        # ships the Metal shader compiler as a separate component. Idempotent — a no-op
+        # if already present. Without it `CompileMetalFile` fails.
+        run: |
+          xcodebuild -downloadComponent MetalToolchain 2>&1 | tail -20 || \
+            echo "::warning::-downloadComponent MetalToolchain returned nonzero (may already be present); continuing"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Pick a simulator destination
+        run: |
+          DEST=$(xcrun simctl list devices available | grep -oE 'iPhone [0-9]+' | sort -V | tail -1)
+          echo "SIM_NAME=${DEST:-iPhone 15}" >> "$GITHUB_ENV"
+          echo "using simulator: ${DEST:-iPhone 15}"
+
+      - name: Build for simulator (compile check — SwiftTerm 1.15.0 + Metal + app)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Herdr.xcodeproj -scheme Herdr \
+            -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -derivedDataPath .build-dd \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build \
+            -project Herdr.xcodeproj -scheme Herdr \
+            -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -derivedDataPath .build-dd \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run UI scroll-test (the gesture receipt)
+        # Runs only if the HerdrUITests target exists in the generated project.
+        run: |
+          if xcodebuild -project Herdr.xcodeproj -list 2>/dev/null | grep -q HerdrUITests; then
+            set -o pipefail
+            xcodebuild test \
+              -project Herdr.xcodeproj -scheme Herdr \
+              -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+              -only-testing:HerdrUITests \
+              -derivedDataPath .build-dd \
+              -resultBundlePath TestResults.xcresult \
+              CODE_SIGNING_ALLOWED=NO | xcbeautify || \
+            xcodebuild test \
+              -project Herdr.xcodeproj -scheme Herdr \
+              -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+              -only-testing:HerdrUITests \
+              -derivedDataPath .build-dd \
+              -resultBundlePath TestResults.xcresult \
+              CODE_SIGNING_ALLOWED=NO
+          else
+            echo "HerdrUITests target not present yet — skipping (compile-check only run)."
+          fi
+
+      - name: Upload test result bundle (scroll receipt screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scroll-test-results
+          path: TestResults.xcresult
+          if-no-files-found: ignore
