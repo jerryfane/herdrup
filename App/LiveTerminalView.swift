@@ -427,8 +427,25 @@ struct LiveTerminalView: UIViewRepresentable {
                 let line = max(1, Self.paneFont.lineHeight)
                 let ticks = Int(scrollAccum / line)
                 guard ticks != 0 else { return }
-                scrollAccum -= CGFloat(ticks) * line
-                emitScroll(up: ticks > 0, count: min(abs(ticks), 4),
+                // Pace the wheel: a MOUSE-MODE agent (Claude Code) accelerates its own
+                // scroll from the GAP between wheel events, so several events slammed into
+                // one send arrive ~simultaneously and trip its fast cap (~36 lines/tick) —
+                // the jumpy leaps. Emit ONE tick per frame there so the gaps land in its
+                // gentle ~3-line regime → smooth, finger-proportional (its own accel still
+                // supplies fling speed). The ARROW-key fallback (rare non-mouse alt-screen)
+                // doesn't accelerate, so keep up to 4/frame. CONSUME ONLY the ticks we
+                // emit and CARRY the rest in scrollAccum, so a fast drag isn't truncated.
+                let cap = term.mouseMode != .off ? 1 : 4
+                let count = min(abs(ticks), cap)
+                scrollAccum -= CGFloat((ticks > 0 ? 1 : -1) * count) * line
+                // Bound the carry to ONE frame's worth: keeps the decelerating-drag
+                // benefit but stops scrollAccum growing unbounded when demand outruns the
+                // cap — otherwise a direction REVERSAL within one touch keeps firing the
+                // old direction for many frames (scrolls backwards), and in mouse mode the
+                // backlog × Claude Code's own acceleration would over-scroll (reviewer).
+                let maxCarry = CGFloat(cap) * line
+                scrollAccum = min(max(scrollAccum, -maxCarry), maxCarry)
+                emitScroll(up: ticks > 0, count: count,
                            at: gr.location(in: view), term: term)
             default:
                 break
