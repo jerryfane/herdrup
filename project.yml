@@ -73,7 +73,7 @@ targets:
       - package: HerdrKit
         product: HerdrKit
       # SwiftTerm rides on the APP target only (it is UIKit/AppKit) — it renders
-      # the live terminal in TerminalPaneView. HerdrKit deliberately does NOT
+      # the live terminal in TerminalPaneContent. HerdrKit deliberately does NOT
       # depend on it so the Linux build/test of the protocol layer stays intact.
       - package: SwiftTerm
         product: SwiftTerm
