@@ -2009,10 +2009,17 @@ final class CCScrollDriver: @unchecked Sendable {
 
     /// A 24-row window into a 200-line virtual transcript at the current `offset`,
     /// cleared + home-positioned so each redraw fully repaints the visible alt screen.
+    /// Each row is a FULL-WIDTH band of a character keyed to its line number, so a
+    /// scroll (window shift) changes most pixels on screen — a subtle number-only tweak
+    /// would fall under the test's pixel-diff threshold even when the scroll DID happen.
     private func renderWindow() -> String {
         var s = "\u{1b}[H\u{1b}[2J"
         let top = max(1, 200 - 24 - offset)
-        for i in 0..<24 { s += String(format: "CC line %03d  claude fullscreen viewport\r\n", top + i) }
+        for i in 0..<24 {
+            let n = top + i
+            let fill = Character(UnicodeScalar(UInt8(65 + (n % 26)))!)   // A..Z by line number
+            s += String(format: "CC%03d ", n) + String(repeating: fill, count: 60) + "\r\n"
+        }
         return s
     }
 
