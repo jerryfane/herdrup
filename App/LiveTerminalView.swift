@@ -12,7 +12,7 @@ import HerdrKit
 /// READ-ONLY for keyboard/typed input: the view never becomes first responder (no
 /// keyboard) and its delegate `send` is a no-op, so SwiftTerm keystrokes are never
 /// routed to the PTY. Command/message input stays exclusively on the reply/Send +
-/// keycap affordances in `TerminalPaneView` (`sendText`/`sendKeys`/`prompt`). The
+/// keycap affordances in `TerminalPaneContent` (`sendText`/`sendKeys`/`prompt`). The
 /// ONE narrow input exception is SCROLL: a pan on the alternate screen sends
 /// constrained wheel/arrow sequences to the agent so its full-screen view can scroll
 /// (see `handleScrollPan`) — never a keystroke, never arbitrary typed text.
@@ -32,6 +32,12 @@ struct LiveTerminalView: UIViewRepresentable {
     /// there is no list context to page through. Refreshed on every update so the
     /// closure never captures a stale view.
     var onNavigate: ((Int) -> Void)? = nil
+    /// Whether this pane is the one on screen. A keep-mounted pane that goes offscreen
+    /// (another agent is fronted, or we're back on the list) stays subscribed but must
+    /// RELEASE the PTY width-lock so it stops pinning a co-viewing desktop to the phone's
+    /// width while nobody's looking; it re-takes the lock when fronted again. Only the
+    /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
+    var isForeground: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -44,6 +50,7 @@ struct LiveTerminalView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
+        context.coordinator.setForeground(isForeground)
     }
 
     static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
@@ -129,6 +136,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
         private static var geometryGeneration: [String: Int] = [:]
         private var myGeometryGeneration = 0
+        /// Whether this (keep-mounted) pane is currently on screen. Only the FOREGROUND
+        /// pane holds the PTY width-lock; a backgrounded pane releases it (see
+        /// `setForeground`) so it can't pin a co-viewing desktop while hidden, and a
+        /// hidden pane's async `sizeChanged` tracks the grid but never re-locks.
+        private var foreground = true
         /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
@@ -285,6 +297,30 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
+        /// Front↔background transition for a KEEP-MOUNTED pane. Only the front pane holds the
+        /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing
+        /// re-takes it at the current grid. Reuses `releaseGeometryOwnership` + the
+        /// `geometryGeneration` guard, so a hide's still-in-flight `lock:false` that lands
+        /// after a re-show is skipped (its generation is now stale) and the visible pane is
+        /// never left unlocked. Different panes own different PTYs, so a background-release on
+        /// one and a foreground-retake on another never order against each other.
+        func setForeground(_ f: Bool) {
+            guard !stopped, f != foreground else { return }
+            foreground = f
+            if f {
+                // Claim a new generation (supersede any background lock:false still in flight),
+                // then re-lock at the tracked grid — reset lastSent to defeat sendPTYSize's dedup.
+                let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
+                Self.geometryGeneration[paneID] = gen
+                myGeometryGeneration = gen
+                lastSentCols = 0
+                lastSentRows = 0
+                if desiredCols >= 4, desiredRows >= 2 { sendPTYSize(cols: desiredCols, rows: desiredRows) }
+            } else {
+                releaseGeometryOwnership()   // release lock:false, keep the stream + emulator warm
+            }
+        }
+
         // MARK: styling (the design's machine voice)
 
         private func style(_ view: ReadOnlyTerminalView) {
@@ -414,6 +450,11 @@ struct LiveTerminalView: UIViewRepresentable {
             desiredCols = cols
             desiredRows = rows
             resizeRetries = 0        // a new target gets a fresh retry budget
+            // A backgrounded (keep-mounted) pane TRACKS the latest grid above but does not
+            // send `lock:true` while hidden — it would re-pin a co-viewing desktop to the
+            // phone's width with nobody looking. `setForeground(true)` re-locks at the
+            // tracked size when the pane returns to screen.
+            guard foreground else { return }
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = Self.cellPixels()
             resizeTask = Task { @MainActor [weak self] in
