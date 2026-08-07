@@ -27,16 +27,24 @@ import HerdrKit
 struct LiveTerminalView: UIViewRepresentable {
     let client: HerdrClient
     let paneID: String
+    /// Called when the reader swipes horizontally to page between agents: +1 for the
+    /// next agent (swipe left), -1 for the previous (swipe right). Nil (or a no-op) when
+    /// there is no list context to page through. Refreshed on every update so the
+    /// closure never captures a stale view.
+    var onNavigate: ((Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
     func makeUIView(context: Context) -> ReadOnlyTerminalView {
         let view = ReadOnlyTerminalView(frame: .zero, font: Coordinator.paneFont)
+        context.coordinator.onNavigate = onNavigate
         context.coordinator.attach(view)
         return view
     }
 
-    func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {}
+    func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
+        context.coordinator.onNavigate = onNavigate
+    }
 
     static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
         coordinator.stop()
@@ -107,6 +115,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// defeat the release (review HIGH). Once stopped, `sendPTYSize` is inert.
         private var stopped = false
 
+        /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
+        /// by `updateUIView`. +1 = next agent, -1 = previous.
+        var onNavigate: ((Int) -> Void)?
+        /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
+        /// left screen EDGE to the back gesture — a right-swipe there means "go back",
+        /// not "previous agent".
+        private weak var swipeAgentPrev: UISwipeGestureRecognizer?
+
         /// IBM Plex Mono (the design's MACHINE voice) at the pane size, falling back
         /// to the system monospace if the bundled face is unavailable. The
         /// PostScript name matches `DesignSystem.Typography`'s mono regular cut.
@@ -151,6 +167,20 @@ struct LiveTerminalView: UIViewRepresentable {
                     t.require(toFail: doubleTap)
                 }
             }
+            // Horizontal swipe → page to the previous/next agent in the list. These are
+            // DISCRETE UISwipe recognizers (not the scroll pan), so a vertical scroll drag
+            // never triggers them, and they recognize simultaneously with the pan via the
+            // delegate below. Swipe left = next agent; swipe right = previous. The right
+            // swipe cedes the left screen edge to the back gesture (see `shouldReceive`).
+            let swipeNext = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeNav(_:)))
+            swipeNext.direction = .left
+            swipeNext.delegate = self
+            view.addGestureRecognizer(swipeNext)
+            let swipePrev = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeNav(_:)))
+            swipePrev.direction = .right
+            swipePrev.delegate = self
+            view.addGestureRecognizer(swipePrev)
+            swipeAgentPrev = swipePrev
             style(view)
             start()
         }
@@ -175,6 +205,13 @@ struct LiveTerminalView: UIViewRepresentable {
                 let maxY = max(0, view.contentSize.height - view.bounds.height)
                 view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
             }
+        }
+
+        /// Horizontal swipe → move to the previous/next agent. The pane view owns the
+        /// ordered list and the clamping; here we only report the direction.
+        @objc private func handleSwipeNav(_ gr: UISwipeGestureRecognizer) {
+            guard !stopped else { return }
+            onNavigate?(gr.direction == .left ? 1 : -1)
         }
 
         func stop() {
@@ -539,6 +576,16 @@ struct LiveTerminalView: UIViewRepresentable {
         /// lets our handler drive the agent scroll.
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        /// The previous-agent (rightward) swipe must not fire from the left screen edge —
+        /// that zone belongs to the back gesture (a window-level edge pan). Ignoring
+        /// touches that begin there keeps a right-swipe-at-the-edge meaning "go back",
+        /// while a right-swipe further in pages to the previous agent. All other
+        /// recognizers (scroll pan, double-tap, the next-agent swipe) accept every touch.
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard g === swipeAgentPrev, let v = g.view else { return true }
+            return touch.location(in: v).x > 32
+        }
 
         // MARK: palette helpers
 
