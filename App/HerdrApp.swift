@@ -2017,7 +2017,7 @@ final class CCScrollDriver: @unchecked Sendable {
         let top = max(1, 200 - 24 - offset)
         for i in 0..<24 {
             let n = top + i
-            let fill = Character(UnicodeScalar(UInt8(65 + (n % 26)))!)   // A..Z by line number
+            let fill = Character(UnicodeScalar(UInt8(65 + (n % 26))))   // A..Z by line number
             s += String(format: "CC%03d ", n) + String(repeating: fill, count: 60) + "\r\n"
         }
         return s
