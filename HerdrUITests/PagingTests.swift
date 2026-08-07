@@ -22,33 +22,41 @@ final class PagingTests: XCTestCase {
         app.launch()
         Thread.sleep(forTimeInterval: 2.0)   // let the first pane mount + its stream seed
 
-        // Opens on ALFA (heading "ALFA · ALFA").
-        XCTAssertTrue(frontHeader(app, contains: "ALFA"),
+        // Opens on ALFA (heading "ALFA · ALFA") — front, hittable.
+        XCTAssertTrue(frontIs(app, "ALFA"),
             "Paging harness did not open on the first agent (ALFA).")
         attach(app, "01-alfa")
 
-        // Swipe LEFT → next agent (BRAVO). ALFA leaves the a11y tree; BRAVO enters.
+        // Swipe LEFT → next agent (BRAVO) is now the FRONT (hittable) pane. If the swipe never
+        // paged, BRAVO would be absent and ALFA would still be the hittable front → fail.
         swipe(app, .left)
-        XCTAssertTrue(frontHeader(app, contains: "BRAVO"),
+        XCTAssertTrue(frontIs(app, "BRAVO"),
             "Swipe-left did not page to the next agent (BRAVO).")
-        XCTAssertFalse(frontHeader(app, contains: "ALFA", timeout: 1),
-            "ALFA is still on screen after paging to BRAVO — the swap did not front BRAVO.")
+        XCTAssertFalse(frontIs(app, "ALFA", timeout: 1),
+            "ALFA is still the front pane after paging to BRAVO — the swap did not front BRAVO.")
         attach(app, "02-bravo")
 
-        // Swipe RIGHT → previous agent (back to ALFA), a warm keep-mounted hit.
+        // Swipe RIGHT → previous agent (back to ALFA), a warm keep-mounted hit that re-fronts it.
         swipe(app, .right)
-        XCTAssertTrue(frontHeader(app, contains: "ALFA"),
+        XCTAssertTrue(frontIs(app, "ALFA"),
             "Swipe-right did not page back to the previous agent (ALFA).")
         attach(app, "03-alfa-again")
     }
 
     // MARK: helpers
 
-    /// The front pane's header heading rendered as a SwiftUI Text (staticText). Non-front panes
-    /// are `.accessibilityHidden`, so a match means that pane is the one on screen.
-    private func frontHeader(_ app: XCUIApplication, contains name: String, timeout: TimeInterval = 6) -> Bool {
-        let pred = NSPredicate(format: "label CONTAINS[c] %@", name)
-        return app.staticTexts.containing(pred).firstMatch.waitForExistence(timeout: timeout)
+    /// True when the named agent's header heading belongs to the FRONT pane — present AND
+    /// HITTABLE. A backgrounded keep-mounted pane sits at opacity 0 with hit-testing off, so its
+    /// header is not hittable; only the fronted pane's header is. This distinguishes "on screen"
+    /// from "merely still mounted", without relying on accessibility hiding.
+    private func frontIs(_ app: XCUIApplication, _ name: String, timeout: TimeInterval = 6) -> Bool {
+        let el = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", name)).firstMatch
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        repeat {
+            if el.exists && el.isHittable { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        return el.exists && el.isHittable
     }
 
     private enum Dir { case left, right }
