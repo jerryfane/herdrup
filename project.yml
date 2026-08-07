@@ -77,6 +77,13 @@ targets:
       # depend on it so the Linux build/test of the protocol layer stays intact.
       - package: SwiftTerm
         product: SwiftTerm
+    # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
+    # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
+    # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
+    # archive) is unaffected.
+    scheme:
+      testTargets:
+        - HerdrUITests
     info:
       path: App/Info.plist
       properties:
@@ -153,3 +160,23 @@ targets:
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"
+
+  # UI-test bundle — the automated SCROLL RECEIPT. Launches the app in the
+  # HERDR_SCREENSHOT_MOCK=scroll pane (a real SwiftTerm view fed 200 lines), swipes it,
+  # and asserts the rendered content MOVED (proving the SwiftTerm 1.15.0 scroll fix on a
+  # simulator — the on-device gesture proof JARVIS rule 47874 requires). Simulator only,
+  # never signed, never archived. GENERATE_INFOPLIST_FILE builds the test bundle plist.
+  HerdrUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: HerdrUITests
+    dependencies:
+      - target: Herdr
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.uitests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: NO
