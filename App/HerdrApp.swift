@@ -231,6 +231,16 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "scrolltest",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .ccscroll:
+            // A REAL SwiftTerm pane in alt-screen + mouse-mode (Claude Code fullscreen
+            // shape). CCScrollDriver stands in for Claude Code: it redraws shifted
+            // content when the app SENDS it an SGR wheel event, so the HerdrUITests
+            // swipe proves the mouse-mode scroll path end to end.
+            NavigationStack {
+                TerminalPaneView(client: HerdrClient(transport: MockTransport(ccDriver: CCScrollDriver.shared)),
+                                 paneID: "w1:p1", title: "claude",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         }
     }
     #endif
@@ -1829,7 +1839,7 @@ private extension View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 enum ScreenshotMock {
-    case list, pane, settings, newAgent, scroll
+    case list, pane, settings, newAgent, scroll, ccscroll
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -1839,9 +1849,14 @@ enum ScreenshotMock {
         case "pane": return .pane
         case "settings": return .settings
         case "newagent": return .newAgent
-        // `scroll` drives the HerdrUITests scroll receipt: a real SwiftTerm pane seeded
-        // with 200 distinct lines of scrollback so a swipe visibly moves the content.
+        // `scroll` drives the omp scroll receipt: a real SwiftTerm pane seeded with 200
+        // distinct lines of scrollback so a swipe visibly moves the content.
         case "scroll": return .scroll
+        // `ccscroll` drives the Claude-Code scroll receipt: a real SwiftTerm pane put
+        // into alt-screen + mouse-mode (like Claude Code fullscreen) whose stand-in
+        // agent redraws shifted content when it RECEIVES an SGR wheel event — so a swipe
+        // proves drag → app emits wheel → content moves.
+        case "ccscroll": return .ccscroll
         default: return .list
         }
     }
@@ -1851,12 +1866,18 @@ enum ScreenshotMock {
 /// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
 /// compiled on Linux) — keep the two fixtures in sync.
 struct MockTransport: HerdrTransport {
-    /// When true, `pane.stream` seeds MANY lines of scrollback (for the UI scroll
+    /// When true, `pane.stream` seeds MANY lines of scrollback (for the omp UI scroll
     /// receipt) instead of the short screenshot seed. Default false keeps the
     /// buildbox screenshot fixtures unchanged.
     var scrollback = false
+    /// When set, this pane is a Claude-Code stand-in (alt-screen + mouse-mode) that
+    /// scrolls in RESPONSE to SGR wheel events the app sends — for the ccscroll receipt.
+    var ccDriver: CCScrollDriver?
 
     func roundTrip(_ requestLine: String) async throws -> String {
+        // ccscroll receipt: any request may carry an SGR wheel event the app sent
+        // (via sendText); the driver scrolls the stand-in Claude Code if so.
+        ccDriver?.received(requestLine)
         if requestLine.contains("agent.list") { return Self.agentList }
         if requestLine.contains("agent.read") { return Self.agentRead }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
@@ -1869,6 +1890,14 @@ struct MockTransport: HerdrTransport {
         // terminal, not an empty one. The scrollback seed (UI test) feeds 200 lines so
         // there is real history to scroll; the default seed is the short screenshot one.
         if requestLine.contains("pane.stream") {
+            if let driver = ccDriver {
+                // Claude-Code stand-in: keep the stream OPEN so the driver can push
+                // redraws in response to wheel events the app sends.
+                return AsyncThrowingStream { continuation in
+                    continuation.yield(Self.paneStreamAck)
+                    driver.attach(continuation)
+                }
+            }
             let reset = scrollback ? Self.scrollbackResetFrame() : Self.paneStreamReset
             return AsyncThrowingStream { continuation in
                 continuation.yield(Self.paneStreamAck)
@@ -1939,5 +1968,77 @@ struct MockTransport: HerdrTransport {
     static let demoPaneAgent: AgentInfo? = try? JSONDecoder().decode(
         AgentInfo.self,
         from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
+}
+
+/// Stateful stand-in for a Claude-Code pane in the `ccscroll` UI test. It puts the REAL
+/// SwiftTerm view into ALT-SCREEN + MOUSE-MODE (like Claude Code "fullscreen"), then —
+/// each time the app SENDS it an SGR wheel event (`ESC[<64`/`<65`, proof the finger-drag
+/// was translated to wheel for a mouse-mode agent) — redraws the screen shifted by a few
+/// lines, standing in for Claude Code scrolling its own viewport. So the XCUITest proves
+/// the whole path: drag → app emits SGR wheel → rendered content moves. If the app fails
+/// to emit wheel (the bug), no redraw happens and the screenshots stay identical → FAIL.
+final class CCScrollDriver: @unchecked Sendable {
+    static let shared = CCScrollDriver()
+
+    private let lock = NSLock()
+    private var cont: AsyncThrowingStream<String, Error>.Continuation?
+    private var seq: UInt64 = 1
+    private var offset = 0            // 0 = newest window (bottom); grows toward older
+
+    /// Called when `pane.stream` opens: keep the continuation, turn on mouse tracking on
+    /// the NORMAL (main) buffer, and render the initial window.
+    ///
+    /// Deliberately NOT the alternate screen: on the alt buffer the OLD gate
+    /// (`guard isCurrentBufferAlternate`) already passed, so an alt seed couldn't prove
+    /// the new `|| mouseMode != .off` branch is what makes a mouse-mode agent scrollable
+    /// (reviewer HIGH). Seeding mouse-mode on the NORMAL buffer exercises exactly the new
+    /// branch AND the isScrollEnabled toggle — and would be RED on the old alt-only gate
+    /// (a normal-buffer drag returned early → no wheel → static).
+    func attach(_ c: AsyncThrowingStream<String, Error>.Continuation) {
+        lock.lock(); cont = c; offset = 0; lock.unlock()
+        // ?1000h+?1006h mouse tracking (SGR), like Claude Code · ?25l hide cursor. NO
+        // ?1049h — stays on the normal buffer so `isCurrentBufferAlternate == false`.
+        let body = "\u{1b}[?1000h\u{1b}[?1006h\u{1b}[?25l" + renderWindow()
+        c.yield(resetFrame(body))
+    }
+
+    /// Inspect an outgoing request; if it carries an SGR wheel event, scroll + redraw.
+    func received(_ requestLine: String) {
+        let up = requestLine.contains("[<64")      // wheel-up → older content
+        let down = requestLine.contains("[<65")    // wheel-down → newer content
+        guard up || down else { return }
+        lock.lock()
+        offset = max(0, min(offset + (up ? 4 : -4), 170))
+        let frame = dataFrame(renderWindow())
+        let c = cont
+        lock.unlock()
+        c?.yield(frame)
+    }
+
+    /// A 24-row window into a 200-line virtual transcript at the current `offset`,
+    /// cleared + home-positioned so each redraw fully repaints the visible alt screen.
+    /// Each row is a FULL-WIDTH band of a character keyed to its line number, so a
+    /// scroll (window shift) changes most pixels on screen — a subtle number-only tweak
+    /// would fall under the test's pixel-diff threshold even when the scroll DID happen.
+    private func renderWindow() -> String {
+        var s = "\u{1b}[H\u{1b}[2J"
+        let top = max(1, 200 - 24 - offset)
+        for i in 0..<24 {
+            let n = top + i
+            let fill = Character(UnicodeScalar(UInt8(65 + (n % 26))))   // A..Z by line number
+            s += String(format: "CC%03d ", n) + String(repeating: fill, count: 60) + "\r\n"
+        }
+        return s
+    }
+
+    private func resetFrame(_ body: String) -> String {
+        let b64 = Data(body.utf8).base64EncodedString()
+        return "{\"stream\":\"pane.bytes\",\"frame\":\"reset\",\"seq\":0,\"epoch\":7,\"cols\":80,\"rows\":24,\"data_b64\":\"\(b64)\"}"
+    }
+    private func dataFrame(_ body: String) -> String {
+        let b64 = Data(body.utf8).base64EncodedString()
+        let s = seq; seq += 1
+        return "{\"stream\":\"pane.bytes\",\"frame\":\"data\",\"seq\":\(s),\"epoch\":7,\"data_b64\":\"\(b64)\"}"
+    }
 }
 #endif
