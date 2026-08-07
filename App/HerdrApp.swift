@@ -822,6 +822,11 @@ struct TerminalHomeView: View {
         return rows.first(where: { $0.info.focused == true }) ?? rows.first
     }
 
+    /// The ordered LIVE agents a pushed pane can page through with a horizontal swipe —
+    /// the full sorted order (`AgentList.rows`, needs-you first), live panes only since a
+    /// stopped pane has no stream to open. Snapshotted into the pushed pane at open time.
+    private var orderedSiblings: [AgentInfo] { fullList.rows.filter(\.isLive).map(\.info) }
+
     /// Sections after applying the search box. Search filters the raw agents and
     /// re-derives, so counts and grouping stay honest for the filtered view.
     private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
@@ -1033,7 +1038,8 @@ struct TerminalHomeView: View {
             if !isCollapsed {
                 ForEach(rows) { row in
                     NavigationLink {
-                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title, agent: row.info)
+                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title,
+                                         agent: row.info, siblings: orderedSiblings)
                     } label: {
                         card(row)
                     }
@@ -1259,10 +1265,79 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
+/// A pushed terminal pane that can PAGE between agents with a horizontal swipe, without
+/// pushing a new navigation level each time. It keeps one pushed screen and swaps which
+/// sibling agent the inner `TerminalPaneContent` shows — keyed on the shown pane id, so
+/// the per-pane state and terminal stream are rebuilt cleanly for the new agent while the
+/// single pushed level (and its edge-back gesture) stay intact.
+///
+/// `siblings` is the ordered agent list to page through (the same order the list shows).
+/// It is EMPTY when the pane is opened without list context — e.g. a just-spawned agent —
+/// in which case swiping is a no-op and this behaves exactly like `TerminalPaneContent`.
 struct TerminalPaneView: View {
     let client: HerdrClient
     let paneID: String
     let title: String
+    let agent: AgentInfo?
+    let initialReply: String
+    let siblings: [AgentInfo]
+
+    /// The pane id currently shown. Starts at the opened pane and moves along `siblings`
+    /// as the reader swipes.
+    @State private var currentID: String
+
+    init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil,
+         initialReply: String = "", siblings: [AgentInfo] = []) {
+        self.client = client
+        self.paneID = paneID
+        self.title = title
+        self.agent = agent
+        self.initialReply = initialReply
+        self.siblings = siblings
+        _currentID = State(initialValue: paneID)
+    }
+
+    /// The sibling now shown. Nil when there is no list context, or if the shown pane
+    /// fell out of the list (e.g. its agent stopped) — the pane then keeps the identity
+    /// it was opened with.
+    private var current: AgentInfo? { siblings.first { $0.paneID == currentID } }
+
+    var body: some View {
+        TerminalPaneContent(
+            client: client,
+            paneID: current?.paneID ?? paneID,
+            title: current?.displayName ?? title,
+            agent: current ?? agent,
+            // The pre-filled task belongs only to the pane that was actually opened,
+            // never to a swiped-to neighbour.
+            initialReply: currentID == paneID ? initialReply : "",
+            onNavigate: navigate
+        )
+        // Rebuild the pane (and its stream + per-pane @State) whenever the shown agent
+        // changes — a clean handoff to the neighbour's terminal.
+        .id(currentID)
+    }
+
+    /// Move `delta` steps through the ordered siblings, clamped at both ends. A no-op
+    /// when there is no list context or the move would run past an end.
+    private func navigate(_ delta: Int) {
+        guard let i = siblings.firstIndex(where: { $0.paneID == currentID }) else { return }
+        let j = i + delta
+        guard siblings.indices.contains(j) else { return }
+        currentID = siblings[j].paneID
+    }
+}
+
+/// The pane itself — one agent's live terminal + controls. Its identity (pane id,
+/// per-pane @State, terminal stream) is fixed for its lifetime; paging between agents
+/// is done by the thin `TerminalPaneView` wrapper above, which rebuilds this view for
+/// the new agent. `onNavigate` reports a horizontal swipe (+1 next / -1 previous) up to
+/// that wrapper.
+struct TerminalPaneContent: View {
+    let client: HerdrClient
+    let paneID: String
+    let title: String
+    let onNavigate: (Int) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var reply: String
@@ -1305,10 +1380,12 @@ struct TerminalPaneView: View {
     /// moment the pane reports a composer — never typed raw into the still-booting
     /// pane. A non-empty `initialReply` puts the view into the pending-delivery
     /// state.
-    init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil, initialReply: String = "") {
+    init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil,
+         initialReply: String = "", onNavigate: @escaping (Int) -> Void = { _ in }) {
         self.client = client
         self.paneID = paneID
         self.title = title
+        self.onNavigate = onNavigate
         _agent = State(initialValue: agent)
         _reply = State(initialValue: initialReply)
         _pendingPrefill = State(initialValue: !initialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1342,7 +1419,7 @@ struct TerminalPaneView: View {
                 // byte firehose (#40), full-bleed as the machine ground. Read-only —
                 // input stays on the keycaps + reply bar below (sendText/sendKeys/
                 // prompt), never routed through the terminal itself.
-                LiveTerminalView(client: client, paneID: paneID)
+                LiveTerminalView(client: client, paneID: paneID, onNavigate: onNavigate)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
