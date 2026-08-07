@@ -438,6 +438,13 @@ struct LiveTerminalView: UIViewRepresentable {
                 let cap = term.mouseMode != .off ? 1 : 4
                 let count = min(abs(ticks), cap)
                 scrollAccum -= CGFloat((ticks > 0 ? 1 : -1) * count) * line
+                // Bound the carry to ONE frame's worth: keeps the decelerating-drag
+                // benefit but stops scrollAccum growing unbounded when demand outruns the
+                // cap — otherwise a direction REVERSAL within one touch keeps firing the
+                // old direction for many frames (scrolls backwards), and in mouse mode the
+                // backlog × Claude Code's own acceleration would over-scroll (reviewer).
+                let maxCarry = CGFloat(cap) * line
+                scrollAccum = min(max(scrollAccum, -maxCarry), maxCarry)
                 emitScroll(up: ticks > 0, count: count,
                            at: gr.location(in: view), term: term)
             default:
