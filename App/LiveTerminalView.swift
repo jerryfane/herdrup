@@ -196,7 +196,7 @@ struct LiveTerminalView: UIViewRepresentable {
             relockPending = true
             let pane = paneID
             Task { @MainActor [weak self] in
-                await Coordinator.awaitRelease(Self.geometryReleaseTask[pane], timeout: 5)
+                await Self.geometryReleaseTask[pane]?.value   // let a prior coordinator's release land first
                 guard let self, !self.stopped, self.myGeometryGeneration == gen else { return }
                 self.relockPending = false
                 if self.desiredCols >= 4, self.desiredRows >= 2 {
@@ -347,8 +347,11 @@ struct LiveTerminalView: UIViewRepresentable {
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
                 _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
-                // Drop our own registry entry once settled (no newer show/hide bumped the
-                // generation), so the static map doesn't accumulate one entry per pane id opened.
+                // Best-effort: drop our own registry entry once settled (no newer show/hide/attach
+                // bumped the generation). This only runs when the release actually SENT; a release
+                // that bailed on the generation guard above leaves the entry for the newer owner
+                // (which is correct — clearing it there could clobber a live newer release). So the
+                // map holds at most one entry per pane id, overwritten by the next release.
                 await MainActor.run {
                     if Coordinator.geometryGeneration[pane] == myGen { Coordinator.geometryReleaseTask[pane] = nil }
                 }
@@ -376,7 +379,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 relockPending = true            // hold off ALL sendPTYSize until the release lands
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
-                    await Coordinator.awaitRelease(pending, timeout: 5)   // let any committed lock:false land first (bounded)
+                    await pending?.value        // let any committed lock:false land FIRST
                     guard let self, self.foreground, !self.stopped,
                           self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
                     self.relockPending = false
@@ -389,22 +392,6 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         // MARK: styling (the design's machine voice)
-
-        /// Await a pending release, but give up after `seconds`. CitadelTransport's RPC has no
-        /// timeout and the detached release tasks are never cancelled, so a wedged SSH channel
-        /// could otherwise pin a deferred re-lock forever (relockPending stuck true → the visible
-        /// pane never re-locks). On timeout the caller clears relockPending and re-locks anyway; if
-        /// the stale `lock:false` lands afterwards the pane simply re-locks on its next layout —
-        /// strictly better than staying unlocked indefinitely.
-        private static func awaitRelease(_ task: Task<Void, Never>?, timeout seconds: Double) async {
-            guard let task else { return }
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await task.value }
-                group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
-                _ = await group.next()      // return as soon as the release lands OR the timeout fires
-                group.cancelAll()
-            }
-        }
 
         private func style(_ view: ReadOnlyTerminalView) {
             view.font = Self.paneFont
