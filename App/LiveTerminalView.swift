@@ -137,13 +137,20 @@ struct LiveTerminalView: UIViewRepresentable {
             view.addGestureRecognizer(pan)
             scrollPan = pan
             // Double-tap → jump to the live tail. A UIKit recognizer (NOT a SwiftUI
-            // .onTapGesture, which starves the scroll pan — HerdrApp.swift note) that
-            // recognizes simultaneously with everything (delegate below); SwiftTerm's own
-            // double-tap word-select is inert on this read-only view.
+            // .onTapGesture, which starves the scroll pan — HerdrApp.swift note).
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.delegate = self
             view.addGestureRecognizer(doubleTap)
+            // SUPERSEDE SwiftTerm's own double-tap (word-select): make it wait for ours to
+            // FAIL, so a double-tap jumps to the tail without starting a word selection and
+            // its lingering selection pan (which would otherwise fight the next scroll on an
+            // idle shell pane — SwiftTerm's doubleTap has no read-only guard).
+            for gr in view.gestureRecognizers ?? [] where gr !== doubleTap {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
+                    t.require(toFail: doubleTap)
+                }
+            }
             style(view)
             start()
         }
@@ -161,8 +168,12 @@ struct LiveTerminalView: UIViewRepresentable {
                     _ = try? await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
                 }
             } else {
+                // animated:false — an animated jump is cancelled mid-flight on a streaming
+                // pane (SwiftTerm's updateScroller writes the offset back and leaves
+                // userScrolling stuck true). A direct set runs contentOffset's didSet →
+                // syncYDispFromContentOffset synchronously and re-engages auto-follow.
                 let maxY = max(0, view.contentSize.height - view.bounds.height)
-                view.setContentOffset(CGPoint(x: 0, y: maxY), animated: true)
+                view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
             }
         }
 

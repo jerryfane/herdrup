@@ -1039,10 +1039,18 @@ struct TerminalHomeView: View {
                     }
                     .buttonStyle(.plain)
                     // Long-press an agent → quick actions. Stop = close the pane
-                    // (`pane.close`, the only stop RPC — its inverse is start), then reload.
+                    // (`pane.close`, the only stop RPC — its inverse is start), then reload;
+                    // disclose a failure rather than swallowing it (file convention).
                     .contextMenu {
                         Button(role: .destructive) {
-                            Task { try? await client.closePane(paneID: row.info.paneID); await load() }
+                            Task {
+                                do {
+                                    try await client.closePane(paneID: row.info.paneID)
+                                    await load()
+                                } catch let e {
+                                    error = "couldn't stop \(row.title): \(e.localizedDescription)"
+                                }
+                            }
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
                     }
                 }
@@ -1204,34 +1212,50 @@ struct TerminalHomeView: View {
 /// there are deliberately no Approve/Reject buttons (a fixed 1/2 mapping cannot be
 /// verified against an agent-specific menu — structured menu actions are a follow-up).
 /// A LEFT-EDGE swipe-back for a view whose nav bar is hidden (which disables UIKit's
-/// default interactive-pop). Hosts a `UIScreenEdgePanGestureRecognizer` on a view that
-/// only CLAIMS touches in the ~20pt left strip (`point(inside:)`), so it never intercepts
-/// the terminal scroll or the buttons elsewhere. Overlaid on the pane; fires `action`
-/// (dismiss) on a committed rightward edge swipe.
+/// default interactive-pop). The recognizer is attached to a SHARED ANCESTOR (the window),
+/// with a delegate that recognizes SIMULTANEOUSLY with everything, so it coexists with the
+/// terminal scroll + the buttons rather than carving a touch dead-zone. This view itself
+/// never intercepts a touch (`hitTest` → nil). Fires `action` (dismiss) on a committed
+/// rightward edge swipe; removes the recognizer on teardown.
 struct EdgeSwipeBack: UIViewRepresentable {
     let action: () -> Void
     func makeCoordinator() -> Coord { Coord(action: action) }
     func makeUIView(context: Context) -> UIView {
-        let v = EdgeStripView()
-        v.backgroundColor = .clear
-        let edge = UIScreenEdgePanGestureRecognizer(target: context.coordinator, action: #selector(Coord.fired(_:)))
-        edge.edges = .left
-        v.addGestureRecognizer(edge)
+        let v = PassthroughView()
+        DispatchQueue.main.async { context.coordinator.attach(from: v) }
         return v
     }
     func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.action = action }
-    final class Coord: NSObject {
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coord) { coordinator.detach() }
+
+    final class Coord: NSObject, UIGestureRecognizerDelegate {
         var action: () -> Void
+        private weak var host: UIView?
+        private var edge: UIScreenEdgePanGestureRecognizer?
         init(action: @escaping () -> Void) { self.action = action }
+        func attach(from v: UIView) {
+            guard edge == nil else { return }
+            guard let window = v.window else {   // not in the hierarchy yet — retry next runloop
+                DispatchQueue.main.async { [weak self, weak v] in if let v { self?.attach(from: v) } }
+                return
+            }
+            let g = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(fired(_:)))
+            g.edges = .left
+            g.delegate = self
+            window.addGestureRecognizer(g)
+            host = window; edge = g
+        }
+        func detach() { if let g = edge { host?.removeGestureRecognizer(g) }; edge = nil; host = nil }
         @objc func fired(_ gr: UIScreenEdgePanGestureRecognizer) {
             guard gr.state == .ended, let v = gr.view else { return }
-            // Commit only on a real rightward swipe, not an edge twitch.
-            if gr.translation(in: v).x > 40 || gr.velocity(in: v).x > 300 { action() }
+            if gr.translation(in: v).x > 40 || gr.velocity(in: v).x > 300 { action() }   // real swipe, not a twitch
         }
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
     }
-    /// Transparent to touches except the left edge strip (where the edge-pan lives).
-    final class EdgeStripView: UIView {
-        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool { point.x <= 20 }
+    /// Never intercepts touches — the recognizer lives on the window, not this view.
+    final class PassthroughView: UIView {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
     }
 }
 
