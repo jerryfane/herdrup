@@ -213,7 +213,7 @@ struct RootView: View {
                              livePaneIDs: MockTransport.demoLivePaneIDs)
         case .pane:
             NavigationStack {
-                TerminalPaneView(client: mockClient, paneID: "w1:p1", title: "jarvis",
+                TerminalPaneContent(client: mockClient, paneID: "w1:p1", title: "jarvis",
                                  agent: MockTransport.demoPaneAgent)
             }
         case .settings:
@@ -227,7 +227,7 @@ struct RootView: View {
             // HerdrUITests swipe exercises the actual library scroll path — the only
             // test that proves the SwiftTerm 1.15.0 scroll fix on device.
             NavigationStack {
-                TerminalPaneView(client: HerdrClient(transport: MockTransport(scrollback: true)),
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(scrollback: true)),
                                  paneID: "w1:p1", title: "scrolltest",
                                  agent: MockTransport.demoPaneAgent)
             }
@@ -237,7 +237,7 @@ struct RootView: View {
             // content when the app SENDS it an SGR wheel event, so the HerdrUITests
             // swipe proves the mouse-mode scroll path end to end.
             NavigationStack {
-                TerminalPaneView(client: HerdrClient(transport: MockTransport(ccDriver: CCScrollDriver.shared)),
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(ccDriver: CCScrollDriver.shared)),
                                  paneID: "w1:p1", title: "claude",
                                  agent: MockTransport.demoPaneAgent)
             }
@@ -787,19 +787,18 @@ struct TerminalHomeView: View {
         var id: Int { rawValue }
     }
 
-    /// A freshly-spawned pane to open with its task pre-filled. Held in
-    /// `pendingOpen` while the New-agent cover animates away, then applied in the
-    /// cover's onDismiss (→ `openedPane`) so the push happens AFTER the cover is
-    /// gone — presenting a navigation push and dismissing a full-screen cover in
-    /// the same frame is the historically fragile case.
-    private struct PaneToOpen: Identifiable, Hashable {
-        let paneID: String
-        let name: String
-        let task: String
-        var id: String { paneID }
-    }
-    @State private var pendingOpen: PaneToOpen?
-    @State private var openedPane: PaneToOpen?
+    /// Recently-opened terminals, kept MOUNTED (in `PaneKeepAliveContainer`) so reopening is
+    /// instant. Most-recently-used LAST; the pane whose id == `frontID` is the one on screen,
+    /// `nil` means the agents list is showing. Bounded to `maxLivePanes` (LRU eviction ⇒ that
+    /// slot's view unmounts ⇒ its stream/SSH connection closes). See `open(_:)`.
+    @State private var slots: [PaneSlot] = []
+    @State private var frontID: String?
+    /// A freshly-spawned pane held while the New-agent cover animates away, then opened in the
+    /// cover's onDismiss (fronting a keep-mounted pane, not a nav push, so the historically
+    /// fragile "push while dismissing a cover" no longer applies — but the deferral is kept as
+    /// cheap safety).
+    @State private var pendingOpenSlot: PaneSlot?
+    private static let maxLivePanes = 3
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
@@ -829,6 +828,33 @@ struct TerminalHomeView: View {
     /// Snapshotted into the pushed pane at open time.
     private var orderedSiblings: [AgentInfo] { fullList.rows.filter(\.isLive).map(\.info) }
 
+    /// Front a terminal, keeping it (and up to `maxLivePanes-1` others) MOUNTED. Re-opening a
+    /// still-mounted pane just LRU-bumps it — instant, its stream never closed. A new pane is
+    /// appended (MRU) and the least-recently-used non-front slot is evicted past the cap
+    /// (removal unmounts it → `Coordinator.stop()` closes its stream + SSH connection).
+    private func open(_ slot: PaneSlot) {
+        if let i = slots.firstIndex(where: { $0.paneID == slot.paneID }) {
+            let existing = slots.remove(at: i)
+            slots.append(existing)          // keep the LIVE mounted slot; do not replace it
+        } else {
+            slots.append(slot)
+            while slots.count > Self.maxLivePanes {
+                slots.removeFirst()         // LRU is index 0 and never the just-appended new front
+            }
+        }
+        frontID = slot.paneID
+    }
+
+    /// Swipe-page from the fronted pane to its prev/next sibling (clamped). `open()`s the
+    /// neighbour — instant if it is already mounted.
+    private func navigate(from slot: PaneSlot, delta: Int) {
+        guard let i = slot.siblings.firstIndex(where: { $0.paneID == frontID }),
+              slot.siblings.indices.contains(i + delta) else { return }
+        let next = slot.siblings[i + delta]
+        open(PaneSlot(paneID: next.paneID, title: next.displayName, agent: next,
+                      initialReply: "", siblings: slot.siblings))
+    }
+
     /// Sections after applying the search box. Search filters the raw agents and
     /// re-derives, so counts and grouping stay honest for the filtered view.
     private var visibleSections: [(group: AgentGroup, rows: [AgentRow])] {
@@ -841,41 +867,43 @@ struct TerminalHomeView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                Palette.ground.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    header
-                    if let error {
-                        errorView(error)
-                    } else if loading {
-                        Spacer(); ProgressView().tint(Palette.textDim); Spacer()
-                    } else {
-                        agentList
+        ZStack {
+            NavigationStack {
+                ZStack {
+                    Palette.ground.ignoresSafeArea()
+                    VStack(spacing: 0) {
+                        header
+                        if let error {
+                            errorView(error)
+                        } else if loading && agents.isEmpty {
+                            // Spinner ONLY on a genuine first load (or after reconnect clears
+                            // `agents`). A re-entry with data in hand refreshes silently rather
+                            // than blanking the still-valid list to a spinner.
+                            Spacer(); ProgressView().tint(Palette.textDim); Spacer()
+                        } else {
+                            agentList
+                        }
+                        tabBar
                     }
-                    tabBar
                 }
+                .toolbar(.hidden, for: .navigationBar)
+                .task { await load() }
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .task { await load() }
-            // Programmatic push for a just-spawned agent's pane, opened with its
-            // task pre-filled. Popping back reloads the list so the new agent shows.
-            .navigationDestination(item: $openedPane) { pane in
-                // A task-less open (the Terminal tab lands on the focused agent) can page
-                // like a list-opened pane. A spawn open carries a pre-fill task and stays
-                // non-paging (siblings: []) so a stray swipe can't interrupt the one-shot
-                // task delivery mid-flight — and it's usually not in the list yet anyway.
-                TerminalPaneView(client: client, paneID: pane.paneID, title: pane.name,
-                                 agent: nil, initialReply: pane.task,
-                                 siblings: pane.task.isEmpty ? orderedSiblings : [])
-                    .onDisappear { Task { await load() } }
-            }
+            // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
+            // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
+            // covers it and captures touches; otherwise the overlay is fully inert.
+            PaneKeepAliveContainer(
+                client: client, slots: slots, frontID: frontID,
+                onClose: { frontID = nil; Task { await load() } },
+                onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
+                .opacity(frontID != nil ? 1 : 0)
+                .allowsHitTesting(frontID != nil)
         }
         // ONE item-based cover, not two stacked isPresented covers (stacked
         // presentation modifiers on a single view are historically fragile).
         // onDismiss applies a queued open AFTER the cover is fully gone.
         .fullScreenCover(item: $activeCover, onDismiss: {
-            if let pane = pendingOpen { pendingOpen = nil; openedPane = pane }
+            if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
         }) { cover in
             switch cover {
             case .settings:
@@ -894,7 +922,8 @@ struct TerminalHomeView: View {
                     // Spawn done: queue the new pane, then dismiss the cover; the
                     // cover's onDismiss opens the pane with the task pre-filled.
                     onStarted: { paneID, name, task in
-                        pendingOpen = PaneToOpen(paneID: paneID, name: name, task: task)
+                        pendingOpenSlot = PaneSlot(paneID: paneID, title: name, agent: nil,
+                                                   initialReply: task, siblings: [])
                         activeCover = nil
                     },
                     onCancel: { activeCover = nil })
@@ -957,12 +986,13 @@ struct TerminalHomeView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             tabItem("square.grid.2x2.fill", "Agents", active: true)
-            // Terminal → the focused agent's pane (or the top of the list). Reuses the
-            // openedPane push with an EMPTY task, so there is no pre-fill/auto-delivery
-            // (pendingPrefill stays false); the pane re-resolves its own agent identity.
+            // Terminal → front the focused agent's pane (or the top of the list), keep-mounted
+            // like a list open. EMPTY task, so no pre-fill/auto-delivery (pendingPrefill stays
+            // false); the pane re-resolves its own agent identity.
             Button {
                 if let t = terminalTarget {
-                    openedPane = PaneToOpen(paneID: t.info.paneID, name: t.title, task: "")
+                    open(PaneSlot(paneID: t.info.paneID, title: t.title, agent: t.info,
+                                  initialReply: "", siblings: orderedSiblings))
                 }
             } label: {
                 tabItem("terminal", "Terminal", active: false)
@@ -1048,9 +1078,9 @@ struct TerminalHomeView: View {
 
             if !isCollapsed {
                 ForEach(rows) { row in
-                    NavigationLink {
-                        TerminalPaneView(client: client, paneID: row.info.paneID, title: row.title,
-                                         agent: row.info, siblings: siblings)
+                    Button {
+                        open(PaneSlot(paneID: row.info.paneID, title: row.title,
+                                      agent: row.info, initialReply: "", siblings: siblings))
                     } label: {
                         card(row)
                     }
@@ -1204,20 +1234,39 @@ struct TerminalHomeView: View {
     }
 
     private func load() async {
-        loading = true
-        error = nil
-        rejectedFingerprint = nil
-        trustFailed = false
+        // Spinner ONLY when there is nothing to show yet (genuine first load, or after a
+        // reconnect cleared `agents` via `.id(session)`). A re-entry with a populated list
+        // refreshes silently — stale-while-revalidate — instead of blanking to a spinner.
+        if agents.isEmpty { loading = true }
+        defer { loading = false }
         do {
-            agents = try await client.agentList()
+            let fetched = try await client.agentList()
+            agents = fetched
+            error = nil
+            rejectedFingerprint = nil
+            trustFailed = false
+            // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
+            // terminal lingers warm — but never the FRONT pane, so the reader isn't yanked off
+            // an exited terminal they may still be looking at.
+            let live = Set(fetched.map(\.paneID))
+            slots.removeAll { $0.paneID != frontID && !live.contains($0.paneID) }
         } catch {
-            self.error = "\(error)"
+            let rejected: String?
             if let transportError = error as? TransportError,
                case .hostKeyRejected(_, let fingerprint) = transportError {
-                rejectedFingerprint = fingerprint
+                rejected = fingerprint
+            } else {
+                rejected = nil
+            }
+            // A BACKGROUND refresh failure keeps the stale-but-good list rather than blowing it
+            // away into the error screen. Surface the error only when there is nothing to show —
+            // EXCEPT a host-key rejection, which always surfaces (a mid-session key change must
+            // never be hidden behind a cached list).
+            if agents.isEmpty || rejected != nil {
+                self.error = "\(error)"
+                rejectedFingerprint = rejected
             }
         }
-        loading = false
     }
 }
 
@@ -1285,87 +1334,26 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
-/// A pushed terminal pane that can PAGE between agents with a horizontal swipe, without
-/// pushing a new navigation level each time. It keeps one pushed screen and swaps which
-/// sibling agent the inner `TerminalPaneContent` shows — keyed on the shown pane id, so
-/// the per-pane state and terminal stream are rebuilt cleanly for the new agent while the
-/// single pushed level (and its edge-back gesture) stay intact.
-///
-/// `siblings` is the ordered agent list to page through (the same order the list shows).
-/// It is EMPTY when the pane is opened without list context — e.g. a just-spawned agent —
-/// in which case swiping is a no-op and this behaves exactly like `TerminalPaneContent`.
-struct TerminalPaneView: View {
-    let client: HerdrClient
-    let paneID: String
-    let title: String
-    let agent: AgentInfo?
-    let initialReply: String
-    let siblings: [AgentInfo]
-
-    /// The pane id currently shown. Starts at the opened pane and moves along `siblings`
-    /// as the reader swipes.
-    @State private var currentID: String
-    /// Set once the reader pages away, so returning to the originally-opened pane can NOT
-    /// re-seed a spawn pre-fill (which would re-run deliverPrefillIfNeeded and deliver the
-    /// task to the agent a second time). The pre-fill is a one-shot for the pane it opened.
-    @State private var prefillConsumed = false
-
-    init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil,
-         initialReply: String = "", siblings: [AgentInfo] = []) {
-        self.client = client
-        self.paneID = paneID
-        self.title = title
-        self.agent = agent
-        self.initialReply = initialReply
-        self.siblings = siblings
-        _currentID = State(initialValue: paneID)
-    }
-
-    /// The sibling now shown. Nil when there is no list context, or if the shown pane
-    /// fell out of the list (e.g. its agent stopped) — the pane then keeps the identity
-    /// it was opened with.
-    private var current: AgentInfo? { siblings.first { $0.paneID == currentID } }
-
-    var body: some View {
-        TerminalPaneContent(
-            client: client,
-            paneID: current?.paneID ?? paneID,
-            title: current?.displayName ?? title,
-            agent: current ?? agent,
-            // The pre-filled task belongs ONLY to the pane that was actually opened, and only
-            // until the reader pages away once — never to a neighbour, never re-armed on the
-            // way back.
-            initialReply: (!prefillConsumed && currentID == paneID) ? initialReply : "",
-            onNavigate: navigate
-        )
-        // Rebuild the pane (and its stream + per-pane @State) whenever the shown agent
-        // changes — a clean handoff to the neighbour's terminal.
-        .id(currentID)
-    }
-
-    /// Move `delta` steps through the ordered siblings, clamped at both ends. A no-op
-    /// when there is no list context or the move would run past an end.
-    private func navigate(_ delta: Int) {
-        guard let i = siblings.firstIndex(where: { $0.paneID == currentID }) else { return }
-        let j = i + delta
-        guard siblings.indices.contains(j) else { return }
-        prefillConsumed = true
-        currentID = siblings[j].paneID
-    }
-}
-
-/// The pane itself — one agent's live terminal + controls. Its identity (pane id,
-/// per-pane @State, terminal stream) is fixed for its lifetime; paging between agents
-/// is done by the thin `TerminalPaneView` wrapper above, which rebuilds this view for
-/// the new agent. `onNavigate` reports a horizontal swipe (+1 next / -1 previous) up to
-/// that wrapper.
+/// One agent's live terminal + controls. Its identity (pane id, per-pane @State, terminal
+/// stream) is fixed for its lifetime — it is hosted MOUNTED by `PaneKeepAliveContainer` and
+/// never torn down while its slot exists, so reopening it (and swiping/paging to it) is
+/// instant, with scroll position and any typed draft preserved. `onNavigate` reports a
+/// horizontal swipe (+1 next / -1 previous) up to the container, which fronts the neighbour;
+/// `isForeground` drives the PTY width-lock hand-off when the pane hides/shows.
 struct TerminalPaneContent: View {
     let client: HerdrClient
     let paneID: String
     let title: String
     let onNavigate: (Int) -> Void
+    /// True while this pane is the one on screen. Drives the PTY-lock release/re-take
+    /// (via `LiveTerminalView.isForeground`) and a status refresh on re-show; a
+    /// backgrounded keep-mounted pane stays warm but drops the keyboard and stops holding
+    /// the width-lock.
+    let isForeground: Bool
+    /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
+    /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
+    let onClose: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
     @State private var reply: String
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
@@ -1407,11 +1395,14 @@ struct TerminalPaneContent: View {
     /// pane. A non-empty `initialReply` puts the view into the pending-delivery
     /// state.
     init(client: HerdrClient, paneID: String, title: String, agent: AgentInfo? = nil,
-         initialReply: String = "", onNavigate: @escaping (Int) -> Void = { _ in }) {
+         initialReply: String = "", isForeground: Bool = true,
+         onNavigate: @escaping (Int) -> Void = { _ in }, onClose: @escaping () -> Void = {}) {
         self.client = client
         self.paneID = paneID
         self.title = title
+        self.isForeground = isForeground
         self.onNavigate = onNavigate
+        self.onClose = onClose
         _agent = State(initialValue: agent)
         _reply = State(initialValue: initialReply)
         _pendingPrefill = State(initialValue: !initialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1433,20 +1424,6 @@ struct TerminalPaneContent: View {
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
     private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering }
 
-    /// Swipe-to-page, gated on the reply draft. Paging rebuilds this whole view (the
-    /// wrapper keys it on the pane id), which would silently discard an unsent reply — and
-    /// the terminal is the largest touch target on screen, so an accidental horizontal
-    /// flick while reading is easy. So hold the page and say why when there's text to lose;
-    /// otherwise drop the keyboard and hand off to the neighbour.
-    private func requestNavigate(_ delta: Int) {
-        if !reply.trimmingCharacters(in: .whitespaces).isEmpty {
-            actionNote = "Send or clear your reply before switching agents"
-            return
-        }
-        replyFocused = false
-        onNavigate(delta)
-    }
-
     var body: some View {
         ZStack {
             // The terminal is its own ground — one shade under the app (groundMachine
@@ -1459,7 +1436,8 @@ struct TerminalPaneContent: View {
                 // byte firehose (#40), full-bleed as the machine ground. Read-only —
                 // input stays on the keycaps + reply bar below (sendText/sendKeys/
                 // prompt), never routed through the terminal itself.
-                LiveTerminalView(client: client, paneID: paneID, onNavigate: requestNavigate)
+                LiveTerminalView(client: client, paneID: paneID,
+                                 onNavigate: onNavigate, isForeground: isForeground)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
@@ -1477,13 +1455,21 @@ struct TerminalPaneContent: View {
                 replyBar
             }
         }
-        // Left-edge swipe → back to the agents list (the hidden nav bar disables the
-        // default interactive-pop). Edge-only, so it never fights the terminal scroll.
-        .overlay(EdgeSwipeBack { dismiss() })
-        .toolbar(.hidden, for: .navigationBar)
+        // Left-edge swipe → back to the agents list. Edge-only, so it never fights the
+        // terminal scroll. Rendered ONLY for the front pane: EdgeSwipeBack attaches its
+        // recognizer to the WINDOW, so N keep-mounted panes would otherwise stack N
+        // recognizers that all fire on one edge swipe.
+        .overlay { if isForeground { EdgeSwipeBack { onClose() } } }
+        // Runs ONCE per slot lifetime now (the pane stays mounted, so paneID never changes):
+        // the one-shot prefill delivery + first status resolve.
         .task(id: paneID) {
             await refresh()
             await deliverPrefillIfNeeded()
+        }
+        // Re-resolve status each time the pane returns to the front; drop the keyboard when it
+        // backgrounds so a hidden keep-mounted pane can't hold the software keyboard.
+        .onChange(of: isForeground) { _, nowFront in
+            if nowFront { Task { await refresh() } } else { replyFocused = false }
         }
     }
 
@@ -1492,7 +1478,7 @@ struct TerminalPaneContent: View {
     private var header: some View {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
-                Button { dismiss() } label: {
+                Button { onClose() } label: {
                     Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Palette.textDim)
                 }
