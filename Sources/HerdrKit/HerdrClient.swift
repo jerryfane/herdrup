@@ -160,6 +160,33 @@ public actor HerdrClient {
         _ = try await call("pane.send_text", SendTextParams(paneID: pane, text: text), as: JSONNull.self)
     }
 
+    struct RegisterDeviceParams: Encodable {
+        let deviceToken: String
+        let platform: String
+        let notifyNeedsInput: Bool
+        let notifyDies: Bool
+        let notifyFinishes: Bool
+        enum CodingKeys: String, CodingKey {
+            case deviceToken = "device_token"
+            case platform
+            case notifyNeedsInput = "notify_needs_input"
+            case notifyDies = "notify_dies"
+            case notifyFinishes = "notify_finishes"
+        }
+    }
+
+    /// Register this device's APNs token so the server can push agent transitions (needs-you /
+    /// finished / stopped) even while the app is closed, filtered by the user's category prefs.
+    /// Idempotent — safe to re-send on every (re)connect and whenever a token or pref changes. A
+    /// server that does not yet implement the method just throws, which the caller ignores.
+    public func registerDevice(token: String, needsInput: Bool, dies: Bool, finishes: Bool) async throws {
+        _ = try await call("notifications.register_device",
+                           RegisterDeviceParams(deviceToken: token, platform: "apns",
+                                                notifyNeedsInput: needsInput, notifyDies: dies,
+                                                notifyFinishes: finishes),
+                           as: JSONNull.self)
+    }
+
     struct SendKeysParams: Encodable {
         let target: String
         let keys: [String]
