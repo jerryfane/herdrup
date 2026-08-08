@@ -22,7 +22,7 @@ final class PagingTests: XCTestCase {
         app.launch()
         Thread.sleep(forTimeInterval: 2.0)   // let the first pane mount + its stream seed
 
-        // Opens on ALFA (heading "ALFA · ALFA") — front, hittable.
+        // Opens on ALFA (heading collapses to "ALFA" — name==kind==folder) — front, hittable.
         XCTAssertTrue(frontIs(app, "ALFA"),
             "Paging harness did not open on the first agent (ALFA).")
         attach(app, "01-alfa")

@@ -1434,18 +1434,21 @@ struct TerminalPaneContent: View {
     }
 
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
-    /// "kind · folder" for the header, e.g. "claude · herdr-ios".
+    /// The pane header label: the agent's NAME first (matching the list), then the model (kind) and
+    /// the cwd folder as context — each appended only when it adds information. E.g.
+    /// "herdr-app · claude · herdr-ios"; a name equal to its kind or folder collapses to just the name.
     private var heading: String {
-        // Lead with the agent's NAME (matching the list), then the model (kind) + folder as
-        // context — deduped so a name equal to its folder isn't repeated.
         let name = agent?.displayName ?? title
-        var parts = [name]
-        if let kind = agent?.agent, kind != name { parts.append(kind) }
+        var parts: [String] = []
+        if !name.isEmpty { parts.append(name) }                       // never a leading " · " for an empty name
+        if let kind = agent?.agent, !kind.isEmpty, !parts.contains(kind) { parts.append(kind) }
         if let cwd = agent?.cwd {
             let folder = URL(fileURLWithPath: cwd).lastPathComponent
-            if !folder.isEmpty, folder != "/", folder != name { parts.append(folder) }
+            // Dedup the folder against BOTH name and kind, and drop the non-folders URL yields for a
+            // root/empty cwd ("/" and "." respectively).
+            if !folder.isEmpty, folder != "/", folder != ".", !parts.contains(folder) { parts.append(folder) }
         }
-        return parts.joined(separator: " · ")
+        return parts.isEmpty ? title : parts.joined(separator: " · ")   // fall back so the header is never blank
     }
     // Send is withheld only while the auto-delivery loop is actively polling (it
     // owns delivery then). A pending pre-fill does NOT disable the button once the
@@ -2234,9 +2237,10 @@ struct MockTransport: HerdrTransport {
         AgentInfo.self,
         from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
 
-    /// A distinctively-named agent for the `paging` receipt. Its header heading renders
-    /// "<kind> · <kind>" (agent kind · cwd folder), so an XCUITest can assert the header
-    /// CHANGED after a swipe fronts the neighbour. Force-decoded: the literal is fixed + valid.
+    /// A distinctively-named agent for the `paging` receipt. Name == kind == cwd folder (all the same
+    /// distinctive word), so the deduped header heading collapses to just that word (e.g. "ALFA") —
+    /// which an XCUITest asserts CHANGES after a swipe fronts the neighbour. The `frontIs` CONTAINS
+    /// match still keys off that word. Force-decoded: the literal is fixed + valid.
     static func pagingAgent(kind: String, pane: String) -> AgentInfo {
         try! JSONDecoder().decode(AgentInfo.self, from: Data(
             #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
