@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- APNs environment, resolved per build config via the APS_ENVIRONMENT build setting
+	     (development for Debug, production for Release/Distribution — see project.yml). The
+	     "Herdrup App Store" profile now carries the Push capability, so device archives sign
+	     cleanly. Inert for the iphonesimulator build (never code-signed). -->
+	<key>aps-environment</key>
+	<string>$(APS_ENVIRONMENT)</string>
+</dict>
+</plist>
