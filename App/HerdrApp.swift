@@ -177,6 +177,14 @@ struct RootView: View {
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
     // (re)sends the token to the server whenever a connection exists.
     @ObservedObject private var push = PushCenter.shared
+    // Mirror the Settings push toggles here so a change WHILE CONNECTED re-registers the new prefs
+    // with the server (and can surface the permission prompt if a category was just enabled) —
+    // otherwise a toggle would only take effect on the next connect/reconnect. Keys + defaults match
+    // SettingsView exactly; @AppStorage observes UserDefaults app-wide, so SettingsView's writes fire
+    // the onChange handlers below even though they live on different views.
+    @AppStorage("notify.needsInput") private var notifyNeedsInput = true
+    @AppStorage("notify.dies") private var notifyDies = true
+    @AppStorage("notify.finishes") private var notifyFinishes = false
 
     var body: some View {
         Group {
@@ -207,6 +215,11 @@ struct RootView: View {
             // A device token can arrive AFTER connect (the APNs callback is async + independent of
             // SSH); register it whenever it lands while connected.
             .onChange(of: push.deviceToken) { _, _ in registerPush() }
+            // A push-category toggle flipped in Settings while connected: re-register the new prefs
+            // (and prompt if a category was just enabled), instead of waiting for a reconnect.
+            .onChange(of: notifyNeedsInput) { _, _ in pushPrefsChanged() }
+            .onChange(of: notifyDies) { _, _ in pushPrefsChanged() }
+            .onChange(of: notifyFinishes) { _, _ in pushPrefsChanged() }
         } else {
             ConnectView { connect($0) }
         }
@@ -214,10 +227,21 @@ struct RootView: View {
 
     /// Send the APNs token (with the current category prefs) to the server, if we have both a live
     /// client and a token. Idempotent + fire-and-forget — a server without the method just throws.
-    private func registerPush() {
-        guard let client, let token = push.deviceToken else { return }
+    private func registerPush(with explicitClient: HerdrClient? = nil) {
+        // Prefer the client the caller JUST built (connect/reconnect pass it in) over the @State
+        // `client`, which the SwiftUI setter may not have published through yet on the same tick.
+        guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
         let p = PushCenter.Prefs.current
         Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes) }
+    }
+
+    /// A push-category toggle changed while connected: surface the permission prompt if a category is
+    /// now enabled and not yet authorized, then re-register the current prefs with the server. Both
+    /// are no-ops when nothing is enabled / no token exists yet, so turning the last toggle off still
+    /// re-registers all-false (telling the server to stop) without prompting.
+    private func pushPrefsChanged() {
+        AppDelegate.requestAuthorizationIfWanted()
+        registerPush()
     }
 
     #if DEBUG
@@ -283,7 +307,7 @@ struct RootView: View {
         // connect. Result is discarded; the view re-fetches (and reuses the warm
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
-        registerPush()   // re-send a cached token to the freshly-connected server
+        registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
         // Now that the user has committed to a connection, ask for notification permission (if any
         // category is enabled). On grant, the token arrives via the delegate → onChange → registerPush.
         AppDelegate.requestAuthorizationIfWanted()
@@ -306,10 +330,11 @@ struct RootView: View {
         let closing = transport
         Task { await closing?.close() }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
+        let newClient = HerdrClient(transport: newTransport)
         transport = newTransport
-        client = HerdrClient(transport: newTransport)
+        client = newClient
         session += 1
-        registerPush()   // the reconnect built a fresh client actor — re-register the token with it
+        registerPush(with: newClient)   // the reconnect built a fresh client actor — re-register the token with it
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
@@ -893,8 +918,14 @@ struct TerminalHomeView: View {
     /// Front the pane a tapped push targeted (PushCenter.pendingPaneID), once the agent list has
     /// loaded so the swipe roster + identity resolve. Opens best-effort even if the agent has since
     /// gone (the pane then shows its exited state). Consumes the target so it fires once.
-    private func applyDeepLink() {
+    private func applyDeepLink(afterLoad: Bool = false) {
         guard let paneID = push.pendingPaneID else { return }
+        // If a first load is in flight (`loading` is set only while the list is still empty), do NOT
+        // consume the target from the onChange path — let THIS load's end (`afterLoad: true`) open it
+        // with the resolved identity + swipe roster, instead of a bare paneID with agent=nil and no
+        // siblings. The afterLoad call always proceeds; a background refresh (loading==false) also
+        // proceeds, using the stale-but-usable roster already in hand.
+        if !afterLoad, loading { return }
         push.pendingPaneID = nil
         let info = agents.first { $0.paneID == paneID }
         open(PaneSlot(paneID: paneID, title: info?.displayName ?? paneID, agent: info,
@@ -1293,6 +1324,7 @@ struct TerminalHomeView: View {
         Spacer()
     }
 
+    @MainActor
     private func load() async {
         // Spinner ONLY when there is nothing to show yet (genuine first load, or after a
         // reconnect cleared `agents` via `.id(session)`). A re-entry with a populated list
@@ -1313,7 +1345,7 @@ struct TerminalHomeView: View {
             let live = Set(fetched.map(\.paneID))
             everLive.formUnion(live)
             slots.removeAll { $0.paneID != frontID && everLive.contains($0.paneID) && !live.contains($0.paneID) }
-            applyDeepLink()   // now that agents + roster are loaded, front any pending push target
+            applyDeepLink(afterLoad: true)   // agents + roster loaded — front any pending push target
         } catch {
             let rejected: String?
             if let transportError = error as? TransportError,
