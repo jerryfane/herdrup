@@ -1473,6 +1473,9 @@ struct TerminalPaneContent: View {
     @State private var agent: AgentInfo?
     @State private var sending = false
     @State private var actionNote: String?
+    /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
+    /// `/tui default` prompts (the reply box's send is gated by `sending`; this is its analogue).
+    @State private var switchingTui = false
     /// True when the pane was opened with a pre-filled task (a just-spawned agent).
     /// While true, the manual send is DISABLED and `deliverPrefillIfNeeded` polls
     /// until the agent is promptable, then delivers the task as a prompt. This is
@@ -1548,12 +1551,26 @@ struct TerminalPaneContent: View {
     private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
-    /// ONLY for Claude Code panes (`agent == "claude"`) and only until the reader has
-    /// answered it once (`tuiClassicPrompted`). Deliberately gates on agent KIND + the
+    /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
+    /// has answered it once (`tuiClassicPrompted`). Deliberately gates on agent KIND + the
     /// one-shot flag, not on probing the alt-screen/mouse state — simpler, and correct
     /// even after the switch since the flag suppresses any re-show. codex/gemini/plain
     /// shells never see it.
-    private var showTuiBanner: Bool { agent?.agent == "claude" && !tuiClassicPrompted }
+    private var showTuiBanner: Bool {
+        // Never render during a buildbox screenshot or an XCUITest run. The banner takes its own
+        // ~150pt of flow space above the terminal, which would push the scroll receipts' hard-coded
+        // dy:0.35 drag origin off the scroll view — their scroll/ccscroll mocks seat a claude-kind
+        // pane — reproducing the exact movedDiff~0 dead-scroll failure those receipts exist to catch.
+        // ScreenshotMock is #if DEBUG-only and this view builds in ALL configs, so the guard is
+        // DEBUG-gated (a bare reference breaks the Release/Distribution archive; release has no mock
+        // harness, so nothing to suppress there). Same guard shape AppDelegate uses for push/prompts.
+        #if DEBUG
+        if ScreenshotMock.mode != nil { return false }
+        #endif
+        // contains("claude") to stay consistent with DesignSystem's agent-kind colour/glyph mapping,
+        // so a claude-family kind is classified uniformly everywhere.
+        return (agent?.agent?.contains("claude") ?? false) && !tuiClassicPrompted
+    }
 
     var body: some View {
         ZStack {
@@ -1678,6 +1695,8 @@ struct TerminalPaneContent: View {
                         .padding(.horizontal, 18).padding(.vertical, 8)
                         .background(Palette.text).clipShape(Capsule())
                 }
+                .disabled(switchingTui)
+                .opacity(switchingTui ? 0.5 : 1)
                 Button { dismissTuiBanner() } label: {
                     Text("Not now").font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
                         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -1692,20 +1711,29 @@ struct TerminalPaneContent: View {
         .padding(.horizontal, 12).padding(.top, 10)
     }
 
-    /// [Switch] — send `/tui default` through the SAME prompt path the reply box uses
-    /// (`client.prompt`), fire-and-forget with `try?` like the other sends, then close the
-    /// banner for good. `/tui default` runs as a Claude Code slash command AND persists to
-    /// the host's ~/.claude/settings.json, so this one switch both flips the current agent
-    /// live and makes every future Claude Code agent open in classic (smooth-scroll) mode.
+    /// [Switch] — send `/tui default` through the SAME confirmed-delivery prompt path the reply
+    /// box uses (`client.prompt` with `waitUntil: anyAgentStatus`), then close the banner for good
+    /// ONLY on a clean delivery. `/tui default` runs as a Claude Code slash command AND persists to
+    /// the host's ~/.claude/settings.json, so this one switch both flips the current agent live and
+    /// makes every future Claude Code agent open in classic (smooth-scroll) mode. `waitUntil` makes
+    /// the server report a truthful delivery and THROW on a stranded draft / not-ready composer,
+    /// rather than the unconditional written-to-pty a bare prompt returns — which would dismiss the
+    /// banner while nothing actually switched (the round-1 failure, in a narrower form).
     private func switchToClassicTui() {
+        // Coalesce repeated taps: without this each tap would queue another /tui default prompt
+        // (the reply box's send is already gated by `sending`; the banner had no equivalent).
+        guard !switchingTui else { return }
+        switchingTui = true
         let pane = paneID
-        // Mark the one-time prompt answered ONLY after the send actually lands. If the prompt fails
-        // (agent not at a ready composer, a transient error), keep the banner so the reader can retry
-        // instead of silently believing they switched while scrolling stays laggy. On success the
-        // banner is dismissed for ALL agents (Claude Code persists the classic-renderer setting).
+        // Mark the one-time prompt answered ONLY after the send is CONFIRMED delivered. If it fails
+        // (agent not at a ready composer, a stranded draft, a transient error), keep the banner so the
+        // reader can retry instead of silently believing they switched while scrolling stays laggy. On
+        // success the banner is dismissed for ALL agents (Claude Code persists the classic setting).
         Task {
+            defer { switchingTui = false }
             do {
-                try await client.prompt(pane: pane, text: "/tui default")
+                _ = try await client.prompt(pane: pane, text: "/tui default",
+                                            waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
                 tuiClassicPrompted = true
                 actionNote = "Switched — Claude Code will open in smooth-scroll mode from now on"
             } catch {
