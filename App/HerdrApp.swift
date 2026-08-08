@@ -284,6 +284,9 @@ struct RootView: View {
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
         registerPush()   // re-send a cached token to the freshly-connected server
+        // Now that the user has committed to a connection, ask for notification permission (if any
+        // category is enabled). On grant, the token arrives via the delegate → onChange → registerPush.
+        AppDelegate.requestAuthorizationIfWanted()
     }
 
     private func disconnect() {
