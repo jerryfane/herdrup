@@ -18,21 +18,36 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
            let paneID = payload["pane_id"] as? String {
             PushCenter.shared.tapped(paneID: paneID)
         }
-        requestAuthorizationIfWanted(application)
+        // On launch just REFRESH the token if the user already granted permission — no prompt, so
+        // nothing appears on the connect screen (which the buildbox screenshots). The actual
+        // permission PROMPT is deferred to `connect()` (see requestAuthorizationIfWanted), because
+        // asking before the user has even connected is poor UX.
+        Self.refreshTokenIfAuthorized()
         return true
+    }
+
+    /// Register for APNs (to refresh the device token) only if permission was already granted — this
+    /// never shows a prompt, so it is safe at launch.
+    static func refreshTokenIfAuthorized() {
+        guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] == nil else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else { return }
+            DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
+        }
     }
 
     /// Ask for notification permission (and register for APNs) only if the user has at least one
     /// push category enabled in Settings — mirrors the existing notify.* toggles so we never prompt
-    /// for something they turned off. `RootView` re-runs this when a toggle flips on.
-    func requestAuthorizationIfWanted(_ application: UIApplication = .shared) {
-        // Never prompt during a buildbox screenshot or an XCUITest run (both set
-        // HERDR_SCREENSHOT_MOCK): a permission alert would overlay the screenshot / block the test.
+    /// for something they turned off. Called from `RootView.connect()` so the prompt appears once
+    /// the user is actually using the app, not on the connect screen. Static so RootView can call it
+    /// without a reference to the delegate instance.
+    static func requestAuthorizationIfWanted() {
+        // Never prompt during a buildbox screenshot or an XCUITest run (both set HERDR_SCREENSHOT_MOCK).
         guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] == nil else { return }
         guard PushCenter.Prefs.current.anyEnabled else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
-            DispatchQueue.main.async { application.registerForRemoteNotifications() }
+            DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
         }
     }
 
