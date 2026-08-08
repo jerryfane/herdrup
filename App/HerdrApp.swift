@@ -235,12 +235,11 @@ struct RootView: View {
         Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes) }
     }
 
-    /// A push-category toggle changed while connected: surface the permission prompt if a category is
-    /// now enabled and not yet authorized, then re-register the current prefs with the server. Both
-    /// are no-ops when nothing is enabled / no token exists yet, so turning the last toggle off still
-    /// re-registers all-false (telling the server to stop) without prompting.
+    /// A push-category toggle changed while connected: re-register the current prefs with the server so
+    /// the change takes effect immediately (no-op until a device token exists — i.e. until push is
+    /// activated in 2a/2c). The permission PROMPT is intentionally NOT triggered here in 2b, for the
+    /// same one-shot-grant reason as connect() — it lands with the entitlement + server in 2a/2c.
     private func pushPrefsChanged() {
-        AppDelegate.requestAuthorizationIfWanted()
         registerPush()
     }
 
@@ -308,9 +307,12 @@ struct RootView: View {
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
         registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
-        // Now that the user has committed to a connection, ask for notification permission (if any
-        // category is enabled). On grant, the token arrives via the delegate → onChange → registerPush.
-        AppDelegate.requestAuthorizationIfWanted()
+        // NOTE: the notification permission PROMPT is deliberately NOT requested in 2b. iOS grants
+        // alert authorization exactly once per install, and 2b's push stack is dormant (no entitlement
+        // until 2a, no server RPC until 2c), so prompting now would burn that one-shot grant for a
+        // capability that cannot deliver anything — a user who taps "Don't Allow" is then permanently
+        // opted out even after push goes live. AppDelegate.requestAuthorizationIfWanted() is wired in
+        // the 2a/2c PR, alongside the entitlement + server, so the prompt appears only when it can work.
     }
 
     private func disconnect() {
@@ -920,14 +922,19 @@ struct TerminalHomeView: View {
     /// gone (the pane then shows its exited state). Consumes the target so it fires once.
     private func applyDeepLink(afterLoad: Bool = false) {
         guard let paneID = push.pendingPaneID else { return }
-        // If a first load is in flight (`loading` is set only while the list is still empty), do NOT
-        // consume the target from the onChange path — let THIS load's end (`afterLoad: true`) open it
-        // with the resolved identity + swipe roster, instead of a bare paneID with agent=nil and no
-        // siblings. The afterLoad call always proceeds; a background refresh (loading==false) also
-        // proceeds, using the stale-but-usable roster already in hand.
-        if !afterLoad, loading { return }
-        push.pendingPaneID = nil
         let info = agents.first { $0.paneID == paneID }
+        // On the onChange path (not post-load), only open once the target RESOLVES against the roster.
+        // If it doesn't — an empty roster (first load) OR a stale one (agent spawned from the desktop
+        // since the last refresh) — opening now would give a bare paneID title AND a sibling list that
+        // doesn't contain it, so swipe-paging would be dead for that slot's whole life. Instead kick a
+        // refresh (if one isn't already running) and let the post-load `afterLoad: true` call open it
+        // with the fresh identity + roster. The afterLoad call always proceeds — even an unresolved
+        // target opens best-effort then (the agent is genuinely gone → its pane shows the exited state).
+        if !afterLoad, info == nil {
+            if !loading { Task { await load() } }
+            return
+        }
+        push.pendingPaneID = nil
         open(PaneSlot(paneID: paneID, title: info?.displayName ?? paneID, agent: info,
                       initialReply: "", siblings: orderedSiblings))
     }
@@ -1362,6 +1369,11 @@ struct TerminalHomeView: View {
                 self.error = "\(error)"
                 rejectedFingerprint = rejected
             }
+            // DROP a pending deep-link this failed load couldn't service, rather than leave it armed:
+            // a push targets a just-now event, so firing it after some much-later successful load would
+            // yank the reader into a stale pane (an agent that may have finished long ago). If it was
+            // already opened by the onChange path, this is nil already. They can reopen from the list.
+            push.pendingPaneID = nil
         }
     }
 }
