@@ -136,15 +136,13 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
-        # NO APNs entitlement is wired here (no CODE_SIGN_ENTITLEMENTS). It affects only the DEVICE
-        # archive lanes (Release for the Mac lane, Distribution for CI), and until owner step 2a
-        # re-mints the "Herdrup App Store" profile WITH the Push capability, adding aps-environment to
-        # those configs makes the NEXT TestFlight archive fail to sign — for BOTH manual (Distribution)
-        # and automatic (Release) signing, since the App ID has no Push capability to auto-provision.
-        # The 2b scaffolding (AppDelegate/PushCenter/registration) is inert without it, so it ships
-        # safely now. The 2a PR adds the entitlements file, CODE_SIGN_ENTITLEMENTS, and a per-config
-        # APS_ENVIRONMENT build setting (development for Debug, production for Release/Distribution)
-        # together, alongside the re-minted profile.
+        # APNs entitlement (App/Herdr.entitlements): aps-environment = $(APS_ENVIRONMENT), resolved
+        # per-config below (development for Debug, production for Release/Distribution). The App ID has
+        # the Push capability and the "Herdrup App Store" profile was re-minted WITH Push, so the device
+        # archive lanes (Release Mac lane, Distribution CI) sign cleanly. INERT for the iphonesimulator
+        # build (never code-signed), so the buildbox/CI sim build is unaffected. Pairs with the 2b/2c
+        # push stack (AppDelegate/PushCenter registration + the herdr APNs sender).
+        CODE_SIGN_ENTITLEMENTS: App/Herdr.entitlements
         # The lamb app icon ("Herdrup — The Lamb", the approved icon kit). The
         # asset catalog lives under App/ (already a source path), so xcodegen
         # bundles it; this names the icon set inside it. Single 1024 artwork —
@@ -169,7 +167,15 @@ targets:
       # is unaffected; Debug (the buildbox sim build) is never code-signed. The
       # specifier matches the profile minted into the `testflight` GitHub environment.
       configs:
+        # aps-environment resolves from APS_ENVIRONMENT per config: `development` for an on-device
+        # Debug build (which provisions against a development profile / sandbox APNs), `production` for
+        # the Release (Mac lane) and Distribution (CI) archives that ship to TestFlight/App Store.
+        Debug:
+          APS_ENVIRONMENT: development
+        Release:
+          APS_ENVIRONMENT: production
         Distribution:
+          APS_ENVIRONMENT: production
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"
