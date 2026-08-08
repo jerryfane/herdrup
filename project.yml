@@ -124,6 +124,10 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # NOTE: no UIBackgroundModes here. Our push is an ALERT the user taps (agent transition) —
+        # the system delivers alert pushes with no background mode, and `remote-notification` only
+        # matters for silent `content-available` wakes (which also require a fetch handler we don't
+        # implement). Declaring it unused is an App Store review flag, so it is deliberately omitted.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
@@ -132,6 +136,15 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
+        # NO APNs entitlement is wired here (no CODE_SIGN_ENTITLEMENTS). It affects only the DEVICE
+        # archive lanes (Release for the Mac lane, Distribution for CI), and until owner step 2a
+        # re-mints the "Herdrup App Store" profile WITH the Push capability, adding aps-environment to
+        # those configs makes the NEXT TestFlight archive fail to sign — for BOTH manual (Distribution)
+        # and automatic (Release) signing, since the App ID has no Push capability to auto-provision.
+        # The 2b scaffolding (AppDelegate/PushCenter/registration) is inert without it, so it ships
+        # safely now. The 2a PR adds the entitlements file, CODE_SIGN_ENTITLEMENTS, and a per-config
+        # APS_ENVIRONMENT build setting (development for Debug, production for Release/Distribution)
+        # together, alongside the re-minted profile.
         # The lamb app icon ("Herdrup — The Lamb", the approved icon kit). The
         # asset catalog lives under App/ (already a source path), so xcodegen
         # bundles it; this names the icon set inside it. Single 1024 artwork —
