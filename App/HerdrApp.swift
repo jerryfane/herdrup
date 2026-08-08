@@ -11,6 +11,10 @@ import HerdrKit
 // monospace is a readable terminal v1.
 @main
 struct HerdrApp: App {
+    // The app is otherwise pure SwiftUI; the adaptor is only for APNs registration + notification
+    // callbacks, which have no SwiftUI equivalent. It bridges to PushCenter; RootView does the rest.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup { RootView() }
     }
@@ -169,6 +173,10 @@ struct RootView: View {
     @State private var credentials: SSHCredentials?
     @State private var session = 0   // bumped to force a fresh load on reconnect
     private let pins = KeychainHostKeyPolicy.shared
+    // The APNs token + tapped-notification target live here (in PushCenter), not in the
+    // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
+    // (re)sends the token to the server whenever a connection exists.
+    @ObservedObject private var push = PushCenter.shared
 
     var body: some View {
         Group {
@@ -196,9 +204,20 @@ struct RootView: View {
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
             .id(session)
+            // A device token can arrive AFTER connect (the APNs callback is async + independent of
+            // SSH); register it whenever it lands while connected.
+            .onChange(of: push.deviceToken) { _, _ in registerPush() }
         } else {
             ConnectView { connect($0) }
         }
+    }
+
+    /// Send the APNs token (with the current category prefs) to the server, if we have both a live
+    /// client and a token. Idempotent + fire-and-forget — a server without the method just throws.
+    private func registerPush() {
+        guard let client, let token = push.deviceToken else { return }
+        let p = PushCenter.Prefs.current
+        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes) }
     }
 
     #if DEBUG
@@ -264,6 +283,7 @@ struct RootView: View {
         // connect. Result is discarded; the view re-fetches (and reuses the warm
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
+        registerPush()   // re-send a cached token to the freshly-connected server
     }
 
     private func disconnect() {
@@ -286,6 +306,7 @@ struct RootView: View {
         transport = newTransport
         client = HerdrClient(transport: newTransport)
         session += 1
+        registerPush()   // the reconnect built a fresh client actor — re-register the token with it
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
@@ -803,6 +824,9 @@ struct TerminalHomeView: View {
     /// live and then vanishes — so a still-BOOTING spawn pane (absent from agent.list by design
     /// while its composer comes up) is never reaped mid-delivery.
     @State private var everLive: Set<String> = []
+    /// A tapped push deep-links to its agent (see PushCenter). Observed here (a singleton, so it
+    /// survives this view's `.id(session)` remount); consumed once the list has loaded.
+    @ObservedObject private var push = PushCenter.shared
     /// A freshly-spawned pane held while the New-agent cover animates away, then opened in the
     /// cover's onDismiss (fronting a keep-mounted pane, not a nav push, so the historically
     /// fragile "push while dismissing a cover" no longer applies — but the deferral is kept as
@@ -863,6 +887,17 @@ struct TerminalHomeView: View {
         frontID = slot.paneID
     }
 
+    /// Front the pane a tapped push targeted (PushCenter.pendingPaneID), once the agent list has
+    /// loaded so the swipe roster + identity resolve. Opens best-effort even if the agent has since
+    /// gone (the pane then shows its exited state). Consumes the target so it fires once.
+    private func applyDeepLink() {
+        guard let paneID = push.pendingPaneID else { return }
+        push.pendingPaneID = nil
+        let info = agents.first { $0.paneID == paneID }
+        open(PaneSlot(paneID: paneID, title: info?.displayName ?? paneID, agent: info,
+                      initialReply: "", siblings: orderedSiblings))
+    }
+
     /// Swipe-page from the fronted pane to its prev/next sibling (clamped). `open()`s the
     /// neighbour — instant if it is already mounted.
     private func navigate(from slot: PaneSlot, delta: Int) {
@@ -906,6 +941,10 @@ struct TerminalHomeView: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
+                // A push tapped while the home view is already loaded (app foregrounded / already
+                // on the list) deep-links immediately; the cold-launch / just-loaded case is handled
+                // at the end of load().
+                .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
             }
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
@@ -1271,6 +1310,7 @@ struct TerminalHomeView: View {
             let live = Set(fetched.map(\.paneID))
             everLive.formUnion(live)
             slots.removeAll { $0.paneID != frontID && everLive.contains($0.paneID) && !live.contains($0.paneID) }
+            applyDeepLink()   // now that agents + roster are loaded, front any pending push target
         } catch {
             let rejected: String?
             if let transportError = error as? TransportError,

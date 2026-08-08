@@ -124,6 +124,10 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # Remote push: lets APNs wake the app in the background to deliver an agent-transition
+        # notification even when it isn't foregrounded. Pairs with the aps-environment entitlement.
+        UIBackgroundModes:
+          - remote-notification
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
@@ -132,6 +136,11 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
+        # APNs entitlement. INERT for the iphonesimulator build (never code-signed — see the signing
+        # note below), so the buildbox/CI sim build stays green; it takes effect only for the device
+        # archive, which needs the "Herdrup App Store" profile re-minted WITH Push. `production`
+        # because we ship via TestFlight (a production distribution → production APNs).
+        CODE_SIGN_ENTITLEMENTS: App/Herdr.entitlements
         # The lamb app icon ("Herdrup — The Lamb", the approved icon kit). The
         # asset catalog lives under App/ (already a source path), so xcodegen
         # bundles it; this names the icon set inside it. Single 1024 artwork —
