@@ -12,12 +12,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        // Cold launch FROM a notification tap: the payload is in launchOptions; stash the target so
-        // RootView opens it once connected + loaded.
-        if let payload = launchOptions?[.remoteNotification] as? [AnyHashable: Any],
-           let paneID = payload["pane_id"] as? String {
-            PushCenter.shared.tapped(paneID: paneID)
-        }
+        // A cold launch FROM a notification tap is delivered to `userNotificationCenter(_:didReceive:)`
+        // as well (the delegate is set above, synchronously, before the launch tap is dispatched), so
+        // we do NOT also read launchOptions[.remoteNotification] here — that would deep-link the same
+        // tap twice. The single didReceive path stashes the target for RootView to open once loaded.
         // On launch just REFRESH the token if the user already granted permission — no prompt, so
         // nothing appears on the connect screen (which the buildbox screenshots). The actual
         // permission PROMPT is deferred to `connect()` (see requestAuthorizationIfWanted), because
@@ -29,9 +27,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// Register for APNs (to refresh the device token) only if permission was already granted — this
     /// never shows a prompt, so it is safe at launch.
     static func refreshTokenIfAuthorized() {
-        guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] == nil else { return }
+        // One source of truth for "we're in a screenshot/UITest run" — matches ScreenshotMock.mode
+        // (env var OR the -herdrScreenshotMock launch arg), so no mock path can slip past an
+        // env-only check and prompt/register under test.
+        guard ScreenshotMock.mode == nil else { return }
         UNUserNotificationCenter.current().getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized else { return }
+            // Refresh for any granted state, including provisional/ephemeral (which also deliver
+            // pushes) — not just the full .authorized grant.
+            guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
             DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
         }
     }
@@ -42,8 +45,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// the user is actually using the app, not on the connect screen. Static so RootView can call it
     /// without a reference to the delegate instance.
     static func requestAuthorizationIfWanted() {
-        // Never prompt during a buildbox screenshot or an XCUITest run (both set HERDR_SCREENSHOT_MOCK).
-        guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] == nil else { return }
+        // Never prompt during a buildbox screenshot or an XCUITest run (ScreenshotMock.mode covers
+        // both the env var and the -herdrScreenshotMock launch arg).
+        guard ScreenshotMock.mode == nil else { return }
         guard PushCenter.Prefs.current.anyEnabled else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
@@ -63,10 +67,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // to surface (the Settings screen already tells the user push is best-effort).
     }
 
-    // Show the banner + play the sound even while the app is foregrounded.
+    // Show the banner + play the sound even while the app is foregrounded, and ALSO add it to
+    // Notification Center (.list) so a user who dismisses or misses the banner still has a record of
+    // the agent transition to tap later.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        [.banner, .list, .sound]
     }
 
     // A tap on the notification → deep-link to the agent's pane.

@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  APNs entitlement, kept in the repo but NOT yet wired into project.yml (no CODE_SIGN_ENTITLEMENTS).
+  It is wired in the 2a PR, once owner step 2a re-mints the "Herdrup App Store" profile WITH Push —
+  before then, applying aps-environment to the device archive configs breaks signing (the profile
+  lacks the capability). APS_ENVIRONMENT is a per-config build setting the 2a PR sets: `development`
+  for Debug (on-device debug builds provision against a development profile) and `production` for
+  Release/Distribution (TestFlight/App Store → production APNs). This keeps the value correct per
+  build type instead of hardcoding `production` everywhere.
+-->
 <plist version="1.0">
 <dict>
 	<key>aps-environment</key>
-	<string>production</string>
+	<string>$(APS_ENVIRONMENT)</string>
 </dict>
 </plist>
