@@ -1399,6 +1399,10 @@ struct TerminalPaneContent: View {
     /// (delivered or timed out) the button re-enables — but ALWAYS routes a pending
     /// pre-fill through the prompt-only path, never rawKeys.
     @State private var autoDelivering = false
+    /// Bumped by the header refresh button to RECONNECT the pane: changing the id below re-creates
+    /// the LiveTerminalView (new Coordinator → a fresh pane.stream over a new connection, re-seeded
+    /// from the current server state). Useful when the stream has gone stale or its connection dropped.
+    @State private var streamGen = 0
     /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
@@ -1430,14 +1434,21 @@ struct TerminalPaneContent: View {
     }
 
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
-    /// "kind · folder" for the header, e.g. "claude · herdr-ios".
+    /// The pane header label: the agent's NAME first (matching the list), then the model (kind) and
+    /// the cwd folder as context — each appended only when it adds information. E.g.
+    /// "herdr-app · claude · herdr-ios"; a name equal to its kind or folder collapses to just the name.
     private var heading: String {
-        let kind = agent?.agent ?? title
+        let name = agent?.displayName ?? title
+        var parts: [String] = []
+        if !name.isEmpty { parts.append(name) }                       // never a leading " · " for an empty name
+        if let kind = agent?.agent, !kind.isEmpty, !parts.contains(kind) { parts.append(kind) }
         if let cwd = agent?.cwd {
             let folder = URL(fileURLWithPath: cwd).lastPathComponent
-            if !folder.isEmpty && folder != "/" { return "\(kind) · \(folder)" }
+            // Dedup the folder against BOTH name and kind, and drop the non-folders URL yields for a
+            // root/empty cwd ("/" and "." respectively).
+            if !folder.isEmpty, folder != "/", folder != ".", !parts.contains(folder) { parts.append(folder) }
         }
-        return kind
+        return parts.isEmpty ? title : parts.joined(separator: " · ")   // fall back so the header is never blank
     }
     // Send is withheld only while the auto-delivery loop is actively polling (it
     // owns delivery then). A pending pre-fill does NOT disable the button once the
@@ -1459,6 +1470,8 @@ struct TerminalPaneContent: View {
                 // prompt), never routed through the terminal itself.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground)
+                    // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
+                    .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
@@ -1505,7 +1518,10 @@ struct TerminalPaneContent: View {
                 }
                 Text(heading).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                 Spacer()
-                Button { Task { await refresh() } } label: {
+                Button {
+                    streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
+                    Task { await refresh() }   // and re-resolve the agent's status/identity
+                } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundStyle(Palette.textDim)
                 }
             }
@@ -2221,9 +2237,10 @@ struct MockTransport: HerdrTransport {
         AgentInfo.self,
         from: Data(#"{"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"}"#.utf8))
 
-    /// A distinctively-named agent for the `paging` receipt. Its header heading renders
-    /// "<kind> · <kind>" (agent kind · cwd folder), so an XCUITest can assert the header
-    /// CHANGED after a swipe fronts the neighbour. Force-decoded: the literal is fixed + valid.
+    /// A distinctively-named agent for the `paging` receipt. Name == kind == cwd folder (all the same
+    /// distinctive word), so the deduped header heading collapses to just that word (e.g. "ALFA") —
+    /// which an XCUITest asserts CHANGES after a swipe fronts the neighbour. The `frontIs` CONTAINS
+    /// match still keys off that word. Force-decoded: the literal is fixed + valid.
     static func pagingAgent(kind: String, pane: String) -> AgentInfo {
         try! JSONDecoder().decode(AgentInfo.self, from: Data(
             #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
