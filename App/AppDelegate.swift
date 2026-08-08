@@ -28,9 +28,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// never shows a prompt, so it is safe at launch.
     static func refreshTokenIfAuthorized() {
         // One source of truth for "we're in a screenshot/UITest run" — matches ScreenshotMock.mode
-        // (env var OR the -herdrScreenshotMock launch arg), so no mock path can slip past an
-        // env-only check and prompt/register under test.
+        // (env var OR the -herdrScreenshotMock launch arg), so no mock path can slip past and
+        // register under test. ScreenshotMock is `#if DEBUG`-only (it lives in the mock harness), and
+        // this file compiles in ALL configs, so the guard MUST be DEBUG-gated — a bare reference would
+        // fail to compile the Release/Distribution archive (which CI, building Debug, never sees). In
+        // release there is no mock harness at all, so no guard is needed.
+        #if DEBUG
         guard ScreenshotMock.mode == nil else { return }
+        #endif
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             // Refresh for any granted state, including provisional/ephemeral (which also deliver
             // pushes) — not just the full .authorized grant.
@@ -39,15 +44,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Ask for notification permission (and register for APNs) only if the user has at least one
-    /// push category enabled in Settings — mirrors the existing notify.* toggles so we never prompt
-    /// for something they turned off. Called from `RootView.connect()` so the prompt appears once
-    /// the user is actually using the app, not on the connect screen. Static so RootView can call it
-    /// without a reference to the delegate instance.
+    /// Ask for notification permission (and register for APNs) only if the user has at least one push
+    /// category enabled in Settings — mirrors the notify.* toggles so we never prompt for something
+    /// they turned off. NOT called in 2b (the prompt is deferred until push can actually deliver — see
+    /// RootView.connect()); the 2a/2c PR wires the call, once the entitlement + server exist. Static so
+    /// RootView can call it without a reference to the delegate instance.
     static func requestAuthorizationIfWanted() {
-        // Never prompt during a buildbox screenshot or an XCUITest run (ScreenshotMock.mode covers
-        // both the env var and the -herdrScreenshotMock launch arg).
+        // Never prompt during a buildbox screenshot or an XCUITest run. ScreenshotMock covers the env
+        // var AND the -herdrScreenshotMock launch arg, but it is `#if DEBUG`-only and this file builds
+        // in all configs, so the guard is DEBUG-gated (a bare reference breaks the release archive;
+        // release has no mock harness, so no guard is needed there).
+        #if DEBUG
         guard ScreenshotMock.mode == nil else { return }
+        #endif
         guard PushCenter.Prefs.current.anyEnabled else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
