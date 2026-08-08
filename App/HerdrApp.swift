@@ -1399,6 +1399,10 @@ struct TerminalPaneContent: View {
     /// (delivered or timed out) the button re-enables — but ALWAYS routes a pending
     /// pre-fill through the prompt-only path, never rawKeys.
     @State private var autoDelivering = false
+    /// Bumped by the header refresh button to RECONNECT the pane: changing the id below re-creates
+    /// the LiveTerminalView (new Coordinator → a fresh pane.stream over a new connection, re-seeded
+    /// from the current server state). Useful when the stream has gone stale or its connection dropped.
+    @State private var streamGen = 0
     /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
@@ -1432,12 +1436,16 @@ struct TerminalPaneContent: View {
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
     /// "kind · folder" for the header, e.g. "claude · herdr-ios".
     private var heading: String {
-        let kind = agent?.agent ?? title
+        // Lead with the agent's NAME (matching the list), then the model (kind) + folder as
+        // context — deduped so a name equal to its folder isn't repeated.
+        let name = agent?.displayName ?? title
+        var parts = [name]
+        if let kind = agent?.agent, kind != name { parts.append(kind) }
         if let cwd = agent?.cwd {
             let folder = URL(fileURLWithPath: cwd).lastPathComponent
-            if !folder.isEmpty && folder != "/" { return "\(kind) · \(folder)" }
+            if !folder.isEmpty, folder != "/", folder != name { parts.append(folder) }
         }
-        return kind
+        return parts.joined(separator: " · ")
     }
     // Send is withheld only while the auto-delivery loop is actively polling (it
     // owns delivery then). A pending pre-fill does NOT disable the button once the
@@ -1459,6 +1467,8 @@ struct TerminalPaneContent: View {
                 // prompt), never routed through the terminal itself.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground)
+                    // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
+                    .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
@@ -1505,7 +1515,10 @@ struct TerminalPaneContent: View {
                 }
                 Text(heading).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                 Spacer()
-                Button { Task { await refresh() } } label: {
+                Button {
+                    streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
+                    Task { await refresh() }   // and re-resolve the agent's status/identity
+                } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundStyle(Palette.textDim)
                 }
             }
