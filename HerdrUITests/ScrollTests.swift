@@ -92,6 +92,45 @@ final class ScrollTests: XCTestCase {
             "Claude Code pane did NOT scroll: content unchanged after swipe (diff=\(movedDiff)). The drag was not translated into an SGR wheel event for the mouse-mode agent.")
     }
 
+    /// The SCROLLBACK-BACKFILL receipt (open/refresh history). On connect the live stream seeds
+    /// only the CURRENT screen; this proves the connect-time backfill (agent.read source=recent,
+    /// ansi) supplies earlier output so a swipe-up reveals it. The `backfill` mock's LIVE stream
+    /// carries ONLY the short one-screen seed while agent.read returns ~1000 numbered lines — so
+    /// any scrollback the swipe reveals came from the backfill path, not the stream. RED without
+    /// the feature (nothing above the seed to scroll into); GREEN once the backfill fills
+    /// SwiftTerm's scrollback.
+    func testBackfillMakesHistoryScrollable() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "backfill"
+        app.launch()
+        Thread.sleep(forTimeInterval: 3.0)   // launch + backfill read + reset seed feed
+
+        // Static baseline (cursor hidden by the fixture): untouched frames ~identical.
+        let before = app.screenshot()
+        Thread.sleep(forTimeInterval: 1.0)
+        let beforeAgain = app.screenshot()
+        let idleDiff = pixelDiffFraction(before, beforeAgain)
+        attach(before, name: "bf-01-before")
+        XCTAssertLessThan(idleDiff, 0.02,
+            "Backfill mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
+
+        // Swipe DOWN on the terminal body to reveal the backfilled history above the current
+        // screen (same gesture the omp scroll receipt uses).
+        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        for _ in 0..<3 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        let after = app.screenshot()
+        attach(after, name: "bf-02-after-swipe")
+        let movedDiff = pixelDiffFraction(before, after)
+        XCTAssertGreaterThan(movedDiff, 0.10,
+            "No backfilled history to scroll into: content unchanged after swiping (diff=\(movedDiff)). The connect-time scrollback backfill did not populate SwiftTerm's scrollback.")
+    }
+
     // MARK: - helpers
 
     private func attach(_ shot: XCUIScreenshot, name: String) {
