@@ -4,6 +4,21 @@ import UIKit
 import SwiftTerm
 import HerdrKit
 
+/// One-shot claim gate: `claim()` returns true to EXACTLY ONE caller, so a
+/// `CheckedContinuation` raced between two tasks (a read vs a timeout) is resumed at
+/// most once. Used by the scrollback backfill to bound a read that the transport won't
+/// cancel — the loser is abandoned rather than awaited.
+private final class ResumeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 /// A read-only, LIVE SwiftTerm terminal for a herdr pane (#40). It consumes
 /// `client.streamTerminal(pane:)` — herdr's raw PTY byte firehose — and feeds the
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
@@ -439,18 +454,26 @@ struct LiveTerminalView: UIViewRepresentable {
             guard Self.backfillLines > 0 else { backfillTask = nil; return }
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
-                let read = Task {
-                    try? await client.read(pane: pane, source: .recent, format: .ansi,
-                                           lines: Self.backfillLines)
+                // Race the read against the timeout and take whichever finishes FIRST, ABANDONING
+                // the loser. The shipped HerdrTransports do NOT honour Task cancellation on the read
+                // path, so we must never `await` a hung read — that would leave the first .reset (and
+                // every frame queued behind it) suspended forever, a blank terminal. Instead a
+                // one-shot gate resumes the continuation exactly once: whichever of the read / the
+                // 1.2s sleep fires first wins; a hung read just leaks its background task and we paint
+                // the seed with no history, exactly as before the feature.
+                let gate = ResumeGate()
+                return await withCheckedContinuation { (cont: CheckedContinuation<[UInt8]?, Never>) in
+                    let read = Task {
+                        let r = try? await client.read(pane: pane, source: .recent,
+                                                       format: .ansi, lines: Self.backfillLines)
+                        let bytes = (r?.text).flatMap { $0.isEmpty ? nil : [UInt8]($0.utf8) }
+                        if gate.claim() { cont.resume(returning: bytes) }
+                    }
+                    Task {
+                        try? await Task.sleep(nanoseconds: Self.backfillTimeoutNanos)
+                        if gate.claim() { read.cancel(); cont.resume(returning: nil) }
+                    }
                 }
-                let timeout = Task {
-                    try? await Task.sleep(nanoseconds: Self.backfillTimeoutNanos)
-                    read.cancel()   // a slow/hung read must never stall the seed
-                }
-                let result = await read.value
-                timeout.cancel()
-                guard let text = result?.text, !text.isEmpty else { return nil }
-                return [UInt8](text.utf8)
             }
         }
 
@@ -481,29 +504,39 @@ struct LiveTerminalView: UIViewRepresentable {
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
-                    if !didSeedOnce {
+                    let firstReset = !didSeedOnce
+                    if firstReset {
                         didSeedOnce = true
-                        // Raise SwiftTerm's scrollback ring ONCE (its ~500 default) so it can hold
-                        // the full backfill plus the live tail. Durable: layout resizes go through
-                        // terminal.resize(), which preserves scrollback (setupOptions runs only at
-                        // construction).
+                        // Raise SwiftTerm's scrollback ring ONCE (its ~500 default) so it can hold the
+                        // full backfill plus the live tail — BEFORE the resize below so a resize can't
+                        // reclamp the ring while history is being fed. Whether the raise then survives
+                        // the LAYOUT-driven terminal.resize() (SwiftTerm's Buffer.resize must not
+                        // recompute maxLength down from options.scrollback) is an SPM-dependency
+                        // internal not visible here; the swipe-up XCUITest, which resizes to the real
+                        // sim grid, is the actual proof that history survives.
                         view.getTerminal().changeHistorySize(Self.scrollbackCap)
-                        // History ABOVE the seed: feed it BEFORE the clear so its lines scroll into
-                        // SwiftTerm's scrollback; the ESC[2J below then erases only the overlapping
-                        // VISIBLE rows (recent's bottom ≈ the current screen) in place — scrollback
-                        // untouched — and the seed repaints them, so nothing is duplicated. Bounded
-                        // await; re-check teardown before feeding a possibly-dismantled view.
+                    }
+                    // Size the grid to the reset's geometry FIRST (was previously between clear+seed),
+                    // so nothing later in THIS reset can truncate freshly-fed history.
+                    resizeEmulator(cols: cols, rows: rows, in: view)
+                    if firstReset {
+                        // History ABOVE the seed: feed it now so its lines scroll into SwiftTerm's
+                        // scrollback; the ESC[2J below then erases only the overlapping VISIBLE rows
+                        // (recent's bottom ≈ the current screen) in place — scrollback untouched — and
+                        // the seed repaints them, so nothing is duplicated. Bounded (raced) await;
+                        // re-check teardown before feeding a possibly-dismantled view. The trailing
+                        // ESC[0m resets any SGR the history left active, so ESC[2J's background-colour
+                        // erase can't tint the rows the seed does not repaint.
                         let history = await backfillTask?.value ?? nil
                         if let history, !history.isEmpty, !stopped {
                             view.feed(byteArray: history[...])
+                            view.feed(byteArray: [UInt8]("\u{1b}[0m".utf8)[...])
                         }
                     }
-                    // Clear the VISIBLE screen + home (NOT scrollback — see
-                    // clearSequence, Fix B), then paint the full-screen seed.
-                    // `lagged` resets seed identically (the server already collapsed
-                    // the backlog into this keyframe).
+                    // Clear the VISIBLE screen + home (NOT scrollback — see clearSequence, Fix B),
+                    // then paint the full-screen seed. `lagged` resets seed identically (the server
+                    // already collapsed the backlog into this keyframe).
                     view.feed(byteArray: Self.clearSequence[...])
-                    resizeEmulator(cols: cols, rows: rows, in: view)
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
                 case .data(_, _, let data):
                     if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
