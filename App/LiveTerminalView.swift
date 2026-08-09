@@ -203,9 +203,13 @@ struct LiveTerminalView: UIViewRepresentable {
         /// SwiftTerm scrollback ring, raised once per connect from its ~500 default. MUST stay
         /// >= backfillLines + live tail so a full backfill is retained (not truncated).
         static let scrollbackCap = 4000
-        /// Bound the wait so a slow/hung `read` can never stall the live seed — on timeout we
-        /// skip history and paint the seed (today's behaviour).
-        static let backfillTimeoutNanos: UInt64 = 1_200_000_000
+        /// Safety cap so a truly hung `read` can't stall the seed forever — NOT a tight budget.
+        /// The read runs concurrently with the stream's fresh SSH connect (~1-2s), and the reset
+        /// only arrives after that connect, so a generous cap adds little to first paint in the
+        /// normal case. The server renders `recent` instantly (~5ms); the real cost is the phone
+        /// transferring up to ~200 KB of ANSI over SSH/Tailscale, which the old 1.2s budget cut off
+        /// (→ zero history on real panes). On timeout we skip history and paint the seed as before.
+        static let backfillTimeoutNanos: UInt64 = 6_000_000_000
 
         init(client: HerdrClient, paneID: String) {
             self.client = client
