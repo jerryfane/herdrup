@@ -307,12 +307,17 @@ struct RootView: View {
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
         registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
-        // NOTE: the notification permission PROMPT is deliberately NOT requested in 2b. iOS grants
-        // alert authorization exactly once per install, and 2b's push stack is dormant (no entitlement
-        // until 2a, no server RPC until 2c), so prompting now would burn that one-shot grant for a
-        // capability that cannot deliver anything — a user who taps "Don't Allow" is then permanently
-        // opted out even after push goes live. AppDelegate.requestAuthorizationIfWanted() is wired in
-        // the 2a/2c PR, alongside the entitlement + server, so the prompt appears only when it can work.
+        // Request the notification permission PROMPT here — push can now actually deliver: the build
+        // carries the aps-environment entitlement AND the server runs the 2c APNs sender. This is the
+        // call the 2b scaffolding deferred: 2b left it out on purpose (iOS grants alert authorization
+        // exactly once per install, and prompting while the stack was dormant — no entitlement, no
+        // server RPC — would have burned that one-shot grant on a capability that could not deliver, so
+        // a "Don't Allow" tap would permanently opt the user out even after push went live). Now that
+        // both exist it is safe: requestAuthorizationIfWanted only prompts when a notify.* category is
+        // enabled and no screenshot/UITest mock is active, and a later call just returns the existing
+        // status silently. On grant it registers for remote notifications; the token reaches the server
+        // via AppDelegate.didRegisterForRemoteNotificationsWithDeviceToken → registerPush.
+        AppDelegate.requestAuthorizationIfWanted()
     }
 
     private func disconnect() {
