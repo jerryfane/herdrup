@@ -283,6 +283,16 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "claude",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .backfill:
+            // A REAL SwiftTerm pane whose LIVE stream carries only the short one-screen seed,
+            // while agent.read (source=recent, ansi) returns ~1000 numbered lines of history —
+            // so the scrollback a swipe-up reveals can ONLY have come from the connect-time
+            // backfill (the scrollback receipt for open/refresh history).
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(backfill: true)),
+                                 paneID: "w1:p1", title: "backfill",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         case .paging:
             // Three distinctively-named agents in the real keep-mounted container. A swipe
             // fronts the neighbour and the header heading changes (ALFA→BRAVO→ALFA) — the
@@ -2315,7 +2325,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case list, pane, settings, newAgent, scroll, ccscroll, paging
+    case list, pane, settings, newAgent, scroll, ccscroll, paging, backfill
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -2336,6 +2346,10 @@ enum ScreenshotMock {
         // `paging` drives the swipe-between-agents receipt: three distinctively-named agents
         // in the keep-mounted container; a swipe fronts the neighbour and the header changes.
         case "paging": return .paging
+        // `backfill` drives the scrollback-backfill receipt: the LIVE stream carries only a
+        // short one-screen seed, while agent.read (recent, ansi) returns ~1000 lines of history
+        // — so scrollback the swipe reveals can ONLY have come from the connect-time backfill.
+        case "backfill": return .backfill
         default: return .list
         }
     }
@@ -2352,13 +2366,17 @@ struct MockTransport: HerdrTransport {
     /// When set, this pane is a Claude-Code stand-in (alt-screen + mouse-mode) that
     /// scrolls in RESPONSE to SGR wheel events the app sends — for the ccscroll receipt.
     var ccDriver: CCScrollDriver?
+    /// When true, `agent.read` (source=recent, ansi) returns MANY numbered lines of history
+    /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
+    /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
+    var backfill = false
 
     func roundTrip(_ requestLine: String) async throws -> String {
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
         if requestLine.contains("agent.list") { return Self.agentList }
-        if requestLine.contains("agent.read") { return Self.agentRead }
+        if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -2401,6 +2419,24 @@ struct MockTransport: HerdrTransport {
         body += "SCROLLTEST end — swipe down to reveal earlier lines"
         let b64 = Data(body.utf8).base64EncodedString()
         return "{\"stream\":\"pane.bytes\",\"frame\":\"reset\",\"seq\":0,\"epoch\":7,\"cols\":80,\"rows\":24,\"data_b64\":\"\(b64)\"}"
+    }
+
+    /// An `agent.read` response (source=recent, format=ansi) carrying ~1000 DISTINCT numbered
+    /// lines as ANSI — the history the app's connect-time backfill prepends into SwiftTerm's
+    /// scrollback. `\r\n` endings (no staircase), cursor hidden (ESC[?25l) so static frames stay
+    /// byte-identical for the before/after image compare. Built at runtime (DEBUG/UI-test only);
+    /// JSONSerialization escapes the ESC + control bytes in the `text` field.
+    static func backfillRead() -> String {
+        var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        for i in 1...1000 {
+            body += String(format: "BACKFILL line %04d  the quick brown fox jumps over the lazy dog\r\n", i)
+        }
+        body += "BACKFILL end — swipe down to reveal earlier lines"
+        let payload: [String: Any] = ["id": "mock", "result": ["read": [
+            "pane_id": "w1:p1", "text": body, "truncated": false,
+            "source": "recent", "format": "ansi"]]]
+        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? Self.agentRead
     }
 
     // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
