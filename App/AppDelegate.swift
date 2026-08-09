@@ -45,9 +45,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     /// Ask for notification permission (and register for APNs) only if the user has at least one push
-    /// category enabled in Settings — mirrors the notify.* toggles so we never prompt for something
-    /// they turned off. NOT called in 2b (the prompt is deferred until push can actually deliver — see
-    /// RootView.connect()); the 2a/2c PR wires the call, once the entitlement + server exist. Static so
+    /// category enabled in Settings — mirrors the notify.* toggles so we never prompt for something they
+    /// turned off. Called from RootView.connect() (now that the entitlement + 2c server exist, push can
+    /// deliver) AND from pushPrefsChanged() (so enabling a category AFTER connect also prompts). iOS shows
+    /// the alert at most once per install; later calls return the existing status silently. Static so
     /// RootView can call it without a reference to the delegate instance.
     static func requestAuthorizationIfWanted() {
         // Never prompt during a buildbox screenshot or an XCUITest run. ScreenshotMock covers the env
