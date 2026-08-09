@@ -235,12 +235,15 @@ struct RootView: View {
         Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes) }
     }
 
-    /// A push-category toggle changed while connected: re-register the current prefs with the server so
-    /// the change takes effect immediately (no-op until a device token exists — i.e. until push is
-    /// activated in 2a/2c). The permission PROMPT is intentionally NOT triggered here in 2b, for the
-    /// same one-shot-grant reason as connect() — it lands with the entitlement + server in 2a/2c.
+    /// A push-category toggle changed while connected: re-register the current prefs with the server so the
+    /// change takes effect immediately (registerPush is a no-op until a device token exists), AND request the
+    /// permission prompt — so a user who connected with every category OFF (nothing to prompt for then) and
+    /// later enables one gets asked NOW, instead of never. requestAuthorizationIfWanted self-guards on
+    /// `anyEnabled` and skips under ScreenshotMock, and iOS shows the alert at most once per install (later
+    /// calls return the existing status silently), so this is safe + idempotent to call on every toggle.
     private func pushPrefsChanged() {
         registerPush()
+        AppDelegate.requestAuthorizationIfWanted()
     }
 
     #if DEBUG
