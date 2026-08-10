@@ -2428,6 +2428,9 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") { return Self.gramList }
         if requestLine.contains("gram.post") { return Self.gramPosted }
+        if requestLine.contains("gram.get_file") { return Self.gramFileContent }
+        if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
+        if requestLine.contains("gram.delete") { return Self.gramOk }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -2526,13 +2529,21 @@ struct MockTransport: HerdrTransport {
       {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
       {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
       {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true}
+      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
     ]}}
     """#
 
     /// A canned `gram.post` echo, so the mock composer's send path resolves.
     static let gramPosted =
         #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+
+    /// A canned `gram.get_file` reply; the bytes decode to "hello world".
+    /// Byte-identical to MockWireFixtures.gramFileContent.
+    static let gramFileContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":11,"data_base64":"aGVsbG8gd29ybGQ="}}"#
+
+    /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
+    static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
 
     // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
     // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is

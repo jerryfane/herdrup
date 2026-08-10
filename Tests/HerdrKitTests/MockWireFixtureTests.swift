@@ -15,6 +15,9 @@ final class MockWireFixtureTests: XCTestCase {
             if requestLine.contains("agent.read") { return MockWireFixtures.agentRead }
             if requestLine.contains("gram.list") { return MockWireFixtures.gramList }
             if requestLine.contains("gram.post") { return MockWireFixtures.gramPosted }
+            if requestLine.contains("gram.get_file") { return MockWireFixtures.gramFileContent }
+            if requestLine.contains("gram.upload_chunk") { return MockWireFixtures.okResult }
+            if requestLine.contains("gram.delete") { return MockWireFixtures.okResult }
             if requestLine.contains("pane.set_pty_size") { return MockWireFixtures.panePtySize }
             return #"{"id":"x","result":{}}"#
         }
@@ -249,6 +252,40 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(posted.direction, .ownerToAgent)
         XCTAssertEqual(posted.from, "owner")
     }
+
+    /// A message may carry a file (`file` object); one without it decodes to nil,
+    /// not a failure — so the row shows a chip only when there is one.
+    func testMockGramListDecodesFileAttachment() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let messages = try await client.gramList()
+
+        let withFile = try XCTUnwrap(messages.first { $0.id == "g5" })
+        let file = try XCTUnwrap(withFile.file, "g5 should carry a file")
+        XCTAssertEqual(file.name, "vetrina-live.png")
+        XCTAssertEqual(file.mime, "image/png")
+        XCTAssertEqual(file.size, 48213)
+
+        let noFile = try XCTUnwrap(messages.first { $0.id == "g1" })
+        XCTAssertNil(noFile.file, "a message without a file must decode to nil")
+    }
+
+    /// `gram.get_file` returns the bytes inline (base64); the client decodes them.
+    func testMockGramGetFileDecodes() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let (name, mime, data) = try await client.gramGetFile(id: "g5")
+        XCTAssertEqual(name, "vetrina-live.png")
+        XCTAssertEqual(mime, "image/png")
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "hello world")
+    }
+
+    /// The upload + delete round-trips decode their `type: ok` replies without
+    /// throwing, and the upload mints a safe `app-` id.
+    func testMockGramUploadAndDeleteSucceed() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let uploadID = try await client.gramUploadFile(Data("hello".utf8))
+        XCTAssertTrue(uploadID.hasPrefix("app-"), "upload id should be a safe app- token")
+        try await client.gramDelete(id: "g5")
+    }
 }
 
 /// THE FIXTURES. Duplicated verbatim in App/HerdrApp.swift's MockTransport (the
@@ -287,7 +324,7 @@ enum MockWireFixtures {
       {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
       {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
       {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true}
+      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
     ]}}
     """#
 
@@ -295,6 +332,14 @@ enum MockWireFixtures {
     /// MockTransport.gramPosted.
     static let gramPosted =
         #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+
+    /// A canned `gram.get_file` reply (`type: gram_file_content`); the bytes decode
+    /// to "hello world". Keep in sync with the App's MockTransport.gramFileContent.
+    static let gramFileContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":11,"data_base64":"aGVsbG8gd29ybGQ="}}"#
+
+    /// A canned `type: ok` reply, for `gram.upload_chunk` and `gram.delete`.
+    static let okResult = #"{"id":"mock","result":{"type":"ok"}}"#
 
     // MARK: pane.stream / pane.set_pty_size fixtures (mirrored in App MockTransport)
 
