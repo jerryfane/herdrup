@@ -1419,6 +1419,10 @@ struct TerminalHomeView: View {
             // yank the reader into a stale pane (an agent that may have finished long ago). If it was
             // already opened by the onChange path, this is nil already. They can reopen from the list.
             push.pendingPaneID = nil
+            // Same for a pending gram tap: a message does not go stale like a pane,
+            // but popping the Gram cover on some much-later successful load is a
+            // surprise; drop it for the same reason and consistency.
+            push.pendingGram = false
         }
     }
 }
