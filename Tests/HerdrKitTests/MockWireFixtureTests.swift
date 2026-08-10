@@ -13,6 +13,8 @@ final class MockWireFixtureTests: XCTestCase {
         func roundTrip(_ requestLine: String) async throws -> String {
             if requestLine.contains("agent.list") { return MockWireFixtures.agentList }
             if requestLine.contains("agent.read") { return MockWireFixtures.agentRead }
+            if requestLine.contains("gram.list") { return MockWireFixtures.gramList }
+            if requestLine.contains("gram.post") { return MockWireFixtures.gramPosted }
             if requestLine.contains("pane.set_pty_size") { return MockWireFixtures.panePtySize }
             return #"{"id":"x","result":{}}"#
         }
@@ -197,6 +199,56 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertThrowsError(try frame(#"{"stream":"pane.bytes","frame":"data","seq":1,"epoch":7,"data_b64":"@@not base64@@"}"#),
                              "an invalid base64 payload must be rejected")
     }
+
+    /// The `gram.list` fixture must decode through the real client path, and the
+    /// GramMessage flags the Gram page renders on (unread, open-queue, grabbed,
+    /// direct) must resolve correctly. Optional fields (`to`, `grabbed_by`) are
+    /// omitted in JSON when absent — decoding must yield nil, not fail.
+    func testMockGramListDecodes() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let messages = try await client.gramList()
+        XCTAssertEqual(messages.count, 5, "gram.list fixture did not decode to 5 messages")
+
+        // Newest first: the unread agent->owner digest leads.
+        let first = try XCTUnwrap(messages.first)
+        XCTAssertEqual(first.id, "g1")
+        XCTAssertEqual(first.direction, .agentToOwner)
+        XCTAssertEqual(first.from, "trend-scout")
+        XCTAssertTrue(first.isFromAgent)
+        XCTAssertTrue(first.isUnread, "an agent->owner message with read_by_owner:false is unread")
+        XCTAssertNil(first.to)
+        XCTAssertNil(first.grabbedBy)
+
+        // An unclaimed shared queue post (no `to`, no `grabbed_by`).
+        let queue = try XCTUnwrap(messages.first { $0.id == "g2" })
+        XCTAssertEqual(queue.direction, .ownerToAgent)
+        XCTAssertNil(queue.to)
+        XCTAssertNil(queue.grabbedBy)
+        XCTAssertTrue(queue.isOpenQueueItem)
+
+        // A grabbed queue item is no longer open.
+        let grabbed = try XCTUnwrap(messages.first { $0.id == "g3" })
+        XCTAssertEqual(grabbed.grabbedBy, "herdr-app")
+        XCTAssertFalse(grabbed.isOpenQueueItem)
+
+        // A direct message carries `to`.
+        let direct = try XCTUnwrap(messages.first { $0.id == "g4" })
+        XCTAssertEqual(direct.to, "clientloop")
+        XCTAssertNil(direct.grabbedBy)
+
+        // Exactly one unread → the header badge shows 1.
+        XCTAssertEqual(messages.filter { $0.isUnread }.count, 1)
+    }
+
+    /// `gram.post` echoes the stored message (`type: gram_sent`) — the composer
+    /// inserts it optimistically, so it must decode through the client path.
+    func testMockGramPostDecodes() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let posted = try await client.gramPost(text: "hello", to: nil)
+        XCTAssertEqual(posted.id, "gp1")
+        XCTAssertEqual(posted.direction, .ownerToAgent)
+        XCTAssertEqual(posted.from, "owner")
+    }
 }
 
 /// THE FIXTURES. Duplicated verbatim in App/HerdrApp.swift's MockTransport (the
@@ -225,6 +277,24 @@ enum MockWireFixtures {
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
+
+    /// A `gram.list` owner view: unread + read agent->owner messages, an unclaimed
+    /// shared queue post, a grabbed one, and a direct message — newest first. Keep in
+    /// sync with the App's MockTransport.gramList.
+    static let gramList = #"""
+    {"id":"mock","result":{"type":"gram_list","messages":[
+      {"id":"g1","direction":"agent_to_owner","from":"trend-scout","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1723000005000,"read_by_owner":false},
+      {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
+      {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
+      {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
+      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true}
+    ]}}
+    """#
+
+    /// A canned `gram.post` echo (`type: gram_sent`). Keep in sync with the App's
+    /// MockTransport.gramPosted.
+    static let gramPosted =
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
 
     // MARK: pane.stream / pane.set_pty_size fixtures (mirrored in App MockTransport)
 
