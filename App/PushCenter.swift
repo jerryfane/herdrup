@@ -18,6 +18,10 @@ final class PushCenter: ObservableObject {
     /// its agent list has loaded, then clears it. Held here so a cold-launch tap (app was closed)
     /// and a tap during a reconnect both survive until the view can act on it.
     @Published var pendingPaneID: String?
+    /// Set when the user taps a gram push (the payload carries `gram: true`, no pane). The home view
+    /// opens the Gram page then clears it. Held here so a cold-launch tap (app was closed) survives
+    /// until the view can act, exactly like `pendingPaneID`.
+    @Published var pendingGram: Bool = false
 
     private static let tokenKey = "push.deviceToken"
 
@@ -37,19 +41,26 @@ final class PushCenter: ObservableObject {
         pendingPaneID = paneID
     }
 
+    /// A gram push was tapped — open the Gram page when the view is ready.
+    func tappedGram() {
+        pendingGram = true
+    }
+
     /// The user's per-category push preferences (the existing Settings toggles), sent to the server
     /// alongside the token so it only pushes the kinds they want. Defaults match SettingsView.
     struct Prefs: Equatable {
         var needsInput: Bool
         var dies: Bool
         var finishes: Bool
+        var gram: Bool
         static var current: Prefs {
             let d = UserDefaults.standard
             return Prefs(
                 needsInput: d.object(forKey: "notify.needsInput") as? Bool ?? true,
                 dies:       d.object(forKey: "notify.dies") as? Bool ?? true,
-                finishes:   d.object(forKey: "notify.finishes") as? Bool ?? false)
+                finishes:   d.object(forKey: "notify.finishes") as? Bool ?? false,
+                gram:       d.object(forKey: "notify.gram") as? Bool ?? true)
         }
-        var anyEnabled: Bool { needsInput || dies || finishes }
+        var anyEnabled: Bool { needsInput || dies || finishes || gram }
     }
 }

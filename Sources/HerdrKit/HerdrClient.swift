@@ -166,25 +166,75 @@ public actor HerdrClient {
         let notifyNeedsInput: Bool
         let notifyDies: Bool
         let notifyFinishes: Bool
+        let notifyGram: Bool
         enum CodingKeys: String, CodingKey {
             case deviceToken = "device_token"
             case platform
             case notifyNeedsInput = "notify_needs_input"
             case notifyDies = "notify_dies"
             case notifyFinishes = "notify_finishes"
+            case notifyGram = "notify_gram"
         }
     }
 
     /// Register this device's APNs token so the server can push agent transitions (needs-you /
-    /// finished / stopped) even while the app is closed, filtered by the user's category prefs.
-    /// Idempotent — safe to re-send on every (re)connect and whenever a token or pref changes. A
-    /// server that does not yet implement the method just throws, which the caller ignores.
-    public func registerDevice(token: String, needsInput: Bool, dies: Bool, finishes: Bool) async throws {
+    /// finished / stopped) and gram messages even while the app is closed, filtered by the user's
+    /// category prefs. Idempotent — safe to re-send on every (re)connect and whenever a token or
+    /// pref changes. A server that does not yet implement the method (or the `notify_gram` field)
+    /// just ignores what it does not know, and an older server throws, which the caller ignores.
+    public func registerDevice(
+        token: String, needsInput: Bool, dies: Bool, finishes: Bool, gram: Bool
+    ) async throws {
         _ = try await call("notifications.register_device",
                            RegisterDeviceParams(deviceToken: token, platform: "apns",
                                                 notifyNeedsInput: needsInput, notifyDies: dies,
-                                                notifyFinishes: finishes),
+                                                notifyFinishes: finishes, notifyGram: gram),
                            as: JSONNull.self)
+    }
+
+    // MARK: - Gram (owner<->agent messages)
+
+    struct GramListParams: Encodable {
+        let callerPaneID: String?
+        let onlyQueue: Bool
+        let unreadOnly: Bool
+        enum CodingKeys: String, CodingKey {
+            case callerPaneID = "caller_pane_id"
+            case onlyQueue = "only_queue"
+            case unreadOnly = "unread_only"
+        }
+    }
+
+    /// The owner view of the gram store: every message, both directions, newest
+    /// first. The app is the owner, so it omits `caller_pane_id` (supplying one
+    /// would select an agent view). `unreadOnly` narrows to unread agent->owner
+    /// messages. Throws the server's `APIError` on an older server that lacks gram.
+    public func gramList(unreadOnly: Bool = false) async throws -> [GramMessage] {
+        try await call("gram.list",
+                       GramListParams(callerPaneID: nil, onlyQueue: false, unreadOnly: unreadOnly),
+                       as: GramListResult.self).messages
+    }
+
+    struct GramPostParams: Encodable {
+        let text: String
+        let to: String?
+    }
+
+    /// The owner posts a message to agents. `to == nil` posts to the shared
+    /// grab-queue any agent can claim; `to == <agentName>` addresses one live
+    /// agent directly (the server rejects a name that is not a live agent).
+    /// Returns the stored message.
+    @discardableResult
+    public func gramPost(text: String, to: String? = nil) async throws -> GramMessage {
+        try await call("gram.post", GramPostParams(text: text, to: to),
+                       as: GramMessageResult.self).message
+    }
+
+    struct GramMarkReadParams: Encodable { let id: String }
+
+    /// The owner marks an agent->owner message read (clears its unread badge).
+    public func gramMarkRead(id: String) async throws {
+        _ = try await call("gram.mark_read", GramMarkReadParams(id: id), as: JSONNull.self)
     }
 
     struct SendKeysParams: Encodable {
