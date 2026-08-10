@@ -24,6 +24,7 @@ struct GramView: View {
     @State private var draft: String = ""
     @State private var sending = false
     @State private var banner: String?
+    @State private var isLoading = false
 
     private enum LoadPhase: Equatable {
         case loading
@@ -67,10 +68,29 @@ struct GramView: View {
             header
             Divider().overlay(Palette.hairlineQuiet)
             content
+            bannerView
             composer
         }
         .background(Palette.ground.ignoresSafeArea())
-        .task { await load(initial: true) }
+        // Poll while the page is open so new agent messages appear without a manual
+        // refresh (the gram store has no event stream); the loop ends when the view
+        // goes away (task cancellation).
+        .task { await pollLoop() }
+    }
+
+    /// A load error / send error, shown ABOVE the composer in every phase — the
+    /// composer is enabled in all states, so a failure must be visible in all states
+    /// (empty inbox, pre-deploy daemon, or a loaded list alike).
+    @ViewBuilder
+    private var bannerView: some View {
+        if let banner {
+            Text(banner)
+                .font(Typography.app(12))
+                .foregroundStyle(Palette.died)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+        }
     }
 
     // MARK: - Header
@@ -120,7 +140,7 @@ struct GramView: View {
             centered { ProgressView().tint(Palette.textDim) }
         case .unavailable(let message):
             centered {
-                VStack(spacing: 8) {
+                VStack(spacing: 12) {
                     Image(systemName: "bubble.left.and.exclamationmark.bubble.right")
                         .font(.system(size: 28))
                         .foregroundStyle(Palette.textFaint)
@@ -128,6 +148,14 @@ struct GramView: View {
                         .font(Typography.app(14))
                         .foregroundStyle(Palette.textDim)
                         .multilineTextAlignment(.center)
+                    Button { Task { await load(initial: true) } } label: {
+                        Text("Retry")
+                            .font(Typography.app(14, .semibold))
+                            .foregroundStyle(Palette.ground)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Palette.text))
+                    }
                 }
                 .padding(.horizontal, 32)
             }
@@ -150,12 +178,6 @@ struct GramView: View {
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    if let banner {
-                        Text(banner)
-                            .font(Typography.app(12))
-                            .foregroundStyle(Palette.died)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
                     ForEach(messages) { message in
                         GramRow(message: message)
                             .onAppear { markReadIfNeeded(message) }
@@ -239,20 +261,44 @@ struct GramView: View {
 
     // MARK: - Actions
 
+    /// Load once, then poll every few seconds while the page is visible so a new
+    /// agent message appears without a manual refresh (the gram store has no event
+    /// stream). Ends when the view goes away (the task is cancelled).
+    private func pollLoop() async {
+        await load(initial: true)
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if Task.isCancelled { break }
+            await load(initial: false)
+        }
+    }
+
     private func load(initial: Bool) async {
-        // Show the spinner only on the first load with nothing to show yet; a
-        // refresh keeps the current messages visible.
+        // One load at a time: overlapping polls/refreshes race, and a load in flight
+        // during a send could overwrite the optimistic insert.
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        // Spinner only on the first load with nothing to show yet; a refresh keeps
+        // the current messages visible.
         if initial && messages.isEmpty { phase = .loading }
         do {
-            let fetched = try await client.gramList()
-            messages = fetched
+            messages = try await client.gramList()
             phase = .loaded
             banner = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
-            phase = .unavailable("Gram isn't available on this server yet.")
-        } catch {
             if messages.isEmpty {
-                phase = .unavailable("Couldn't load messages. Pull to retry.")
+                phase = .unavailable("Gram isn't available on this server yet.")
+            } else {
+                banner = "Gram is unavailable right now."
+            }
+        } catch {
+            // A daemon predating the gram build answers an unknown-method error, NOT
+            // `gram_unavailable`, so a first-load failure gets one honest message
+            // covering both "not deployed yet" and "couldn't reach it", plus a Retry.
+            if messages.isEmpty {
+                phase = .unavailable(
+                    "Gram isn't available on this server yet, or the messages couldn't load.")
             } else {
                 banner = "Refresh failed — showing the last loaded messages."
             }
@@ -267,7 +313,9 @@ struct GramView: View {
         do {
             let posted = try await client.gramPost(text: text, to: recipient.wireTo)
             draft = ""
-            // Optimistically show it immediately, then reconcile on the next load.
+            // Optimistically show it immediately, de-duped by id so a repeat never
+            // collides in the ForEach; the next poll reconciles.
+            messages.removeAll { $0.id == posted.id }
             messages.insert(posted, at: 0)
             banner = nil
         } catch let error as APIError {
@@ -280,10 +328,15 @@ struct GramView: View {
     private func markReadIfNeeded(_ message: GramMessage) {
         guard message.isUnread else { return }
         Task {
-            try? await client.gramMarkRead(id: message.id)
-            // Optimistically flip the local copy so the unread dot/badge clears.
-            if let index = messages.firstIndex(where: { $0.id == message.id }) {
-                messages[index].readByOwner = true
+            do {
+                try await client.gramMarkRead(id: message.id)
+                // Flip the local copy only after the server confirms, so a failed
+                // mark-read doesn't clear the unread dot until it actually took.
+                if let index = messages.firstIndex(where: { $0.id == message.id }) {
+                    messages[index].readByOwner = true
+                }
+            } catch {
+                // Leave it unread; the next poll re-surfaces it.
             }
         }
     }
