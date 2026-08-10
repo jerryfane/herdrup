@@ -18,13 +18,31 @@ struct GramView: View {
     let agents: [AgentInfo]
     var onClose: (() -> Void)?
 
-    @State private var messages: [GramMessage] = []
+    /// The last server snapshot (newest first) and the owner's just-posted messages
+    /// not yet reflected in a snapshot. `messages` composes them so a background poll
+    /// can never drop an optimistic post it hasn't caught up to.
+    @State private var serverMessages: [GramMessage] = []
+    @State private var pendingPosts: [GramMessage] = []
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
     @State private var draft: String = ""
     @State private var sending = false
-    @State private var banner: String?
+    /// A send failure. Kept SEPARATE from load state so a successful background poll
+    /// never clears it before the owner sees it.
+    @State private var sendError: String?
+    /// A non-fatal refresh failure while messages are already shown.
+    @State private var refreshNote: String?
     @State private var isLoading = false
+    /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
+    /// a duplicate `gram.mark_read`.
+    @State private var markingRead: Set<String> = []
+
+    /// The list the page renders: optimistic posts first, then the server snapshot
+    /// with those posts de-duped out once the server reflects them.
+    private var messages: [GramMessage] {
+        let pendingIDs = Set(pendingPosts.map(\.id))
+        return pendingPosts + serverMessages.filter { !pendingIDs.contains($0.id) }
+    }
 
     private enum LoadPhase: Equatable {
         case loading
@@ -83,8 +101,8 @@ struct GramView: View {
     /// (empty inbox, pre-deploy daemon, or a loaded list alike).
     @ViewBuilder
     private var bannerView: some View {
-        if let banner {
-            Text(banner)
+        if let text = sendError ?? refreshNote {
+            Text(text)
                 .font(Typography.app(12))
                 .foregroundStyle(Palette.died)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -261,21 +279,23 @@ struct GramView: View {
 
     // MARK: - Actions
 
-    /// Load once, then poll every few seconds while the page is visible so a new
-    /// agent message appears without a manual refresh (the gram store has no event
-    /// stream). Ends when the view goes away (the task is cancelled).
+    /// Load once, then poll while the page is visible so a new agent message appears
+    /// without a manual refresh (the gram store has no event stream). Backs off when
+    /// the server can't serve gram (a pre-deploy daemon), so a failing `gram.list`
+    /// isn't hit every few seconds. Ends when the view goes away (task cancelled).
     private func pollLoop() async {
         await load(initial: true)
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            let interval: UInt64
+            if case .unavailable = phase { interval = 30_000_000_000 } else { interval = 6_000_000_000 }
+            try? await Task.sleep(nanoseconds: interval)
             if Task.isCancelled { break }
             await load(initial: false)
         }
     }
 
     private func load(initial: Bool) async {
-        // One load at a time: overlapping polls/refreshes race, and a load in flight
-        // during a send could overwrite the optimistic insert.
+        // One load at a time: overlapping loads would race each other.
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
@@ -283,14 +303,20 @@ struct GramView: View {
         // the current messages visible.
         if initial && messages.isEmpty { phase = .loading }
         do {
-            messages = try await client.gramList()
+            let fetched = try await client.gramList()
+            serverMessages = fetched
+            // Drop optimistic posts the server now reflects; unconfirmed ones stay
+            // visible via `messages` (gram.post writes synchronously, so any in-flight
+            // load started BEFORE a post can no longer discard it).
+            let serverIDs = Set(fetched.map(\.id))
+            pendingPosts.removeAll { serverIDs.contains($0.id) }
             phase = .loaded
-            banner = nil
+            refreshNote = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
             if messages.isEmpty {
                 phase = .unavailable("Gram isn't available on this server yet.")
             } else {
-                banner = "Gram is unavailable right now."
+                refreshNote = "Gram is unavailable right now."
             }
         } catch {
             // A daemon predating the gram build answers an unknown-method error, NOT
@@ -300,7 +326,7 @@ struct GramView: View {
                 phase = .unavailable(
                     "Gram isn't available on this server yet, or the messages couldn't load.")
             } else {
-                banner = "Refresh failed — showing the last loaded messages."
+                refreshNote = "Refresh failed — showing the last loaded messages."
             }
         }
     }
@@ -310,30 +336,34 @@ struct GramView: View {
         guard !text.isEmpty, !sending else { return }
         sending = true
         defer { sending = false }
+        sendError = nil
         do {
             let posted = try await client.gramPost(text: text, to: recipient.wireTo)
             draft = ""
-            // Optimistically show it immediately, de-duped by id so a repeat never
-            // collides in the ForEach; the next poll reconciles.
-            messages.removeAll { $0.id == posted.id }
-            messages.insert(posted, at: 0)
-            banner = nil
+            // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
+            // cannot drop it; de-duped by id, reconciled once the server reflects it.
+            pendingPosts.removeAll { $0.id == posted.id }
+            pendingPosts.insert(posted, at: 0)
         } catch let error as APIError {
-            banner = error.message
+            sendError = error.message
         } catch {
-            banner = "Couldn't send. Try again."
+            sendError = "Couldn't send. Try again."
         }
     }
 
     private func markReadIfNeeded(_ message: GramMessage) {
-        guard message.isUnread else { return }
+        // Skip if already read or a mark-read is already in flight for it (onAppear
+        // re-fires on scroll).
+        guard message.isUnread, !markingRead.contains(message.id) else { return }
+        markingRead.insert(message.id)
         Task {
+            defer { markingRead.remove(message.id) }
             do {
                 try await client.gramMarkRead(id: message.id)
-                // Flip the local copy only after the server confirms, so a failed
-                // mark-read doesn't clear the unread dot until it actually took.
-                if let index = messages.firstIndex(where: { $0.id == message.id }) {
-                    messages[index].readByOwner = true
+                // Flip the local copy only after the server confirms — an unread
+                // agent->owner message always lives in the server snapshot.
+                if let index = serverMessages.firstIndex(where: { $0.id == message.id }) {
+                    serverMessages[index].readByOwner = true
                 }
             } catch {
                 // Leave it unread; the next poll re-surfaces it.

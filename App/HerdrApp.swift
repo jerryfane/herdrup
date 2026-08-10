@@ -306,9 +306,10 @@ struct RootView: View {
             PagingTestHarness(client: mockClient)
         case .gram:
             // The Gram page over a mock that answers gram.list with a canned owner
-            // view. Empty `agents` keeps the recipient picker to the shared queue —
-            // the messages + claim states are what this FYI shows.
-            GramView(client: mockClient, agents: [], onClose: {})
+            // view. Empty `agents` keeps the recipient picker to the shared queue;
+            // onClose nil hides the close X (there is nothing to dismiss to in the
+            // standalone screenshot render). The messages + claim states are the FYI.
+            GramView(client: mockClient, agents: [], onClose: nil)
         }
     }
     #endif
@@ -969,6 +970,14 @@ struct TerminalHomeView: View {
     /// flag before this view existed). Clearing it lets a later tap re-trigger.
     private func openGramIfPending() {
         guard push.pendingGram else { return }
+        // Another cover is already presented: `fullScreenCover(item:)` does not
+        // reliably swap to a new item while up, so dismiss it first (keeping the flag
+        // armed). The cover's onDismiss re-invokes this, and with none presented it
+        // opens the Gram page.
+        if let current = activeCover, current != .gram {
+            activeCover = nil
+            return
+        }
         push.pendingGram = false
         activeCover = .gram
     }
@@ -1037,6 +1046,7 @@ struct TerminalHomeView: View {
         // onDismiss applies a queued open AFTER the cover is fully gone.
         .fullScreenCover(item: $activeCover, onDismiss: {
             if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
+            openGramIfPending()   // a gram tap deferred while another cover was up
         }) { cover in
             switch cover {
             case .settings:
