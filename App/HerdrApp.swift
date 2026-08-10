@@ -185,6 +185,7 @@ struct RootView: View {
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
     @AppStorage("notify.finishes") private var notifyFinishes = false
+    @AppStorage("notify.gram") private var notifyGram = true
 
     var body: some View {
         Group {
@@ -220,6 +221,7 @@ struct RootView: View {
             .onChange(of: notifyNeedsInput) { _, _ in pushPrefsChanged() }
             .onChange(of: notifyDies) { _, _ in pushPrefsChanged() }
             .onChange(of: notifyFinishes) { _, _ in pushPrefsChanged() }
+            .onChange(of: notifyGram) { _, _ in pushPrefsChanged() }
         } else {
             ConnectView { connect($0) }
         }
@@ -232,7 +234,7 @@ struct RootView: View {
         // `client`, which the SwiftUI setter may not have published through yet on the same tick.
         guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
         let p = PushCenter.Prefs.current
-        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes) }
+        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram) }
     }
 
     /// A push-category toggle changed while connected: re-register the current prefs with the server so the
@@ -302,6 +304,12 @@ struct RootView: View {
             // swipe-between-agents receipt. The pane ids are NOT in the mock agent.list, so
             // reresolveAgent leaves the seeded identity in place and the header stays stable.
             PagingTestHarness(client: mockClient)
+        case .gram:
+            // The Gram page over a mock that answers gram.list with a canned owner
+            // view. Empty `agents` keeps the recipient picker to the shared queue;
+            // onClose nil hides the close X (there is nothing to dismiss to in the
+            // standalone screenshot render). The messages + claim states are the FYI.
+            GramView(client: mockClient, agents: [], onClose: nil)
         }
     }
     #endif
@@ -858,7 +866,7 @@ struct TerminalHomeView: View {
     @State private var activeCover: ActiveCover?
 
     private enum ActiveCover: Int, Identifiable {
-        case settings, newAgent
+        case settings, newAgent, gram
         var id: Int { rawValue }
     }
 
@@ -957,6 +965,23 @@ struct TerminalHomeView: View {
                       initialReply: "", siblings: orderedSiblings))
     }
 
+    /// A tapped gram push opens the Gram cover. Like `applyDeepLink`, it is consumed
+    /// on the onChange path (app already up) AND post-load (a cold-launch tap set the
+    /// flag before this view existed). Clearing it lets a later tap re-trigger.
+    private func openGramIfPending() {
+        guard push.pendingGram else { return }
+        // Another cover is already presented: `fullScreenCover(item:)` does not
+        // reliably swap to a new item while up, so dismiss it first (keeping the flag
+        // armed). The cover's onDismiss re-invokes this, and with none presented it
+        // opens the Gram page.
+        if let current = activeCover, current != .gram {
+            activeCover = nil
+            return
+        }
+        push.pendingGram = false
+        activeCover = .gram
+    }
+
     /// Swipe-page from the fronted pane to its prev/next sibling (clamped). `open()`s the
     /// neighbour — instant if it is already mounted.
     private func navigate(from slot: PaneSlot, delta: Int) {
@@ -1004,6 +1029,7 @@ struct TerminalHomeView: View {
                 // on the list) deep-links immediately; the cold-launch / just-loaded case is handled
                 // at the end of load().
                 .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
+                .onChange(of: push.pendingGram) { _, newValue in if newValue { openGramIfPending() } }
             }
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
@@ -1020,6 +1046,7 @@ struct TerminalHomeView: View {
         // onDismiss applies a queued open AFTER the cover is fully gone.
         .fullScreenCover(item: $activeCover, onDismiss: {
             if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
+            openGramIfPending()   // a gram tap deferred while another cover was up
         }) { cover in
             switch cover {
             case .settings:
@@ -1043,6 +1070,11 @@ struct TerminalHomeView: View {
                         activeCover = nil
                     },
                     onCancel: { activeCover = nil })
+            case .gram:
+                GramView(
+                    client: client,
+                    agents: agents,
+                    onClose: { activeCover = nil })
             }
         }
     }
@@ -1115,6 +1147,10 @@ struct TerminalHomeView: View {
             }
             .buttonStyle(.plain)
             .disabled(terminalTarget == nil)
+            Button { activeCover = .gram } label: {
+                tabItem("bubble.left.and.bubble.right", "Gram", active: false)
+            }
+            .buttonStyle(.plain)
             Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
@@ -1371,6 +1407,7 @@ struct TerminalHomeView: View {
             everLive.formUnion(live)
             slots.removeAll { $0.paneID != frontID && everLive.contains($0.paneID) && !live.contains($0.paneID) }
             applyDeepLink(afterLoad: true)   // agents + roster loaded — front any pending push target
+            openGramIfPending()              // a cold-launch gram tap opens the Gram page once loaded
         } catch {
             let rejected: String?
             if let transportError = error as? TransportError,
@@ -1392,6 +1429,10 @@ struct TerminalHomeView: View {
             // yank the reader into a stale pane (an agent that may have finished long ago). If it was
             // already opened by the onChange path, this is nil already. They can reopen from the list.
             push.pendingPaneID = nil
+            // Same for a pending gram tap: a message does not go stale like a pane,
+            // but popping the Gram cover on some much-later successful load is a
+            // surprise; drop it for the same reason and consistency.
+            push.pendingGram = false
         }
     }
 }
@@ -2113,6 +2154,7 @@ struct SettingsView: View {
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
     @AppStorage("notify.finishes") private var notifyFinishes = false
+    @AppStorage("notify.gram") private var notifyGram = true
     @State private var copied = false
 
     var body: some View {
@@ -2173,6 +2215,7 @@ struct SettingsView: View {
             toggleRow("An agent needs input", $notifyNeedsInput)
             toggleRow("An agent dies", $notifyDies)
             toggleRow("An agent finishes", $notifyFinishes)
+            toggleRow("A gram message arrives", $notifyGram)
             // Honest about delivery: the toggles persist the choice, but push
             // delivery is not wired yet — do not imply live notifications.
             Text("Delivery is coming soon — these save your preference.")
@@ -2328,7 +2371,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case list, pane, settings, newAgent, scroll, ccscroll, paging, backfill
+    case list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -2353,6 +2396,9 @@ enum ScreenshotMock {
         // short one-screen seed, while agent.read (recent, ansi) returns ~1000 lines of history
         // — so scrollback the swipe reveals can ONLY have come from the connect-time backfill.
         case "backfill": return .backfill
+        // `gram` renders the Gram page from a canned owner-view gram.list — the
+        // messages, unread badge, claim states, and composer, for a layout FYI.
+        case "gram": return .gram
         default: return .list
         }
     }
@@ -2380,6 +2426,8 @@ struct MockTransport: HerdrTransport {
         ccDriver?.received(requestLine)
         if requestLine.contains("agent.list") { return Self.agentList }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
+        if requestLine.contains("gram.list") { return Self.gramList }
+        if requestLine.contains("gram.post") { return Self.gramPosted }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -2469,6 +2517,22 @@ struct MockTransport: HerdrTransport {
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
+
+    /// `gram.list` owner view for the Gram-page mock render. Byte-identical to
+    /// MockWireFixtures.gramList in the tests, where it is machine-checked to decode.
+    static let gramList = #"""
+    {"id":"mock","result":{"type":"gram_list","messages":[
+      {"id":"g1","direction":"agent_to_owner","from":"trend-scout","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1723000005000,"read_by_owner":false},
+      {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
+      {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
+      {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
+      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true}
+    ]}}
+    """#
+
+    /// A canned `gram.post` echo, so the mock composer's send path resolves.
+    static let gramPosted =
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
 
     // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
     // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is
