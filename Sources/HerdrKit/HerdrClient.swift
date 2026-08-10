@@ -6,7 +6,16 @@ import Foundation
 /// single-shot (see `HerdrTransport`). Only `subscribe` holds a connection open.
 public actor HerdrClient {
     private let transport: HerdrTransport
-    private let encoder = JSONEncoder()
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        // Do NOT escape "/" as "\/". A base64 gram file chunk is slash-heavy (an
+        // all-0xFF chunk is ALL "/"), and the default escaping would nearly double
+        // those bytes — enough to push an otherwise in-budget chunk past the SSH
+        // transport's command-size cap. Unescaped "/" is valid JSON and the server
+        // parses it identically.
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return encoder
+    }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
 

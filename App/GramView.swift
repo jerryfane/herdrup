@@ -51,6 +51,10 @@ struct GramView: View {
     @State private var previewURL: URL?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
+    /// Ids the server has confirmed deleted, kept as tombstones so an in-flight poll
+    /// (whose snapshot predates the delete) cannot resurrect the row for a few
+    /// seconds. Cleared once the server's own snapshot also omits the id.
+    @State private var deletedIDs: Set<String> = []
 
     /// A file staged for sending: read into memory so the send is one atomic action.
     private struct PickedAttachment {
@@ -66,7 +70,8 @@ struct GramView: View {
     /// with those posts de-duped out once the server reflects them.
     private var messages: [GramMessage] {
         let pendingIDs = Set(pendingPosts.map(\.id))
-        return pendingPosts + serverMessages.filter { !pendingIDs.contains($0.id) }
+        return (pendingPosts + serverMessages.filter { !pendingIDs.contains($0.id) })
+            .filter { !deletedIDs.contains($0.id) }
     }
 
     private enum LoadPhase: Equatable {
@@ -129,6 +134,17 @@ struct GramView: View {
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
         .quickLookPreview($previewURL)
+        // Delete the previewed temp file when QuickLook dismisses (it nils the
+        // binding) or when it is replaced — so a previewed secret does not linger.
+        .onChange(of: previewURL) { oldValue, newValue in
+            if let oldValue, oldValue != newValue {
+                try? FileManager.default.removeItem(at: oldValue)
+            }
+        }
+        // Backstop: remove any lingering preview file when the page goes away.
+        .onDisappear {
+            if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
+        }
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -284,6 +300,7 @@ struct GramView: View {
                     .padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 7).fill(Palette.surface))
                 }
+                .disabled(sending)
                 Spacer(minLength: 0)
             }
             if let attachedFile { attachmentChip(attachedFile) }
@@ -311,7 +328,10 @@ struct GramView: View {
                 } label: {
                     Group {
                         if uploading {
-                            ProgressView().tint(Palette.ground)
+                            // Over the dark `surface` fill (canSend is false while
+                            // sending), tint the spinner light so it is visible —
+                            // it is the only feedback during a many-chunk upload.
+                            ProgressView().tint(Palette.text)
                         } else {
                             Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
                         }
@@ -397,6 +417,9 @@ struct GramView: View {
             // load started BEFORE a post can no longer discard it).
             let serverIDs = Set(fetched.map(\.id))
             pendingPosts.removeAll { serverIDs.contains($0.id) }
+            // Retire delete-tombstones the server has confirmed gone; keep only those
+            // it still returns (a poll that raced the delete), which stay suppressed.
+            deletedIDs.formIntersection(serverIDs)
             phase = .loaded
             refreshNote = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
@@ -421,6 +444,11 @@ struct GramView: View {
     private func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachment = attachedFile
+        // Capture the destination BEFORE any await. Otherwise the recipient picker
+        // could change mid-upload and the file (possibly a secret) would post to a
+        // different agent than the one chosen when Send was tapped. The picker is
+        // also disabled while sending, but capturing is the real guarantee.
+        let to = recipient.wireTo
         // A file with no caption is fine; an empty text-only message is not.
         guard (!text.isEmpty || attachment != nil), !sending else { return }
         sending = true
@@ -437,11 +465,11 @@ struct GramView: View {
                 let uploadID = try await client.gramUploadFile(attachment.data)
                 uploading = false
                 posted = try await client.gramPost(
-                    text: text, to: recipient.wireTo,
+                    text: text, to: to,
                     attachment: .init(
                         uploadID: uploadID, name: attachment.name, mime: attachment.mime))
             } else {
-                posted = try await client.gramPost(text: text, to: recipient.wireTo)
+                posted = try await client.gramPost(text: text, to: to)
             }
             draft = ""
             attachedFile = nil
@@ -462,12 +490,22 @@ struct GramView: View {
         guard case .success(let urls) = result, let url = urls.first else { return }
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Reject an over-cap file BEFORE reading it into memory, so picking a
+        // multi-gigabyte file can't allocate/read it all (and risk a jetsam) before
+        // the size check ever runs.
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+            size > Self.maxFileBytes
+        {
+            sendError = "That file is too large (max 10 MB)."
+            return
+        }
         do {
             let data = try Data(contentsOf: url)
             guard !data.isEmpty else {
                 sendError = "That file is empty."
                 return
             }
+            // Fallback for a URL whose size wasn't reported up front.
             guard data.count <= Self.maxFileBytes else {
                 sendError = "That file is too large (max 10 MB)."
                 return
@@ -498,9 +536,16 @@ struct GramView: View {
             defer { downloadingFileFor = nil }
             do {
                 let (name, _, data) = try await client.gramGetFile(id: message.id)
+                // Never trust the server name to be a safe path component; reduce it
+                // to a bare basename before joining it to the temp directory.
                 let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(name.isEmpty ? "file" : name)
-                try data.write(to: url, options: .atomic)
+                    .appendingPathComponent(Self.safeTempFileName(name))
+                // Remove any previously-previewed file so a viewed secret does not
+                // accumulate in tmp; write encrypted-at-rest.
+                if let previous = previewURL {
+                    try? FileManager.default.removeItem(at: previous)
+                }
+                try data.write(to: url, options: [.atomic, .completeFileProtection])
                 previewURL = url
             } catch let error as APIError {
                 sendError = "Couldn't open the file: \(error.message)"
@@ -510,12 +555,27 @@ struct GramView: View {
         }
     }
 
+    /// Reduce a server-supplied file name to a safe single path component for the
+    /// temp directory: strip any directory parts and reject `.`/`..`.
+    private static func safeTempFileName(_ name: String) -> String {
+        let base = (name as NSString).lastPathComponent
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty || base == "." || base == ".." { return "file" }
+        return base
+    }
+
     /// Delete a message (and its file bytes) after the server confirms — so a
     /// failed delete leaves the row in place rather than lying that it's gone.
     private func delete(_ message: GramMessage) {
         Task {
             do {
                 try await client.gramDelete(id: message.id)
+                // Tombstone it so an in-flight poll (snapshot predating the delete)
+                // can't briefly resurrect the row; cleared in `load` once the server
+                // no longer returns it.
+                deletedIDs.insert(message.id)
                 serverMessages.removeAll { $0.id == message.id }
                 pendingPosts.removeAll { $0.id == message.id }
             } catch let error as APIError {
