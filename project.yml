@@ -77,6 +77,9 @@ targets:
       # depend on it so the Linux build/test of the protocol layer stays intact.
       - package: SwiftTerm
         product: SwiftTerm
+      # QuickLook backs the Gram page's file preview (`.quickLookPreview`). Linked
+      # explicitly so the SwiftUI modifier resolves regardless of auto-linking.
+      - sdk: QuickLook.framework
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
