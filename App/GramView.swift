@@ -1,4 +1,5 @@
 import HerdrKit
+import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -558,7 +559,7 @@ struct GramView: View {
     /// Reduce a server-supplied file name to a safe single path component for the
     /// temp directory: strip any directory parts and reject `.`/`..`.
     private static func safeTempFileName(_ name: String) -> String {
-        let base = (name as NSString).lastPathComponent
+        let base = URL(fileURLWithPath: name).lastPathComponent
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "\\", with: "_")
             .trimmingCharacters(in: .whitespacesAndNewlines)
