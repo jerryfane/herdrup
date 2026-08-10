@@ -6,7 +6,16 @@ import Foundation
 /// single-shot (see `HerdrTransport`). Only `subscribe` holds a connection open.
 public actor HerdrClient {
     private let transport: HerdrTransport
-    private let encoder = JSONEncoder()
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        // Do NOT escape "/" as "\/". A base64 gram file chunk is slash-heavy (an
+        // all-0xFF chunk is ALL "/"), and the default escaping would nearly double
+        // those bytes — enough to push an otherwise in-budget chunk past the SSH
+        // transport's command-size cap. Unescaped "/" is valid JSON and the server
+        // parses it identically.
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return encoder
+    }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
 
@@ -215,19 +224,48 @@ public actor HerdrClient {
                        as: GramListResult.self).messages
     }
 
+    /// A file already uploaded via `gramUploadFile`, ready to attach to a post.
+    public struct GramFileAttachment: Sendable {
+        public let uploadID: String
+        public let name: String
+        public let mime: String
+        public init(uploadID: String, name: String, mime: String) {
+            self.uploadID = uploadID
+            self.name = name
+            self.mime = mime
+        }
+    }
+
+    struct GramFileUploadParams: Encodable {
+        let uploadID: String
+        let name: String
+        let mime: String
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "upload_id"
+            case name, mime
+        }
+    }
+
     struct GramPostParams: Encodable {
         let text: String
         let to: String?
+        let file: GramFileUploadParams?
     }
 
     /// The owner posts a message to agents. `to == nil` posts to the shared
     /// grab-queue any agent can claim; `to == <agentName>` addresses one live
     /// agent directly (the server rejects a name that is not a live agent).
-    /// Returns the stored message.
+    /// `attachment` attaches a file previously uploaded with `gramUploadFile`; the
+    /// text may be empty when a file is attached. Returns the stored message.
     @discardableResult
-    public func gramPost(text: String, to: String? = nil) async throws -> GramMessage {
-        try await call("gram.post", GramPostParams(text: text, to: to),
-                       as: GramMessageResult.self).message
+    public func gramPost(
+        text: String, to: String? = nil, attachment: GramFileAttachment? = nil
+    ) async throws -> GramMessage {
+        let file = attachment.map {
+            GramFileUploadParams(uploadID: $0.uploadID, name: $0.name, mime: $0.mime)
+        }
+        return try await call("gram.post", GramPostParams(text: text, to: to, file: file),
+                              as: GramMessageResult.self).message
     }
 
     struct GramMarkReadParams: Encodable { let id: String }
@@ -235,6 +273,66 @@ public actor HerdrClient {
     /// The owner marks an agent->owner message read (clears its unread badge).
     public func gramMarkRead(id: String) async throws {
         _ = try await call("gram.mark_read", GramMarkReadParams(id: id), as: JSONNull.self)
+    }
+
+    struct GramDeleteParams: Encodable { let id: String }
+
+    /// The owner deletes a gram message and any file attached to it, for good. As
+    /// the owner the app sends no caller pane, so it may delete any message.
+    public func gramDelete(id: String) async throws {
+        _ = try await call("gram.delete", GramDeleteParams(id: id), as: JSONNull.self)
+    }
+
+    struct GramUploadChunkParams: Encodable {
+        let uploadID: String
+        let offset: UInt64
+        let dataBase64: String
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "upload_id"
+            case offset
+            case dataBase64 = "data_base64"
+        }
+    }
+
+    /// Raw bytes per upload chunk. The SSH transport caps a whole request command
+    /// near 120 KB, and the request JSON is base64'd twice on the way out (the
+    /// inner `data_base64`, then the argv itself), a ~1.78x expansion. 48 KiB raw
+    /// lands around 87 KB of command — safely under the cap with headroom.
+    static let gramUploadChunkBytes = 48 * 1024
+
+    /// Uploads a file's bytes in chunks and returns the `upload_id` to attach to a
+    /// `gramPost`. Chunks are sent in order; the server validates each against the
+    /// running offset. A single request per chunk keeps every one under the SSH
+    /// command-size cap.
+    public func gramUploadFile(_ data: Data) async throws -> String {
+        let uploadID = "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + Self.gramUploadChunkBytes, data.count)
+            let chunk = data.subdata(in: offset..<end)
+            _ = try await call(
+                "gram.upload_chunk",
+                GramUploadChunkParams(
+                    uploadID: uploadID, offset: UInt64(offset),
+                    dataBase64: chunk.base64EncodedString()),
+                as: JSONNull.self)
+            offset = end
+        }
+        return uploadID
+    }
+
+    struct GramGetFileParams: Encodable { let id: String }
+
+    /// Downloads the file attached to a message and returns its name, mime, and
+    /// bytes. As the owner the app sends no caller pane and may download any file.
+    /// The bytes come back inline (base64) in one reply.
+    public func gramGetFile(id: String) async throws -> (name: String, mime: String, data: Data) {
+        let result = try await call("gram.get_file", GramGetFileParams(id: id),
+                                    as: GramFileContentResult.self)
+        guard let data = Data(base64Encoded: result.dataBase64) else {
+            throw GramError.invalidFileData
+        }
+        return (result.name, result.mime, data)
     }
 
     struct SendKeysParams: Encodable {

@@ -13,6 +13,40 @@ public enum GramDirection: String, Decodable, Sendable, Equatable {
     case ownerToAgent = "owner_to_agent"
 }
 
+/// A gram-specific client failure that isn't a server `APIError`.
+public enum GramError: Error, CustomStringConvertible {
+    /// `gram.get_file` returned data that was not valid base64 (should not happen).
+    case invalidFileData
+    public var description: String {
+        switch self {
+        case .invalidFileData:
+            return "the server returned file data that could not be decoded"
+        }
+    }
+}
+
+/// Metadata for a file attached to a gram message. The bytes are fetched
+/// separately with `gramGetFile`; this is only what's needed to show and verify
+/// it. Mirrors src/api/schema/gram.rs::GramFileInfo.
+public struct GramFile: Decodable, Sendable, Equatable {
+    public let name: String
+    public let size: UInt64
+    public let mime: String
+    public let sha256: String
+
+    /// A human-readable size, e.g. "12 KB" or "1.3 MB".
+    public var displaySize: String { Self.displaySize(of: size) }
+
+    /// Format a byte count for display. Static so a not-yet-uploaded local file
+    /// (which has no `GramFile` yet) can use the same rendering.
+    public static func displaySize(of size: UInt64) -> String {
+        let bytes = Double(size)
+        if bytes < 1024 { return "\(size) B" }
+        if bytes < 1024 * 1024 { return String(format: "%.0f KB", bytes / 1024) }
+        return String(format: "%.1f MB", bytes / (1024 * 1024))
+    }
+}
+
 /// One gram message as returned by the server.
 public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     public let id: String
@@ -31,9 +65,11 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     /// it locally for an optimistic update after `gram.mark_read` (the rest of the
     /// message is immutable / decode-only).
     public var readByOwner: Bool
+    /// A file attached to this message, or nil. Fetch its bytes with `gramGetFile`.
+    public let file: GramFile?
 
     enum CodingKeys: String, CodingKey {
-        case id, direction, from, to, text
+        case id, direction, from, to, text, file
         case grabbedBy = "grabbed_by"
         case grabbedUnixMs = "grabbed_unix_ms"
         case createdUnixMs = "created_unix_ms"
@@ -63,4 +99,16 @@ struct GramListResult: Decodable {
 /// `message` is decoded — the type discriminator is ignored.
 struct GramMessageResult: Decodable {
     let message: GramMessage
+}
+
+/// `gram.get_file` result (`type: "gram_file_content"`): the file's bytes inline.
+struct GramFileContentResult: Decodable {
+    let name: String
+    let mime: String
+    let size: UInt64
+    let dataBase64: String
+    enum CodingKeys: String, CodingKey {
+        case name, mime, size
+        case dataBase64 = "data_base64"
+    }
 }
