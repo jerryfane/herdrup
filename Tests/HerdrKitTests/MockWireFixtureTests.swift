@@ -286,6 +286,32 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertTrue(uploadID.hasPrefix("app-"), "upload id should be a safe app- token")
         try await client.gramDelete(id: "g5")
     }
+
+    /// A worst-case slash-heavy chunk (all 0xFF → base64 is entirely "/") must not
+    /// inflate the request line: the request encoder must emit unescaped "/", or a
+    /// binary chunk would blow the SSH command-size cap. Guards the chunk-size math.
+    func testGramUploadChunkRequestStaysCompactForSlashHeavyData() async throws {
+        final class Capture: HerdrTransport, @unchecked Sendable {
+            var maxLen = 0
+            func roundTrip(_ requestLine: String) async throws -> String {
+                maxLen = max(maxLen, requestLine.utf8.count)
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let capture = Capture()
+        let client = HerdrClient(transport: capture)
+        let data = Data(repeating: 0xFF, count: HerdrClient.gramUploadChunkBytes)
+        _ = try await client.gramUploadFile(data)
+        // ~49 KiB raw → ~65.5 KB unescaped base64 + envelope. Escaping every "/"
+        // would nearly double it; assert it stays well under the point where the
+        // outer argv base64 (~1.33x) would breach the 120 KB command cap.
+        XCTAssertLessThan(
+            capture.maxLen, 80_000,
+            "slash escaping inflated the upload request line to \(capture.maxLen) bytes")
+    }
 }
 
 /// THE FIXTURES. Duplicated verbatim in App/HerdrApp.swift's MockTransport (the
