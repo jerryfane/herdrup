@@ -1,12 +1,17 @@
 import HerdrKit
+import QuickLook
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The Gram page: the owner's side of the owner<->agent message channel.
 ///
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
 /// sent, plus the owner's own posts and their claim state) newest-first, and a
-/// composer to post to the shared grab-queue or one agent directly. Text only;
-/// file attachments are a later phase.
+/// composer to post to the shared grab-queue or one agent directly, with an
+/// optional file attachment. A received file shows a chip that downloads and
+/// previews it (QuickLook); long-pressing a message deletes it — and its file
+/// bytes — for good, which is what makes gram safe for a short-lived secret like
+/// a temporary API key.
 ///
 /// Nav-agnostic: it renders its own content and takes an optional `onClose` — a
 /// modal cover passes one (a close button appears); a persistent tab passes nil.
@@ -37,11 +42,37 @@ struct GramView: View {
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
 
+    /// A file the owner picked to attach to the next post (read into memory at pick
+    /// time), nil when none is staged.
+    @State private var attachedFile: PickedAttachment?
+    @State private var showFileImporter = false
+    /// True while a picked file is uploading (many small chunks over SSH).
+    @State private var uploading = false
+    /// A downloaded file written to a temp URL, presented via QuickLook when set.
+    @State private var previewURL: URL?
+    /// The message id whose file is currently downloading, to show a spinner on it.
+    @State private var downloadingFileFor: String?
+    /// Ids the server has confirmed deleted, kept as tombstones so an in-flight poll
+    /// (whose snapshot predates the delete) cannot resurrect the row for a few
+    /// seconds. Cleared once the server's own snapshot also omits the id.
+    @State private var deletedIDs: Set<String> = []
+
+    /// A file staged for sending: read into memory so the send is one atomic action.
+    private struct PickedAttachment {
+        let name: String
+        let mime: String
+        let data: Data
+    }
+
+    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`.
+    private static let maxFileBytes = 10 * 1024 * 1024
+
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
     private var messages: [GramMessage] {
         let pendingIDs = Set(pendingPosts.map(\.id))
-        return pendingPosts + serverMessages.filter { !pendingIDs.contains($0.id) }
+        return (pendingPosts + serverMessages.filter { !pendingIDs.contains($0.id) })
+            .filter { !deletedIDs.contains($0.id) }
     }
 
     private enum LoadPhase: Equatable {
@@ -94,6 +125,27 @@ struct GramView: View {
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
         .task { await pollLoop() }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: false
+        ) { result in
+            handlePickedFile(result)
+        }
+        // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
+        // it and offers the system share action (save to Files, etc.).
+        .quickLookPreview($previewURL)
+        // Delete the previewed temp file when QuickLook dismisses (it nils the
+        // binding) or when it is replaced — so a previewed secret does not linger.
+        .onChange(of: previewURL) { oldValue, newValue in
+            if let oldValue, oldValue != newValue {
+                try? FileManager.default.removeItem(at: oldValue)
+            }
+        }
+        // Backstop: remove any lingering preview file when the page goes away.
+        .onDisappear {
+            if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
+        }
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -197,8 +249,13 @@ struct GramView: View {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(messages) { message in
-                        GramRow(message: message)
-                            .onAppear { markReadIfNeeded(message) }
+                        GramRow(
+                            message: message,
+                            isDownloadingFile: downloadingFileFor == message.id,
+                            onOpenFile: { openFile(message) },
+                            onDelete: { delete(message) }
+                        )
+                        .onAppear { markReadIfNeeded(message) }
                     }
                 }
                 .padding(16)
@@ -244,9 +301,21 @@ struct GramView: View {
                     .padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 7).fill(Palette.surface))
                 }
+                .disabled(sending)
                 Spacer(minLength: 0)
             }
+            if let attachedFile { attachmentChip(attachedFile) }
             HStack(alignment: .bottom, spacing: 8) {
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(Palette.surface))
+                }
+                .disabled(sending)
                 TextField("Message an agent…", text: $draft, axis: .vertical)
                     .font(Typography.app(15))
                     .foregroundStyle(Palette.text)
@@ -258,11 +327,19 @@ struct GramView: View {
                 Button {
                     Task { await send() }
                 } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
-                        .frame(width: 38, height: 38)
-                        .background(Circle().fill(canSend ? Palette.text : Palette.surface))
+                    Group {
+                        if uploading {
+                            // Over the dark `surface` fill (canSend is false while
+                            // sending), tint the spinner light so it is visible —
+                            // it is the only feedback during a many-chunk upload.
+                            ProgressView().tint(Palette.text)
+                        } else {
+                            Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
+                        }
+                    }
+                    .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(canSend ? Palette.text : Palette.surface))
                 }
                 .disabled(!canSend)
             }
@@ -274,7 +351,38 @@ struct GramView: View {
     }
 
     private var canSend: Bool {
-        !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !sending else { return false }
+        return attachedFile != nil
+            || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The staged attachment shown above the composer, with a remove button.
+    private func attachmentChip(_ file: PickedAttachment) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: FileGlyph.name(for: file.mime, fileName: file.name))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+            Text(file.name)
+                .font(Typography.app(13, .medium))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(GramFile.displaySize(of: UInt64(file.data.count)))
+                .font(Typography.machine(11))
+                .foregroundStyle(Palette.textFaint)
+            Spacer(minLength: 0)
+            Button {
+                attachedFile = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.textFaint)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Actions
@@ -310,6 +418,9 @@ struct GramView: View {
             // load started BEFORE a post can no longer discard it).
             let serverIDs = Set(fetched.map(\.id))
             pendingPosts.removeAll { serverIDs.contains($0.id) }
+            // Retire delete-tombstones the server has confirmed gone; keep only those
+            // it still returns (a poll that raced the delete), which stay suppressed.
+            deletedIDs.formIntersection(serverIDs)
             phase = .loaded
             refreshNote = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
@@ -333,13 +444,36 @@ struct GramView: View {
 
     private func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !sending else { return }
+        let attachment = attachedFile
+        // Capture the destination BEFORE any await. Otherwise the recipient picker
+        // could change mid-upload and the file (possibly a secret) would post to a
+        // different agent than the one chosen when Send was tapped. The picker is
+        // also disabled while sending, but capturing is the real guarantee.
+        let to = recipient.wireTo
+        // A file with no caption is fine; an empty text-only message is not.
+        guard (!text.isEmpty || attachment != nil), !sending else { return }
         sending = true
-        defer { sending = false }
+        defer {
+            sending = false
+            uploading = false
+        }
         sendError = nil
         do {
-            let posted = try await client.gramPost(text: text, to: recipient.wireTo)
+            let posted: GramMessage
+            if let attachment {
+                // Upload the bytes in chunks, then post the message referencing them.
+                uploading = true
+                let uploadID = try await client.gramUploadFile(attachment.data)
+                uploading = false
+                posted = try await client.gramPost(
+                    text: text, to: to,
+                    attachment: .init(
+                        uploadID: uploadID, name: attachment.name, mime: attachment.mime))
+            } else {
+                posted = try await client.gramPost(text: text, to: to)
+            }
             draft = ""
+            attachedFile = nil
             // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
             // cannot drop it; de-duped by id, reconciled once the server reflects it.
             pendingPosts.removeAll { $0.id == posted.id }
@@ -348,6 +482,108 @@ struct GramView: View {
             sendError = error.message
         } catch {
             sendError = "Couldn't send. Try again."
+        }
+    }
+
+    /// Read a picked file into memory (bounded by the server's size cap) so the
+    /// send is one atomic action. A file URL from the importer is security-scoped.
+    private func handlePickedFile(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Reject an over-cap file BEFORE reading it into memory, so picking a
+        // multi-gigabyte file can't allocate/read it all (and risk a jetsam) before
+        // the size check ever runs.
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+            size > Self.maxFileBytes
+        {
+            sendError = "That file is too large (max 10 MB)."
+            return
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            guard !data.isEmpty else {
+                sendError = "That file is empty."
+                return
+            }
+            // Fallback for a URL whose size wasn't reported up front.
+            guard data.count <= Self.maxFileBytes else {
+                sendError = "That file is too large (max 10 MB)."
+                return
+            }
+            attachedFile = PickedAttachment(
+                name: url.lastPathComponent, mime: Self.mimeType(for: url), data: data)
+            sendError = nil
+        } catch {
+            sendError = "Couldn't read that file."
+        }
+    }
+
+    private static func mimeType(for url: URL) -> String {
+        if let type = UTType(filenameExtension: url.pathExtension),
+            let mime = type.preferredMIMEType
+        {
+            return mime
+        }
+        return "application/octet-stream"
+    }
+
+    /// Download a message's file to a temp URL and present it in QuickLook (which
+    /// offers the system share action to save it).
+    private func openFile(_ message: GramMessage) {
+        guard downloadingFileFor == nil else { return }
+        downloadingFileFor = message.id
+        Task {
+            defer { downloadingFileFor = nil }
+            do {
+                let (name, _, data) = try await client.gramGetFile(id: message.id)
+                // Never trust the server name to be a safe path component; reduce it
+                // to a bare basename before joining it to the temp directory.
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(Self.safeTempFileName(name))
+                // Remove any previously-previewed file so a viewed secret does not
+                // accumulate in tmp; write encrypted-at-rest.
+                if let previous = previewURL {
+                    try? FileManager.default.removeItem(at: previous)
+                }
+                try data.write(to: url, options: [.atomic, .completeFileProtection])
+                previewURL = url
+            } catch let error as APIError {
+                sendError = "Couldn't open the file: \(error.message)"
+            } catch {
+                sendError = "Couldn't open the file."
+            }
+        }
+    }
+
+    /// Reduce a server-supplied file name to a safe single path component for the
+    /// temp directory: strip any directory parts and reject `.`/`..`.
+    private static func safeTempFileName(_ name: String) -> String {
+        let base = URL(fileURLWithPath: name).lastPathComponent
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty || base == "." || base == ".." { return "file" }
+        return base
+    }
+
+    /// Delete a message (and its file bytes) after the server confirms — so a
+    /// failed delete leaves the row in place rather than lying that it's gone.
+    private func delete(_ message: GramMessage) {
+        Task {
+            do {
+                try await client.gramDelete(id: message.id)
+                // Tombstone it so an in-flight poll (snapshot predating the delete)
+                // can't briefly resurrect the row; cleared in `load` once the server
+                // no longer returns it.
+                deletedIDs.insert(message.id)
+                serverMessages.removeAll { $0.id == message.id }
+                pendingPosts.removeAll { $0.id == message.id }
+            } catch let error as APIError {
+                sendError = "Couldn't delete: \(error.message)"
+            } catch {
+                sendError = "Couldn't delete. Try again."
+            }
         }
     }
 
@@ -376,6 +612,9 @@ struct GramView: View {
 /// shows the recipient and the claim state of a queued item.
 private struct GramRow: View {
     let message: GramMessage
+    var isDownloadingFile: Bool
+    var onOpenFile: () -> Void
+    var onDelete: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -393,10 +632,15 @@ private struct GramRow: View {
                         .font(Typography.machine(11))
                         .foregroundStyle(Palette.textFaint)
                 }
-                Text(message.text)
-                    .font(Typography.app(14))
-                    .foregroundStyle(Palette.textDim)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(Typography.app(14))
+                        .foregroundStyle(Palette.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let file = message.file {
+                    fileChip(file)
+                }
                 if let status = statusLine {
                     Text(status)
                         .font(Typography.machine(11))
@@ -408,6 +652,47 @@ private struct GramRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
+        // Long-press to delete a message (and its file bytes) for good.
+        .contextMenu {
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    /// A tappable chip for an attached file: tap to download + preview it.
+    private func fileChip(_ file: GramFile) -> some View {
+        Button(action: onOpenFile) {
+            HStack(spacing: 8) {
+                Image(systemName: FileGlyph.name(for: file.mime, fileName: file.name))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.text)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(file.name)
+                        .font(Typography.app(13, .medium))
+                        .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(file.displaySize)
+                        .font(Typography.machine(11))
+                        .foregroundStyle(Palette.textFaint)
+                }
+                Spacer(minLength: 0)
+                if isDownloadingFile {
+                    ProgressView().tint(Palette.textDim)
+                } else {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surface))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloadingFile)
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -463,5 +748,21 @@ private struct GramRow: View {
         case ..<86400: return "\(Int(seconds / 3600))h"
         default: return "\(Int(seconds / 86400))d"
         }
+    }
+}
+
+/// Picks an SF Symbol for a file from its MIME type. Shared by the composer's
+/// staged-attachment chip and a received message's file chip.
+private enum FileGlyph {
+    static func name(for mime: String, fileName: String) -> String {
+        let mime = mime.lowercased()
+        if mime.hasPrefix("image/") { return "photo" }
+        if mime.hasPrefix("video/") { return "film" }
+        if mime.hasPrefix("audio/") { return "waveform" }
+        if mime == "application/pdf" { return "doc.richtext" }
+        if mime == "application/zip" || mime.contains("compressed") { return "doc.zipper" }
+        if mime == "application/json" { return "curlybraces" }
+        if mime.hasPrefix("text/") { return "doc.text" }
+        return "doc"
     }
 }
