@@ -85,10 +85,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         [.banner, .list, .sound]
     }
 
-    // A tap on the notification → deep-link to the agent's pane.
+    // A tap on the notification → deep-link. A gram alert carries `gram: true` and an
+    // empty `pane_id`, so it MUST be checked before the pane branch (an empty pane id
+    // is a non-nil String that would otherwise deep-link to a nonexistent pane).
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
-        if let paneID = response.notification.request.content.userInfo["pane_id"] as? String {
+        let userInfo = response.notification.request.content.userInfo
+        if userInfo["gram"] as? Bool == true {
+            await MainActor.run { PushCenter.shared.tappedGram() }
+        } else if let paneID = userInfo["pane_id"] as? String, !paneID.isEmpty {
             await MainActor.run { PushCenter.shared.tapped(paneID: paneID) }
         }
     }
