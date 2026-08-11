@@ -23,6 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cache resolved Swift packages (SwiftTerm is a sizeable remote checkout that
+      # bundles Metal shaders) so a build doesn't re-clone them every run. Keyed on
+      # project.yml, which pins the package refs; restore-keys lets a near-miss still
+      # seed the checkout, and xcodebuild re-resolves against Package.resolved anyway,
+      # so a stale cache is safe. The builds below pin the clone dir to ./SourcePackages.
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
       - name: Select Xcode and assert the iOS SDK
         run: |
           echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
@@ -40,7 +53,9 @@ jobs:
             echo "::warning::-downloadComponent MetalToolchain returned nonzero (may already be present); continuing"
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Skip Homebrew's auto-update (it re-indexes every formula on a cold runner,
+        # a minute-plus of pure overhead) — we only need the already-bottled xcodegen.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
 
       - name: Generate project
         run: xcodegen generate
@@ -58,10 +73,12 @@ jobs:
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,name=${SIM_NAME}" \
             -derivedDataPath .build-dd \
+            -clonedSourcePackagesDirPath SourcePackages \
             CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build \
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,name=${SIM_NAME}" \
             -derivedDataPath .build-dd \
+            -clonedSourcePackagesDirPath SourcePackages \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Run UI scroll-test (the gesture receipt)
@@ -74,6 +91,7 @@ jobs:
               -destination "platform=iOS Simulator,name=${SIM_NAME}" \
               -only-testing:HerdrUITests \
               -derivedDataPath .build-dd \
+              -clonedSourcePackagesDirPath SourcePackages \
               -resultBundlePath TestResults.xcresult \
               CODE_SIGNING_ALLOWED=NO | xcbeautify || \
             xcodebuild test \
@@ -81,6 +99,7 @@ jobs:
               -destination "platform=iOS Simulator,name=${SIM_NAME}" \
               -only-testing:HerdrUITests \
               -derivedDataPath .build-dd \
+              -clonedSourcePackagesDirPath SourcePackages \
               -resultBundlePath TestResults.xcresult \
               CODE_SIGNING_ALLOWED=NO
           else
