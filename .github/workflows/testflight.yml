@@ -45,6 +45,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cache resolved Swift packages (see ci.yml) so the archive doesn't re-clone
+      # SwiftTerm + the Citadel/NIO/crypto tree every release. The archive below pins
+      # the clone dir to ./SourcePackages; xcodebuild re-resolves against
+      # Package.resolved, so a stale cache is safe.
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
       - name: Select Xcode and assert the iOS SDK
         # Do NOT pin an Xcode path (keephair trap a: /Applications/Xcode_16.app did
         # not exist — a pinned path verifies a filename, not an SDK). Take the newest
@@ -64,7 +76,8 @@ jobs:
       - name: Install XcodeGen
         # The repo has NO committed .xcodeproj (gitignored, generated). project.yml is
         # at the REPO ROOT (unlike keephair's ios/ subdir).
-        run: brew install xcodegen
+        # Skip Homebrew's auto-update (pure cold-runner overhead); the bottle is enough.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
 
       - name: Compute build number
         # App Store rejects a duplicate CFBundleVersion. run_number is monotonic per
@@ -167,6 +180,7 @@ jobs:
           xcodebuild -project Herdr.xcodeproj -scheme Herdr \
             -configuration Distribution -destination 'generic/platform=iOS' \
             -archivePath /tmp/Herdr.xcarchive \
+            -clonedSourcePackagesDirPath SourcePackages \
             CURRENT_PROJECT_VERSION="$BUILD" \
             archive
 

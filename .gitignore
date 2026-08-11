@@ -10,3 +10,4 @@ build/
 # info.properties; committing it only drifts. xcodegen rewrites it before every
 # build, so it is derived, not source.
 App/Info.plist
+SourcePackages/
