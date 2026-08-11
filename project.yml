@@ -80,6 +80,9 @@ targets:
       # QuickLook backs the Gram page's file preview (`.quickLookPreview`). Linked
       # explicitly so the SwiftUI modifier resolves regardless of auto-linking.
       - sdk: QuickLook.framework
+      # PhotosUI backs the Gram attachment picker's Photo/Video source (`PhotosPicker`
+      # / `.photosPicker`). Linked explicitly for the same reason as QuickLook above.
+      - sdk: PhotosUI.framework
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
