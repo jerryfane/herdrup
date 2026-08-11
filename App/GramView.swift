@@ -560,22 +560,34 @@ struct GramView: View {
         }
     }
 
-    /// An over-cap library pick, thrown from `PickedMedia`'s importer BEFORE the bytes
-    /// are read into memory — so a multi-GB 4K/ProRes video is rejected by its on-disk
-    /// size, never materialized (which would jetsam the app).
-    private enum PickedMediaError: Error { case tooLarge }
-
     /// A photo-library pick loaded as a size-checked file. PhotosUI exports the item to
-    /// a temp file; we stat that file and reject an over-cap pick THERE, mirroring the
-    /// document path's "reject before reading into memory" guard, then read the bytes
-    /// only once we know they fit.
+    /// a temp file; the importer stats that file and rejects an over-cap (or unstat-able)
+    /// pick THERE — `data == nil` — before any bytes are read, mirroring the document
+    /// path's "reject before reading into memory" guard.
+    ///
+    /// Rejection is signalled as a VALUE (`data == nil`), NOT a thrown error, on purpose:
+    /// `loadTransferable` routes through NSItemProvider's Obj-C error bridge, across which
+    /// a thrown Swift error type may not survive — so a `nil` payload is the only reliable
+    /// way to carry "rejected" back and still show the right message.
     private struct PickedMedia: Transferable {
-        let data: Data
+        /// Non-nil only for an in-cap, readable pick; nil = rejected (over-cap OR the
+        /// exported file's size could not be determined — treated as over-cap, never
+        /// read blindly into memory).
+        let data: Data?
         static var transferRepresentation: some TransferRepresentation {
             FileRepresentation(importedContentType: .item) { received in
-                let size = (try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                guard size <= GramView.maxFileBytes else { throw PickedMediaError.tooLarge }
-                return PickedMedia(data: try Data(contentsOf: received.file))
+                // Unknown size is treated as OVER-cap (reject), never under-cap — an
+                // unstat-able export must not fall through to an unbounded read.
+                guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                    size <= GramView.maxFileBytes
+                else {
+                    return PickedMedia(data: nil)
+                }
+                let data = try Data(contentsOf: received.file)
+                // Belt-and-braces, matching the document path: reject if the read somehow
+                // exceeded the stat'd size, so an over-cap Data can never reach the caller.
+                guard data.count <= GramView.maxFileBytes else { return PickedMedia(data: nil) }
+                return PickedMedia(data: data)
             }
         }
     }
@@ -591,19 +603,23 @@ struct GramView: View {
             photoItem = nil  // reset so re-picking the same item fires onChange again
         }
         do {
+            // A nil transferable = couldn't produce a file; a non-nil transferable with a
+            // nil `data` = rejected by the size guard (over-cap / unstat-able).
             guard let media = try await item.loadTransferable(type: PickedMedia.self) else {
                 sendError = "Couldn't read that item."
                 return
             }
-            guard !media.data.isEmpty else {
+            guard let data = media.data else {
+                sendError = "That item is too large (max 10 MB)."
+                return
+            }
+            guard !data.isEmpty else {
                 sendError = "That item is empty."
                 return
             }
             let (name, mime) = Self.photoNameAndMime(for: item)
-            attachedFile = PickedAttachment(name: name, mime: mime, data: media.data)
+            attachedFile = PickedAttachment(name: name, mime: mime, data: data)
             sendError = nil
-        } catch is PickedMediaError {
-            sendError = "That item is too large (max 10 MB)."
         } catch {
             sendError = "Couldn't read that item."
         }
