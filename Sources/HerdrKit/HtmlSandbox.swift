@@ -5,9 +5,10 @@ import Foundation
 /// scriptable web content — so a hostile file from an agent could run JavaScript in
 /// the preview. The content is placed in a **sandboxed** iframe (no `allow-scripts`)
 /// which the browser renders statically: scripts, forms, popups, top-level
-/// navigation, and same-origin access are all blocked. A purely passive resource
-/// load (an `<img>` or CSS `url()`) can still beacon, but that is low-impact with no
-/// script access — and no data the preview holds is reachable.
+/// navigation, and same-origin access are all blocked. A strict CSP — inherited by
+/// the srcdoc frame — additionally caps passive network loads: an `<img>` or CSS
+/// `url()` may only reach `data:`, so a hostile file cannot even beacon out, and no
+/// data the preview holds is reachable.
 ///
 /// Lives in HerdrKit so the escaping/wrapping is unit-tested on Linux; the app only
 /// decides which file types to route through it.
