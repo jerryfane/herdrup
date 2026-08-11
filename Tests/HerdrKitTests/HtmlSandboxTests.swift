@@ -27,7 +27,9 @@ final class HtmlSandboxTests: XCTestCase {
         // Assert the positional invariant: every `<script` occurrence sits AFTER the
         // start of the srcdoc attribute value — none escaped out to become a sibling.
         var searchFrom = out.startIndex
-        while let hit = out.range(of: "<script", range: searchFrom..<out.endIndex) {
+        while let hit = out.range(
+            of: "<script", options: .caseInsensitive, range: searchFrom..<out.endIndex)
+        {
             XCTAssertGreaterThan(hit.lowerBound, srcdocStart.lowerBound,
                 "a <script token escaped the srcdoc attribute: \(out)")
             searchFrom = hit.upperBound
