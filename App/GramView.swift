@@ -1,3 +1,4 @@
+import CoreTransferable
 import HerdrKit
 import PhotosUI
 import QuickLook
@@ -53,6 +54,10 @@ struct GramView: View {
     @State private var showPhotoPicker = false
     /// The item chosen from the photo library, loaded into a `PickedAttachment`.
     @State private var photoItem: PhotosPickerItem?
+    /// True while a photo-library pick is loading (iCloud items can take a moment).
+    /// Gates Send and the paperclip so a text-only send can't race the load and a
+    /// second pick can't start concurrently.
+    @State private var loadingPhoto = false
     /// True while a picked file is uploading (many small chunks over SSH).
     @State private var uploading = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
@@ -169,6 +174,9 @@ struct GramView: View {
         .onDisappear {
             if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
         }
+        // Don't let a swipe-down (the new sheet dismissal) abandon an in-flight send
+        // or a photo load mid-way — the chunked upload would keep running off-screen.
+        .interactiveDismissDisabled(sending || loadingPhoto)
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -332,13 +340,21 @@ struct GramView: View {
                 Button {
                     showAttachTypeDialog = true
                 } label: {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                        .frame(width: 38, height: 38)
-                        .background(Circle().fill(Palette.surface))
+                    Group {
+                        if loadingPhoto {
+                            // An iCloud-backed pick can take a beat to materialize;
+                            // show it's working rather than a dead paperclip.
+                            ProgressView().tint(Palette.textDim)
+                        } else {
+                            Image(systemName: "paperclip")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(Palette.textDim)
+                        }
+                    }
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(Palette.surface))
                 }
-                .disabled(sending)
+                .disabled(sending || loadingPhoto)
                 TextField("Message an agent…", text: $draft, axis: .vertical)
                     .font(Typography.app(15))
                     .foregroundStyle(Palette.text)
@@ -374,7 +390,9 @@ struct GramView: View {
     }
 
     private var canSend: Bool {
-        guard !sending else { return false }
+        // Also blocked while a photo is loading, so tapping Send mid-load can't fire a
+        // text-only message that races the attachment in behind it.
+        guard !sending, !loadingPhoto else { return false }
         return attachedFile != nil
             || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -542,43 +560,73 @@ struct GramView: View {
         }
     }
 
-    /// Load a photo-library pick into a `PickedAttachment`. The library gives us raw
-    /// bytes (not a security-scoped file URL), so the size check runs after the load;
-    /// the same 10 MB cap the file path enforces still applies.
+    /// An over-cap library pick, thrown from `PickedMedia`'s importer BEFORE the bytes
+    /// are read into memory — so a multi-GB 4K/ProRes video is rejected by its on-disk
+    /// size, never materialized (which would jetsam the app).
+    private enum PickedMediaError: Error { case tooLarge }
+
+    /// A photo-library pick loaded as a size-checked file. PhotosUI exports the item to
+    /// a temp file; we stat that file and reject an over-cap pick THERE, mirroring the
+    /// document path's "reject before reading into memory" guard, then read the bytes
+    /// only once we know they fit.
+    private struct PickedMedia: Transferable {
+        let data: Data
+        static var transferRepresentation: some TransferRepresentation {
+            FileRepresentation(importedContentType: .item) { received in
+                let size = (try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                guard size <= GramView.maxFileBytes else { throw PickedMediaError.tooLarge }
+                return PickedMedia(data: try Data(contentsOf: received.file))
+            }
+        }
+    }
+
+    /// Load a photo-library pick into a `PickedAttachment`. Routes through `PickedMedia`
+    /// so the 10 MB cap is enforced on the exported file's size before any bytes are
+    /// read — the same invariant the document path holds, so an over-cap video shows
+    /// the "too large" error instead of jetsamming the app.
     private func loadPickedPhoto(_ item: PhotosPickerItem) async {
-        defer { photoItem = nil }  // reset so re-picking the same item fires onChange again
+        loadingPhoto = true
+        defer {
+            loadingPhoto = false
+            photoItem = nil  // reset so re-picking the same item fires onChange again
+        }
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
+            guard let media = try await item.loadTransferable(type: PickedMedia.self) else {
                 sendError = "Couldn't read that item."
                 return
             }
-            guard !data.isEmpty else {
+            guard !media.data.isEmpty else {
                 sendError = "That item is empty."
                 return
             }
-            guard data.count <= Self.maxFileBytes else {
-                sendError = "That item is too large (max 10 MB)."
-                return
-            }
             let (name, mime) = Self.photoNameAndMime(for: item)
-            attachedFile = PickedAttachment(name: name, mime: mime, data: data)
+            attachedFile = PickedAttachment(name: name, mime: mime, data: media.data)
             sendError = nil
+        } catch is PickedMediaError {
+            sendError = "That item is too large (max 10 MB)."
         } catch {
             sendError = "Couldn't read that item."
         }
     }
 
     /// Derive a filename + MIME for a library pick from its concrete content type
-    /// (HEIC, JPEG, MOV, …); fall back to jpeg/mov if the type doesn't report one.
+    /// (HEIC, JPEG, MOV, …). The name carries a short unique discriminator so three
+    /// photos don't all arrive as "image.heic" — identical chips for the owner and a
+    /// name collision for any receiving agent that stores attachments by name.
     private static func photoNameAndMime(for item: PhotosPickerItem) -> (String, String) {
+        let disc = UUID().uuidString.prefix(8).lowercased()
         if let type = item.supportedContentTypes.first,
             let ext = type.preferredFilenameExtension,
             let mime = type.preferredMIMEType
         {
             let base = type.conforms(to: .movie) ? "video" : "image"
-            return ("\(base).\(ext)", mime)
+            return ("\(base)-\(disc).\(ext)", mime)
         }
-        return ("image.jpg", "image/jpeg")
+        // The type reported no extension/MIME — still make a movie-aware, unique name.
+        if let type = item.supportedContentTypes.first, type.conforms(to: .movie) {
+            return ("video-\(disc).mov", "video/quicktime")
+        }
+        return ("image-\(disc).jpg", "image/jpeg")
     }
 
     private static func mimeType(for url: URL) -> String {

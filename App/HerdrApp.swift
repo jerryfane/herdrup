@@ -698,6 +698,11 @@ struct NewAgentView: View {
                 }
             }
         }
+        // Under a .sheet a swipe-down is an unguarded exit, but a spawn keeps running
+        // off-screen and its queued pane would be stranded (pendingOpenSlot never
+        // drains, then fires on an unrelated sheet close). Block interactive dismissal
+        // mid-spawn — the same invariant the Cancel button's .disabled(starting) holds.
+        .interactiveDismissDisabled(starting)
     }
 
     private var header: some View {
@@ -1027,13 +1032,19 @@ struct TerminalHomeView: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
-                // First launch: show the gestures tutorial once. Guarded so a pending
-                // gram deep-link (which sets activeCover) is never stomped — and if one
-                // is up, openGramIfPending defers until this sheet closes.
+                // First launch: show the gestures tutorial once — but NOT over a pending
+                // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
+                // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
+                // when we actually present, so a deep-linked first launch still gets the
+                // tutorial on its next clean launch rather than never.
                 .onAppear {
-                    if !hasSeenGesturesHelp {
+                    if !hasSeenGesturesHelp,
+                        activeCover == nil,
+                        !push.pendingGram,
+                        push.pendingPaneID == nil
+                    {
                         hasSeenGesturesHelp = true
-                        if activeCover == nil { activeCover = .gestures }
+                        activeCover = .gestures
                     }
                 }
                 // A push tapped while the home view is already loaded (app foregrounded / already
