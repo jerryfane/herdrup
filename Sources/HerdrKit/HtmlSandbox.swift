@@ -13,6 +13,14 @@ import Foundation
 /// decides which file types to route through it.
 public enum HtmlSandbox {
 
+    /// Wrap received file BYTES. Decodes LOSSILY (invalid UTF-8 → U+FFFD) so a web
+    /// document is ALWAYS sandboxed — a caller must never fall back to writing raw
+    /// bytes when strict decoding fails, since WebKit recovers from invalid UTF-8
+    /// and would still execute a hostile `<script>`.
+    public static func wrap(data: Data, title: String = "Preview") -> String {
+        wrap(String(decoding: data, as: UTF8.self), title: title)
+    }
+
     /// Wrap raw HTML/SVG source into a self-contained document whose sole body is a
     /// sandboxed iframe holding the (escaped) source. `title` names the preview tab.
     public static func wrap(_ rawHTML: String, title: String = "Preview") -> String {
@@ -32,8 +40,13 @@ public enum HtmlSandbox {
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
 
+        // A srcdoc document inherits its embedder's CSP, so this policy also governs
+        // the framed content: no script (default-src 'none'), and no NETWORK beacon
+        // (img/connect/font all fall back to 'none'; only data: images and this
+        // page's inline <style> are allowed). Defense-in-depth atop the sandbox.
         return """
             <!doctype html><html lang="en"><head><meta charset="utf-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>\(safeTitle)</title>
             <style>html,body{margin:0;height:100%;background:#fff}
