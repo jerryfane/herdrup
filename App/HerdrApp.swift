@@ -984,6 +984,10 @@ struct TerminalHomeView: View {
     /// flag before this view existed). Clearing it lets a later tap re-trigger.
     private func openGramIfPending() {
         guard push.pendingGram else { return }
+        // The fork notice (a fullScreenCover) is up: don't arm the .gram sheet over it
+        // — that recreates the two-presentations-on-one-view collision. Leave the flag
+        // set; the notice's onDismiss re-invokes this once it's gone.
+        if showForkNotice { return }
         // Another cover is already presented: `fullScreenCover(item:)` does not
         // reliably swap to a new item while up, so dismiss it first (keeping the flag
         // armed). The cover's onDismiss re-invokes this, and with none presented it
@@ -1132,9 +1136,14 @@ struct TerminalHomeView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
-        // Advisory full-screen notice when the daemon isn't our fork. Dismissable —
-        // it never blocks basic use (the base daemon still lists + controls agents).
-        .fullScreenCover(isPresented: $showForkNotice) {
+        // Advisory full-screen notice when the daemon lacks the fork features.
+        // Dismissable — it never blocks basic use. onDismiss drains anything that
+        // arrived WHILE it was up (a gram push / pane deep-link deferred against it),
+        // so those never armed a competing presentation over the cover.
+        .fullScreenCover(isPresented: $showForkNotice, onDismiss: {
+            openGramIfPending()
+            applyDeepLink()
+        }) {
             ForkNoticeView(onDismiss: { showForkNotice = false })
         }
     }
