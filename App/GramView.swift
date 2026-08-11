@@ -3,6 +3,7 @@ import HerdrKit
 import PhotosUI
 import QuickLook
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// The Gram page: the owner's side of the owner<->agent message channel.
@@ -850,8 +851,18 @@ private struct GramRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
-        // Long-press to delete a message (and its file bytes) for good.
+        // Long-press for the message actions. Copy the text (when there is any) —
+        // a file's bytes are reached via the chip's preview + system share sheet, so
+        // we don't add a second, weaker file-copy path here. Delete is destructive,
+        // pinned last.
         .contextMenu {
+            if !message.text.isEmpty {
+                Button {
+                    UIPasteboard.general.string = message.text
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+            }
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
