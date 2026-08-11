@@ -698,6 +698,11 @@ struct NewAgentView: View {
                 }
             }
         }
+        // Under a .sheet a swipe-down is an unguarded exit, but a spawn keeps running
+        // off-screen and its queued pane would be stranded (pendingOpenSlot never
+        // drains, then fires on an unrelated sheet close). Block interactive dismissal
+        // mid-spawn — the same invariant the Cancel button's .disabled(starting) holds.
+        .interactiveDismissDisabled(starting)
     }
 
     private var header: some View {
@@ -864,9 +869,11 @@ struct TerminalHomeView: View {
     @State private var trustFailed = false
     @State private var search = ""
     @State private var activeCover: ActiveCover?
+    /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
+    @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
 
     private enum ActiveCover: Int, Identifiable {
-        case settings, newAgent, gram
+        case settings, newAgent, gram, gestures
         var id: Int { rawValue }
     }
 
@@ -1025,6 +1032,21 @@ struct TerminalHomeView: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
+                // First launch: show the gestures tutorial once — but NOT over a pending
+                // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
+                // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
+                // when we actually present, so a deep-linked first launch still gets the
+                // tutorial on its next clean launch rather than never.
+                .onAppear {
+                    if !hasSeenGesturesHelp,
+                        activeCover == nil,
+                        !push.pendingGram,
+                        push.pendingPaneID == nil
+                    {
+                        hasSeenGesturesHelp = true
+                        activeCover = .gestures
+                    }
+                }
                 // A push tapped while the home view is already loaded (app foregrounded / already
                 // on the list) deep-links immediately; the cold-launch / just-loaded case is handled
                 // at the end of load().
@@ -1041,41 +1063,50 @@ struct TerminalHomeView: View {
                 .opacity(frontID != nil ? 1 : 0)
                 .allowsHitTesting(frontID != nil)
         }
-        // ONE item-based cover, not two stacked isPresented covers (stacked
-        // presentation modifiers on a single view are historically fragile).
-        // onDismiss applies a queued open AFTER the cover is fully gone.
-        .fullScreenCover(item: $activeCover, onDismiss: {
+        // ONE item-based sheet, not two stacked isPresented presentations (stacked
+        // presentation modifiers on a single view are historically fragile). A SHEET
+        // (not a full-screen cover) so it presents bottom-up and swipe-down dismisses
+        // it — the header close buttons still work too. onDismiss applies a queued
+        // open AFTER the sheet is fully gone.
+        .sheet(item: $activeCover, onDismiss: {
             if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
-            openGramIfPending()   // a gram tap deferred while another cover was up
+            openGramIfPending()   // a gram tap deferred while another sheet was up
         }) { cover in
-            switch cover {
-            case .settings:
-                SettingsView(
-                    host: host,
-                    connected: error == nil && !loading,
-                    // Withhold reconnect during a host-key rejection — reconnecting
-                    // then would first-contact-trust the next key (same gate as the
-                    // recovery screen's withheld retry).
-                    canReconnect: rejectedFingerprint == nil,
-                    onReconnect: { activeCover = nil; onReconnect() },
-                    onClose: { activeCover = nil })
-            case .newAgent:
-                NewAgentView(
-                    client: client,
-                    // Spawn done: queue the new pane, then dismiss the cover; the
-                    // cover's onDismiss opens the pane with the task pre-filled.
-                    onStarted: { paneID, name, task in
-                        pendingOpenSlot = PaneSlot(paneID: paneID, title: name, agent: nil,
-                                                   initialReply: task, siblings: [])
-                        activeCover = nil
-                    },
-                    onCancel: { activeCover = nil })
-            case .gram:
-                GramView(
-                    client: client,
-                    agents: agents,
-                    onClose: { activeCover = nil })
+            Group {
+                switch cover {
+                case .settings:
+                    SettingsView(
+                        host: host,
+                        connected: error == nil && !loading,
+                        // Withhold reconnect during a host-key rejection — reconnecting
+                        // then would first-contact-trust the next key (same gate as the
+                        // recovery screen's withheld retry).
+                        canReconnect: rejectedFingerprint == nil,
+                        onReconnect: { activeCover = nil; onReconnect() },
+                        onClose: { activeCover = nil })
+                case .newAgent:
+                    NewAgentView(
+                        client: client,
+                        // Spawn done: queue the new pane, then dismiss the sheet; the
+                        // onDismiss opens the pane with the task pre-filled.
+                        onStarted: { paneID, name, task in
+                            pendingOpenSlot = PaneSlot(paneID: paneID, title: name, agent: nil,
+                                                       initialReply: task, siblings: [])
+                            activeCover = nil
+                        },
+                        onCancel: { activeCover = nil })
+                case .gram:
+                    GramView(
+                        client: client,
+                        agents: agents,
+                        onClose: { activeCover = nil })
+                case .gestures:
+                    GesturesHelpView(onClose: { activeCover = nil })
+                }
             }
+            // Full-height bottom-up sheet with a grabber, so swipe-down closes it.
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
     }
 
@@ -1149,6 +1180,10 @@ struct TerminalHomeView: View {
             .disabled(terminalTarget == nil)
             Button { activeCover = .gram } label: {
                 tabItem("bubble.left.and.bubble.right", "Gram", active: false)
+            }
+            .buttonStyle(.plain)
+            Button { activeCover = .gestures } label: {
+                tabItem("hand.draw", "Gestures", active: false)
             }
             .buttonStyle(.plain)
             Button { activeCover = .settings } label: {
