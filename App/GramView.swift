@@ -552,13 +552,13 @@ struct GramView: View {
                     let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
                     url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
                     try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-                } else if Self.isWebDocument(name: name, mime: mime),
-                    let text = String(data: data, encoding: .utf8)
-                {
+                } else if Self.isWebDocument(name: name, mime: mime) {
                     // Received HTML/SVG would render as LIVE, scriptable content in
                     // QuickLook. Wrap it in a sandboxed iframe so it still renders
-                    // styled but no script from a hostile file can run in the preview.
-                    let wrapped = HtmlSandbox.wrap(text, title: Self.webBaseName(name))
+                    // styled but no script from a hostile file can run. Decode from
+                    // DATA (lossy) — NEVER gate on strict UTF-8, or a non-UTF-8 hostile
+                    // file would fall through to the raw, unsandboxed write below.
+                    let wrapped = HtmlSandbox.wrap(data: data, title: Self.webBaseName(name))
                     url = tmp.appendingPathComponent(Self.sandboxHTMLName(for: name))
                     try Data(wrapped.utf8).write(to: url, options: [.atomic, .completeFileProtection])
                 } else {
