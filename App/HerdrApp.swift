@@ -871,6 +871,9 @@ struct TerminalHomeView: View {
     @State private var activeCover: ActiveCover?
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
+    /// Shown once per connect when the daemon isn't our fork (probe == .notFork).
+    /// Advisory, dismissable — the base daemon still lists/controls agents.
+    @State private var showForkNotice = false
 
     private enum ActiveCover: Int, Identifiable {
         case settings, newAgent, gram, gestures
@@ -1032,6 +1035,12 @@ struct TerminalHomeView: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
+                // Once per connect (this view is .id(session)-scoped): if the daemon
+                // isn't our fork, surface the advisory notice. Only a DEFINITIVE
+                // not-fork flips it — network/other errors stay quiet (see probeFork).
+                .task {
+                    if await client.probeFork() == .notFork { showForkNotice = true }
+                }
                 // First launch: show the gestures tutorial once — but NOT over a pending
                 // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
                 // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
@@ -1107,6 +1116,11 @@ struct TerminalHomeView: View {
             // Full-height bottom-up sheet with a grabber, so swipe-down closes it.
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
+        }
+        // Advisory full-screen notice when the daemon isn't our fork. Dismissable —
+        // it never blocks basic use (the base daemon still lists + controls agents).
+        .fullScreenCover(isPresented: $showForkNotice) {
+            ForkNoticeView(onDismiss: { showForkNotice = false })
         }
     }
 
