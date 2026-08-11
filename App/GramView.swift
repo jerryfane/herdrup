@@ -552,6 +552,15 @@ struct GramView: View {
                     let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
                     url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
                     try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
+                } else if Self.isWebDocument(name: name, mime: mime),
+                    let text = String(data: data, encoding: .utf8)
+                {
+                    // Received HTML/SVG would render as LIVE, scriptable content in
+                    // QuickLook. Wrap it in a sandboxed iframe so it still renders
+                    // styled but no script from a hostile file can run in the preview.
+                    let wrapped = HtmlSandbox.wrap(text, title: Self.webBaseName(name))
+                    url = tmp.appendingPathComponent(Self.sandboxHTMLName(for: name))
+                    try Data(wrapped.utf8).write(to: url, options: [.atomic, .completeFileProtection])
                 } else {
                     // Never trust the server name to be a safe path component; reduce
                     // it to a bare basename. Write encrypted-at-rest.
@@ -600,6 +609,34 @@ struct GramView: View {
     /// QuickLook renders it as a web page, not source.
     private static func previewHTMLName(for name: String) -> String {
         displayTitle(name) + ".html"
+    }
+
+    /// A received web document that QuickLook would otherwise render as live,
+    /// scriptable content — routed through the sandbox instead.
+    private static func isWebDocument(name: String, mime: String) -> Bool {
+        let lower = name.lowercased()
+        if lower.hasSuffix(".html") || lower.hasSuffix(".htm") || lower.hasSuffix(".xhtml")
+            || lower.hasSuffix(".svg")
+        {
+            return true
+        }
+        let m = mime.lowercased()
+        return m == "text/html" || m == "application/xhtml+xml" || m == "image/svg+xml"
+    }
+
+    /// The web file's name without its extension, for the preview title.
+    private static func webBaseName(_ name: String) -> String {
+        let base = safeTempFileName(name)
+        for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
+            return String(base.dropLast(ext.count))
+        }
+        return base
+    }
+
+    /// The temp file name for a sandboxed web preview — always `.html`, since the
+    /// sandbox WRAPPER is HTML (even when wrapping an `.svg`), so QuickLook renders it.
+    private static func sandboxHTMLName(for name: String) -> String {
+        webBaseName(name) + ".html"
     }
 
     /// Delete a message (and its file bytes) after the server confirms — so a
