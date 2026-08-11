@@ -871,6 +871,13 @@ struct TerminalHomeView: View {
     @State private var activeCover: ActiveCover?
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
+    /// Shown once per connect when the daemon lacks the fork features (probe ==
+    /// .notFork). Advisory, dismissable — the base daemon still lists/controls agents.
+    @State private var showForkNotice = false
+    /// Set when the probe returns .notFork WHILE a cover (e.g. the first-run gestures
+    /// sheet) is up — draining it from the sheet's onDismiss serializes the notice
+    /// with `activeCover`, so the two presentations are never armed at once.
+    @State private var pendingForkNotice = false
 
     private enum ActiveCover: Int, Identifiable {
         case settings, newAgent, gram, gestures
@@ -977,6 +984,10 @@ struct TerminalHomeView: View {
     /// flag before this view existed). Clearing it lets a later tap re-trigger.
     private func openGramIfPending() {
         guard push.pendingGram else { return }
+        // The fork notice (a fullScreenCover) is up: don't arm the .gram sheet over it
+        // — that recreates the two-presentations-on-one-view collision. Leave the flag
+        // set; the notice's onDismiss re-invokes this once it's gone.
+        if showForkNotice { return }
         // Another cover is already presented: `fullScreenCover(item:)` does not
         // reliably swap to a new item while up, so dismiss it first (keeping the flag
         // armed). The cover's onDismiss re-invokes this, and with none presented it
@@ -1032,6 +1043,16 @@ struct TerminalHomeView: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
+                // Once per connect (this view is .id(session)-scoped): if the daemon
+                // lacks the fork features, surface the advisory notice. Only a
+                // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
+                // probeFork). If a cover is already up (e.g. the first-run gestures
+                // sheet the onAppear below opens synchronously), DEFER — the sheet's
+                // onDismiss drains it, so we never arm two presentations at once.
+                .task {
+                    guard await client.probeFork() == .notFork else { return }
+                    if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
+                }
                 // First launch: show the gestures tutorial once — but NOT over a pending
                 // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
                 // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
@@ -1071,6 +1092,13 @@ struct TerminalHomeView: View {
         .sheet(item: $activeCover, onDismiss: {
             if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
             openGramIfPending()   // a gram tap deferred while another sheet was up
+            // A fork notice deferred behind this sheet fires now — but only if nothing
+            // else claimed the foreground (a queued gram sets activeCover above), so
+            // the fullScreenCover never races the sheet.
+            if pendingForkNotice && activeCover == nil {
+                pendingForkNotice = false
+                showForkNotice = true
+            }
         }) { cover in
             Group {
                 switch cover {
@@ -1107,6 +1135,16 @@ struct TerminalHomeView: View {
             // Full-height bottom-up sheet with a grabber, so swipe-down closes it.
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
+        }
+        // Advisory full-screen notice when the daemon lacks the fork features.
+        // Dismissable — it never blocks basic use. onDismiss drains anything that
+        // arrived WHILE it was up (a gram push / pane deep-link deferred against it),
+        // so those never armed a competing presentation over the cover.
+        .fullScreenCover(isPresented: $showForkNotice, onDismiss: {
+            openGramIfPending()
+            applyDeepLink()
+        }) {
+            ForkNoticeView(onDismiss: { showForkNotice = false })
         }
     }
 

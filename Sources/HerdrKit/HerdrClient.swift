@@ -224,6 +224,51 @@ public actor HerdrClient {
                        as: GramListResult.self).messages
     }
 
+    /// Whether the connected daemon is our fork or the upstream base.
+    public enum ForkProbe: Sendable, Equatable {
+        /// Has the fork-only methods (gram, live terminal, push).
+        case isFork
+        /// The base daemon — rejected a fork-only method as unknown.
+        case notFork
+        /// Couldn't tell (network/transport error, or an unexpected API error on a
+        /// well-formed call). Callers should NOT prompt on this — assume fork.
+        case indeterminate
+    }
+
+    /// Detect the fork by calling a fork-only method (`gram.list`). The base daemon
+    /// parses `method` as an enum, so it cannot even DESERIALIZE an unknown method and
+    /// answers `invalid_request` / "unknown variant" — an outcome a well-formed
+    /// `gram.list` never produces on the fork (which returns a list, or
+    /// `gram_unavailable` when the shared server is down). Everything that is not a
+    /// definitive "unknown method" is treated as `indeterminate`, so a real fork user
+    /// is never falsely told to install the fork (a false positive is worse than a
+    /// missed one — the notice is only advisory).
+    public func probeFork() async -> ForkProbe {
+        do {
+            _ = try await gramList()
+            return .isFork
+        } catch let error as APIError {
+            if error.code == "gram_unavailable" {
+                return .isFork  // fork HAS gram.list; the shared server is just down
+            }
+            let lowered = error.message.lowercased()
+            if error.code == "invalid_request",
+                lowered.contains("unknown variant"),
+                lowered.contains("gram.list")
+            {
+                // serde's variant error always names the offending tag ("unknown
+                // variant `gram.list`, …"). Requiring the METHOD name narrows this to
+                // the top-level method enum — so if gram.list ever gains an enum-typed
+                // PARAM, an older fork that rejects that param's variant degrades to
+                // indeterminate (quiet) instead of a false notFork.
+                return .notFork
+            }
+            return .indeterminate  // some other API error on a well-formed call
+        } catch {
+            return .indeterminate  // network / decode / transport error
+        }
+    }
+
     /// A file already uploaded via `gramUploadFile`, ready to attach to a post.
     public struct GramFileAttachment: Sendable {
         public let uploadID: String
