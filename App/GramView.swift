@@ -61,6 +61,11 @@ struct GramView: View {
     @State private var loadingPhoto = false
     /// True while a picked file is uploading (many small chunks over SSH).
     @State private var uploading = false
+    /// Dismissed the "set up gram for your agents" card. It also auto-hides once any
+    /// agent has messaged (proof they've set the skill up), so this is the manual out.
+    @AppStorage("gram.setupCardDismissed") private var setupCardDismissed = false
+    /// Momentary "Copied ✓" on the setup card's copy button.
+    @State private var setupCommandCopied = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
     @State private var previewURL: URL?
     /// The message id whose file is currently downloading, to show a spinner on it.
@@ -261,7 +266,7 @@ struct GramView: View {
                 }
                 .padding(.horizontal, 32)
             }
-        case .loaded where messages.isEmpty:
+        case .loaded where messages.isEmpty && !shouldShowSetupCard:
             centered {
                 VStack(spacing: 8) {
                     Image(systemName: "tray")
@@ -280,6 +285,7 @@ struct GramView: View {
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
+                    if shouldShowSetupCard { setupCard }
                     ForEach(messages) { message in
                         GramRow(
                             message: message,
@@ -299,6 +305,65 @@ struct GramView: View {
     private func centered<V: View>(@ViewBuilder _ inner: () -> V) -> some View {
         VStack { Spacer(); inner(); Spacer() }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The one-liner an agent runs to install the gram skill (from the fork's raw URL).
+    private static let setupCommand =
+        "curl -fsSL https://raw.githubusercontent.com/jerryfane/herdr/master/"
+        + "skills/herdrup-gram-skill/SKILL.md --create-dirs "
+        + "-o ~/.claude/skills/herdrup-gram-skill/SKILL.md"
+
+    /// Show the "set up gram" card until an agent has actually messaged (proof the
+    /// skill is in use) or the owner dismisses it.
+    private var shouldShowSetupCard: Bool {
+        !setupCardDismissed && !messages.contains(where: \.isFromAgent)
+    }
+
+    /// A dismissable card teaching the owner how to give their agents the gram skill:
+    /// the install command + a Copy button. Auto-hides once an agent messages.
+    private var setupCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Set up gram for your agents")
+                        .font(Typography.app(15, .semibold))
+                        .foregroundStyle(Palette.text)
+                    Text("Paste this to your agents so they can message you here.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button { setupCardDismissed = true } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.surfaceRaised))
+                }
+            }
+            Text(Self.setupCommand)
+                .font(Typography.machine(11))
+                .foregroundStyle(Palette.textDim)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.groundMachine))
+            Button {
+                UIPasteboard.general.string = Self.setupCommand
+                setupCommandCopied = true
+            } label: {
+                Text(setupCommandCopied ? "Copied ✓" : "Copy command")
+                    .font(Typography.app(13, .semibold))
+                    .foregroundStyle(Palette.ground)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Palette.text))
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairline, lineWidth: 1))
     }
 
     // MARK: - Composer
