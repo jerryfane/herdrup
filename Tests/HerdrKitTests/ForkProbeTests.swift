@@ -55,6 +55,35 @@ final class ForkProbeTests: XCTestCase {
         XCTAssertEqual(r, .isFork)
     }
 
+    func testUnknownVariantNotNamingTheMethodIsIndeterminate() async {
+        // "unknown variant" that does NOT name gram.list (e.g. a future enum-typed
+        // PARAM an older fork rejects) must degrade to indeterminate, never a false
+        // notFork on a real fork user.
+        let line = error(code: "invalid_request",
+                         message: "invalid request: unknown variant `weekly`, expected one of `all`, `unread`")
+        let client = HerdrClient(transport: CannedTransport(line: line))
+        let r = await client.probeFork()
+        XCTAssertEqual(r, .indeterminate)
+    }
+
+    func testMixedCaseUnknownVariantIsNotFork() async {
+        // The match is case-insensitive (.lowercased()), so a reworded/mixed-case
+        // phrasing still classifies correctly.
+        let line = error(code: "invalid_request",
+                         message: "Invalid Request: Unknown Variant `gram.list`, expected one of ...")
+        let client = HerdrClient(transport: CannedTransport(line: line))
+        let r = await client.probeFork()
+        XCTAssertEqual(r, .notFork)
+    }
+
+    func testUndecodableSuccessLineIsIndeterminate() async {
+        // A 200-shaped line that doesn't decode to the result type throws a
+        // DecodingError (not an APIError) → the trailing catch → indeterminate.
+        let client = HerdrClient(transport: CannedTransport(line: #"{"id":"x","result":{"wrong":true}}"#))
+        let r = await client.probeFork()
+        XCTAssertEqual(r, .indeterminate)
+    }
+
     func testOtherInvalidRequestIsIndeterminate() async {
         // invalid_request WITHOUT "unknown variant" (e.g. a future required param) must
         // NOT flag a fork user — fail safe to indeterminate.

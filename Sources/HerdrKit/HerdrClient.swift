@@ -251,9 +251,16 @@ public actor HerdrClient {
             if error.code == "gram_unavailable" {
                 return .isFork  // fork HAS gram.list; the shared server is just down
             }
+            let lowered = error.message.lowercased()
             if error.code == "invalid_request",
-                error.message.lowercased().contains("unknown variant")
+                lowered.contains("unknown variant"),
+                lowered.contains("gram.list")
             {
+                // serde's variant error always names the offending tag ("unknown
+                // variant `gram.list`, …"). Requiring the METHOD name narrows this to
+                // the top-level method enum — so if gram.list ever gains an enum-typed
+                // PARAM, an older fork that rejects that param's variant degrades to
+                // indeterminate (quiet) instead of a false notFork.
                 return .notFork
             }
             return .indeterminate  // some other API error on a well-formed call

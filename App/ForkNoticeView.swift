@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Shown once per connect when the daemon isn't our fork (`HerdrClient.probeFork()`
-/// == `.notFork`). The base daemon runs the terminals fine, but the features that
-/// make Herdrup itself — gram, push, the live terminal — are fork-only. Advisory,
-/// never a lockout: "Continue anyway" always dismisses.
+/// Shown once per connect when the daemon lacks the fork-only features
+/// (`HerdrClient.probeFork()` == `.notFork`) — a base daemon, OR a jerryfane/herdr
+/// build that predates gram (the probe can't tell them apart, so the copy says
+/// "update or switch", not "you're not on the fork"). The daemon runs the terminals
+/// fine; gram, push, and the live terminal are what's missing. Advisory, never a
+/// lockout: "Continue anyway" always dismisses.
 struct ForkNoticeView: View {
     var onDismiss: () -> Void
 
@@ -22,11 +24,14 @@ struct ForkNoticeView: View {
                     .font(.system(size: 40, weight: .regular))
                     .foregroundStyle(Palette.waiting)
                 VStack(spacing: 8) {
-                    Text("You're not on the Herdr fork")
+                    Text("This daemon is missing the Herdr features")
                         .font(Typography.app(22, .bold))
                         .foregroundStyle(Palette.text)
                         .multilineTextAlignment(.center)
-                    Text("Your agents connect fine, but the features Herdrup adds run on the jerryfane/herdr fork of the daemon:")
+                    // Capability, not identity: the probe can't tell a base daemon from
+                    // a jerryfane/herdr build that predates gram, so the copy must be
+                    // true of BOTH — "update or switch", never "you're not on the fork".
+                    Text("Your agents connect fine, but gram, push, and the live terminal need the jerryfane/herdr fork of the daemon:")
                         .font(Typography.app(14))
                         .foregroundStyle(Palette.textDim)
                         .multilineTextAlignment(.center)
@@ -35,7 +40,7 @@ struct ForkNoticeView: View {
                 VStack(spacing: 10) {
                     ForEach(missing, id: \.name) { row($0) }
                 }
-                Text("Switch your daemon to jerryfane/herdr to turn them on.")
+                Text("Switch to — or update — jerryfane/herdr to turn them on.")
                     .font(Typography.app(13))
                     .foregroundStyle(Palette.textFaint)
                     .multilineTextAlignment(.center)
