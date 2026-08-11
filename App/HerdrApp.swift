@@ -1182,10 +1182,6 @@ struct TerminalHomeView: View {
                 tabItem("bubble.left.and.bubble.right", "Gram", active: false)
             }
             .buttonStyle(.plain)
-            Button { activeCover = .gestures } label: {
-                tabItem("hand.draw", "Gestures", active: false)
-            }
-            .buttonStyle(.plain)
             Button { activeCover = .settings } label: {
                 tabItem("gearshape", "Settings", active: false)
             }
@@ -2191,6 +2187,9 @@ struct SettingsView: View {
     @AppStorage("notify.finishes") private var notifyFinishes = false
     @AppStorage("notify.gram") private var notifyGram = true
     @State private var copied = false
+    /// The gestures tutorial, opened from the Help row (its persistent home now that
+    /// it's no longer a tab). Presented as a child sheet over Settings.
+    @State private var showGestures = false
 
     var body: some View {
         ZStack {
@@ -2198,17 +2197,25 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 header
                 ScrollView {
-                    // Grouped into three subviews so the top-level builder stays
-                    // well under SwiftUI's 10-child ViewBuilder ceiling.
+                    // Grouped into subviews so the top-level builder stays well under
+                    // SwiftUI's 10-child ViewBuilder ceiling.
                     VStack(alignment: .leading, spacing: 0) {
                         connectionSection
                         notifySection
                         troubleSection
+                        helpSection
                         versionFooter
                     }
                     .padding(.bottom, 16)
                 }
             }
+        }
+        // The gestures reference lives here now (moved out of the main tab bar);
+        // reuse the same self-contained help view the first-run popup shows.
+        .sheet(isPresented: $showGestures) {
+            GesturesHelpView(onClose: { showGestures = false })
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -2265,6 +2272,13 @@ struct SettingsView: View {
             actionRow("Reconnect now", enabled: canReconnect,
                       note: "verify the host key first") { onReconnect() }
             actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+        }
+    }
+
+    private var helpSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("HELP")
+            actionRow("Gestures", note: "how to move around the app") { showGestures = true }
         }
     }
 
