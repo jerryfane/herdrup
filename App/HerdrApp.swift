@@ -871,9 +871,13 @@ struct TerminalHomeView: View {
     @State private var activeCover: ActiveCover?
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
-    /// Shown once per connect when the daemon isn't our fork (probe == .notFork).
-    /// Advisory, dismissable — the base daemon still lists/controls agents.
+    /// Shown once per connect when the daemon lacks the fork features (probe ==
+    /// .notFork). Advisory, dismissable — the base daemon still lists/controls agents.
     @State private var showForkNotice = false
+    /// Set when the probe returns .notFork WHILE a cover (e.g. the first-run gestures
+    /// sheet) is up — draining it from the sheet's onDismiss serializes the notice
+    /// with `activeCover`, so the two presentations are never armed at once.
+    @State private var pendingForkNotice = false
 
     private enum ActiveCover: Int, Identifiable {
         case settings, newAgent, gram, gestures
@@ -1036,10 +1040,14 @@ struct TerminalHomeView: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .task { await load() }
                 // Once per connect (this view is .id(session)-scoped): if the daemon
-                // isn't our fork, surface the advisory notice. Only a DEFINITIVE
-                // not-fork flips it — network/other errors stay quiet (see probeFork).
+                // lacks the fork features, surface the advisory notice. Only a
+                // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
+                // probeFork). If a cover is already up (e.g. the first-run gestures
+                // sheet the onAppear below opens synchronously), DEFER — the sheet's
+                // onDismiss drains it, so we never arm two presentations at once.
                 .task {
-                    if await client.probeFork() == .notFork { showForkNotice = true }
+                    guard await client.probeFork() == .notFork else { return }
+                    if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
                 }
                 // First launch: show the gestures tutorial once — but NOT over a pending
                 // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
@@ -1080,6 +1088,13 @@ struct TerminalHomeView: View {
         .sheet(item: $activeCover, onDismiss: {
             if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
             openGramIfPending()   // a gram tap deferred while another sheet was up
+            // A fork notice deferred behind this sheet fires now — but only if nothing
+            // else claimed the foreground (a queued gram sets activeCover above), so
+            // the fullScreenCover never races the sheet.
+            if pendingForkNotice && activeCover == nil {
+                pendingForkNotice = false
+                showForkNotice = true
+            }
         }) { cover in
             Group {
                 switch cover {
