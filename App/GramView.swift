@@ -1,4 +1,5 @@
 import HerdrKit
+import PhotosUI
 import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
@@ -46,6 +47,12 @@ struct GramView: View {
     /// time), nil when none is staged.
     @State private var attachedFile: PickedAttachment?
     @State private var showFileImporter = false
+    /// The paperclip opens this chooser first, so we know which system picker to
+    /// present: the photo library (image/video) or the document picker (any file).
+    @State private var showAttachTypeDialog = false
+    @State private var showPhotoPicker = false
+    /// The item chosen from the photo library, loaded into a `PickedAttachment`.
+    @State private var photoItem: PhotosPickerItem?
     /// True while a picked file is uploading (many small chunks over SSH).
     @State private var uploading = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
@@ -125,6 +132,22 @@ struct GramView: View {
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
         .task { await pollLoop() }
+        // Paperclip → choose the source so we open the RIGHT system picker: the
+        // photo library for media, or the document picker for an arbitrary file.
+        .confirmationDialog("Attach", isPresented: $showAttachTypeDialog, titleVisibility: .visible) {
+            Button("Photo or Video") { showPhotoPicker = true }
+            Button("File") { showFileImporter = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .photosPicker(
+            isPresented: $showPhotoPicker,
+            selection: $photoItem,
+            matching: .any(of: [.images, .videos])
+        )
+        .onChange(of: photoItem) { _, newItem in
+            guard let newItem else { return }
+            Task { await loadPickedPhoto(newItem) }
+        }
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.item],
@@ -307,7 +330,7 @@ struct GramView: View {
             if let attachedFile { attachmentChip(attachedFile) }
             HStack(alignment: .bottom, spacing: 8) {
                 Button {
-                    showFileImporter = true
+                    showAttachTypeDialog = true
                 } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: 16, weight: .semibold))
@@ -517,6 +540,45 @@ struct GramView: View {
         } catch {
             sendError = "Couldn't read that file."
         }
+    }
+
+    /// Load a photo-library pick into a `PickedAttachment`. The library gives us raw
+    /// bytes (not a security-scoped file URL), so the size check runs after the load;
+    /// the same 10 MB cap the file path enforces still applies.
+    private func loadPickedPhoto(_ item: PhotosPickerItem) async {
+        defer { photoItem = nil }  // reset so re-picking the same item fires onChange again
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                sendError = "Couldn't read that item."
+                return
+            }
+            guard !data.isEmpty else {
+                sendError = "That item is empty."
+                return
+            }
+            guard data.count <= Self.maxFileBytes else {
+                sendError = "That item is too large (max 10 MB)."
+                return
+            }
+            let (name, mime) = Self.photoNameAndMime(for: item)
+            attachedFile = PickedAttachment(name: name, mime: mime, data: data)
+            sendError = nil
+        } catch {
+            sendError = "Couldn't read that item."
+        }
+    }
+
+    /// Derive a filename + MIME for a library pick from its concrete content type
+    /// (HEIC, JPEG, MOV, …); fall back to jpeg/mov if the type doesn't report one.
+    private static func photoNameAndMime(for item: PhotosPickerItem) -> (String, String) {
+        if let type = item.supportedContentTypes.first,
+            let ext = type.preferredFilenameExtension,
+            let mime = type.preferredMIMEType
+        {
+            let base = type.conforms(to: .movie) ? "video" : "image"
+            return ("\(base).\(ext)", mime)
+        }
+        return ("image.jpg", "image/jpeg")
     }
 
     private static func mimeType(for url: URL) -> String {
