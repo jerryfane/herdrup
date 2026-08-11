@@ -536,17 +536,28 @@ struct GramView: View {
         Task {
             defer { downloadingFileFor = nil }
             do {
-                let (name, _, data) = try await client.gramGetFile(id: message.id)
-                // Never trust the server name to be a safe path component; reduce it
-                // to a bare basename before joining it to the temp directory.
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(Self.safeTempFileName(name))
+                let (name, mime, data) = try await client.gramGetFile(id: message.id)
                 // Remove any previously-previewed file so a viewed secret does not
-                // accumulate in tmp; write encrypted-at-rest.
+                // accumulate in tmp.
                 if let previous = previewURL {
                     try? FileManager.default.removeItem(at: previous)
                 }
-                try data.write(to: url, options: [.atomic, .completeFileProtection])
+                let tmp = FileManager.default.temporaryDirectory
+                let url: URL
+                if Self.isMarkdown(name: name, mime: mime),
+                    let text = String(data: data, encoding: .utf8)
+                {
+                    // Render markdown to styled HTML so it previews FORMATTED —
+                    // QuickLook shows a raw .md file as plain source otherwise.
+                    let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
+                    url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
+                    try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
+                } else {
+                    // Never trust the server name to be a safe path component; reduce
+                    // it to a bare basename. Write encrypted-at-rest.
+                    url = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                    try data.write(to: url, options: [.atomic, .completeFileProtection])
+                }
                 previewURL = url
             } catch let error as APIError {
                 sendError = "Couldn't open the file: \(error.message)"
@@ -565,6 +576,30 @@ struct GramView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if base.isEmpty || base == "." || base == ".." { return "file" }
         return base
+    }
+
+    /// A file we should render as formatted HTML (a markdown source), by extension
+    /// or advisory mime.
+    private static func isMarkdown(name: String, mime: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.hasSuffix(".md") || lower.hasSuffix(".markdown")
+            || mime.lowercased() == "text/markdown"
+    }
+
+    /// The markdown file's name without its `.md`/`.markdown` extension, for the
+    /// preview title.
+    private static func displayTitle(_ name: String) -> String {
+        let base = safeTempFileName(name)
+        for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
+            return String(base.dropLast(ext.count))
+        }
+        return base
+    }
+
+    /// The temp file name for a rendered markdown preview — a `.html` extension so
+    /// QuickLook renders it as a web page, not source.
+    private static func previewHTMLName(for name: String) -> String {
+        displayTitle(name) + ".html"
     }
 
     /// Delete a message (and its file bytes) after the server confirms — so a
