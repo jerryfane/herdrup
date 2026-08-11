@@ -82,4 +82,47 @@ final class MarkdownTests: XCTestCase {
         XCTAssertTrue(out.contains("<style>"), out)
         XCTAssertTrue(out.contains("prefers-color-scheme: dark"), out)
     }
+
+    // MARK: - Injection safety
+
+    func testEscapeCoversQuotes() {
+        let out = Markdown.escape("say \"hi\" it's")
+        XCTAssertTrue(out.contains("&quot;"), out)
+        XCTAssertTrue(out.contains("&#39;"), out)
+    }
+
+    func testLinkAttributeInjectionIsNeutralized() {
+        // A quote in the URL must be escaped so it can't break out of href="..."
+        // and inject a live event handler.
+        let out = Markdown.inline(#"[x](https://a.com/"onmouseover="alert(1))"#)
+        XCTAssertFalse(out.contains("\"onmouseover=\""), out)  // no live attribute
+        XCTAssertTrue(out.contains("&quot;"), out)  // the quote is escaped
+    }
+
+    func testUnsafeSchemesAreDroppedNotLinked() {
+        let js = Markdown.inline("[click](javascript:alert(1))")
+        XCTAssertFalse(js.lowercased().contains("href"), js)  // no link at all
+        XCTAssertTrue(js.contains("click"), js)  // text preserved
+
+        let data = Markdown.inline("[x](data:text/html,<script>1</script>)")
+        XCTAssertFalse(data.lowercased().contains("href=\"data:"), data)
+    }
+
+    func testSafeSchemesAreLinked() {
+        XCTAssertTrue(Markdown.inline("[a](https://x.com)").contains(#"<a href="https://x.com">a</a>"#))
+        XCTAssertTrue(Markdown.inline("[a](mailto:x@y.com)").contains(#"href="mailto:x@y.com""#))
+        XCTAssertTrue(Markdown.inline("[a](/docs)").contains(#"href="/docs""#))
+    }
+
+    func testDocumentHasStrictCSP() {
+        let out = html("# x")
+        XCTAssertTrue(out.contains("Content-Security-Policy"), out)
+        XCTAssertTrue(out.contains("default-src 'none'"), out)
+    }
+
+    func testDeeplyNestedBlockquoteDoesNotCrash() {
+        // A hostile deeply-nested quote must render bounded, not overflow the stack.
+        let out = html(String(repeating: ">", count: 500) + " boom")
+        XCTAssertTrue(out.contains("<blockquote>"), "should still render a bounded quote")
+    }
 }
