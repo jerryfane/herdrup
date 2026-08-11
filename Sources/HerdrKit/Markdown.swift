@@ -12,14 +12,21 @@ import Foundation
 public enum Markdown {
 
     /// Convert markdown to a self-contained, theme-aware HTML document suitable for
-    /// QuickLook. `title` names the browser/preview tab.
+    /// QuickLook. `title` names the browser/preview tab. Output is escaped/safe HTML
+    /// under a strict CSP, so a hostile `.md` cannot run script in the preview.
     public static func toStyledHTML(_ markdown: String, title: String = "Preview") -> String {
-        document(title: escape(title), body: renderBlocks(markdown))
+        // Strip NUL so it cannot collide with the code-span sentinel below.
+        let clean = markdown.replacingOccurrences(of: "\u{0000}", with: "")
+        return document(title: escape(title), body: renderBlocks(clean, depth: 0))
     }
+
+    /// Bound on blockquote nesting, so a hostile `>>>>…` file cannot recurse deep
+    /// enough to overflow the stack.
+    private static let maxBlockquoteDepth = 6
 
     // MARK: - Block parsing
 
-    private static func renderBlocks(_ markdown: String) -> String {
+    private static func renderBlocks(_ markdown: String, depth: Int) -> String {
         // Normalize newlines; keep blank lines (they separate blocks).
         let lines = markdown
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -83,7 +90,12 @@ public enum Markdown {
                     quote.append(q.trimmingCharacters(in: .whitespaces))
                     i += 1
                 }
-                html += "<blockquote>\(renderBlocks(quote.joined(separator: "\n")))</blockquote>\n"
+                // Bound recursion so a deeply nested `>>>>…` file can't overflow.
+                let inner =
+                    depth < maxBlockquoteDepth
+                    ? renderBlocks(quote.joined(separator: "\n"), depth: depth + 1)
+                    : "<p>\(inline(quote.joined(separator: " ")))</p>"
+                html += "<blockquote>\(inner)</blockquote>\n"
                 continue
             }
 
@@ -214,7 +226,8 @@ public enum Markdown {
 
         // 3) Links, then bold, then italic (bold before italic so ** wins over *).
         html = replace(html, #"\[([^\]]+)\]\(([^)\s]+)\)"#) { m in
-            "<a href=\"\(m[2])\">\(m[1])</a>"
+            // Drop an unsafe scheme (javascript:, data:, …) — render just the text.
+            Self.isSafeURL(m[2]) ? "<a href=\"\(m[2])\">\(m[1])</a>" : m[1]
         }
         html = replace(html, #"\*\*([^*]+)\*\*"#) { "<strong>\($0[1])</strong>" }
         html = replace(html, #"__([^_]+)__"#) { "<strong>\($0[1])</strong>" }
@@ -253,6 +266,28 @@ public enum Markdown {
         s.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    /// Whether a link destination is safe to place in an `href`. Allows http(s),
+    /// mailto, and relative/anchor links; blocks `javascript:`, `data:`, and any
+    /// other scheme that could execute in the preview's WebView. The URL has
+    /// already been HTML-escaped, so `escape`'d quotes here can't break the
+    /// attribute; this additionally stops a clickable `javascript:` href.
+    static func isSafeURL(_ url: String) -> Bool {
+        let lower = url.lowercased()
+        if lower.hasPrefix("#") || lower.hasPrefix("/") || lower.hasPrefix("./")
+            || lower.hasPrefix("../")
+        {
+            return true
+        }
+        for scheme in ["https://", "http://", "mailto:"] where lower.hasPrefix(scheme) {
+            return true
+        }
+        // No scheme delimiter at all → a bare/relative path; anything WITH a `:`
+        // that wasn't allowlisted above (javascript:, data:, vbscript:, …) is out.
+        return !lower.contains(":")
     }
 
     // MARK: - Document shell
@@ -261,6 +296,7 @@ public enum Markdown {
         """
         <!doctype html>
         <html lang="en"><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>\(title)</title>
         <style>
