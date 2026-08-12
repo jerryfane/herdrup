@@ -3,6 +3,7 @@ import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
+import StoreKit // Product / tip jar (Settings' Support section)
 import HerdrKit
 
 // Phase 4, first real slice: terminal-first, on the merged pure-Swift transport.
@@ -2228,12 +2229,19 @@ struct SettingsView: View {
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
+    /// The tip jar (StoreKit 2). Renders nothing until products load, so the section
+    /// is invisible before the App Store Connect products exist.
+    @ObservedObject private var tipStore = TipStore.shared
+    /// Opens the Privacy/Terms/GitHub links in the system browser. Overridable in
+    /// previews/UI-tests so automated runs never actually leave the app.
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                Divider().overlay(Palette.hairlineQuiet)
                 ScrollView {
                     // Grouped into subviews so the top-level builder stays well under
                     // SwiftUI's 10-child ViewBuilder ceiling.
@@ -2242,7 +2250,10 @@ struct SettingsView: View {
                         notifySection
                         troubleSection
                         helpSection
+                        supportSection
+                        aboutSection
                         versionFooter
+                        githubFooter
                     }
                     .padding(.bottom, 16)
                 }
@@ -2255,22 +2266,29 @@ struct SettingsView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
+        // Load the tip products when Settings opens. No-ops after a successful load;
+        // re-tries after a prior failure, so products created in ASC later appear.
+        .task { await tipStore.loadProducts() }
     }
 
-    // Header sits on the ground with a bottom hairline (not a filled bar); the
-    // one accent the kit uses here is the back affordance.
+    // Matches the Gram/Gestures header exactly: a left-aligned title in the app
+    // voice at .semibold, a bare xmark close on the right, and NO baked-in hairline
+    // (the body draws a separate Divider under it, like its sibling sheets). This is
+    // a sheet, not a nav push — xmark and swipe-down both dismiss, so there's no back.
     private var header: some View {
-        ZStack {
-            Text("Settings").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-            HStack {
-                Button { onClose() } label: {
-                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
-                }
-                Spacer()
+        HStack(spacing: 10) {
+            Text("Settings")
+                .font(Typography.app(20, .semibold))
+                .foregroundStyle(Palette.text)
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Palette.textDim)
             }
         }
-        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
-        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private var connectionSection: some View {
@@ -2292,16 +2310,67 @@ struct SettingsView: View {
     private var notifySection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("NOTIFY ME WHEN")
-            toggleRow("An agent needs input", $notifyNeedsInput)
-            toggleRow("An agent dies", $notifyDies)
-            toggleRow("An agent finishes", $notifyFinishes)
-            toggleRow("A gram message arrives", $notifyGram)
-            // Honest about delivery: the toggles persist the choice, but push
-            // delivery is not wired yet — do not imply live notifications.
-            Text("Delivery is coming soon — these save your preference.")
-                .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                .padding(.horizontal, 20).padding(.top, 8)
+            // One bordered card holds the four toggles AND the honest status row, so
+            // the group reads as a single feature rather than four stray rows plus a
+            // shrinking-violet footnote.
+            VStack(spacing: 0) {
+                groupedToggleRow("An agent needs input", $notifyNeedsInput)
+                rowDivider
+                groupedToggleRow("An agent dies", $notifyDies)
+                rowDivider
+                groupedToggleRow("An agent finishes", $notifyFinishes)
+                rowDivider
+                groupedToggleRow("A gram message arrives", $notifyGram)
+                rowDivider
+                notifyInfoRow
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
         }
+    }
+
+    private var rowDivider: some View {
+        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
+    }
+
+    /// A word-state toggle row (ON/OFF, differentiated by the word not colour, per the
+    /// kit) WITHOUT its own border — the card around the group supplies one border for
+    /// all of them.
+    private func groupedToggleRow(_ label: String, _ value: Binding<Bool>) -> some View {
+        Button { value.wrappedValue.toggle() } label: {
+            HStack {
+                Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                Spacer()
+                Text(value.wrappedValue ? "ON" : "OFF")
+                    .font(Typography.machine(13, .bold)).foregroundStyle(Palette.text)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
+    }
+
+    /// The delivery caveat, promoted from a faint one-liner into an icon-led info row
+    /// inside the same card — so the one message that MUST land (push isn't wired yet)
+    /// reads as feature status, not a footnote. Kept strictly honest.
+    private var notifyInfoRow: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "bell.badge.slash")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Palette.surfaceRaised))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Delivery is coming soon")
+                    .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
+                Text("These switches save your preference now — push alerts turn on in a future update.")
+                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
     private var troubleSection: some View {
@@ -2316,8 +2385,99 @@ struct SettingsView: View {
     private var helpSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("HELP")
-            actionRow("Gestures", note: "how to move around the app") { showGestures = true }
+            richActionRow("Gestures", systemImage: "hand.draw",
+                          subtitle: "How to move around the app") { showGestures = true }
         }
+    }
+
+    /// Outbound links to the public web pages. Distinguished from in-app rows by the
+    /// `arrow.up.right` trailing glyph (leaving the app), set inside `linkRow`.
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("ABOUT")
+            linkRow("Privacy Policy", systemImage: "lock.shield",
+                    url: URL(string: "https://herdrup.themartian.app/legal/privacy")!)
+            linkRow("Terms of Service", systemImage: "doc.text",
+                    url: URL(string: "https://herdrup.themartian.app/legal/terms")!)
+        }
+    }
+
+    /// The tip jar (StoreKit 2). Renders ONLY when products are loaded — `.idle`,
+    /// `.loading`, and `.unavailable` all render nothing, so the section is simply
+    /// absent before the App Store Connect products exist or when offline.
+    @ViewBuilder
+    private var supportSection: some View {
+        if case .loaded(let products) = tipStore.loadState, !products.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionLabel("SUPPORT THE PROJECT")
+                VStack(spacing: 0) {
+                    ForEach(Array(products.enumerated()), id: \.element.id) { index, product in
+                        tipRow(product)
+                        if index < products.count - 1 { rowDivider }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .padding(.horizontal, 16).padding(.top, 10)
+                supportFeedback
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var supportFeedback: some View {
+        switch tipStore.purchaseState {
+        case .thankYou:
+            Text("Thank you — it means a lot.")
+                .font(Typography.app(12, .medium)).foregroundStyle(Palette.done)
+                .padding(.horizontal, 20).padding(.top, 8)
+        case .failed(let message):
+            Text(message)
+                .font(Typography.app(12)).foregroundStyle(Palette.died)
+                .padding(.horizontal, 20).padding(.top, 8)
+        case .idle, .purchasing:
+            EmptyView()
+        }
+    }
+
+    private func tipRow(_ product: Product) -> some View {
+        Button { Task { await tipStore.purchase(product) } } label: {
+            HStack(spacing: 12) {
+                Image(systemName: tipGlyph(for: product.id))
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.textDim)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                Text(product.displayName.isEmpty ? tipFallbackName(product.id) : product.displayName)
+                    .font(Typography.app(15)).foregroundStyle(Palette.text)
+                Spacer()
+                if isPurchasing(product) {
+                    ProgressView().tint(Palette.textDim)
+                } else {
+                    Text(product.displayPrice)
+                        .font(Typography.machine(13, .semibold)).foregroundStyle(Palette.text)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
+        .disabled(isPurchasing(product))
+    }
+
+    private func isPurchasing(_ product: Product) -> Bool {
+        if case .purchasing(let id) = tipStore.purchaseState { return id == product.id }
+        return false
+    }
+
+    private func tipGlyph(for id: String) -> String {
+        if id == TipStore.coffeeID { return "cup.and.saucer.fill" }
+        if id == TipStore.lunchID { return "fork.knife" }
+        return "wineglass.fill"
+    }
+
+    private func tipFallbackName(_ id: String) -> String {
+        if id == TipStore.coffeeID { return "Coffee" }
+        if id == TipStore.lunchID { return "Lunch" }
+        return "Dinner"
     }
 
     /// The app names itself here — "herdrup mobile <version> (<build>)" — with the
@@ -2336,30 +2496,34 @@ struct SettingsView: View {
         .padding(.top, 28)
     }
 
+    /// The open-source affordance, at the very bottom — a quiet capsule, deliberately
+    /// not a card row: it says "the app IS open source", not "here's a setting". No
+    /// official GitHub SF Symbol exists; the code-brackets glyph reads as "source" and
+    /// sidesteps the Octocat trademark.
+    private var githubFooter: some View {
+        Button {
+            openURL(URL(string: "https://github.com/jerryfane/herdr-ios")!)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Open source on GitHub").font(Typography.app(12, .medium))
+            }
+            .foregroundStyle(Palette.textDim)
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(Capsule().stroke(Palette.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 14)
+    }
+
     private func sectionLabel(_ text: String) -> some View {
         HStack(spacing: 8) {
             Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
             Rectangle().fill(Palette.hairline).frame(height: 1)
         }
         .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
-    }
-
-    private func toggleRow(_ label: String, _ value: Binding<Bool>) -> some View {
-        Button { value.wrappedValue.toggle() } label: {
-            HStack {
-                Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
-                Spacer()
-                // ON and OFF are BOTH the primary tier — differentiated by the
-                // word, not colour. Brand violet is reserved for the primary
-                // action + active tab, never a toggle state.
-                Text(value.wrappedValue ? "ON" : "OFF")
-                    .font(Typography.machine(13, .bold)).foregroundStyle(Palette.text)
-            }
-            .rowShell()
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 16).padding(.top, 10)
-        .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
     }
 
     private func actionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
@@ -2379,6 +2543,44 @@ struct SettingsView: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// An icon-led row with an ALWAYS-visible subtitle (unlike `actionRow`, whose
+    /// `note` shows only when disabled). Used for Gestures and, via `linkRow`, the
+    /// outbound Privacy/Terms links.
+    private func richActionRow(
+        _ label: String, systemImage: String, subtitle: String? = nil,
+        trailingGlyph: String = "chevron.right", _ action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Palette.textDim)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                    if let subtitle {
+                        Text(subtitle).font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                    }
+                }
+                Spacer()
+                Image(systemName: trailingGlyph)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .rowShell()
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// A `richActionRow` that opens an external URL in the system browser, marked with
+    /// the leaving-the-app glyph.
+    private func linkRow(_ label: String, systemImage: String, url: URL) -> some View {
+        richActionRow(label, systemImage: systemImage, trailingGlyph: "arrow.up.right") {
+            openURL(url)
+        }
     }
 
     private func copyDiagnostics() {
