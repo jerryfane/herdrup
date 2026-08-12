@@ -45,22 +45,31 @@ struct GramView: View {
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
 
-    /// A file the owner picked to attach to the next post (read into memory at pick
-    /// time), nil when none is staged.
-    @State private var attachedFile: PickedAttachment?
+    /// Files the owner picked to attach to the next post (read into memory at pick
+    /// time), empty when none are staged. Several can be staged at once; each sends as
+    /// its own gram message (the wire is one-file-per-message).
+    @State private var attachedFiles: [PickedAttachment] = []
     @State private var showFileImporter = false
-    /// The paperclip opens this chooser first, so we know which system picker to
-    /// present: the photo library (image/video) or the document picker (any file).
-    @State private var showAttachTypeDialog = false
+    /// The paperclip opens a Telegram-style attach sheet first, so we know which
+    /// system picker to present: the photo library (images/videos) or the document
+    /// picker (any file). `pendingPicker` remembers the choice so the picker is opened
+    /// AFTER the sheet finishes dismissing (presenting one sheet while another is
+    /// dismissing drops the second on iOS).
+    @State private var showAttachSheet = false
+    private enum PendingPicker { case photos, file }
+    @State private var pendingPicker: PendingPicker?
     @State private var showPhotoPicker = false
-    /// The item chosen from the photo library, loaded into a `PickedAttachment`.
-    @State private var photoItem: PhotosPickerItem?
-    /// True while a photo-library pick is loading (iCloud items can take a moment).
+    /// Items chosen from the photo library (multi-select), loaded into `attachedFiles`.
+    @State private var photoItems: [PhotosPickerItem] = []
+    /// True while a photo-library batch is loading (iCloud items can take a moment).
     /// Gates Send and the paperclip so a text-only send can't race the load and a
     /// second pick can't start concurrently.
     @State private var loadingPhoto = false
     /// True while a picked file is uploading (many small chunks over SSH).
     @State private var uploading = false
+    /// Progress across a multi-file send: (already-sent, total). nil when idle or when
+    /// only a single message is in flight.
+    @State private var sendProgress: (sent: Int, total: Int)?
     /// Dismissed the "set up gram for your agents" card. It also auto-hides once any
     /// agent has messaged (proof they've set the skill up), so this is the manual out.
     @AppStorage("gram.setupCardDismissed") private var setupCardDismissed = false
@@ -76,7 +85,9 @@ struct GramView: View {
     @State private var deletedIDs: Set<String> = []
 
     /// A file staged for sending: read into memory so the send is one atomic action.
-    private struct PickedAttachment {
+    /// Identifiable so the composer strip can render + remove chips by identity.
+    private struct PickedAttachment: Identifiable {
+        let id = UUID()
         let name: String
         let mime: String
         let data: Data
@@ -84,6 +95,8 @@ struct GramView: View {
 
     /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`.
     private static let maxFileBytes = 10 * 1024 * 1024
+    /// How many files can be staged at once. Each sends as its own gram message.
+    private static let maxAttachments = 10
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -143,28 +156,33 @@ struct GramView: View {
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
         .task { await pollLoop() }
-        // Paperclip → choose the source so we open the RIGHT system picker: the
-        // photo library for media, or the document picker for an arbitrary file.
-        .confirmationDialog("Attach", isPresented: $showAttachTypeDialog, titleVisibility: .visible) {
-            Button("Photo or Video") { showPhotoPicker = true }
-            Button("File") { showFileImporter = true }
-            Button("Cancel", role: .cancel) {}
+        // Paperclip → a Telegram-style attach sheet picks the source, so we open the
+        // RIGHT system picker. The picker is opened in the sheet's onDismiss (via
+        // `pendingPicker`), not inline — presenting a sheet while another dismisses
+        // drops the second on iOS.
+        .sheet(isPresented: $showAttachSheet, onDismiss: presentPendingPicker) {
+            attachSheet
+                .presentationDetents([.height(190)])
+                .presentationDragIndicator(.visible)
         }
         .photosPicker(
             isPresented: $showPhotoPicker,
-            selection: $photoItem,
+            selection: $photoItems,
+            maxSelectionCount: Self.maxAttachments,
             matching: .any(of: [.images, .videos])
         )
-        .onChange(of: photoItem) { _, newItem in
-            guard let newItem else { return }
-            Task { await loadPickedPhoto(newItem) }
+        .onChange(of: photoItems) { _, newItems in
+            guard !newItems.isEmpty else { return }
+            let items = newItems
+            photoItems = []  // reset now so re-picking the same items fires onChange again
+            Task { await loadPickedPhotos(items) }
         }
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.item],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
-            handlePickedFile(result)
+            handlePickedFiles(result)
         }
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
@@ -401,10 +419,22 @@ struct GramView: View {
                 .disabled(sending)
                 Spacer(minLength: 0)
             }
-            if let attachedFile { attachmentChip(attachedFile) }
+            if !attachedFiles.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachedFiles) { file in attachmentChip(file) }
+                    }
+                }
+            }
+            if let progress = sendProgress, progress.total > 1 {
+                Text("Sending \(progress.sent + 1) of \(progress.total)…")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 Button {
-                    showAttachTypeDialog = true
+                    showAttachSheet = true
                 } label: {
                     Group {
                         if loadingPhoto {
@@ -459,11 +489,13 @@ struct GramView: View {
         // Also blocked while a photo is loading, so tapping Send mid-load can't fire a
         // text-only message that races the attachment in behind it.
         guard !sending, !loadingPhoto else { return false }
-        return attachedFile != nil
+        return !attachedFiles.isEmpty
             || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The staged attachment shown above the composer, with a remove button.
+    /// A staged attachment shown in the composer's horizontal strip, with a remove
+    /// button. Sizes to content (long names truncate) rather than filling the width,
+    /// since several chips now sit side by side.
     private func attachmentChip(_ file: PickedAttachment) -> some View {
         HStack(spacing: 8) {
             Image(systemName: FileGlyph.name(for: file.mime, fileName: file.name))
@@ -474,12 +506,12 @@ struct GramView: View {
                 .foregroundStyle(Palette.text)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .frame(maxWidth: 140)
             Text(GramFile.displaySize(of: UInt64(file.data.count)))
                 .font(Typography.machine(11))
                 .foregroundStyle(Palette.textFaint)
-            Spacer(minLength: 0)
             Button {
-                attachedFile = nil
+                attachedFiles.removeAll { $0.id == file.id }
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 15))
@@ -489,7 +521,57 @@ struct GramView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A Telegram-style attach sheet: two large iconned choices instead of the old
+    /// action-sheet list. Photo & Video opens the multi-select library; File opens the
+    /// document picker. Each records `pendingPicker` and dismisses; the real picker is
+    /// presented in the sheet's onDismiss.
+    private var attachSheet: some View {
+        VStack(spacing: 18) {
+            Text("Attach")
+                .font(Typography.app(14, .semibold)).foregroundStyle(Palette.textDim)
+                .padding(.top, 16)
+            HStack(spacing: 20) {
+                attachOption(icon: "photo.on.rectangle.angled", label: "Photo & Video") {
+                    pendingPicker = .photos
+                    showAttachSheet = false
+                }
+                attachOption(icon: "doc", label: "File") {
+                    pendingPicker = .file
+                    showAttachSheet = false
+                }
+            }
+            .padding(.horizontal, 24)
+            Spacer(minLength: 8)
+        }
+        .frame(maxWidth: .infinity)
+        .background(Palette.ground.ignoresSafeArea())
+    }
+
+    private func attachOption(icon: String, label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .semibold)).foregroundStyle(Palette.text)
+                    .frame(width: 64, height: 64)
+                    .background(Circle().fill(Palette.surface))
+                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
+                Text(label).font(Typography.app(13, .medium)).foregroundStyle(Palette.textDim)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Opens the picker the attach sheet selected, once the sheet has fully dismissed.
+    private func presentPendingPicker() {
+        switch pendingPicker {
+        case .photos: showPhotoPicker = true
+        case .file: showFileImporter = true
+        case nil: break
+        }
+        pendingPicker = nil
     }
 
     // MARK: - Actions
@@ -551,79 +633,114 @@ struct GramView: View {
 
     private func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let attachment = attachedFile
+        let files = attachedFiles
         // Capture the destination BEFORE any await. Otherwise the recipient picker
-        // could change mid-upload and the file (possibly a secret) would post to a
+        // could change mid-upload and a file (possibly a secret) would post to a
         // different agent than the one chosen when Send was tapped. The picker is
         // also disabled while sending, but capturing is the real guarantee.
         let to = recipient.wireTo
         // A file with no caption is fine; an empty text-only message is not.
-        guard (!text.isEmpty || attachment != nil), !sending else { return }
+        guard (!text.isEmpty || !files.isEmpty), !sending else { return }
         sending = true
         defer {
             sending = false
             uploading = false
+            sendProgress = nil
         }
         sendError = nil
-        do {
-            let posted: GramMessage
-            if let attachment {
-                // Upload the bytes in chunks, then post the message referencing them.
-                uploading = true
-                let uploadID = try await client.gramUploadFile(attachment.data)
-                uploading = false
-                posted = try await client.gramPost(
-                    text: text, to: to,
-                    attachment: .init(
-                        uploadID: uploadID, name: attachment.name, mime: attachment.mime))
-            } else {
-                posted = try await client.gramPost(text: text, to: to)
+
+        // Text-only: the unchanged single-message path.
+        guard !files.isEmpty else {
+            do {
+                let posted = try await client.gramPost(text: text, to: to)
+                draft = ""
+                pendingPosts.removeAll { $0.id == posted.id }
+                pendingPosts.insert(posted, at: 0)
+            } catch let error as APIError {
+                sendError = error.message
+            } catch {
+                sendError = "Couldn't send. Try again."
             }
-            draft = ""
-            attachedFile = nil
-            // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
-            // cannot drop it; de-duped by id, reconciled once the server reflects it.
-            pendingPosts.removeAll { $0.id == posted.id }
-            pendingPosts.insert(posted, at: 0)
-        } catch let error as APIError {
-            sendError = error.message
-        } catch {
-            sendError = "Couldn't send. Try again."
+            return
+        }
+
+        // One upload+post per file (the wire is one-file-per-message). The text rides
+        // as the FIRST message's caption; the rest post with no text. `draft` is
+        // cleared the instant message 0 succeeds, so a retry of the remaining files
+        // never re-sends the caption onto a different file.
+        var sentCount = 0
+        var remaining: [PickedAttachment] = []
+        var failure: String?
+        for (index, file) in files.enumerated() {
+            sendProgress = (sent: sentCount, total: files.count)
+            let caption = index == 0 ? text : ""
+            do {
+                uploading = true
+                let uploadID = try await client.gramUploadFile(file.data)
+                uploading = false
+                let posted = try await client.gramPost(
+                    text: caption, to: to,
+                    attachment: .init(uploadID: uploadID, name: file.name, mime: file.mime))
+                // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
+                // cannot drop it; de-duped by id, reconciled once the server reflects it.
+                pendingPosts.removeAll { $0.id == posted.id }
+                pendingPosts.insert(posted, at: 0)
+                sentCount += 1
+                if index == 0 { draft = "" }
+            } catch let error as APIError {
+                failure = error.message
+                remaining.append(contentsOf: files[index...])
+                break
+            } catch {
+                failure = "Couldn't send. Try again."
+                remaining.append(contentsOf: files[index...])
+                break
+            }
+        }
+        // Keep only the not-yet-sent files staged, so a failure leaves the rest ready
+        // for a one-tap retry; a full success clears the strip. Already-sent messages
+        // are live and are not rolled back.
+        attachedFiles = remaining
+        if let failure {
+            sendError = sentCount > 0
+                ? "Sent \(sentCount) of \(files.count) — \(failure)"
+                : failure
         }
     }
 
-    /// Read a picked file into memory (bounded by the server's size cap) so the
-    /// send is one atomic action. A file URL from the importer is security-scoped.
-    private func handlePickedFile(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        // Reject an over-cap file BEFORE reading it into memory, so picking a
-        // multi-gigabyte file can't allocate/read it all (and risk a jetsam) before
-        // the size check ever runs.
-        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-            size > Self.maxFileBytes
-        {
-            sendError = "That file is too large (max 10 MB)."
-            return
-        }
-        do {
-            let data = try Data(contentsOf: url)
-            guard !data.isEmpty else {
-                sendError = "That file is empty."
-                return
+    /// Read picked files into memory (each bounded by the server's size cap) so each
+    /// send is one atomic action. File URLs from the importer are security-scoped.
+    /// Over-cap / unreadable picks are COLLECTED into one summary rather than dropped
+    /// silently, so picking several where one is bad still stages the good ones.
+    private func handlePickedFiles(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else { return }
+        var skipped: [String] = []
+        for url in urls {
+            guard attachedFiles.count < Self.maxAttachments else {
+                skipped.append(url.lastPathComponent)
+                continue
             }
-            // Fallback for a URL whose size wasn't reported up front.
-            guard data.count <= Self.maxFileBytes else {
-                sendError = "That file is too large (max 10 MB)."
-                return
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            // Reject an over-cap file BEFORE reading it into memory, so a multi-gigabyte
+            // pick can't allocate/read it all (and risk a jetsam) before the check runs.
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                size > Self.maxFileBytes
+            {
+                skipped.append(url.lastPathComponent)
+                continue
             }
-            attachedFile = PickedAttachment(
-                name: url.lastPathComponent, mime: Self.mimeType(for: url), data: data)
-            sendError = nil
-        } catch {
-            sendError = "Couldn't read that file."
+            guard let data = try? Data(contentsOf: url), !data.isEmpty,
+                data.count <= Self.maxFileBytes
+            else {
+                skipped.append(url.lastPathComponent)
+                continue
+            }
+            attachedFiles.append(PickedAttachment(
+                name: url.lastPathComponent, mime: Self.mimeType(for: url), data: data))
         }
+        sendError = skipped.isEmpty ? nil
+            : "Skipped (too large or unreadable): \(skipped.joined(separator: ", "))"
     }
 
     /// A photo-library pick loaded as a size-checked file. PhotosUI exports the item to
@@ -658,37 +775,39 @@ struct GramView: View {
         }
     }
 
-    /// Load a photo-library pick into a `PickedAttachment`. Routes through `PickedMedia`
-    /// so the 10 MB cap is enforced on the exported file's size before any bytes are
-    /// read — the same invariant the document path holds, so an over-cap video shows
-    /// the "too large" error instead of jetsamming the app.
-    private func loadPickedPhoto(_ item: PhotosPickerItem) async {
+    /// Load a batch of photo-library picks into `attachedFiles`. Each routes through
+    /// `PickedMedia` so the 10 MB cap is enforced on the exported file's size before
+    /// any bytes are read — the same invariant the document path holds. Loads SERIALLY
+    /// (not concurrently) so the memory ceiling stays at one file at a time, and
+    /// COLLECTS skips into one summary so picking five where one is oversized doesn't
+    /// silently eat the other four's outcome.
+    private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
         loadingPhoto = true
-        defer {
-            loadingPhoto = false
-            photoItem = nil  // reset so re-picking the same item fires onChange again
+        defer { loadingPhoto = false }
+        var skipped = 0
+        for item in items {
+            guard attachedFiles.count < Self.maxAttachments else {
+                skipped += 1
+                continue
+            }
+            do {
+                // A nil transferable = couldn't produce a file; a non-nil transferable
+                // with a nil `data` = rejected by the size guard (over-cap / unstat-able).
+                guard let media = try await item.loadTransferable(type: PickedMedia.self),
+                    let data = media.data, !data.isEmpty
+                else {
+                    skipped += 1
+                    continue
+                }
+                let (name, mime) = Self.photoNameAndMime(for: item)
+                attachedFiles.append(PickedAttachment(name: name, mime: mime, data: data))
+            } catch {
+                skipped += 1
+            }
         }
-        do {
-            // A nil transferable = couldn't produce a file; a non-nil transferable with a
-            // nil `data` = rejected by the size guard (over-cap / unstat-able).
-            guard let media = try await item.loadTransferable(type: PickedMedia.self) else {
-                sendError = "Couldn't read that item."
-                return
-            }
-            guard let data = media.data else {
-                sendError = "That item is too large (max 10 MB)."
-                return
-            }
-            guard !data.isEmpty else {
-                sendError = "That item is empty."
-                return
-            }
-            let (name, mime) = Self.photoNameAndMime(for: item)
-            attachedFile = PickedAttachment(name: name, mime: mime, data: data)
-            sendError = nil
-        } catch {
-            sendError = "Couldn't read that item."
-        }
+        sendError = skipped == 0 ? nil
+            : skipped == 1 ? "1 item was too large or unreadable and was skipped."
+            : "\(skipped) items were too large or unreadable and were skipped."
     }
 
     /// Derive a filename + MIME for a library pick from its concrete content type
