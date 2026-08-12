@@ -93,8 +93,11 @@ struct GramView: View {
         let data: Data
     }
 
-    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`.
-    private static let maxFileBytes = 10 * 1024 * 1024
+    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`. 100 MB is
+    /// an exact multiple of the server's chunk size, so the "cap is a whole number of
+    /// chunks" invariant holds. A single staged file of this size is read whole into
+    /// memory (see `PickedAttachment.data`); `maxAttachments` bounds how many at once.
+    private static let maxFileBytes = 100 * 1024 * 1024
     /// How many files can be staged at once. Each sends as its own gram message.
     private static let maxAttachments = 10
 
@@ -797,7 +800,7 @@ struct GramView: View {
     }
 
     /// Load a batch of photo-library picks into `attachedFiles`. Each routes through
-    /// `PickedMedia` so the 10 MB cap is enforced on the exported file's size before
+    /// `PickedMedia` so the size cap is enforced on the exported file's size before
     /// any bytes are read — the same invariant the document path holds. Loads SERIALLY
     /// (not concurrently) so the memory ceiling stays at one file at a time, and
     /// COLLECTS skips into one summary so picking five where one is oversized doesn't
