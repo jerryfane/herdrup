@@ -722,17 +722,18 @@ struct GramView: View {
             }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            // Reject an over-cap file BEFORE reading it into memory, so a multi-gigabyte
-            // pick can't allocate/read it all (and risk a jetsam) before the check runs.
-            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                size > Self.maxFileBytes
-            {
+            // Require a KNOWN size within the cap BEFORE reading. An unstat-able URL
+            // (size lookup returns nil) is treated as over-cap and skipped, never read
+            // — otherwise a multi-gigabyte pick with no reported size would fall through
+            // to an unbounded Data(contentsOf:) and jetsam the app. Mirrors PickedMedia's
+            // guard so neither the document nor the photo path can read blind.
+            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                size <= Self.maxFileBytes
+            else {
                 skipped.append(url.lastPathComponent)
                 continue
             }
-            guard let data = try? Data(contentsOf: url), !data.isEmpty,
-                data.count <= Self.maxFileBytes
-            else {
+            guard let data = try? Data(contentsOf: url), !data.isEmpty else {
                 skipped.append(url.lastPathComponent)
                 continue
             }
