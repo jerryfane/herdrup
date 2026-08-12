@@ -517,10 +517,17 @@ struct GramView: View {
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.textFaint)
             }
+            // Locked during a send: send() snapshots the files up front, so a
+            // "removed" chip would post anyway — a visible remove that silently
+            // still sends is the wrong outcome for a secret-bearing channel. The
+            // strip is read-only until the batch finishes (matching the paperclip/
+            // Send/recipient controls, which are already disabled while sending).
+            .disabled(sending)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        .opacity(sending ? 0.6 : 1)
     }
 
     /// A Telegram-style attach sheet: two large iconned choices instead of the old
@@ -708,16 +715,29 @@ struct GramView: View {
         }
     }
 
+    /// One combined skip note for a batch pick. `bad` (already phrased) covers picks
+    /// that were too large or unreadable; `capped` counts picks dropped for exceeding
+    /// the maxAttachments limit — reported distinctly so a cap hit isn't mislabeled as
+    /// "too large". nil when nothing was skipped.
+    private func attachmentSkipNote(bad: String?, capped: Int) -> String? {
+        var parts: [String] = []
+        if let bad { parts.append(bad) }
+        if capped > 0 { parts.append("\(capped) over the \(Self.maxAttachments)-file limit") }
+        guard !parts.isEmpty else { return nil }
+        return "Skipped — " + parts.joined(separator: "; ") + "."
+    }
+
     /// Read picked files into memory (each bounded by the server's size cap) so each
     /// send is one atomic action. File URLs from the importer are security-scoped.
     /// Over-cap / unreadable picks are COLLECTED into one summary rather than dropped
     /// silently, so picking several where one is bad still stages the good ones.
     private func handlePickedFiles(_ result: Result<[URL], Error>) {
         guard case .success(let urls) = result else { return }
-        var skipped: [String] = []
+        var badNames: [String] = []
+        var capped = 0
         for url in urls {
             guard attachedFiles.count < Self.maxAttachments else {
-                skipped.append(url.lastPathComponent)
+                capped += 1
                 continue
             }
             let scoped = url.startAccessingSecurityScopedResource()
@@ -730,18 +750,18 @@ struct GramView: View {
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                 size <= Self.maxFileBytes
             else {
-                skipped.append(url.lastPathComponent)
+                badNames.append(url.lastPathComponent)
                 continue
             }
             guard let data = try? Data(contentsOf: url), !data.isEmpty else {
-                skipped.append(url.lastPathComponent)
+                badNames.append(url.lastPathComponent)
                 continue
             }
             attachedFiles.append(PickedAttachment(
                 name: url.lastPathComponent, mime: Self.mimeType(for: url), data: data))
         }
-        sendError = skipped.isEmpty ? nil
-            : "Skipped (too large or unreadable): \(skipped.joined(separator: ", "))"
+        let bad = badNames.isEmpty ? nil : "too large or unreadable: \(badNames.joined(separator: ", "))"
+        sendError = attachmentSkipNote(bad: bad, capped: capped)
     }
 
     /// A photo-library pick loaded as a size-checked file. PhotosUI exports the item to
@@ -785,10 +805,11 @@ struct GramView: View {
     private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
         loadingPhoto = true
         defer { loadingPhoto = false }
-        var skipped = 0
+        var bad = 0
+        var capped = 0
         for item in items {
             guard attachedFiles.count < Self.maxAttachments else {
-                skipped += 1
+                capped += 1
                 continue
             }
             do {
@@ -797,18 +818,19 @@ struct GramView: View {
                 guard let media = try await item.loadTransferable(type: PickedMedia.self),
                     let data = media.data, !data.isEmpty
                 else {
-                    skipped += 1
+                    bad += 1
                     continue
                 }
                 let (name, mime) = Self.photoNameAndMime(for: item)
                 attachedFiles.append(PickedAttachment(name: name, mime: mime, data: data))
             } catch {
-                skipped += 1
+                bad += 1
             }
         }
-        sendError = skipped == 0 ? nil
-            : skipped == 1 ? "1 item was too large or unreadable and was skipped."
-            : "\(skipped) items were too large or unreadable and were skipped."
+        let badNote = bad == 0 ? nil
+            : bad == 1 ? "1 item too large or unreadable"
+            : "\(bad) items too large or unreadable"
+        sendError = attachmentSkipNote(bad: badNote, capped: capped)
     }
 
     /// Derive a filename + MIME for a library pick from its concrete content type
