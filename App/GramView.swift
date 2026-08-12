@@ -93,10 +93,11 @@ struct GramView: View {
         let data: Data
     }
 
-    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`. 100 MB is
-    /// an exact multiple of the server's chunk size, so the "cap is a whole number of
-    /// chunks" invariant holds. A single staged file of this size is read whole into
-    /// memory (see `PickedAttachment.data`); `maxAttachments` bounds how many at once.
+    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES` (100 MiB).
+    /// The upload is chunked (`HerdrClient.gramUploadChunkBytes`), so any size streams
+    /// fine regardless of divisibility; this is just the pre-send size gate. A single
+    /// staged file of this size is read whole into memory (see `PickedAttachment.data`);
+    /// `maxAttachments` bounds how many at once.
     private static let maxFileBytes = 100 * 1024 * 1024
     /// How many files can be staged at once. Each sends as its own gram message.
     /// Bounded to 3 (was 10) now that the per-file cap is 100 MB: staged files are
