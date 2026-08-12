@@ -1,0 +1,114 @@
+{
+  "identifier" : "980AC4F5-7AF6-4D87-A432-1EEDC19CDDBD",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "8E5A606A-B6AB-41F4-AEEA-2116B481B0BB",
+      "localizations" : [
+        {
+          "description" : "A coffee-sized thank you",
+          "displayName" : "Coffee",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.jerryfane.herdr.tip.coffee",
+      "referenceName" : "Coffee Tip",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "9.99",
+      "familyShareable" : false,
+      "internalID" : "A0C81B34-25A0-436F-9A2F-6A5ED75493E4",
+      "localizations" : [
+        {
+          "description" : "A lunch-sized thank you",
+          "displayName" : "Lunch",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.jerryfane.herdr.tip.lunch",
+      "referenceName" : "Lunch Tip",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "19.99",
+      "familyShareable" : false,
+      "internalID" : "00D7C030-F80A-4E1E-A63F-A55D245585BD",
+      "localizations" : [
+        {
+          "description" : "A dinner-sized thank you",
+          "displayName" : "Dinner",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.jerryfane.herdr.tip.dinner",
+      "referenceName" : "Dinner Tip",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "0",
+    "_developerTeamID" : "FXQ5Z9HHY6",
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Load Products"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Purchase"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Verification"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Store Sync"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Subscription Status"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Transaction"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Manage Subscriptions Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Refund Request Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Offer Code Redeem Sheet"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}
