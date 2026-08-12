@@ -11,3 +11,13 @@ build/
 # build, so it is derived, not source.
 App/Info.plist
 SourcePackages/
+# Signing/secret material — none is committed today; these are defense-in-depth so
+# a future stray key can't be added by accident (the repo is public).
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.pem
+*.key
+.env
+fastlane/
