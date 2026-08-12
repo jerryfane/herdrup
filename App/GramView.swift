@@ -99,7 +99,10 @@ struct GramView: View {
     /// memory (see `PickedAttachment.data`); `maxAttachments` bounds how many at once.
     private static let maxFileBytes = 100 * 1024 * 1024
     /// How many files can be staged at once. Each sends as its own gram message.
-    private static let maxAttachments = 10
+    /// Bounded to 3 (was 10) now that the per-file cap is 100 MB: staged files are
+    /// read whole into memory, so this caps the worst case at 3 × 100 MB ≈ 300 MB
+    /// resident rather than ~1 GB — safe on a phone while still allowing a small batch.
+    private static let maxAttachments = 3
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
