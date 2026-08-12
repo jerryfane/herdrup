@@ -93,10 +93,17 @@ struct GramView: View {
         let data: Data
     }
 
-    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`.
-    private static let maxFileBytes = 10 * 1024 * 1024
+    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES` (100 MiB).
+    /// The upload is chunked (`HerdrClient.gramUploadChunkBytes`), so any size streams
+    /// fine regardless of divisibility; this is just the pre-send size gate. A single
+    /// staged file of this size is read whole into memory (see `PickedAttachment.data`);
+    /// `maxAttachments` bounds how many at once.
+    private static let maxFileBytes = 100 * 1024 * 1024
     /// How many files can be staged at once. Each sends as its own gram message.
-    private static let maxAttachments = 10
+    /// Bounded to 3 (was 10) now that the per-file cap is 100 MB: staged files are
+    /// read whole into memory, so this caps the worst case at 3 × 100 MB ≈ 300 MB
+    /// resident rather than ~1 GB — safe on a phone while still allowing a small batch.
+    private static let maxAttachments = 3
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -797,7 +804,7 @@ struct GramView: View {
     }
 
     /// Load a batch of photo-library picks into `attachedFiles`. Each routes through
-    /// `PickedMedia` so the 10 MB cap is enforced on the exported file's size before
+    /// `PickedMedia` so the size cap is enforced on the exported file's size before
     /// any bytes are read — the same invariant the document path holds. Loads SERIALLY
     /// (not concurrently) so the memory ceiling stays at one file at a time, and
     /// COLLECTS skips into one summary so picking five where one is oversized doesn't
