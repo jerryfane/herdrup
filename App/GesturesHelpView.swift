@@ -114,10 +114,14 @@ struct GesturesHelpView: View {
         Button(action: onClose) {
             Text("Got it")
                 .font(Typography.app(16, .semibold))
-                .foregroundStyle(Palette.ground)
+                .foregroundStyle(Palette.text)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
-                .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
+                // Neutral, on-style: a raised surface with a hairline, not the stark
+                // ink fill the design reserves for primary actions (Connect/Approve).
+                // "Got it" is a dismiss, so it should recede into the dark palette.
+                .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surfaceRaised))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairline, lineWidth: 1))
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)

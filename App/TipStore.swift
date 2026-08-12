@@ -50,9 +50,14 @@ final class TipStore: ObservableObject {
         // launch, which is the classic StoreKit 2 leak.
         updatesListener = Task.detached {
             for await update in Transaction.updates {
-                if case .verified(let transaction) = update {
-                    await transaction.finish()
+                // Finish EVERY transaction, verified OR not: a consumable grants
+                // nothing, so there's nothing to withhold on an unverified one, and
+                // leaving it unfinished makes it re-emit here on every launch forever.
+                let transaction: Transaction
+                switch update {
+                case .verified(let value), .unverified(let value, _): transaction = value
                 }
+                await transaction.finish()
             }
         }
     }
@@ -63,6 +68,10 @@ final class TipStore: ObservableObject {
     /// prior `.unavailable`, so a product created in ASC after first launch appears
     /// the next time Settings opens — no app update required.
     func loadProducts() async {
+        // Settings just opened: clear a stale terminal purchase state from a previous
+        // visit so a past failure (or a thank-you) doesn't re-render on reopen. An
+        // in-flight purchase is left alone.
+        if case .purchasing = purchaseState {} else { purchaseState = .idle }
         switch loadState {
         case .loaded, .loading: return
         case .idle, .unavailable: break
@@ -85,11 +94,14 @@ final class TipStore: ObservableObject {
         do {
             switch try await product.purchase() {
             case .success(let verification):
-                guard case .verified(let transaction) = verification else {
-                    purchaseState = .failed("Couldn't verify that purchase.")
-                    return
+                // Finish whether or not StoreKit verified the JWS: a consumable grants
+                // nothing (nothing to withhold), and an unfinished transaction would
+                // re-emit via Transaction.updates on every launch.
+                let transaction: Transaction
+                switch verification {
+                case .verified(let value), .unverified(let value, _): transaction = value
                 }
-                await transaction.finish()   // consumable: nothing to grant or track
+                await transaction.finish()
                 purchaseState = .thankYou(product.id)
                 // Auto-dismiss the thank-you after a beat (only if it's still showing).
                 Task { [weak self] in

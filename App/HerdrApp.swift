@@ -16,6 +16,13 @@ struct HerdrApp: App {
     // callbacks, which have no SwiftUI equivalent. It bridges to PushCenter; RootView does the rest.
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    init() {
+        // Start the tip-jar transaction listener at launch (mirroring PushCenter), so a
+        // transaction that completes outside a purchase() call — e.g. an Ask-to-Buy
+        // approved later — is finished promptly instead of waiting for Settings to open.
+        _ = TipStore.shared
+    }
+
     var body: some Scene {
         WindowGroup { RootView() }
     }
@@ -2351,20 +2358,21 @@ struct SettingsView: View {
         .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
     }
 
-    /// The delivery caveat, promoted from a faint one-liner into an icon-led info row
-    /// inside the same card — so the one message that MUST land (push isn't wired yet)
-    /// reads as feature status, not a footnote. Kept strictly honest.
+    /// The honest requirement for the toggles above: push IS wired (the app registers
+    /// the device + these prefs with the daemon, which sends the APNs), but it only
+    /// fires when the machine runs the herdr fork and notifications are allowed. So the
+    /// row states the requirement, not a "coming soon" — the feature exists.
     private var notifyInfoRow: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "bell.badge.slash")
+            Image(systemName: "bell.badge")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Palette.textDim)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Palette.surfaceRaised))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Delivery is coming soon")
+                Text("Push needs the herdr fork")
                     .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
-                Text("These switches save your preference now — push alerts turn on in a future update.")
+                Text("Alerts arrive when your machine runs the herdr fork and you allow notifications.")
                     .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2502,7 +2510,7 @@ struct SettingsView: View {
     /// sidesteps the Octocat trademark.
     private var githubFooter: some View {
         Button {
-            openURL(URL(string: "https://github.com/jerryfane/herdr-ios")!)
+            openURL(URL(string: "https://github.com/jerryfane/herdrup")!)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
