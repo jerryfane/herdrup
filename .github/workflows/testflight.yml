@@ -8,7 +8,7 @@
 # distribution CERTIFICATE is team-wide and shared; herdr only needs its own
 # provisioning PROFILE for com.jerryfane.herdr.
 #
-# WHAT THIS IS NOT: the Mac build box (a-tailnet-host:8787) still builds every branch
+# WHAT THIS IS NOT: the Mac build box on the tailnet still builds every branch
 # for the SIMULATOR and screenshots it — that is the correctness signal and stays.
 # This is the RELEASE path on a deliberately independent machine, so the two fail
 # independently. Runs only on demand or on a v* tag: an upload burns an App Store

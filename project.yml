@@ -83,13 +83,19 @@ targets:
       # PhotosUI backs the Gram attachment picker's Photo/Video source (`PhotosPicker`
       # / `.photosPicker`). Linked explicitly for the same reason as QuickLook above.
       - sdk: PhotosUI.framework
+      # StoreKit 2 backs the Settings tip jar (`TipStore` / `Product`). Linked
+      # explicitly for the same reason as QuickLook/PhotosUI above.
+      - sdk: StoreKit.framework
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
-    # archive) is unaffected.
+    # archive) is unaffected. `storeKitConfiguration` points RUN/TEST at the local
+    # `.storekit` file, so the tip jar resolves prices in Simulator without App Store
+    # Connect — the archive action is untouched, so shipped builds hit the real store.
     scheme:
       testTargets:
         - HerdrUITests
+      storeKitConfiguration: App/Herdr.storekit
     info:
       path: App/Info.plist
       properties:
