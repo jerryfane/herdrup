@@ -9,13 +9,29 @@ final class AgentListTests: XCTestCase {
     /// path the wire does. Constructing it in memory would let a test pass while
     /// the JSON key was wrong.
     private func agent(
-        pane: String, status: String?, name: String? = nil
+        pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
+        if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
         let data = try JSONSerialization.data(withJSONObject: obj)
         return try JSONDecoder().decode(AgentInfo.self, from: data)
+    }
+
+    /// Within a group, order is most-recently-active first (largest
+    /// completed_unix_ms), then agents with no completed turn, with paneID as the
+    /// stable final tiebreak. paneIDs are chosen so recency — not paneID — decides.
+    func testWithinGroupSortsByMostRecentlyActive() throws {
+        let list = AgentList(agents: [
+            try agent(pane: "p3", status: "working", completedUnixMs: 100),   // older
+            try agent(pane: "p1", status: "working", completedUnixMs: 900),   // newest
+            try agent(pane: "p2", status: "working", completedUnixMs: nil),   // never ran
+        ])
+        let working = list.rows.filter { $0.group == .working }.map(\.info.paneID)
+        XCTAssertEqual(working, ["p1", "p3", "p2"],
+                       "expected most-recent-first (p1=900, then p3=100), no-timestamp last (p2) "
+                       + "— not paneID order p1<p2<p3")
     }
 
     // MARK: - the three ways of not knowing

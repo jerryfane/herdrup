@@ -187,13 +187,19 @@ public struct AgentList: Equatable, Sendable {
         let rows = agents.map { info in
             AgentRow(info: info, isLive: livePaneIDs.map { $0.contains(info.paneID) } ?? true)
         }
-        // STABLE WITHIN A GROUP. Sorting by group alone leaves ties resolved by
-        // whatever order the server happened to answer in, so a list could
-        // reshuffle under the user's thumb between two refreshes that changed
-        // nothing. paneID is the tiebreak because it is the one field that is
-        // unique and does not change as the agent works.
-        let ordered = rows.sorted {
-            $0.group == $1.group ? $0.info.paneID < $1.info.paneID : $0.group < $1.group
+        // Group order first (the screen's primary signal — "does anything need me").
+        // WITHIN a group, most-recently-active first: the agent whose last turn
+        // completed most recently sorts to the top, using the server's wall-clock
+        // `completed_unix_ms`. Agents with no completed turn yet sort last. paneID is
+        // the final tiebreak — unique and stable as the agent works — so the list only
+        // reshuffles when an agent is genuinely more recent, never on an unchanged
+        // refresh where every timestamp is equal.
+        let ordered = rows.sorted { a, b in
+            if a.group != b.group { return a.group < b.group }
+            let ta = a.info.lastCompletedTurn?.completedUnixMs ?? Int64.min
+            let tb = b.info.lastCompletedTurn?.completedUnixMs ?? Int64.min
+            if ta != tb { return ta > tb }
+            return a.info.paneID < b.info.paneID
         }
         self.rows = ordered
         self.sections = AgentGroup.allCases.compactMap { group in
