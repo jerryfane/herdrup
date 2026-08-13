@@ -67,6 +67,9 @@ struct GramView: View {
     @State private var loadingPhoto = false
     /// True while a picked file is uploading (many small chunks over SSH).
     @State private var uploading = false
+    /// Byte progress of the file currently uploading: (bytesSent, totalBytes). Drives
+    /// the composer's determinate progress bar; nil when no upload is in flight.
+    @State private var uploadBytes: (sent: Int, total: Int)?
     /// Progress across a multi-file send: (already-sent, total). nil when idle or when
     /// only a single message is in flight.
     @State private var sendProgress: (sent: Int, total: Int)?
@@ -433,7 +436,27 @@ struct GramView: View {
                     }
                 }
             }
-            if let progress = sendProgress, progress.total > 1 {
+            if let up = uploadBytes {
+                let frac = up.total > 0 ? min(1, Double(up.sent) / Double(up.total)) : 0
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(uploadStatusLabel(fraction: frac))
+                            .font(Typography.machine(11))
+                            .foregroundStyle(Palette.textFaint)
+                        Spacer(minLength: 8)
+                        if up.total >= 1024 * 1024 {
+                            Text("\(byteString(up.sent)) / \(byteString(up.total))")
+                                .font(Typography.machine(11))
+                                .foregroundStyle(Palette.textFaint)
+                                .monospacedDigit()
+                        }
+                    }
+                    ProgressView(value: frac)
+                        .tint(Palette.text)
+                }
+                .frame(maxWidth: .infinity)
+            } else if let progress = sendProgress, progress.total > 1 {
+                // Between files (this one's upload done, its message posting): keep the count.
                 Text("Sending \(progress.sent + 1) of \(progress.total)…")
                     .font(Typography.machine(11))
                     .foregroundStyle(Palette.textFaint)
@@ -645,6 +668,22 @@ struct GramView: View {
         }
     }
 
+    /// Label above the upload bar: "Sending k of N · NN%" for a batch, else "Uploading NN%".
+    private func uploadStatusLabel(fraction: Double) -> String {
+        let pct = Int((fraction * 100).rounded())
+        if let p = sendProgress, p.total > 1 {
+            return "Sending \(p.sent + 1) of \(p.total) · \(pct)%"
+        }
+        return "Uploading \(pct)%"
+    }
+
+    /// Compact byte size for the upload bar (e.g. "42.1 MB", "512 KB").
+    private func byteString(_ bytes: Int) -> String {
+        let mb = Double(bytes) / (1024 * 1024)
+        if mb >= 1 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.0f KB", Double(bytes) / 1024)
+    }
+
     private func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachedFiles
@@ -660,6 +699,7 @@ struct GramView: View {
             sending = false
             uploading = false
             sendProgress = nil
+            uploadBytes = nil
         }
         sendError = nil
 
@@ -690,8 +730,12 @@ struct GramView: View {
             let caption = index == 0 ? text : ""
             do {
                 uploading = true
-                let uploadID = try await client.gramUploadFile(file.data)
+                uploadBytes = (sent: 0, total: file.data.count)
+                let uploadID = try await client.gramUploadFile(file.data) { sent, total in
+                    uploadBytes = (sent: sent, total: total)
+                }
                 uploading = false
+                uploadBytes = nil
                 let posted = try await client.gramPost(
                     text: caption, to: to,
                     attachment: .init(uploadID: uploadID, name: file.name, mime: file.mime))

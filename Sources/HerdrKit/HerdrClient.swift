@@ -349,9 +349,22 @@ public actor HerdrClient {
     /// `gramPost`. Chunks are sent in order; the server validates each against the
     /// running offset. A single request per chunk keeps every one under the SSH
     /// command-size cap.
-    public func gramUploadFile(_ data: Data) async throws -> String {
+    ///
+    /// `onProgress` (if given) is called on the main actor with `(bytesSent, totalBytes)`
+    /// — once at 0, then throttled to ~1% steps as chunks land, and once at completion —
+    /// so a caller can drive a determinate progress bar without flooding the UI on a
+    /// large (≈2100-chunk) 100 MB upload.
+    public func gramUploadFile(
+        _ data: Data,
+        onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
+    ) async throws -> String {
         let uploadID = "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         var offset = 0
+        // Report at most ~once per 1% (or per chunk, whichever is coarser) so a big
+        // file's thousands of round-trips don't schedule thousands of UI updates.
+        let reportStep = max(Self.gramUploadChunkBytes, data.count / 100)
+        var lastReported = -reportStep
+        await onProgress?(0, data.count)
         while offset < data.count {
             let end = min(offset + Self.gramUploadChunkBytes, data.count)
             let chunk = data.subdata(in: offset..<end)
@@ -362,6 +375,10 @@ public actor HerdrClient {
                     dataBase64: chunk.base64EncodedString()),
                 as: JSONNull.self)
             offset = end
+            if offset == data.count || offset - lastReported >= reportStep {
+                lastReported = offset
+                await onProgress?(offset, data.count)
+            }
         }
         return uploadID
     }
