@@ -1099,7 +1099,12 @@ struct TerminalHomeView: View {
                 // between panes (frontID stays non-nil) is unaffected.
                 .offset(x: frontID != nil ? 0 : 40)
                 .allowsHitTesting(frontID != nil)
-                .animation(.easeOut(duration: 0.26), value: frontID)
+                // Key the animation on the BOOLEAN (shown vs not), NOT on frontID itself:
+                // frontID also changes when swipe-paging A->B (both non-nil), and
+                // `value: frontID` would fire the animation into the subtree then —
+                // cross-fading the inner pane swap and disturbing the paging XCUITest.
+                // `frontID != nil` only flips on the list<->terminal open/close.
+                .animation(.easeOut(duration: 0.26), value: frontID != nil)
         }
         // ONE item-based sheet, not two stacked isPresented presentations (stacked
         // presentation modifiers on a single view are historically fragile). A SHEET
