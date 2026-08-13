@@ -1090,7 +1090,16 @@ struct TerminalHomeView: View {
                 onClose: { frontID = nil; Task { await load() } },
                 onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                 .opacity(frontID != nil ? 1 : 0)
+                // Ease the list<->terminal transition instead of a hard cut: the terminal
+                // slides in from the right (and back out on close) while it fades. We animate
+                // the `frontID` STATE, not a gesture, so BOTH entry points — the header
+                // chevron and the left-edge swipe (EdgeSwipeBack fires a discrete onClose) —
+                // get the same motion, and neither EdgeSwipeBack nor the pane's
+                // foreground/PTY handoff is touched. Only nil<->non-nil animates; paging
+                // between panes (frontID stays non-nil) is unaffected.
+                .offset(x: frontID != nil ? 0 : 40)
                 .allowsHitTesting(frontID != nil)
+                .animation(.easeOut(duration: 0.26), value: frontID)
         }
         // ONE item-based sheet, not two stacked isPresented presentations (stacked
         // presentation modifiers on a single view are historically fragile). A SHEET
