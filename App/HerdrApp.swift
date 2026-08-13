@@ -2409,6 +2409,8 @@ struct SettingsView: View {
             sectionLabel("HELP")
             richActionRow("Gestures", systemImage: "hand.draw",
                           subtitle: "How to move around the app") { showGestures = true }
+            linkRow("Report a bug or request a feature", systemImage: "exclamationmark.bubble",
+                    url: URL(string: "https://github.com/jerryfane/herdrup/issues")!)
         }
     }
 

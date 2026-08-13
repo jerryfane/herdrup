@@ -40,7 +40,7 @@ struct ForkNoticeView: View {
                 VStack(spacing: 10) {
                     ForEach(missing, id: \.name) { row($0) }
                 }
-                Text("Switch to — or update — jerryfane/herdr to turn them on.")
+                Text("Switch to or update jerryfane/herdr to turn them on.")
                     .font(Typography.app(13))
                     .foregroundStyle(Palette.textFaint)
                     .multilineTextAlignment(.center)
@@ -48,13 +48,27 @@ struct ForkNoticeView: View {
             }
             .padding(.horizontal, 28)
             Spacer(minLength: 0)
-            Button(action: onDismiss) {
-                Text("Continue anyway")
+            VStack(spacing: 8) {
+                // Primary action: send them to the fork's install instructions.
+                Link(destination: URL(string: "https://github.com/jerryfane/herdr")!) {
+                    HStack(spacing: 6) {
+                        Text("Install instructions")
+                        Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .semibold))
+                    }
                     .font(Typography.app(16, .semibold))
                     .foregroundStyle(Palette.ground)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
+                }
+                // Never a lockout: dismissing is always one tap away.
+                Button(action: onDismiss) {
+                    Text("Continue anyway")
+                        .font(Typography.app(15, .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
