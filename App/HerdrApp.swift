@@ -329,6 +329,9 @@ struct RootView: View {
         credentials = creds
         transport = newTransport
         client = newClient
+        // Bring up the session Live Activity (#90) in a "connecting" state; the home
+        // view's onChange pushes real agent status the moment the first list arrives.
+        LiveActivityController.shared.start(hostLabel: creds.host, state: LiveActivityController.connecting)
         // PRE-WARM: start the SSH handshake + first agent fetch the instant Connect
         // is tapped, so it overlaps the ConnectView→TerminalHomeView transition
         // instead of following it. The transport dedups concurrent connects, so this
@@ -356,6 +359,7 @@ struct RootView: View {
         client = nil
         transport = nil
         credentials = nil
+        LiveActivityController.shared.end()   // tear down the #90 Live Activity with the session
     }
 
     /// Drops and re-establishes the connection with the RETAINED credentials —
@@ -1012,6 +1016,13 @@ struct TerminalHomeView: View {
         // connect (this view is .id(session)-scoped) rather than on every tab switch —
         // which otherwise re-showed the fork notice and cancelled an in-flight load.
         .task { await load() }
+        // Keep the session Live Activity (#90) in step with the herd: push a fresh
+        // summary whenever the derived list changes, and once on appear so a
+        // freshly-connected session reflects its agents right away. A no-op when the
+        // user has Live Activities off — the controller guards that.
+        .onChange(of: fullList, initial: true) { _, list in
+            LiveActivityController.shared.update(LiveActivityController.state(from: list))
+        }
         // If the daemon lacks the fork features, surface the advisory notice. Only a
         // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
         // probeFork). If a cover is already up (e.g. the first-run gestures sheet the

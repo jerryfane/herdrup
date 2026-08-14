@@ -64,6 +64,10 @@ targets:
     platform: iOS
     sources:
       - path: App
+      # The Live Activity model (#90), shared verbatim with the widget extension so
+      # both encode/decode the same ContentState. Kept out of HerdrKit (which must stay
+      # Linux-buildable) and out of App/ (widget can't see App/).
+      - path: Shared
     dependencies:
       # Declared in step ONE rather than when a screen first needs it. Linking
       # HerdrKit into an iOS app exercises the libssh2 system library, the module
@@ -94,6 +98,14 @@ targets:
       # explicitly for the same reason as the frameworks above.
       - sdk: AVFoundation.framework
       - sdk: Speech.framework
+      # ActivityKit backs the agent-session Live Activity (#90) — `LiveActivityController`
+      # starts/updates/ends it. Linked explicitly for the same reason as the others.
+      - sdk: ActivityKit.framework
+      # The widget extension that renders the Live Activity. Declared as a dependency so
+      # xcodegen embeds it in the app's PlugIns (ActivityKit needs the host app to carry
+      # the extension). INERT for the buildbox sim build's signing (never signed); the
+      # Distribution archive needs the widget's own App Store profile — see testflight.yml.
+      - target: HerdrWidgets
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
@@ -115,6 +127,9 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
+        # Live Activities (#90): opt the app in so ActivityKit may start the agent-session
+        # activity on the lock screen / Dynamic Island. Required or Activity.request throws.
+        NSSupportsLiveActivities: true
         # Voice input (#89): the mic button by the Gram composer and terminal reply bar
         # dictates on-device. Both strings are required or the app crashes the first time
         # it requests the permission.
@@ -224,3 +239,46 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGNING_ALLOWED: NO
+
+  # Widget extension — the #90 Live Activity (agent-session status on the lock screen +
+  # Dynamic Island). A WidgetKit app-extension; xcodegen embeds it in the app's PlugIns.
+  # Shares the ActivityAttributes source with the app (both list `Shared`), and keeps its
+  # own copy of the status colours because DesignSystem is app-target only. The buildbox
+  # sim build is never signed (CODE_SIGNING_ALLOWED=NO on the command line), so the widget
+  # compiles+embeds there with no profile; the Distribution ARCHIVE needs the widget's own
+  # App Store profile ("Herdrup Widgets App Store"), minted for com.jerryfane.herdr.widgets
+  # — see testflight.yml (Option B: created in CI via the ASC API, or minted once).
+  HerdrWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: HerdrWidgets
+      - path: Shared
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: ActivityKit.framework
+    info:
+      path: HerdrWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Herdrup
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.widgets
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        # Team + automatic signing for the base (Mac lane / local). INERT for the sim
+        # build (never signed). The Distribution config overrides to manual with the
+        # widget's own App Store profile, mirroring the app target.
+        DEVELOPMENT_TEAM: FXQ5Z9HHY6
+        CODE_SIGN_STYLE: Automatic
+      configs:
+        Distribution:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup Widgets App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"

@@ -21,3 +21,6 @@ SourcePackages/
 *.key
 .env
 fastlane/
+
+# Local buildbox screenshot artifacts (never part of a PR)
+screenshots/
