@@ -80,12 +80,26 @@ struct GramView: View {
     @State private var setupCommandCopied = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
     @State private var previewURL: URL?
+    /// A received web document (HTML/SVG) staged for the in-app viewer. Rendered by
+    /// `HtmlWebView` (JavaScript off, all network blocked) instead of QuickLook, whose
+    /// srcdoc-sandbox path showed a blank white screen for these files (issue #92).
+    @State private var webDoc: WebDoc?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
     /// Ids the server has confirmed deleted, kept as tombstones so an in-flight poll
     /// (whose snapshot predates the delete) cannot resurrect the row for a few
     /// seconds. Cleared once the server's own snapshot also omits the id.
     @State private var deletedIDs: Set<String> = []
+
+    /// A received web document (HTML/SVG) staged for the in-app `HtmlWebView` viewer.
+    /// Holds the parsed markup to render plus the raw file on disk so the owner can
+    /// still Share/save it (the affordance QuickLook used to offer).
+    private struct WebDoc: Identifiable {
+        let id = UUID()
+        let title: String
+        let html: String
+        let fileURL: URL
+    }
 
     /// A file staged for sending: read into memory so the send is one atomic action.
     /// Identifiable so the composer strip can render + remove chips by identity.
@@ -197,6 +211,28 @@ struct GramView: View {
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
         .quickLookPreview($previewURL)
+        // Received HTML/SVG opens in a dedicated in-app viewer (JavaScript off, all
+        // network blocked) rather than QuickLook, which rendered these blank (#92).
+        // Done dismisses; Share still lets the owner save the raw file.
+        .fullScreenCover(item: $webDoc) { doc in
+            NavigationStack {
+                HtmlWebView(html: doc.html)
+                    .ignoresSafeArea(edges: .bottom)
+                    .navigationTitle(doc.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { webDoc = nil }
+                        }
+                        ToolbarItem(placement: .primaryAction) {
+                            ShareLink(item: doc.fileURL)
+                        }
+                    }
+            }
+            // Remove the raw temp file when the viewer closes so a viewed document
+            // does not linger in tmp.
+            .onDisappear { try? FileManager.default.removeItem(at: doc.fileURL) }
+        }
         // Delete the previewed temp file when QuickLook dismisses (it nils the
         // binding) or when it is replaced — so a previewed secret does not linger.
         .onChange(of: previewURL) { oldValue, newValue in
@@ -938,14 +974,19 @@ struct GramView: View {
                     url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
                     try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
                 } else if Self.isWebDocument(name: name, mime: mime) {
-                    // Received HTML/SVG would render as LIVE, scriptable content in
-                    // QuickLook. Wrap it in a sandboxed iframe so it still renders
-                    // styled but no script from a hostile file can run. Decode from
-                    // DATA (lossy) — NEVER gate on strict UTF-8, or a non-UTF-8 hostile
-                    // file would fall through to the raw, unsandboxed write below.
-                    let wrapped = HtmlSandbox.wrap(data: data, title: Self.webBaseName(name))
-                    url = tmp.appendingPathComponent(Self.sandboxHTMLName(for: name))
-                    try Data(wrapped.utf8).write(to: url, options: [.atomic, .completeFileProtection])
+                    // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
+                    // (JavaScript off + all network blocked), NOT QuickLook — the old
+                    // srcdoc-sandbox path painted a blank white screen (#92). Decode
+                    // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
+                    // as text rather than being treated as a plain download. Keep the raw
+                    // bytes on disk so the viewer's Share button can save the original.
+                    let raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                    try data.write(to: raw, options: [.atomic, .completeFileProtection])
+                    webDoc = WebDoc(
+                        title: Self.webBaseName(name),
+                        html: String(decoding: data, as: UTF8.self),
+                        fileURL: raw)
+                    return
                 } else {
                     // Never trust the server name to be a safe path component; reduce
                     // it to a bare basename. Write encrypted-at-rest.
@@ -1016,12 +1057,6 @@ struct GramView: View {
             return String(base.dropLast(ext.count))
         }
         return base
-    }
-
-    /// The temp file name for a sandboxed web preview — always `.html`, since the
-    /// sandbox WRAPPER is HTML (even when wrapping an `.svg`), so QuickLook renders it.
-    private static func sandboxHTMLName(for name: String) -> String {
-        webBaseName(name) + ".html"
     }
 
     /// Delete a message (and its file bytes) after the server confirms — so a
