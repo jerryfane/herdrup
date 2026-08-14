@@ -141,23 +141,6 @@ jobs:
           echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
           echo "ASC_KEYFILE=$KEYFILE" >> "$GITHUB_ENV"
 
-      - name: Write ExportOptions.plist
-        env:
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          cat > /tmp/ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>automatic</string>
-            <key>uploadSymbols</key><true/>
-          </dict>
-          </plist>
-          EOF
-
       - name: Archive
         # Automatic signing: -allowProvisioningUpdates + the ASC API key let xcodebuild
         # create/renew the Apple Distribution cert + App Store profiles (app AND widget
@@ -181,17 +164,57 @@ jobs:
             archive
 
       - name: Export .ipa
+        # LOCAL signing on export. The Archive (automatic + -allowProvisioningUpdates) has
+        # already created and installed the App Store provisioning profile for our bundle
+        # id, so export with a MANUAL ExportOptions that names it. Xcode's automatic export
+        # otherwise attempts CLOUD signing, which needs a cloud-managed distribution cert
+        # this team does not use (we import our own) — the "Cloud signing permission error".
+        # The profile is discovered by name (no hand-minted profile / secret); when the
+        # widget extension lands, add its bundle id + a second provisioningProfiles entry.
         env:
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          # bash 3.2 on the runner — no associative arrays. Find the DISTRIBUTION profile
+          # (get-task-allow=false) that the archive installed for com.jerryfane.herdr.
+          APP_PROFILE=""
+          for p in "$PROFILE_DIR"/*.mobileprovision; do
+            [ -e "$p" ] || continue
+            plist=$(security cms -D -i "$p" 2>/dev/null) || continue
+            appid=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$plist" 2>/dev/null) || continue
+            gta=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' /dev/stdin <<< "$plist" 2>/dev/null)
+            case "$appid" in
+              *.com.jerryfane.herdr)
+                if [ "$gta" = "false" ]; then
+                  APP_PROFILE=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$plist" 2>/dev/null)
+                fi ;;
+            esac
+          done
+          if [ -z "$APP_PROFILE" ]; then
+            echo "::error::No installed App Store profile for com.jerryfane.herdr after archive."
+            ls -la "$PROFILE_DIR" || true
+            exit 1
+          fi
+          echo "export profile for com.jerryfane.herdr: $APP_PROFILE"
+          cat > /tmp/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.jerryfane.herdr</key><string>${APP_PROFILE}</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
           xcodebuild -exportArchive -archivePath /tmp/Herdr.xcarchive \
             -exportOptionsPlist /tmp/ExportOptions.plist \
-            -exportPath /tmp/export \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEYFILE" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -exportPath /tmp/export
 
       - name: Upload to TestFlight
         # The App Store Connect API key already exists (issuer + key id + .p8). altool
