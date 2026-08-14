@@ -9,6 +9,15 @@ struct SavedHost: Codable, Identifiable, Hashable {
     let id: UUID
     var host: String
     var username: String
+    /// Optional friendly label ("My Mac"). Legacy saved hosts predate this field, so it
+    /// is OPTIONAL — old JSON without the key decodes to `nil` (no migration needed).
+    var nickname: String?
+
+    /// The primary display label: the nickname if set, else the host itself.
+    var label: String {
+        if let n = nickname?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty { return n }
+        return host
+    }
 }
 
 /// Persists saved hosts: the host+username list in UserDefaults, each host's
@@ -32,24 +41,45 @@ final class SavedHostsStore: ObservableObject {
         }
     }
 
-    /// Saves (or updates in place) a host by host+username identity and stores its
-    /// key in the Keychain. Returns false — WITHOUT recording the host — if the key
+    /// Adds a NEW saved host (its own id) and stores its key in the Keychain. Returns
+    /// false — WITHOUT recording the host — if a required field is missing or the key
     /// could not be persisted, so the UI never offers a one-tap host it cannot open.
     @discardableResult
-    func save(host: String, username: String, privateKeyPEM: String) -> Bool {
+    func add(nickname: String, host: String, username: String, privateKeyPEM: String) -> Bool {
         let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let n = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = privateKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !h.isEmpty, !u.isEmpty, !key.isEmpty else { return false }
-
-        let existing = hosts.first { $0.host.compare(h, options: .caseInsensitive) == .orderedSame && $0.username == u }
-        let id = existing?.id ?? UUID()
+        let id = UUID()
         // Persist the key FIRST; only record the host if the key actually stuck.
         guard keychain.save(account: id.uuidString, secret: key) else { return false }
-        if existing == nil {
-            hosts.insert(SavedHost(id: id, host: h, username: u), at: 0)
-            persist()
+        hosts.insert(SavedHost(id: id, host: h, username: u, nickname: n.isEmpty ? nil : n), at: 0)
+        persist()
+        return true
+    }
+
+    /// Updates an existing saved host IN PLACE (by id): host / username / nickname, and
+    /// the private key only when `privateKeyPEM` is non-empty (empty = keep the current
+    /// key, so an edit never forces re-entering it). Returns false without changing
+    /// anything if a required field is missing or a provided key fails to persist.
+    @discardableResult
+    func update(_ existing: SavedHost, nickname: String, host: String, username: String, privateKeyPEM: String) -> Bool {
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let n = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = privateKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !h.isEmpty, !u.isEmpty else { return false }
+        guard let i = hosts.firstIndex(where: { $0.id == existing.id }) else { return false }
+        // Replace the key only if a new one was entered; a failed persist aborts the whole
+        // update so the record never drifts out of lockstep with the Keychain.
+        if !key.isEmpty {
+            guard keychain.save(account: existing.id.uuidString, secret: key) else { return false }
         }
+        hosts[i].host = h
+        hosts[i].username = u
+        hosts[i].nickname = n.isEmpty ? nil : n
+        persist()
         return true
     }
 
