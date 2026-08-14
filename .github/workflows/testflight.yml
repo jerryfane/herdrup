@@ -141,23 +141,6 @@ jobs:
           echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
           echo "ASC_KEYFILE=$KEYFILE" >> "$GITHUB_ENV"
 
-      - name: Write ExportOptions.plist
-        env:
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          cat > /tmp/ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>automatic</string>
-            <key>uploadSymbols</key><true/>
-          </dict>
-          </plist>
-          EOF
-
       - name: Archive
         # Automatic signing: -allowProvisioningUpdates + the ASC API key let xcodebuild
         # create/renew the Apple Distribution cert + App Store profiles (app AND widget
@@ -181,17 +164,62 @@ jobs:
             archive
 
       - name: Export .ipa
+        # LOCAL signing on export. The Archive (automatic + -allowProvisioningUpdates)
+        # already created, downloaded, and EMBEDDED the App Store profile(s) it signed with
+        # INTO the .xcarchive, so read them straight from there. That is authoritative (the
+        # exact profiles the app was signed with) and immune to the runner's Xcode-version
+        # profile directory (Xcode 16+ moved it out of ~/Library/MobileDevice) and to
+        # dev/ad-hoc/expiry ambiguity. Export MANUALLY with those so Xcode never attempts
+        # CLOUD signing, which needs a cloud-managed distribution cert this team does not use
+        # (we import our own) — the "Cloud signing permission error". `find` picks up the app
+        # AND any PlugIns/*.appex profile, so the widget extension needs no change here.
         env:
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          APP_DIR=$(ls -d /tmp/Herdr.xcarchive/Products/Applications/*.app 2>/dev/null | head -1)
+          [ -d "$APP_DIR" ] || { echo "::error::no .app in the archive"; ls -la /tmp/Herdr.xcarchive/Products/Applications || true; exit 1; }
+          # Map every embedded profile (app + appex) to its bundle id. Process substitution
+          # (not a pipe) keeps the appended var in this shell; bash 3.2 on the runner is fine.
+          PROFILES_XML=""
+          while IFS= read -r mp; do
+            plist=$(security cms -D -i "$mp" 2>/dev/null) || continue
+            name=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$plist" 2>/dev/null) || continue
+            appid=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$plist" 2>/dev/null) || continue
+            bundle="${appid#*.}"   # strip the TEAMID. prefix
+            # Assert it's an APP STORE profile, not development / ad-hoc / enterprise: those
+            # embed a ProvisionedDevices list or ProvisionsAllDevices, or get-task-allow=true.
+            # Fail loudly — a wrong-type embedded profile means the archive signed wrong, and
+            # a manual app-store-connect export with it would fail cryptically anyway.
+            gta=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
+            has_devices=no
+            if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' /dev/stdin <<< "$plist" >/dev/null 2>&1; then has_devices=yes; fi
+            all_devices=$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
+            if [ "$gta" = "true" ] || [ "$has_devices" = "yes" ] || [ "$all_devices" = "true" ]; then
+              echo "::error::embedded profile for $bundle ('$name') is NOT an App Store profile (get-task-allow=$gta ProvisionedDevices=$has_devices ProvisionsAllDevices=$all_devices)"
+              exit 1
+            fi
+            echo "embedded App Store profile: $bundle -> $name"
+            PROFILES_XML="${PROFILES_XML}<key>${bundle}</key><string>${name}</string>"
+          done < <(find "$APP_DIR" -name embedded.mobileprovision)
+          if [ -z "$PROFILES_XML" ]; then echo "::error::no embedded provisioning profiles in the archive"; exit 1; fi
+          cat > /tmp/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>${PROFILES_XML}</dict>
+          </dict>
+          </plist>
+          EOF
+          echo "--- ExportOptions.plist ---"; cat /tmp/ExportOptions.plist
           xcodebuild -exportArchive -archivePath /tmp/Herdr.xcarchive \
             -exportOptionsPlist /tmp/ExportOptions.plist \
-            -exportPath /tmp/export \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEYFILE" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -exportPath /tmp/export
 
       - name: Upload to TestFlight
         # The App Store Connect API key already exists (issuer + key id + .p8). altool
