@@ -2336,14 +2336,17 @@ struct SettingsView: View {
                 Text(notifyAuthBody)
                     .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
-                if notifyAuth == .notDetermined {
+                switch notifyRowState {
+                case .needAllow:
                     Button("Allow notifications") { requestNotifications() }
                         .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
                         .padding(.top, 2)
-                } else if notifyAuth == .denied {
+                case .denied:
                     Button("Open Settings") { openIOSSettings() }
                         .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
                         .padding(.top, 2)
+                case .ok:
+                    EmptyView()
                 }
             }
             Spacer(minLength: 0)
@@ -2351,37 +2354,64 @@ struct SettingsView: View {
         .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
-    private var notifyAuthIcon: String {
+    /// At least one alert category is on. A permission FIX is only surfaced when this is
+    /// true — if every toggle is off the system permission is moot, so we neither prompt
+    /// nor point to Settings (matching AppDelegate.requestAuthorizationIfWanted's gating).
+    private var anyNotifyOn: Bool { notifyNeedsInput || notifyDies || notifyFinishes || notifyGram }
+
+    private enum NotifyRowState { case ok, needAllow, denied }
+    private var notifyRowState: NotifyRowState {
+        guard anyNotifyOn else { return .ok }
         switch notifyAuth {
+        case .notDetermined: return .needAllow
+        case .denied: return .denied
+        default: return .ok
+        }
+    }
+
+    private var notifyAuthIcon: String {
+        switch notifyRowState {
         case .denied: return "bell.slash"
-        case .authorized, .provisional, .ephemeral: return "bell.badge"
-        default: return "bell"
+        case .needAllow: return "bell"
+        case .ok: return "bell.badge"
         }
     }
     private var notifyAuthTint: Color {
-        notifyAuth == .denied ? Palette.waiting : Palette.textDim
+        switch notifyRowState {
+        case .denied: return Palette.waiting
+        default: return Palette.textDim
+        }
     }
     private var notifyAuthTitle: String {
-        switch notifyAuth {
+        switch notifyRowState {
         case .denied: return "Notifications are off"
-        case .notDetermined: return "Turn on notifications"
-        default: return "Push needs the herdr fork"
+        case .needAllow: return "Turn on notifications"
+        case .ok: return "Push needs the herdr fork"
         }
     }
     private var notifyAuthBody: String {
-        switch notifyAuth {
+        switch notifyRowState {
         case .denied:
             return "Herdrup can't send these alerts until you allow notifications in iOS Settings."
-        case .notDetermined:
+        case .needAllow:
             return "Allow notifications so these alerts can reach you when an agent needs you or a gram arrives."
-        default:
+        case .ok:
             return "Alerts arrive when your machine runs the herdr fork and you allow notifications."
         }
     }
 
     private func refreshNotifyAuth() {
         UNUserNotificationCenter.current().getNotificationSettings { s in
-            DispatchQueue.main.async { notifyAuth = s.authorizationStatus }
+            DispatchQueue.main.async {
+                notifyAuth = s.authorizationStatus
+                // If notifications are (now) allowed — e.g. the user just flipped them on
+                // in iOS Settings and came back — (re)register for APNs so a token actually
+                // issues. A bare status refresh would leave a first-time denier with no
+                // token until a later launch. registerForRemoteNotifications is idempotent.
+                if [.authorized, .provisional, .ephemeral].contains(s.authorizationStatus) {
+                    UIApplication.shared.registerForRemoteNotifications()
+                }
+            }
         }
     }
 
