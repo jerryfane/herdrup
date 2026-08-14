@@ -44,6 +44,12 @@ final class WebViewPolicyTests: XCTestCase {
                 filters.contains { Self.filterMatches($0, allowed) },
                 "\(allowed) must not be blocked or the viewer goes blank")
         }
+        // WebKit matches url-filters case-insensitively, so a hostile file cannot dodge
+        // the rule by uppercasing the scheme.
+        XCTAssertTrue(filters.contains { Self.filterMatches($0, "HTTP://Host/x") },
+                      "uppercase http scheme must still be blocked")
+        XCTAssertTrue(filters.contains { Self.filterMatches($0, "FILE:///etc/passwd") },
+                      "uppercase file scheme must still be blocked")
     }
 
     private func urlFilters() throws -> [String] {
@@ -53,10 +59,12 @@ final class WebViewPolicyTests: XCTestCase {
         return rules.compactMap { ($0["trigger"] as? [String: Any])?["url-filter"] as? String }
     }
 
-    /// A content-blocker url-filter is an anchored regex over the URL; NSRegularExpression
-    /// faithfully emulates whether a given URL would match a given filter.
+    /// A content-blocker url-filter is a regex over the URL that WebKit matches
+    /// CASE-INSENSITIVELY by default; NSRegularExpression with `.caseInsensitive`
+    /// emulates whether a given URL would match a given filter.
     private static func filterMatches(_ pattern: String, _ url: String) -> Bool {
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return false }
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        else { return false }
         return re.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil
     }
 }

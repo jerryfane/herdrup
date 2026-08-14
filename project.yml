@@ -86,6 +86,9 @@ targets:
       # StoreKit 2 backs the Settings tip jar (`TipStore` / `Product`). Linked
       # explicitly for the same reason as QuickLook/PhotosUI above.
       - sdk: StoreKit.framework
+      # WebKit backs the Gram HTML/SVG viewer (`HtmlWebView` / `WKWebView`). Linked
+      # explicitly for the same reason as QuickLook/PhotosUI/StoreKit above.
+      - sdk: WebKit.framework
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`

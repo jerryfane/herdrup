@@ -84,6 +84,9 @@ struct GramView: View {
     /// `HtmlWebView` (JavaScript off, all network blocked) instead of QuickLook, whose
     /// srcdoc-sandbox path showed a blank white screen for these files (issue #92).
     @State private var webDoc: WebDoc?
+    /// The in-flight file-open download (see `openFile`), cancelled when the page goes
+    /// away so a late completion can't strand a temp file after cleanup already ran.
+    @State private var openFileTask: Task<Void, Never>?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
     /// Ids the server has confirmed deleted, kept as tombstones so an in-flight poll
@@ -240,9 +243,20 @@ struct GramView: View {
                 try? FileManager.default.removeItem(at: oldValue)
             }
         }
-        // Backstop: remove any lingering preview file when the page goes away.
+        // Same for the web-doc viewer's raw file: remove the previous one whenever
+        // webDoc changes (including → nil on dismiss), so a viewed HTML/SVG never lingers.
+        .onChange(of: webDoc?.fileURL) { oldValue, newValue in
+            if let oldValue, oldValue != newValue {
+                try? FileManager.default.removeItem(at: oldValue)
+            }
+        }
+        // Backstop: on the way out, cancel an in-flight file open (so a late completion
+        // can't strand a temp file after cleanup) and remove any lingering temp files —
+        // both the QuickLook preview and the web-doc viewer's raw file.
         .onDisappear {
+            openFileTask?.cancel()
             if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
+            if let url = webDoc?.fileURL { try? FileManager.default.removeItem(at: url) }
         }
         // Don't let a swipe-down (the new sheet dismissal) abandon an in-flight send
         // or a photo load mid-way — the chunked upload would keep running off-screen.
@@ -954,10 +968,13 @@ struct GramView: View {
     private func openFile(_ message: GramMessage) {
         guard downloadingFileFor == nil else { return }
         downloadingFileFor = message.id
-        Task {
+        openFileTask = Task {
             defer { downloadingFileFor = nil }
             do {
                 let (name, mime, data) = try await client.gramGetFile(id: message.id)
+                // The page went away mid-download (task cancelled in .onDisappear): stop
+                // before writing any temp file, so a late completion can't strand one.
+                if Task.isCancelled { return }
                 // Remove any previously-previewed file so a viewed secret does not
                 // accumulate in tmp.
                 if let previous = previewURL {
@@ -982,6 +999,10 @@ struct GramView: View {
                     // bytes on disk so the viewer's Share button can save the original.
                     let raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
                     try data.write(to: raw, options: [.atomic, .completeFileProtection])
+                    // We present webDoc, not a QuickLook preview — clear any stale
+                    // previewURL (its file was removed above) so nothing tries to present
+                    // a now-deleted path, and the previewURL onChange doesn't fire on it.
+                    previewURL = nil
                     webDoc = WebDoc(
                         title: Self.webBaseName(name),
                         html: String(decoding: data, as: UTF8.self),
@@ -1038,7 +1059,7 @@ struct GramView: View {
     }
 
     /// A received web document that QuickLook would otherwise render as live,
-    /// scriptable content — routed through the sandbox instead.
+    /// scriptable content — routed to the in-app `HtmlWebView` viewer instead.
     private static func isWebDocument(name: String, mime: String) -> Bool {
         let lower = name.lowercased()
         if lower.hasSuffix(".html") || lower.hasSuffix(".htm") || lower.hasSuffix(".xhtml")
