@@ -19,10 +19,10 @@ options:
   createIntermediateGroups: true
 
 # Debug + Release are the defaults (buildbox builds Debug-iphonesimulator; the Mac
-# lane scripts/testflight.sh archives Release with AUTOMATIC account signing).
-# Distribution is a release-type config used ONLY by the GitHub Actions CI archive,
-# which needs MANUAL signing — isolated here so the CI's manual profile does not
-# regress the Mac lane's automatic Release signing.
+# lane scripts/testflight.sh archives Release with automatic account signing).
+# Distribution is a release-type config used by the GitHub Actions CI archive, which
+# now also signs AUTOMATICALLY (xcodebuild -allowProvisioningUpdates + the App Store
+# Connect API key), so Xcode manages the profiles for the app and its widget extension.
 configs:
   Debug: debug
   Release: release

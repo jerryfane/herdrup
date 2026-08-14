@@ -5,8 +5,8 @@
 # phone from Actions with NO developer Mac in the signing material), + its write-up
 # in workflow note 42758 on apps-coc/pr-reviews. Herdr differences are called out
 # inline. Key reuse: keephair is on the SAME Apple team (FXQ5Z9HHY6), so the
-# distribution CERTIFICATE is team-wide and shared; herdr only needs its own
-# provisioning PROFILE for com.jerryfane.herdr.
+# distribution CERTIFICATE is team-wide and shared; herdr's provisioning PROFILES are
+# created automatically by Xcode at archive time (-allowProvisioningUpdates + ASC key).
 #
 # WHAT THIS IS NOT: the Mac build box on the tailnet still builds every branch
 # for the SIMULATOR and screenshots it — that is the correctness signal and stays.
