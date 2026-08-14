@@ -34,6 +34,9 @@ struct GramView: View {
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
     @State private var draft: String = ""
+    /// True while dictating into the composer, so the field is disabled (typing can't be
+    /// overwritten by the next partial) while the live transcript still appends.
+    @State private var draftDictating = false
     @State private var sending = false
     /// A send failure. Kept SEPARATE from load state so a successful background poll
     /// never clears it before the owner sees it.
@@ -539,8 +542,9 @@ struct GramView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
+                    .disabled(draftDictating)   // dictation owns the field while live
                 // Dictate into the draft (on-device); appends, never clobbers typed text.
-                MicButton(text: $draft)
+                MicButton(text: $draft, recording: $draftDictating)
                 Button {
                     Task { await send() }
                 } label: {
