@@ -2404,18 +2404,27 @@ struct SettingsView: View {
         UNUserNotificationCenter.current().getNotificationSettings { s in
             DispatchQueue.main.async {
                 notifyAuth = s.authorizationStatus
-                // If notifications are (now) allowed — e.g. the user just flipped them on
-                // in iOS Settings and came back — (re)register for APNs so a token actually
-                // issues. A bare status refresh would leave a first-time denier with no
-                // token until a later launch. registerForRemoteNotifications is idempotent.
-                if [.authorized, .provisional, .ephemeral].contains(s.authorizationStatus) {
-                    UIApplication.shared.registerForRemoteNotifications()
-                }
+                guard [.authorized, .provisional, .ephemeral].contains(s.authorizationStatus) else { return }
+                // Never register during a buildbox screenshot / XCUITest run — mirrors
+                // AppDelegate's guard so an authorized test device can't register while the
+                // Settings screen merely renders. ScreenshotMock is DEBUG-only, so is the guard.
+                #if DEBUG
+                guard ScreenshotMock.mode == nil else { return }
+                #endif
+                // (Re)register for APNs so a token actually issues — e.g. the user just
+                // enabled notifications in iOS Settings. registerForRemoteNotifications is
+                // idempotent, so refreshing repeatedly is harmless.
+                UIApplication.shared.registerForRemoteNotifications()
             }
         }
     }
 
     private func requestNotifications() {
+        // Same test-mode guard as AppDelegate.requestAuthorizationIfWanted: never prompt
+        // or register during a screenshot / XCUITest run.
+        #if DEBUG
+        guard ScreenshotMock.mode == nil else { return }
+        #endif
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             DispatchQueue.main.async {
                 if granted { UIApplication.shared.registerForRemoteNotifications() }
