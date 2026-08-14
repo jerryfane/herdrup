@@ -26,9 +26,23 @@ final class LiveActivityController {
     func start(hostLabel: String, state: AgentActivityAttributes.ContentState) {
         guard enabled else { return }
         // ActivityKit PERSISTS activities across app launches: after a kill + relaunch our
-        // `activity` is nil while an OS activity may still be live. Reclaim it before starting,
-        // so we never orphan the old one and stack a second banner for the same session.
-        if activity == nil { activity = Activity<AgentActivityAttributes>.activities.first }
+        // `activity` is nil while an OS activity may still be live. Reclaim it before starting
+        // so we never orphan one and stack a second banner — but ONLY if it is for the SAME
+        // host. `hostLabel` is a static attribute we cannot update, so a reclaimed activity
+        // from a different machine would keep showing the wrong host. End every activity we
+        // are not keeping (wrong host, or leftover orphans).
+        if activity == nil {
+            let existing = Activity<AgentActivityAttributes>.activities
+            activity = existing.first { $0.attributes.hostLabel == hostLabel }
+            let keep = activity?.id
+            if existing.contains(where: { $0.id != keep }) {
+                Task {
+                    for a in existing where a.id != keep {
+                        await a.end(nil, dismissalPolicy: .immediate)
+                    }
+                }
+            }
+        }
         if activity != nil { update(state); return }
         let attributes = AgentActivityAttributes(hostLabel: hostLabel)
         do {
