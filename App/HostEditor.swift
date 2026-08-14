@@ -1,5 +1,6 @@
 import HerdrKit
 import SwiftUI
+import UIKit
 
 /// What the `HostEditor` sheet is working on: a brand-new host, or an existing one.
 enum HostEditorTarget: Identifiable {
@@ -31,6 +32,7 @@ struct HostEditor: View {
     @State private var keyPEM = ""
     @State private var showingKeySheet = false
     @State private var error: String?
+    @State private var keyError: String?
 
     private let editing: SavedHost?
 
@@ -161,22 +163,41 @@ struct HostEditor: View {
         .buttonStyle(.plain)
     }
 
+    /// The key is NEVER rendered on screen (the connect screen can be screenshotted onto
+    /// an open tailnet port, and a screen recording would otherwise capture it). Instead
+    /// it is pasted from the clipboard straight into memory / the Keychain, and only a
+    /// "key set" confirmation is shown.
     private var keySheet: some View {
         NavigationStack {
             ZStack {
                 Palette.ground.ignoresSafeArea()
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Paste your ed25519 private key (PEM). It is held in the Keychain (device-only) and sent over the SSH connection — never shown again.")
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Copy your ed25519 private key (PEM) to the clipboard, then paste it here. It is stored in the Keychain (device-only) and sent over the SSH connection — it is never displayed, so it can't appear in a screenshot.")
                         .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                    TextEditor(text: $keyPEM)
-                        .font(Typography.machine(13)).foregroundStyle(Palette.text)
-                        .scrollContentBackground(.hidden)
-                        .padding(10).background(Palette.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    if !keyPEM.isEmpty {
-                        Button("Clear key") { keyPEM = "" }
-                            .font(Typography.app(14)).foregroundStyle(Palette.died)
+
+                    Button { pasteKeyFromClipboard() } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.on.clipboard").font(.system(size: 15, weight: .semibold))
+                            Text("Paste key from clipboard").font(Typography.app(15, .semibold))
+                        }
+                        .foregroundStyle(Palette.text)
+                        .frame(maxWidth: .infinity).padding(.vertical, 14)
+                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .buttonStyle(.plain)
+
+                    if !keyPEM.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.seal.fill").foregroundStyle(Palette.done)
+                            Text("Key set").font(Typography.app(15)).foregroundStyle(Palette.text)
+                            Spacer(minLength: 8)
+                            Button("Clear") { keyPEM = ""; keyError = nil }
+                                .font(Typography.app(14)).foregroundStyle(Palette.died)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 12)
+                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    if let keyError { caption(keyError, color: Palette.died) }
                     Spacer()
                 }
                 .padding(20)
@@ -188,6 +209,22 @@ struct HostEditor: View {
                 }
             }
         }
+    }
+
+    /// Ingest a PEM key from the clipboard WITHOUT rendering it. Loosely sanity-checks it
+    /// looks like a PEM private key so a stray clipboard string isn't stored as a key.
+    private func pasteKeyFromClipboard() {
+        guard let s = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else {
+            keyError = "Nothing to paste — copy your private key to the clipboard first."
+            return
+        }
+        guard s.contains("PRIVATE KEY") else {
+            keyError = "That doesn't look like a private key (expected a PEM block)."
+            return
+        }
+        keyPEM = s
+        keyError = nil
     }
 
     private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
