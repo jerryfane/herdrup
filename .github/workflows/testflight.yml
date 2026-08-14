@@ -5,8 +5,8 @@
 # phone from Actions with NO developer Mac in the signing material), + its write-up
 # in workflow note 42758 on apps-coc/pr-reviews. Herdr differences are called out
 # inline. Key reuse: keephair is on the SAME Apple team (FXQ5Z9HHY6), so the
-# distribution CERTIFICATE is team-wide and shared; herdr's provisioning PROFILES are
-# created automatically by Xcode at archive time (-allowProvisioningUpdates + ASC key).
+# distribution CERTIFICATE is team-wide and shared; herdr only needs its own
+# provisioning PROFILE for com.jerryfane.herdr.
 #
 # WHAT THIS IS NOT: the Mac build box on the tailnet still builds every branch
 # for the SIMULATOR and screenshots it — that is the correctness signal and stays.
@@ -126,82 +126,31 @@ jobs:
           rm -f /tmp/dist.p12
           security find-identity -v -p codesigning build.keychain
 
-      - name: Write App Store Connect API key (automatic signing + upload)
-        # Automatic signing needs the ASC key at archive/export time so xcodebuild's
-        # -allowProvisioningUpdates can create/renew the Apple Distribution cert + the
-        # App Store profiles (app AND the widget extension, #90) on demand — no hand-minted
-        # profile. Written once here; archive + export reuse it via $ASC_KEYFILE. The
-        # always() cleanup removes ~/private_keys/AuthKey_*.p8.
+      - name: Install provisioning profile
         env:
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_P8_BASE64 }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
-          mkdir -p ~/private_keys
-          KEYFILE="$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
-          echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
-          echo "ASC_KEYFILE=$KEYFILE" >> "$GITHUB_ENV"
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
+            > ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision
+          INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
+            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)")
+          echo "installed profile: $INSTALLED"
+          # Preflight: three names must agree or the run fails deep — the installed
+          # profile, the export secret (PROVISIONING_PROFILE_NAME → ExportOptions), and
+          # the specifier project.yml archives with. Assert equality at the top.
+          SPECIFIER="Herdrup App Store"
+          if [ "$INSTALLED" != "$SPECIFIER" ] || [ "$PROFILE_NAME" != "$SPECIFIER" ]; then
+            echo "::error::profile-name mismatch — installed='$INSTALLED', secret PROVISIONING_PROFILE_NAME='$PROFILE_NAME', project.yml specifier='$SPECIFIER' (all three must match)."
+            exit 1
+          fi
 
-      - name: Archive
-        # Automatic signing: -allowProvisioningUpdates + the ASC API key let xcodebuild
-        # create/renew the Apple Distribution cert + App Store profiles (app AND widget
-        # extension) on demand. Signing settings (team, automatic style) live on the Herdr
-        # app target in project.yml (base) — NOT on this command line: a global specifier
-        # would try to sign the SwiftPM dependency targets (swift-crypto / swift-nio via
-        # Citadel), which "do not support provisioning profiles", and fail the archive.
-        env:
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-        run: |
-          xcodebuild -project Herdr.xcodeproj -scheme Herdr \
-            -configuration Distribution -destination 'generic/platform=iOS' \
-            -archivePath /tmp/Herdr.xcarchive \
-            -clonedSourcePackagesDirPath SourcePackages \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEYFILE" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            CURRENT_PROJECT_VERSION="$BUILD" \
-            archive
-
-      - name: Export .ipa
-        # LOCAL signing on export. The Archive (automatic + -allowProvisioningUpdates)
-        # already created, downloaded, and EMBEDDED the App Store profile(s) it signed with
-        # INTO the .xcarchive, so read them straight from there. That is authoritative (the
-        # exact profiles the app was signed with) and immune to the runner's Xcode-version
-        # profile directory (Xcode 16+ moved it out of ~/Library/MobileDevice) and to
-        # dev/ad-hoc/expiry ambiguity. Export MANUALLY with those so Xcode never attempts
-        # CLOUD signing, which needs a cloud-managed distribution cert this team does not use
-        # (we import our own) — the "Cloud signing permission error". `find` picks up the app
-        # AND any PlugIns/*.appex profile, so the widget extension needs no change here.
+      - name: Write ExportOptions.plist
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
-          APP_DIR=$(ls -d /tmp/Herdr.xcarchive/Products/Applications/*.app 2>/dev/null | head -1)
-          [ -d "$APP_DIR" ] || { echo "::error::no .app in the archive"; ls -la /tmp/Herdr.xcarchive/Products/Applications || true; exit 1; }
-          # Map every embedded profile (app + appex) to its bundle id. Process substitution
-          # (not a pipe) keeps the appended var in this shell; bash 3.2 on the runner is fine.
-          PROFILES_XML=""
-          while IFS= read -r mp; do
-            plist=$(security cms -D -i "$mp" 2>/dev/null) || continue
-            name=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$plist" 2>/dev/null) || continue
-            appid=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$plist" 2>/dev/null) || continue
-            bundle="${appid#*.}"   # strip the TEAMID. prefix
-            # Assert it's an APP STORE profile, not development / ad-hoc / enterprise: those
-            # embed a ProvisionedDevices list or ProvisionsAllDevices, or get-task-allow=true.
-            # Fail loudly — a wrong-type embedded profile means the archive signed wrong, and
-            # a manual app-store-connect export with it would fail cryptically anyway.
-            gta=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
-            has_devices=no
-            if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' /dev/stdin <<< "$plist" >/dev/null 2>&1; then has_devices=yes; fi
-            all_devices=$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
-            if [ "$gta" = "true" ] || [ "$has_devices" = "yes" ] || [ "$all_devices" = "true" ]; then
-              echo "::error::embedded profile for $bundle ('$name') is NOT an App Store profile (get-task-allow=$gta ProvisionedDevices=$has_devices ProvisionsAllDevices=$all_devices)"
-              exit 1
-            fi
-            echo "embedded App Store profile: $bundle -> $name"
-            PROFILES_XML="${PROFILES_XML}<key>${bundle}</key><string>${name}</string>"
-          done < <(find "$APP_DIR" -name embedded.mobileprovision)
-          if [ -z "$PROFILES_XML" ]; then echo "::error::no embedded provisioning profiles in the archive"; exit 1; fi
           cat > /tmp/ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -212,11 +161,31 @@ jobs:
             <key>signingStyle</key><string>manual</string>
             <key>uploadSymbols</key><true/>
             <key>provisioningProfiles</key>
-            <dict>${PROFILES_XML}</dict>
+            <dict>
+              <key>com.jerryfane.herdr</key><string>${PROFILE_NAME}</string>
+            </dict>
           </dict>
           </plist>
           EOF
-          echo "--- ExportOptions.plist ---"; cat /tmp/ExportOptions.plist
+
+      - name: Archive
+        # Manual signing (team, style, profile specifier, Apple Distribution identity)
+        # is scoped to the Herdr APP target in project.yml (configs.Release) — NOT
+        # passed here on the command line. Passing it globally applied the provisioning
+        # profile to the SwiftPM dependency targets (swift-crypto / swift-nio via
+        # Citadel), which are libraries that "do not support provisioning profiles",
+        # and the archive failed (keephair trap b's cousin — but for a dependency-heavy
+        # app the fix is target scoping, not a specifier on the command line).
+        run: |
+          xcodebuild -project Herdr.xcodeproj -scheme Herdr \
+            -configuration Distribution -destination 'generic/platform=iOS' \
+            -archivePath /tmp/Herdr.xcarchive \
+            -clonedSourcePackagesDirPath SourcePackages \
+            CURRENT_PROJECT_VERSION="$BUILD" \
+            archive
+
+      - name: Export .ipa
+        run: |
           xcodebuild -exportArchive -archivePath /tmp/Herdr.xcarchive \
             -exportOptionsPlist /tmp/ExportOptions.plist \
             -exportPath /tmp/export

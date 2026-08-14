@@ -19,10 +19,10 @@ options:
   createIntermediateGroups: true
 
 # Debug + Release are the defaults (buildbox builds Debug-iphonesimulator; the Mac
-# lane scripts/testflight.sh archives Release with automatic account signing).
-# Distribution is a release-type config used by the GitHub Actions CI archive, which
-# now also signs AUTOMATICALLY (xcodebuild -allowProvisioningUpdates + the App Store
-# Connect API key), so Xcode manages the profiles for the app and its widget extension.
+# lane scripts/testflight.sh archives Release with AUTOMATIC account signing).
+# Distribution is a release-type config used ONLY by the GitHub Actions CI archive,
+# which needs MANUAL signing — isolated here so the CI's manual profile does not
+# regress the Mac lane's automatic Release signing.
 configs:
   Debug: debug
   Release: release
@@ -182,14 +182,15 @@ targets:
         # they take effect only for a device archive. See scripts/testflight.sh.
         DEVELOPMENT_TEAM: FXQ5Z9HHY6
         CODE_SIGN_STYLE: Automatic
-      # The Distribution config (GitHub Actions CI archive) now inherits the base
-      # AUTOMATIC signing (DEVELOPMENT_TEAM + CODE_SIGN_STYLE: Automatic) rather than
-      # overriding to a hand-minted profile: the CI archive/export run xcodebuild with
-      # `-allowProvisioningUpdates` + the App Store Connect API key, so Xcode creates and
-      # renews the Apple Distribution cert and the App Store profile(s) on demand — for the
-      # app AND for the widget extension (#90), which no longer needs a hand-minted profile.
-      # (Owner-authorised switch to automatic signing, Aug 14 2026.) Debug (the buildbox sim
-      # build) is never code-signed, so the green sim build is unaffected.
+      # The Distribution config (GitHub Actions CI archive) signs MANUALLY, scoped to
+      # THIS app target. It must NOT be passed on the xcodebuild command line: that
+      # applies the provisioning profile to EVERY target, including the SwiftPM
+      # dependency targets (swift-crypto / swift-nio, pulled via Citadel), which are
+      # libraries that "do not support provisioning profiles" — and the archive fails.
+      # Scoped here, only the app target carries the profile. It lives on Distribution,
+      # NOT Release, so the Mac lane's automatic Release signing (scripts/testflight.sh)
+      # is unaffected; Debug (the buildbox sim build) is never code-signed. The
+      # specifier matches the profile minted into the `testflight` GitHub environment.
       configs:
         # aps-environment resolves from APS_ENVIRONMENT per config: `development` for an on-device
         # Debug build (which provisions against a development profile / sandbox APNs), `production` for
@@ -200,7 +201,9 @@ targets:
           APS_ENVIRONMENT: production
         Distribution:
           APS_ENVIRONMENT: production
-          # Inherits DEVELOPMENT_TEAM + CODE_SIGN_STYLE: Automatic from the base.
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
 
   # UI-test bundle — the automated SCROLL RECEIPT. Launches the app in the
   # HERDR_SCREENSHOT_MOCK=scroll pane (a real SwiftTerm view fed 200 lines), swipes it,
