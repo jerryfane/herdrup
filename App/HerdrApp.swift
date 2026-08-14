@@ -989,19 +989,23 @@ struct TerminalHomeView: View {
                       initialReply: "", siblings: orderedSiblings))
     }
 
-    /// A tapped gram push opens the Gram cover. Like `applyDeepLink`, it is consumed
-    /// on the onChange path (app already up) AND post-load (a cold-launch tap set the
-    /// flag before this view existed). Clearing it lets a later tap re-trigger.
+    /// A tapped gram push selects the Gram tab. Like `applyDeepLink`, it is consumed on
+    /// the onChange path (app already up) AND post-load (a cold-launch tap set the flag
+    /// before this view existed). Leaving it armed lets a later trigger re-invoke it.
     private func openGramIfPending() {
         guard push.pendingGram else { return }
         // The fork notice (a fullScreenCover) is up: don't switch under it; its
         // onDismiss re-invokes this once it's gone.
         if showForkNotice { return }
+        // A modal sheet is up, OR a spawned pane is queued to open: DEFER, do not
+        // consume. Consuming here would dismiss the sheet out from under the user (e.g.
+        // mid new-agent entry) and swallow the tap. Leave the push armed; the sheet's
+        // onDismiss re-invokes this once it's gone (and a queued spawn wins there,
+        // deliberately leaving the push pending rather than yanking the new terminal).
+        if activeCover != nil || pendingOpenSlot != nil { return }
         push.pendingGram = false
-        // A modal sheet (new-agent / gestures) may be up — close it so the Gram tab is
-        // visible. Drop any fronted terminal too, or the pane overlay would cover the
-        // tab (the pane stays MOUNTED, so reopening it later is instant).
-        activeCover = nil
+        // Drop any fronted terminal so the Gram tab is visible (the pane stays MOUNTED,
+        // so reopening it later is instant).
         frontID = nil
         selectedTab = .gram
     }
