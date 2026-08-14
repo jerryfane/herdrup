@@ -959,6 +959,11 @@ struct TerminalHomeView: View {
                 slots.removeFirst()         // LRU is index 0 and never the just-appended new front
             }
         }
+        // A fronted pane must overlay the AGENTS tab: that is where the tab-bar hide is
+        // declared, so a pane opened from a push deep-link while Gram/Settings is showing
+        // would otherwise leave the tab bar drawing over it. Selecting Agents keeps every
+        // open path (row tap, deep-link, spawn, swipe-paging) consistent.
+        selectedTab = .agents
         frontID = slot.paneID
     }
 
@@ -1074,17 +1079,56 @@ struct TerminalHomeView: View {
                 // `frontID != nil` only flips on the list<->terminal open/close.
                 .animation(.easeOut(duration: 0.26), value: frontID != nil)
         }
+        // Connect-scoped lifecycle, attached to the PERSISTENT ROOT, not a tab: a
+        // TabView re-runs a tab's .task / .onAppear every time that tab re-appears, so
+        // keeping these here fires load / fork-probe / first-run / deep-links ONCE per
+        // connect (this view is .id(session)-scoped) rather than on every tab switch —
+        // which otherwise re-showed the fork notice and cancelled an in-flight load.
+        .task { await load() }
+        // If the daemon lacks the fork features, surface the advisory notice. Only a
+        // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
+        // probeFork). If a cover is already up (e.g. the first-run gestures sheet the
+        // onAppear below opens), DEFER — the sheet's onDismiss drains it.
+        .task {
+            guard await client.probeFork() == .notFork else { return }
+            if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
+        }
+        // First launch: show the gestures tutorial once — but NOT over a pending push
+        // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
+        // the pane, wasting the one-shot). Burn the seen-flag ONLY when we present.
+        .onAppear {
+            if !hasSeenGesturesHelp,
+                activeCover == nil,
+                !push.pendingGram,
+                push.pendingPaneID == nil
+            {
+                hasSeenGesturesHelp = true
+                activeCover = .gestures
+            }
+        }
+        // A push tapped while already loaded deep-links immediately, regardless of the
+        // selected tab (open() selects Agents); the cold-launch / just-loaded case is
+        // handled at the end of load().
+        .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
+        .onChange(of: push.pendingGram) { _, newValue in if newValue { openGramIfPending() } }
         // ONE item-based sheet, not two stacked isPresented presentations (stacked
         // presentation modifiers on a single view are historically fragile). A SHEET
         // (not a full-screen cover) so it presents bottom-up and swipe-down dismisses
         // it — the header close buttons still work too. onDismiss applies a queued
         // open AFTER the sheet is fully gone.
         .sheet(item: $activeCover, onDismiss: {
-            if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
-            openGramIfPending()   // a gram tap deferred while another sheet was up
+            // A just-spawned pane wins the foreground: open it and DON'T let a racing
+            // gram push immediately drop it (the push stays pending — its notification
+            // is still there — so the new agent's terminal is not yanked away). Else
+            // apply any deferred gram tap now that the sheet is fully gone.
+            if let slot = pendingOpenSlot {
+                pendingOpenSlot = nil
+                open(slot)
+            } else {
+                openGramIfPending()
+            }
             // A fork notice deferred behind this sheet fires now — but only if nothing
-            // else claimed the foreground (a queued gram sets activeCover above), so
-            // the fullScreenCover never races the sheet.
+            // else claimed the foreground, so the fullScreenCover never races the sheet.
             if pendingForkNotice && activeCover == nil {
                 pendingForkNotice = false
                 showForkNotice = true
@@ -1150,37 +1194,6 @@ struct TerminalHomeView: View {
             // full-screen (the pane overlay covers it too; this animates it away and
             // guards against the bar drawing over the overlay on some iOS versions).
             .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
-            .task { await load() }
-            // Once per connect (this view is .id(session)-scoped): if the daemon
-            // lacks the fork features, surface the advisory notice. Only a
-            // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
-            // probeFork). If a cover is already up (e.g. the first-run gestures
-            // sheet the onAppear below opens synchronously), DEFER — the sheet's
-            // onDismiss drains it, so we never arm two presentations at once.
-            .task {
-                guard await client.probeFork() == .notFork else { return }
-                if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
-            }
-            // First launch: show the gestures tutorial once — but NOT over a pending
-            // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
-            // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
-            // when we actually present, so a deep-linked first launch still gets the
-            // tutorial on its next clean launch rather than never.
-            .onAppear {
-                if !hasSeenGesturesHelp,
-                    activeCover == nil,
-                    !push.pendingGram,
-                    push.pendingPaneID == nil
-                {
-                    hasSeenGesturesHelp = true
-                    activeCover = .gestures
-                }
-            }
-            // A push tapped while the home view is already loaded (app foregrounded / already
-            // on the list) deep-links immediately; the cold-launch / just-loaded case is handled
-            // at the end of load().
-            .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
-            .onChange(of: push.pendingGram) { _, newValue in if newValue { openGramIfPending() } }
         }
     }
 
