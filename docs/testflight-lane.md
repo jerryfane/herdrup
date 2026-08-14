@@ -9,36 +9,41 @@ lane is reviewable in-repo config + a workflow, not Xcode-UI state.
 `.github/workflows/testflight.yml` (GitHub Actions, macOS runner), on
 `workflow_dispatch` or a `v*` tag:
 
-- **Signs MANUALLY** from a distribution certificate + provisioning profile imported
-  from the repo's `testflight` GitHub **Environment** into a throwaway keychain.
-- Uses a **dedicated `Distribution` build configuration** (project.yml) so the manual
-  profile is scoped to the Herdr **app target** and never touches the SwiftPM
-  dependency targets (swift-crypto / swift-nio via Citadel) — libraries that "do not
-  support provisioning profiles" and would otherwise fail the archive.
+- **Signs AUTOMATICALLY**: the archive/export run `xcodebuild -allowProvisioningUpdates`
+  with the App Store Connect API key, so Xcode creates/renews the App Store provisioning
+  profiles on demand — for the app AND its widget extension. The shared team **distribution
+  certificate** is still imported from the `testflight` GitHub **Environment** into a
+  throwaway keychain; only the per-bundle PROFILES are automatic (no hand-minted profile).
+- Uses the **`Distribution` build configuration** (project.yml), which inherits the base
+  automatic signing scoped to the Herdr **app target** — the signing settings live on the
+  target, not the xcodebuild command line, so they never touch the SwiftPM dependency
+  targets (swift-crypto / swift-nio via Citadel), libraries that "do not support
+  provisioning profiles" and would otherwise fail the archive.
 - Archives → exports → uploads → **verifies at the destination**: polls `/v1/builds`
   and requires the build to reach `READY_FOR_BETA_TESTING` / `IN_BETA_TESTING` (failing
   loudly on `FAILED` / `INVALID` / `MISSING_EXPORT_COMPLIANCE`), so a green run always
   means the build actually arrived — not just that the pipeline was green.
 - **No developer Mac touches the signing material.** The Apple **Distribution
-  certificate + provisioning profile are created on Linux** via `openssl` + the App
-  Store Connect API key (the recipe the keephair seat proved). The team distribution
-  cert is shared across the owner's apps; herdr's profile is `Herdrup App Store`
-  against `com.jerryfane.herdr`.
+  certificate** is a team-wide cert (shared across the owner's apps), imported from the
+  Environment; the **provisioning profiles are created by Xcode on demand** at archive
+  time via `-allowProvisioningUpdates` + the App Store Connect API key — for
+  `com.jerryfane.herdr` and its widget extension, with no hand-minted profile to maintain.
 
 **Environment secrets** (`testflight`, scoped to main + `v*` tags — a feature-branch
 run cannot read them): `DIST_CERT_P12_BASE64`, `DIST_CERT_PASSWORD`,
 `KEYCHAIN_PASSWORD`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_ISSUER_ID`,
-`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_P8_BASE64`, `PROVISIONING_PROFILE_BASE64`,
-`PROVISIONING_PROFILE_NAME`.
+`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_P8_BASE64`. (The old
+`PROVISIONING_PROFILE_BASE64` / `PROVISIONING_PROFILE_NAME` are no longer used — the
+profiles are automatic now.)
 
 ## Signing config (project.yml)
 
 - Base `DEVELOPMENT_TEAM: FXQ5Z9HHY6` + `CODE_SIGN_STYLE: Automatic` — **inert for the
   buildbox's iphonesimulator build** (the simulator is never code-signed).
-- `Distribution` config (release-type): manual signing on the app target
-  (`CODE_SIGN_STYLE: Manual`, `PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"`,
-  `CODE_SIGN_IDENTITY: "Apple Distribution"`). Used only by the CI archive.
-- `Release` stays automatic — it belongs to the Mac fallback lane, not the CI.
+- `Distribution` config (release-type): **inherits the base automatic signing** (it no
+  longer overrides to manual). Used by the CI archive, which passes
+  `-allowProvisioningUpdates` + the ASC key so Xcode manages the profiles.
+- `Release` also automatic — it belongs to the Mac fallback lane.
 
 ## Export compliance
 
@@ -66,14 +71,15 @@ uploads; a plain run is a signing dry-run.
 1. The App Store Connect **app record** for `com.jerryfane.herdr` (name Herdrup) —
    created in the ASC web UI, because Apple's API forbids app creation (POST /v1/apps →
    403; GET/UPDATE only).
-2. The `testflight` environment **secrets** (the nine above; the private keys never
+2. The `testflight` environment **secrets** (the seven above; the private keys never
    transit a pane/transcript — written repo-to-repo).
 3. (No per-build export-compliance answer is needed — `ITSAppUsesNonExemptEncryption =
    false` declares the standard-encryption exemption up front, so internal builds are
    testable on upload.)
 
-The bundle id, the shared distribution certificate, and the `Herdrup App Store` profile
-are created via the ASC API on Linux, not by hand.
+The bundle id and the shared distribution certificate are set up once; the App Store
+provisioning profiles are created automatically by Xcode at archive time (no hand-minted
+profile).
 
 ## Verification
 

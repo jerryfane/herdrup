@@ -5,8 +5,8 @@
 # phone from Actions with NO developer Mac in the signing material), + its write-up
 # in workflow note 42758 on apps-coc/pr-reviews. Herdr differences are called out
 # inline. Key reuse: keephair is on the SAME Apple team (FXQ5Z9HHY6), so the
-# distribution CERTIFICATE is team-wide and shared; herdr only needs its own
-# provisioning PROFILE for com.jerryfane.herdr.
+# distribution CERTIFICATE is team-wide and shared; herdr's provisioning PROFILES are
+# created automatically by Xcode at archive time (-allowProvisioningUpdates + ASC key).
 #
 # WHAT THIS IS NOT: the Mac build box on the tailnet still builds every branch
 # for the SIMULATOR and screenshots it — that is the correctness signal and stays.
@@ -126,30 +126,24 @@ jobs:
           rm -f /tmp/dist.p12
           security find-identity -v -p codesigning build.keychain
 
-      - name: Install provisioning profile
+      - name: Write App Store Connect API key (automatic signing + upload)
+        # Automatic signing needs the ASC key at archive/export time so xcodebuild's
+        # -allowProvisioningUpdates can create/renew the Apple Distribution cert + the
+        # App Store profiles (app AND the widget extension, #90) on demand — no hand-minted
+        # profile. Written once here; archive + export reuse it via $ASC_KEYFILE. The
+        # always() cleanup removes ~/private_keys/AuthKey_*.p8.
         env:
-          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
-          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_P8_BASE64 }}
         run: |
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
-            > ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision
-          INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< \
-            "$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/herdr.mobileprovision)")
-          echo "installed profile: $INSTALLED"
-          # Preflight: three names must agree or the run fails deep — the installed
-          # profile, the export secret (PROVISIONING_PROFILE_NAME → ExportOptions), and
-          # the specifier project.yml archives with. Assert equality at the top.
-          SPECIFIER="Herdrup App Store"
-          if [ "$INSTALLED" != "$SPECIFIER" ] || [ "$PROFILE_NAME" != "$SPECIFIER" ]; then
-            echo "::error::profile-name mismatch — installed='$INSTALLED', secret PROVISIONING_PROFILE_NAME='$PROFILE_NAME', project.yml specifier='$SPECIFIER' (all three must match)."
-            exit 1
-          fi
+          mkdir -p ~/private_keys
+          KEYFILE="$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
+          echo "ASC_KEYFILE=$KEYFILE" >> "$GITHUB_ENV"
 
       - name: Write ExportOptions.plist
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
         run: |
           cat > /tmp/ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -158,37 +152,46 @@ jobs:
           <dict>
             <key>method</key><string>app-store-connect</string>
             <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
+            <key>signingStyle</key><string>automatic</string>
             <key>uploadSymbols</key><true/>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>com.jerryfane.herdr</key><string>${PROFILE_NAME}</string>
-            </dict>
           </dict>
           </plist>
           EOF
 
       - name: Archive
-        # Manual signing (team, style, profile specifier, Apple Distribution identity)
-        # is scoped to the Herdr APP target in project.yml (configs.Release) — NOT
-        # passed here on the command line. Passing it globally applied the provisioning
-        # profile to the SwiftPM dependency targets (swift-crypto / swift-nio via
-        # Citadel), which are libraries that "do not support provisioning profiles",
-        # and the archive failed (keephair trap b's cousin — but for a dependency-heavy
-        # app the fix is target scoping, not a specifier on the command line).
+        # Automatic signing: -allowProvisioningUpdates + the ASC API key let xcodebuild
+        # create/renew the Apple Distribution cert + App Store profiles (app AND widget
+        # extension) on demand. Signing settings (team, automatic style) live on the Herdr
+        # app target in project.yml (base) — NOT on this command line: a global specifier
+        # would try to sign the SwiftPM dependency targets (swift-crypto / swift-nio via
+        # Citadel), which "do not support provisioning profiles", and fail the archive.
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           xcodebuild -project Herdr.xcodeproj -scheme Herdr \
             -configuration Distribution -destination 'generic/platform=iOS' \
             -archivePath /tmp/Herdr.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEYFILE" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             CURRENT_PROJECT_VERSION="$BUILD" \
             archive
 
       - name: Export .ipa
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           xcodebuild -exportArchive -archivePath /tmp/Herdr.xcarchive \
             -exportOptionsPlist /tmp/ExportOptions.plist \
-            -exportPath /tmp/export
+            -exportPath /tmp/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEYFILE" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 
       - name: Upload to TestFlight
         # The App Store Connect API key already exists (issuer + key id + .p8). altool
