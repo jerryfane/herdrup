@@ -34,6 +34,11 @@ final class SpeechDictator: ObservableObject {
     private var generation = 0
 
     var isRecording: Bool { state == .recording }
+    /// Busy from the moment the mic is tapped (permission acquisition) through recording.
+    /// Callers gate Send on this so a rapid Send DURING permission acquisition can't clear
+    /// the field out from under a session that is about to start (and then have the next
+    /// partial restore the just-sent text).
+    var isBusy: Bool { state == .recording || state == .requesting }
 
     /// Start a dictation session, requesting mic + speech permission on first use.
     func start() {
@@ -198,7 +203,9 @@ struct MicButton: View {
             guard !t.isEmpty else { return }
             text = base.isEmpty ? t : base + " " + t
         }
-        .onChange(of: dictator.isRecording) { _, r in recording?.wrappedValue = r }
+        // Mirror BUSY (requesting-or-recording), so the parent gates Send from the moment
+        // the mic is tapped — not only once recognition is live.
+        .onChange(of: dictator.state) { _, _ in recording?.wrappedValue = dictator.isBusy }
         .onChange(of: isActive) { _, active in if !active { dictator.stop() } }
         .onChange(of: scenePhase) { _, phase in if phase != .active { dictator.stop() } }
         .onDisappear { dictator.stop() }

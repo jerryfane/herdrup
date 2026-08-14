@@ -2018,9 +2018,12 @@ struct TerminalPaneContent: View {
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
             // chord interception, so a dictation partial is never read as a control byte.
             MicButton(text: $reply, diameter: 40, iconSize: 15,
-                      isActive: isForeground, recording: $replyDictating,
+                      isActive: isForeground && !autoDelivering, recording: $replyDictating,
                       onStart: { ctrlArmed = false })
-                .disabled(sending)   // mutually gated with Send (see canSend)
+                // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
+                // isActive drops on autoDelivering so an in-flight dictation stops before
+                // the auto-deliver clears the reply, and it can't be started during either.
+                .disabled(sending || autoDelivering)
             Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
