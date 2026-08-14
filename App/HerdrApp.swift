@@ -877,6 +877,10 @@ struct TerminalHomeView: View {
     @State private var trustFailed = false
     @State private var search = ""
     @State private var activeCover: ActiveCover?
+    /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
+    /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
+    /// Settings were modal covers before #88; they are persistent tabs now.
+    @State private var selectedTab: HomeTab = .agents
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
     /// Shown once per connect when the daemon lacks the fork features (probe ==
@@ -887,8 +891,14 @@ struct TerminalHomeView: View {
     /// with `activeCover`, so the two presentations are never armed at once.
     @State private var pendingForkNotice = false
 
+    /// The bottom tabs. Terminal is deliberately absent — a terminal fronts a
+    /// keep-mounted pane over the tabs rather than being one.
+    private enum HomeTab: Hashable { case agents, gram, settings }
+
+    /// The only remaining MODAL covers: the new-agent form and the first-run gestures
+    /// tutorial. Gram and Settings became persistent tabs (#88).
     private enum ActiveCover: Int, Identifiable {
-        case settings, newAgent, gram, gestures
+        case newAgent, gestures
         var id: Int { rawValue }
     }
 
@@ -920,19 +930,6 @@ struct TerminalHomeView: View {
     /// HerdrKit's tested `AgentList`, not here.
     private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
 
-    /// The agent the Terminal tab opens: the herdr-focused pane if the session
-    /// reports one (`AgentInfo.focused`), else the top of the sorted list — which is
-    /// the highest-priority row (needs-you first), so the tab always lands on the most
-    /// useful terminal rather than nothing. Nil only when there are no agents at all.
-    private var terminalTarget: AgentRow? {
-        // LIVE rows only. A stopped pane is absent from the census (not live) — its
-        // pane is gone, so never open it, not even if it is the focused one; and if
-        // every known agent is dead the list is empty and the tab correctly disables.
-        // (When there is no census, AgentRow defaults isLive=true, so nothing is lost.)
-        let rows = fullList.sections.flatMap { $0.rows }.filter(\.isLive)
-        return rows.first(where: { $0.info.focused == true }) ?? rows.first
-    }
-
     /// The ordered LIVE agents a pushed pane can page through with a horizontal swipe.
     /// DELIBERATELY the full sorted live list (`AgentList.rows`, needs-you first), NOT the
     /// search-filtered/collapsed `visibleSections` — paging navigates the whole herd, not
@@ -962,6 +959,11 @@ struct TerminalHomeView: View {
                 slots.removeFirst()         // LRU is index 0 and never the just-appended new front
             }
         }
+        // A fronted pane must overlay the AGENTS tab: that is where the tab-bar hide is
+        // declared, so a pane opened from a push deep-link while Gram/Settings is showing
+        // would otherwise leave the tab bar drawing over it. Selecting Agents keeps every
+        // open path (row tap, deep-link, spawn, swipe-paging) consistent.
+        selectedTab = .agents
         frontID = slot.paneID
     }
 
@@ -987,25 +989,25 @@ struct TerminalHomeView: View {
                       initialReply: "", siblings: orderedSiblings))
     }
 
-    /// A tapped gram push opens the Gram cover. Like `applyDeepLink`, it is consumed
-    /// on the onChange path (app already up) AND post-load (a cold-launch tap set the
-    /// flag before this view existed). Clearing it lets a later tap re-trigger.
+    /// A tapped gram push selects the Gram tab. Like `applyDeepLink`, it is consumed on
+    /// the onChange path (app already up) AND post-load (a cold-launch tap set the flag
+    /// before this view existed). Leaving it armed lets a later trigger re-invoke it.
     private func openGramIfPending() {
         guard push.pendingGram else { return }
-        // The fork notice (a fullScreenCover) is up: don't arm the .gram sheet over it
-        // — that recreates the two-presentations-on-one-view collision. Leave the flag
-        // set; the notice's onDismiss re-invokes this once it's gone.
+        // The fork notice (a fullScreenCover) is up: don't switch under it; its
+        // onDismiss re-invokes this once it's gone.
         if showForkNotice { return }
-        // Another cover is already presented: `fullScreenCover(item:)` does not
-        // reliably swap to a new item while up, so dismiss it first (keeping the flag
-        // armed). The cover's onDismiss re-invokes this, and with none presented it
-        // opens the Gram page.
-        if let current = activeCover, current != .gram {
-            activeCover = nil
-            return
-        }
+        // A modal sheet is up, OR a spawned pane is queued to open: DEFER, do not
+        // consume. Consuming here would dismiss the sheet out from under the user (e.g.
+        // mid new-agent entry) and swallow the tap. Leave the push armed; the sheet's
+        // onDismiss re-invokes this once it's gone (and a queued spawn wins there,
+        // deliberately leaving the push pending rather than yanking the new terminal).
+        if activeCover != nil || pendingOpenSlot != nil { return }
         push.pendingGram = false
-        activeCover = .gram
+        // Drop any fronted terminal so the Gram tab is visible (the pane stays MOUNTED,
+        // so reopening it later is instant).
+        frontID = nil
+        selectedTab = .gram
     }
 
     /// Swipe-page from the fronted pane to its prev/next sibling (clamped). `open()`s the
@@ -1031,57 +1033,32 @@ struct TerminalHomeView: View {
 
     var body: some View {
         ZStack {
-            NavigationStack {
-                ZStack {
-                    Palette.ground.ignoresSafeArea()
-                    VStack(spacing: 0) {
-                        header
-                        if let error {
-                            errorView(error)
-                        } else if loading && agents.isEmpty {
-                            // Spinner ONLY on a genuine first load (or after reconnect clears
-                            // `agents`). A re-entry with data in hand refreshes silently rather
-                            // than blanking the still-valid list to a spinner.
-                            Spacer(); ProgressView().tint(Palette.textDim); Spacer()
-                        } else {
-                            agentList
-                        }
-                        tabBar
-                    }
-                }
-                .toolbar(.hidden, for: .navigationBar)
-                .task { await load() }
-                // Once per connect (this view is .id(session)-scoped): if the daemon
-                // lacks the fork features, surface the advisory notice. Only a
-                // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
-                // probeFork). If a cover is already up (e.g. the first-run gestures
-                // sheet the onAppear below opens synchronously), DEFER — the sheet's
-                // onDismiss drains it, so we never arm two presentations at once.
-                .task {
-                    guard await client.probeFork() == .notFork else { return }
-                    if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
-                }
-                // First launch: show the gestures tutorial once — but NOT over a pending
-                // push deep-link (openGramIfPending / applyDeepLink would dismiss it to
-                // show Gram or the pane, wasting the one-shot). Burn the seen-flag ONLY
-                // when we actually present, so a deep-linked first launch still gets the
-                // tutorial on its next clean launch rather than never.
-                .onAppear {
-                    if !hasSeenGesturesHelp,
-                        activeCover == nil,
-                        !push.pendingGram,
-                        push.pendingPaneID == nil
-                    {
-                        hasSeenGesturesHelp = true
-                        activeCover = .gestures
-                    }
-                }
-                // A push tapped while the home view is already loaded (app foregrounded / already
-                // on the list) deep-links immediately; the cold-launch / just-loaded case is handled
-                // at the end of load().
-                .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
-                .onChange(of: push.pendingGram) { _, newValue in if newValue { openGramIfPending() } }
+            // Apple's standard tab bar (Liquid Glass automatically on iOS 26, the clean
+            // standard bar below that) replaces the old hand-built pill (#88). Terminal
+            // is NOT a tab — it fronts a keep-mounted pane over everything (below).
+            TabView(selection: $selectedTab) {
+                agentsTab
+                    .tag(HomeTab.agents)
+                    .tabItem { Label("Agents", systemImage: "square.grid.2x2.fill") }
+
+                // Gram and Settings were modal covers; they are persistent tabs now.
+                // Both are nav-agnostic and take no onClose as tabs (no close button).
+                GramView(client: client, agents: agents)
+                    .tag(HomeTab.gram)
+                    .tabItem { Label("Gram", systemImage: "bubble.left.and.bubble.right") }
+
+                SettingsView(
+                    host: host,
+                    connected: error == nil && !loading,
+                    // Withhold reconnect during a host-key rejection — reconnecting then
+                    // would first-contact-trust the next key (same gate as the recovery
+                    // screen's withheld retry).
+                    canReconnect: rejectedFingerprint == nil,
+                    onReconnect: onReconnect)
+                    .tag(HomeTab.settings)
+                    .tabItem { Label("Settings", systemImage: "gearshape") }
             }
+            .tint(Palette.text)
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
             // covers it and captures touches; otherwise the overlay is fully inert.
@@ -1106,17 +1083,56 @@ struct TerminalHomeView: View {
                 // `frontID != nil` only flips on the list<->terminal open/close.
                 .animation(.easeOut(duration: 0.26), value: frontID != nil)
         }
+        // Connect-scoped lifecycle, attached to the PERSISTENT ROOT, not a tab: a
+        // TabView re-runs a tab's .task / .onAppear every time that tab re-appears, so
+        // keeping these here fires load / fork-probe / first-run / deep-links ONCE per
+        // connect (this view is .id(session)-scoped) rather than on every tab switch —
+        // which otherwise re-showed the fork notice and cancelled an in-flight load.
+        .task { await load() }
+        // If the daemon lacks the fork features, surface the advisory notice. Only a
+        // DEFINITIVE not-fork flips it — network/other errors stay quiet (see
+        // probeFork). If a cover is already up (e.g. the first-run gestures sheet the
+        // onAppear below opens), DEFER — the sheet's onDismiss drains it.
+        .task {
+            guard await client.probeFork() == .notFork else { return }
+            if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
+        }
+        // First launch: show the gestures tutorial once — but NOT over a pending push
+        // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
+        // the pane, wasting the one-shot). Burn the seen-flag ONLY when we present.
+        .onAppear {
+            if !hasSeenGesturesHelp,
+                activeCover == nil,
+                !push.pendingGram,
+                push.pendingPaneID == nil
+            {
+                hasSeenGesturesHelp = true
+                activeCover = .gestures
+            }
+        }
+        // A push tapped while already loaded deep-links immediately, regardless of the
+        // selected tab (open() selects Agents); the cold-launch / just-loaded case is
+        // handled at the end of load().
+        .onChange(of: push.pendingPaneID) { _, newValue in if newValue != nil { applyDeepLink() } }
+        .onChange(of: push.pendingGram) { _, newValue in if newValue { openGramIfPending() } }
         // ONE item-based sheet, not two stacked isPresented presentations (stacked
         // presentation modifiers on a single view are historically fragile). A SHEET
         // (not a full-screen cover) so it presents bottom-up and swipe-down dismisses
         // it — the header close buttons still work too. onDismiss applies a queued
         // open AFTER the sheet is fully gone.
         .sheet(item: $activeCover, onDismiss: {
-            if let slot = pendingOpenSlot { pendingOpenSlot = nil; open(slot) }
-            openGramIfPending()   // a gram tap deferred while another sheet was up
+            // A just-spawned pane wins the foreground: open it and DON'T let a racing
+            // gram push immediately drop it (the push stays pending — its notification
+            // is still there — so the new agent's terminal is not yanked away). Else
+            // apply any deferred gram tap now that the sheet is fully gone.
+            if let slot = pendingOpenSlot {
+                pendingOpenSlot = nil
+                open(slot)
+            } else {
+                openGramIfPending()
+            }
             // A fork notice deferred behind this sheet fires now — but only if nothing
-            // else claimed the foreground (a queued gram sets activeCover above), so
-            // the fullScreenCover never races the sheet.
+            // else claimed the foreground, so the fullScreenCover never races the sheet.
             if pendingForkNotice && activeCover == nil {
                 pendingForkNotice = false
                 showForkNotice = true
@@ -1124,16 +1140,6 @@ struct TerminalHomeView: View {
         }) { cover in
             Group {
                 switch cover {
-                case .settings:
-                    SettingsView(
-                        host: host,
-                        connected: error == nil && !loading,
-                        // Withhold reconnect during a host-key rejection — reconnecting
-                        // then would first-contact-trust the next key (same gate as the
-                        // recovery screen's withheld retry).
-                        canReconnect: rejectedFingerprint == nil,
-                        onReconnect: { activeCover = nil; onReconnect() },
-                        onClose: { activeCover = nil })
                 case .newAgent:
                     NewAgentView(
                         client: client,
@@ -1145,11 +1151,6 @@ struct TerminalHomeView: View {
                             activeCover = nil
                         },
                         onCancel: { activeCover = nil })
-                case .gram:
-                    GramView(
-                        client: client,
-                        agents: agents,
-                        onClose: { activeCover = nil })
                 case .gestures:
                     GesturesHelpView(onClose: { activeCover = nil })
                 }
@@ -1167,6 +1168,36 @@ struct TerminalHomeView: View {
             applyDeepLink()
         }) {
             ForkNoticeView(onDismiss: { showForkNotice = false })
+        }
+    }
+
+    /// The Agents tab: the app-drawn header plus the agents list (or the first-load
+    /// spinner / error). It carries the connect lifecycle — load, fork-probe, the
+    /// first-run gestures tutorial, and the push deep-link hooks. Terminal is not a
+    /// tab; it fronts a keep-mounted pane over the whole TabView.
+    private var agentsTab: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    header
+                    if let error {
+                        errorView(error)
+                    } else if loading && agents.isEmpty {
+                        // Spinner ONLY on a genuine first load (or after reconnect clears
+                        // `agents`). A re-entry with data in hand refreshes silently rather
+                        // than blanking the still-valid list to a spinner.
+                        Spacer(); ProgressView().tint(Palette.textDim); Spacer()
+                    } else {
+                        agentList
+                    }
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            // Hide the tab bar while a terminal is fronted so the pane is truly
+            // full-screen (the pane overlay covers it too; this animates it away and
+            // guards against the bar drawing over the overlay on some iOS versions).
+            .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
         }
     }
 
@@ -1220,50 +1251,6 @@ struct TerminalHomeView: View {
             .background(Palette.surface)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
-    }
-
-    private var tabBar: some View {
-        HStack(spacing: 4) {
-            tabItem("square.grid.2x2.fill", "Agents", active: true)
-            // Terminal → front the focused agent's pane (or the top of the list), keep-mounted
-            // like a list open. EMPTY task, so no pre-fill/auto-delivery (pendingPrefill stays
-            // false); the pane re-resolves its own agent identity.
-            Button {
-                if let t = terminalTarget {
-                    open(PaneSlot(paneID: t.info.paneID, title: t.title, agent: t.info,
-                                  initialReply: "", siblings: orderedSiblings))
-                }
-            } label: {
-                tabItem("terminal", "Terminal", active: false)
-            }
-            .buttonStyle(.plain)
-            .disabled(terminalTarget == nil)
-            Button { activeCover = .gram } label: {
-                tabItem("bubble.left.and.bubble.right", "Gram", active: false)
-            }
-            .buttonStyle(.plain)
-            Button { activeCover = .settings } label: {
-                tabItem("gearshape", "Settings", active: false)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(6)
-        .background(Palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 22))
-        .padding(.horizontal, 36).padding(.bottom, 4)
-    }
-
-    private func tabItem(_ system: String, _ label: String, active: Bool) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: system).font(.system(size: 16, weight: .medium))
-            Text(label).font(Typography.app(11, active ? .semibold : .regular))
-        }
-        .foregroundStyle(active ? Palette.text : Palette.textFaint)
-        .frame(maxWidth: .infinity).padding(.vertical, 8)
-        // surfaceRaised (#262A45), NOT surface: the tab bar itself is surface, so an
-        // active pill on surface would vanish (the design's "active tab" is raised).
-        .background(active ? Palette.surfaceRaised : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
     // MARK: list
@@ -2240,7 +2227,9 @@ struct SettingsView: View {
     /// screen enforces. The row is disabled with a reason in that state.
     var canReconnect: Bool = true
     var onReconnect: () -> Void = {}
-    var onClose: () -> Void = {}
+    /// Nil when Settings is a persistent tab (no close button); a modal sheet passes
+    /// one and the header shows an xmark — mirrors GramView's nav-agnostic contract.
+    var onClose: (() -> Void)?
 
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
@@ -2302,10 +2291,13 @@ struct SettingsView: View {
                 .font(Typography.app(20, .semibold))
                 .foregroundStyle(Palette.text)
             Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Palette.textDim)
+            // Only a modal presentation gets a close button; as a tab there is none.
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
             }
         }
         .padding(.horizontal, 16)
