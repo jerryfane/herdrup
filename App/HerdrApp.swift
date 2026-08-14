@@ -1689,7 +1689,7 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering && !replyDictating }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -2020,6 +2020,7 @@ struct TerminalPaneContent: View {
             MicButton(text: $reply, diameter: 40, iconSize: 15,
                       isActive: isForeground, recording: $replyDictating,
                       onStart: { ctrlArmed = false })
+                .disabled(sending)   // mutually gated with Send (see canSend)
             Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)

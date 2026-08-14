@@ -544,7 +544,9 @@ struct GramView: View {
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
                     .disabled(draftDictating)   // dictation owns the field while live
                 // Dictate into the draft (on-device); appends, never clobbers typed text.
+                // Disabled during a send so dictation can't race the field-clear.
                 MicButton(text: $draft, recording: $draftDictating)
+                    .disabled(sending || loadingPhoto)
                 Button {
                     Task { await send() }
                 } label: {
@@ -573,8 +575,10 @@ struct GramView: View {
 
     private var canSend: Bool {
         // Also blocked while a photo is loading, so tapping Send mid-load can't fire a
-        // text-only message that races the attachment in behind it.
-        guard !sending, !loadingPhoto else { return false }
+        // text-only message that races the attachment in behind it, and while dictating
+        // (see MicButton): sending mid-dictation would clear the field, then the next
+        // recognition partial would restore the just-sent text and re-enable a duplicate.
+        guard !sending, !loadingPhoto, !draftDictating else { return false }
         return !attachedFiles.isEmpty
             || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
