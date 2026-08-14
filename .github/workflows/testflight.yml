@@ -187,8 +187,7 @@ jobs:
             appid=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$plist" 2>/dev/null) || continue
             bundle="${appid#*.}"   # strip the TEAMID. prefix
             echo "embedded profile: $bundle -> $name"
-            PROFILES_XML="${PROFILES_XML}      <key>${bundle}</key><string>${name}</string>
-"
+            PROFILES_XML="${PROFILES_XML}<key>${bundle}</key><string>${name}</string>"
           done < <(find "$APP_DIR" -name embedded.mobileprovision)
           if [ -z "$PROFILES_XML" ]; then echo "::error::no embedded provisioning profiles in the archive"; exit 1; fi
           cat > /tmp/ExportOptions.plist <<EOF
@@ -201,8 +200,7 @@ jobs:
             <key>signingStyle</key><string>manual</string>
             <key>uploadSymbols</key><true/>
             <key>provisioningProfiles</key>
-            <dict>
-${PROFILES_XML}    </dict>
+            <dict>${PROFILES_XML}</dict>
           </dict>
           </plist>
           EOF
