@@ -186,7 +186,19 @@ jobs:
             name=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$plist" 2>/dev/null) || continue
             appid=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$plist" 2>/dev/null) || continue
             bundle="${appid#*.}"   # strip the TEAMID. prefix
-            echo "embedded profile: $bundle -> $name"
+            # Assert it's an APP STORE profile, not development / ad-hoc / enterprise: those
+            # embed a ProvisionedDevices list or ProvisionsAllDevices, or get-task-allow=true.
+            # Fail loudly — a wrong-type embedded profile means the archive signed wrong, and
+            # a manual app-store-connect export with it would fail cryptically anyway.
+            gta=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
+            has_devices=no
+            if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' /dev/stdin <<< "$plist" >/dev/null 2>&1; then has_devices=yes; fi
+            all_devices=$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' /dev/stdin <<< "$plist" 2>/dev/null || echo "")
+            if [ "$gta" = "true" ] || [ "$has_devices" = "yes" ] || [ "$all_devices" = "true" ]; then
+              echo "::error::embedded profile for $bundle ('$name') is NOT an App Store profile (get-task-allow=$gta ProvisionedDevices=$has_devices ProvisionsAllDevices=$all_devices)"
+              exit 1
+            fi
+            echo "embedded App Store profile: $bundle -> $name"
             PROFILES_XML="${PROFILES_XML}<key>${bundle}</key><string>${name}</string>"
           done < <(find "$APP_DIR" -name embedded.mobileprovision)
           if [ -z "$PROFILES_XML" ]; then echo "::error::no embedded provisioning profiles in the archive"; exit 1; fi
