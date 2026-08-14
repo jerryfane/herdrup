@@ -4,6 +4,7 @@ import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
+import UserNotifications // notification authorization status (Settings notify section)
 import HerdrKit
 
 // Phase 4, first real slice: terminal-first, on the merged pure-Swift transport.
@@ -472,12 +473,13 @@ struct ConnectView: View {
         .buttonStyle(.plain)
     }
 
-    // Two faint captions (design copy), centered.
+    // Two faint captions: what the connection is, and where the key lives.
     private var captions: some View {
-        VStack(spacing: 10) {
-            Text("over your tailscale network · nothing public")
+        VStack(spacing: 8) {
+            Text("Connects privately over your Tailscale network — nothing is exposed to the public internet.")
                 .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
-            Text("Seen once. Fails with a reason, never a spinner that gives up quietly.")
+                .multilineTextAlignment(.center)
+            Text("Your key stays in this device's Keychain, never uploaded.")
                 .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
                 .multilineTextAlignment(.center)
         }
@@ -2185,6 +2187,11 @@ struct SettingsView: View {
     /// Opens the Privacy/Terms/GitHub links in the system browser. Overridable in
     /// previews/UI-tests so automated runs never actually leave the app.
     @Environment(\.openURL) private var openURL
+    /// The system notification permission, so the notify section can prompt for it
+    /// (notDetermined) or point to iOS Settings (denied) instead of toggling silently
+    /// into a dead end. Refreshed on appear and on foreground (after a Settings trip).
+    @State private var notifyAuth: UNAuthorizationStatus = .notDetermined
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -2219,6 +2226,10 @@ struct SettingsView: View {
         // Load the tip products when Settings opens. No-ops after a successful load;
         // re-tries after a prior failure, so products created in ASC later appear.
         .task { await tipStore.loadProducts() }
+        // Keep the notify section's permission state honest: on open, and again when the
+        // app returns to the foreground (the user may have flipped it in iOS Settings).
+        .onAppear { refreshNotifyAuth() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { refreshNotifyAuth() } }
     }
 
     // Matches the Gram/Gestures header exactly: a left-aligned title in the app
@@ -2308,23 +2319,122 @@ struct SettingsView: View {
     /// the device + these prefs with the daemon, which sends the APNs), but it only
     /// fires when the machine runs the herdr fork and notifications are allowed. So the
     /// row states the requirement, not a "coming soon" — the feature exists.
+    /// The honest status row under the toggles. It reflects the SYSTEM notification
+    /// permission: if it's off (never asked, or denied), the toggles alone deliver
+    /// nothing, so this offers the way to fix it — a prompt (notDetermined) or a jump to
+    /// iOS Settings (denied) — rather than letting the toggles fail silently.
     private var notifyInfoRow: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "bell.badge")
+            Image(systemName: notifyAuthIcon)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.textDim)
+                .foregroundStyle(notifyAuthTint)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Palette.surfaceRaised))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Push needs the herdr fork")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(notifyAuthTitle)
                     .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
-                Text("Alerts arrive when your machine runs the herdr fork and you allow notifications.")
+                Text(notifyAuthBody)
                     .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
+                switch notifyRowState {
+                case .needAllow:
+                    Button("Allow notifications") { requestNotifications() }
+                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
+                        .padding(.top, 2)
+                case .denied:
+                    Button("Open Settings") { openIOSSettings() }
+                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
+                        .padding(.top, 2)
+                case .ok:
+                    EmptyView()
+                }
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    /// At least one alert category is on. A permission FIX is only surfaced when this is
+    /// true — if every toggle is off the system permission is moot, so we neither prompt
+    /// nor point to Settings (matching AppDelegate.requestAuthorizationIfWanted's gating).
+    private var anyNotifyOn: Bool { notifyNeedsInput || notifyDies || notifyFinishes || notifyGram }
+
+    private enum NotifyRowState { case ok, needAllow, denied }
+    private var notifyRowState: NotifyRowState {
+        guard anyNotifyOn else { return .ok }
+        switch notifyAuth {
+        case .notDetermined: return .needAllow
+        case .denied: return .denied
+        default: return .ok
+        }
+    }
+
+    private var notifyAuthIcon: String {
+        switch notifyRowState {
+        case .denied: return "bell.slash"
+        case .needAllow: return "bell"
+        case .ok: return "bell.badge"
+        }
+    }
+    private var notifyAuthTint: Color {
+        switch notifyRowState {
+        case .denied: return Palette.waiting
+        default: return Palette.textDim
+        }
+    }
+    private var notifyAuthTitle: String {
+        switch notifyRowState {
+        case .denied: return "Notifications are off"
+        case .needAllow: return "Turn on notifications"
+        case .ok: return "Push needs the herdr fork"
+        }
+    }
+    private var notifyAuthBody: String {
+        switch notifyRowState {
+        case .denied:
+            return "Herdrup can't send these alerts until you allow notifications in iOS Settings."
+        case .needAllow:
+            return "Allow notifications so these alerts can reach you when an agent needs you or a gram arrives."
+        case .ok:
+            return "Alerts arrive when your machine runs the herdr fork and you allow notifications."
+        }
+    }
+
+    private func refreshNotifyAuth() {
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            DispatchQueue.main.async {
+                notifyAuth = s.authorizationStatus
+                guard [.authorized, .provisional, .ephemeral].contains(s.authorizationStatus) else { return }
+                // Never register during a buildbox screenshot / XCUITest run — mirrors
+                // AppDelegate's guard so an authorized test device can't register while the
+                // Settings screen merely renders. ScreenshotMock is DEBUG-only, so is the guard.
+                #if DEBUG
+                guard ScreenshotMock.mode == nil else { return }
+                #endif
+                // (Re)register for APNs so a token actually issues — e.g. the user just
+                // enabled notifications in iOS Settings. registerForRemoteNotifications is
+                // idempotent, so refreshing repeatedly is harmless.
+                UIApplication.shared.registerForRemoteNotifications()
+            }
+        }
+    }
+
+    private func requestNotifications() {
+        // Same test-mode guard as AppDelegate.requestAuthorizationIfWanted: never prompt
+        // or register during a screenshot / XCUITest run.
+        #if DEBUG
+        guard ScreenshotMock.mode == nil else { return }
+        #endif
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            DispatchQueue.main.async {
+                if granted { UIApplication.shared.registerForRemoteNotifications() }
+                refreshNotifyAuth()
+            }
+        }
+    }
+
+    private func openIOSSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
     }
 
     private var troubleSection: some View {
