@@ -387,142 +387,102 @@ struct RootView: View {
     }
 }
 
-/// Collects host/key and constructs the transport. Constructing does not connect —
-/// the first request does — so this screen never blocks on the network.
+/// The connect screen: a manager of saved machines. Tap a host to connect (one tap);
+/// "Add host" and hold-to-Edit open the HostEditor sheet. Constructing the transport
+/// does not connect — the first request does — so this never blocks on the network.
 struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
 
-    @State private var host = ""
-    @State private var username = ""
-    @State private var keyPEM = ""
-    @State private var showingKeySheet = false
     @ObservedObject private var savedHosts = SavedHostsStore.shared
-    @State private var saveThisHost = false
-
-    // Host accepts "host" or "host:port" (and "[ipv6]:port"); the port lives in
-    // the one field so the form stays the three rows the mockup shows. Parsing is
-    // HerdrKit's HostEndpoint (Linux-tested); an explicit bad port yields nil, so
-    // it is rejected here rather than silently connecting to :22.
-    private var endpoint: HostEndpoint? { HostEndpoint.parse(host) }
-    private var trimmedUser: String { username.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var trimmedKey: String { keyPEM.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var hostInvalid: Bool {
-        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && endpoint == nil
-    }
-    private var canConnect: Bool {
-        endpoint != nil && !trimmedUser.isEmpty && !trimmedKey.isEmpty
-    }
+    /// The add/edit sheet target; nil = closed.
+    @State private var editorTarget: HostEditorTarget?
 
     var body: some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 16) {
-                    // Centered identity header: the app logo (the Lamb), the name, one
-                    // line of intent. The icon carries its own dark ground, so it reads
-                    // as the app mark — no surface tile behind it.
-                    VStack(spacing: 10) {
-                        Image("AppLogo")
-                            .resizable()
-                            .interpolation(.high)
-                            .frame(width: 64, height: 64)
-                            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-                        VStack(spacing: 4) {
-                            Text("herdrup")
-                                .font(Typography.app(28, .bold))
-                                .foregroundStyle(Palette.text)
-                            Text("connect to your machine")
-                                .font(Typography.machine(13))
-                                .foregroundStyle(Palette.textDim)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 24)
-                    .padding(.bottom, 8)
-
-                    // Saved hosts — one-tap reconnect. Hidden on first launch so the
-                    // screen stays the clean three-row form until there is one to show.
-                    if !savedHosts.hosts.isEmpty {
+                    header
+                    // Saved machines — the list you manage + tap to connect. Empty on
+                    // first launch, where the Add button below is the way in.
+                    if savedHosts.hosts.isEmpty {
+                        emptyState
+                    } else {
                         savedHostsSection
                     }
-
-                    // The three settings-style rows: label left, value right.
-                    VStack(spacing: 10) {
-                        fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
-                        if hostInvalid {
-                            Text("check host or host:port")
-                                .font(Typography.app(12)).foregroundStyle(Palette.died)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
-                        }
-                        fieldRow("User", text: $username, placeholder: "jerry")
-                        keyRow
-                        // Save affordance: only offered once the form is complete, so
-                        // it never implies saving an empty/partial host.
-                        if canConnect {
-                            Toggle(isOn: $saveThisHost) {
-                                Text("Save this host for one-tap reconnect")
-                                    .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                            }
-                            .tint(Palette.text)
-                            .padding(.horizontal, 4).padding(.top, 2)
-                        }
-                    }
-
-                    // Primary action — INK fill. The design carries NO accent colour; the
-                    // one near-white fill in the whole app marks the control that ACTS.
-                    Button {
-                        guard let ep = endpoint else { return }
-                        // Persist BEFORE connecting (the key is in hand here). save()
-                        // stores host+user in UserDefaults + the key in the Keychain.
-                        if saveThisHost {
-                            savedHosts.save(host: host, username: trimmedUser, privateKeyPEM: trimmedKey)
-                        }
-                        onConnect(SSHCredentials(
-                            host: ep.host, port: ep.port,
-                            username: trimmedUser,
-                            // Gated on trimmedKey, so send trimmedKey — a trailing
-                            // space/CR otherwise enables Connect then throws
-                            // InvalidOpenSSHBoundary in Citadel's parser.
-                            privateKeyPEM: trimmedKey, remoteSocketPath: ""))
-                    } label: {
-                        Text("Connect")
-                            .font(Typography.app(16, .semibold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 15)
-                            .background(canConnect ? Palette.text : Palette.surface)
-                            .foregroundStyle(canConnect ? Palette.ground : Palette.textFaint)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
-                    .disabled(!canConnect)
-                    .padding(.top, 6)
-
-                    // Two faint captions (design copy), centered.
-                    VStack(spacing: 10) {
-                        Text("over your tailscale network · nothing public")
-                            .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
-                        Text("Seen once. Fails with a reason, never a spinner that gives up quietly.")
-                            .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
+                    addHostButton
+                    captions
                 }
                 .padding(22)
             }
         }
-        .sheet(isPresented: $showingKeySheet) { keySheet }
+        // Add / edit a host. Save & Connect (add) hands credentials up via onConnect.
+        .sheet(item: $editorTarget) { target in
+            HostEditor(target: target, store: savedHosts) { creds in
+                editorTarget = nil
+                onConnect(creds)
+            }
+        }
     }
 
-    /// A row with the label on the left and a right-aligned monospace value.
-    private func fieldRow(_ label: String, text: Binding<String>, placeholder: String) -> some View {
-        HStack {
-            Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
-            TextField(placeholder, text: text)
-                .multilineTextAlignment(.trailing)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+    // Centered identity header: the app logo (the Lamb), the name, one line of intent.
+    // The icon carries its own dark ground, so it reads as the app mark.
+    private var header: some View {
+        VStack(spacing: 10) {
+            Image("AppLogo")
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            VStack(spacing: 4) {
+                Text("herdrup")
+                    .font(Typography.app(28, .bold))
+                    .foregroundStyle(Palette.text)
+                Text("connect to your machine")
+                    .font(Typography.machine(13))
+                    .foregroundStyle(Palette.textDim)
+            }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity)
+        .padding(.top, 24)
+        .padding(.bottom, 8)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Text("No saved machines yet")
+                .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            Text("Add a machine to connect over your Tailscale network.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, 16)
+    }
+
+    private var addHostButton: some View {
+        Button { editorTarget = .add } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "plus").font(.system(size: 15, weight: .semibold))
+                Text("Add host").font(Typography.app(15, .semibold))
+            }
+            .foregroundStyle(Palette.text)
+            .frame(maxWidth: .infinity).padding(.vertical, 14)
+            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // Two faint captions (design copy), centered.
+    private var captions: some View {
+        VStack(spacing: 10) {
+            Text("over your tailscale network · nothing public")
+                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+            Text("Seen once. Fails with a reason, never a spinner that gives up quietly.")
+                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
     }
 
     private var savedHostsSection: some View {
@@ -543,8 +503,8 @@ struct ConnectView: View {
                     .frame(width: 36, height: 36)
                     .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(saved.host).font(Typography.machine(14)).foregroundStyle(Palette.text).lineLimit(1)
-                    Text(saved.username).font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                    Text(saved.label).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                    Text(secondaryLine(saved)).font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "arrow.right.circle.fill")
@@ -554,74 +514,35 @@ struct ConnectView: View {
             .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
+        // Hold to manage: Edit opens the editor pre-filled; Remove drops it.
         .contextMenu {
+            Button { editorTarget = .edit(saved) } label: {
+                Label("Edit", systemImage: "pencil")
+            }
             Button(role: .destructive) { savedHosts.delete(saved) } label: {
                 Label("Remove", systemImage: "trash")
             }
         }
     }
 
-    /// One-tap connect from a saved host. Pre-fills host+user FIRST, so if the key
-    /// is unreadable (deleted/device locked) the form is ready for a quick re-entry
-    /// rather than a silent dead tap; otherwise it builds the credentials and connects.
+    /// The secondary line: with a nickname, show `user@host`; without, just the user
+    /// (the host is already the row's title, so it isn't repeated).
+    private func secondaryLine(_ saved: SavedHost) -> String {
+        let hasNickname = (saved.nickname?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+        return hasNickname ? "\(saved.username)@\(saved.host)" : saved.username
+    }
+
+    /// One-tap connect from a saved host. If the key is unreadable (deleted / device
+    /// locked), open the editor so it can be re-added rather than a silent dead tap.
     private func tapSavedHost(_ saved: SavedHost) {
-        host = saved.host
-        username = saved.username
         guard let ep = HostEndpoint.parse(saved.host),
               let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty else { return }
+              !key.isEmpty else {
+            editorTarget = .edit(saved)
+            return
+        }
         onConnect(SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
                                  privateKeyPEM: key, remoteSocketPath: ""))
-    }
-
-    /// The key row NEVER renders the key itself — only whether one is loaded.
-    /// That is both the mockup ("id_ed25519 ✓") and the security rule: the
-    /// connect screen is screenshotted onto an open port, so the PEM must not be
-    /// on screen. Tapping opens a sheet to paste it.
-    private var keyRow: some View {
-        Button { showingKeySheet = true } label: {
-            HStack {
-                Text("Key").font(Typography.app(15)).foregroundStyle(Palette.textDim)
-                Spacer()
-                if keyPEM.isEmpty {
-                    Text("Add private key").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
-                } else {
-                    Text("ed25519 key").font(Typography.machine(15)).foregroundStyle(Palette.text)
-                    Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.done)   // green ✓ — the key is loaded (per the .dc.html)
-                }
-            }
-            .padding(.horizontal, 16).padding(.vertical, 14)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var keySheet: some View {
-        NavigationStack {
-            ZStack {
-                Palette.ground.ignoresSafeArea()
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Paste your ed25519 private key (PEM). It is held only in memory and sent over the SSH connection — never shown again.")
-                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                    TextEditor(text: $keyPEM)
-                        .font(Typography.machine(13)).foregroundStyle(Palette.text)
-                        .scrollContentBackground(.hidden)
-                        .padding(10).background(Palette.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    if !keyPEM.isEmpty {
-                        Button("Clear key") { keyPEM = "" }
-                            .font(Typography.app(14)).foregroundStyle(Palette.died)
-                    }
-                    Spacer()
-                }
-                .padding(20)
-            }
-            .navigationTitle("Private key")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.textDim)
-            } }
-        }
     }
 }
 
