@@ -25,6 +25,10 @@ final class LiveActivityController {
     /// banner for one session.
     func start(hostLabel: String, state: AgentActivityAttributes.ContentState) {
         guard enabled else { return }
+        // ActivityKit PERSISTS activities across app launches: after a kill + relaunch our
+        // `activity` is nil while an OS activity may still be live. Reclaim it before starting,
+        // so we never orphan the old one and stack a second banner for the same session.
+        if activity == nil { activity = Activity<AgentActivityAttributes>.activities.first }
         if activity != nil { update(state); return }
         let attributes = AgentActivityAttributes(hostLabel: hostLabel)
         do {
@@ -46,11 +50,16 @@ final class LiveActivityController {
         Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
     }
 
-    /// End and clear the activity immediately (on disconnect / sign-out).
+    /// End and clear the activity immediately (on disconnect / sign-out). Ends EVERY
+    /// activity of this type, not just the tracked one, so an orphan left by a prior
+    /// process (killed mid-session) can't survive as a stuck banner.
     func end() {
-        guard let activity else { return }
-        self.activity = nil
-        Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        activity = nil
+        Task {
+            for a in Activity<AgentActivityAttributes>.activities {
+                await a.end(nil, dismissalPolicy: .immediate)
+            }
+        }
     }
 
     // MARK: - Mapping HerdrKit → the shared content state
