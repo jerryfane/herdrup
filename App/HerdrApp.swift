@@ -2008,6 +2008,10 @@ struct TerminalPaneContent: View {
                 .onChange(of: reply) { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 }
+            // Dictate into the reply (on-device); appends to whatever is typed. A
+            // multi-char dictation append can't trip the ctrl-chord guard above (it
+            // requires a single-char append), so the two coexist safely.
+            MicButton(text: $reply, diameter: 40, iconSize: 15)
             Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)

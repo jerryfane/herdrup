@@ -89,6 +89,11 @@ targets:
       # WebKit backs the Gram HTML/SVG viewer (`HtmlWebView` / `WKWebView`). Linked
       # explicitly for the same reason as QuickLook/PhotosUI/StoreKit above.
       - sdk: WebKit.framework
+      # AVFoundation + Speech back voice dictation (`VoiceInput` / `MicButton`): audio
+      # capture (AVAudioEngine) and on-device transcription (SFSpeechRecognizer). Linked
+      # explicitly for the same reason as the frameworks above.
+      - sdk: AVFoundation.framework
+      - sdk: Speech.framework
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
@@ -110,6 +115,11 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
+        # Voice input (#89): the mic button by the Gram composer and terminal reply bar
+        # dictates on-device. Both strings are required or the app crashes the first time
+        # it requests the permission.
+        NSMicrophoneUsageDescription: Herdrup uses the microphone only while you hold a dictation session, to turn your speech into text in the message field. Audio is transcribed on-device and never leaves your phone.
+        NSSpeechRecognitionUsageDescription: Herdrup transcribes your dictation into text on-device, so you can talk instead of type. Your speech is not sent anywhere.
         # Export compliance: herdr uses ONLY standard, published encryption (AES/SSH
         # via a standard library — no proprietary or custom cryptography), which
         # QUALIFIES FOR THE STANDARD MASS-MARKET EXEMPTION (EAR Category 5 Part 2). So

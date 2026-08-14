@@ -539,6 +539,8 @@ struct GramView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
+                // Dictate into the draft (on-device); appends, never clobbers typed text.
+                MicButton(text: $draft)
                 Button {
                     Task { await send() }
                 } label: {
