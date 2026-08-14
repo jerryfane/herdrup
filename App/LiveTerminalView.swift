@@ -144,6 +144,21 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Guards the one-time scrollback-cap raise + history prepend to the FIRST reset only.
         private var didSeedOnce = false
 
+        /// Auto-reconnect. `reconnectAttempts` drives capped exponential backoff (reset once a
+        /// fresh stream delivers a real `.reset`, i.e. it genuinely re-established). `lastStreamActivity`
+        /// feeds the heartbeat watchdog: the server pings every 20s (`PING_INTERVAL`), so a long
+        /// silence means a stuck / half-open stream that never errors. `streamRunID` tags each stream
+        /// so a superseded (cancelled/restarted) task's `streamEnded` cannot trigger a second reconnect.
+        /// `reconnectTask` is the pending backoff-delayed restart; `watchdogTask` the periodic checker.
+        private var reconnectAttempts = 0
+        private var lastStreamActivity = Date()
+        private var streamRunID = 0
+        private var reconnectTask: Task<Void, Never>?
+        private var watchdogTask: Task<Void, Never>?
+        /// No stream event (data, ping, resize) for this long → treat the stream as stuck and
+        /// reconnect. 2.5× the server's 20s ping, so a single dropped ping is tolerated.
+        private static let streamStuckTimeout: TimeInterval = 50
+
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
         var onNavigate: ((Int) -> Void)?
@@ -333,6 +348,10 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollSendTask = nil
             streamTask?.cancel()
             streamTask = nil
+            watchdogTask?.cancel()          // stop the heartbeat checker
+            watchdogTask = nil
+            reconnectTask?.cancel()         // cancel any pending backoff restart
+            reconnectTask = nil
             backfillTask?.cancel()
             backfillTask = nil
             releaseGeometryOwnership()
@@ -484,6 +503,10 @@ struct LiveTerminalView: UIViewRepresentable {
         private func start() {
             streamTask?.cancel()
             sawExited = false
+            lastStreamActivity = Date()
+            streamRunID &+= 1
+            let myRun = streamRunID
+            startWatchdog()
             streamTask = Task { [weak self] in
                 guard let self else { return }
                 do {
@@ -491,16 +514,56 @@ struct LiveTerminalView: UIViewRepresentable {
                         if Task.isCancelled { return }
                         await self.handle(event)
                     }
-                    await self.streamEnded(nil)
+                    await self.streamEnded(nil, run: myRun)
                 } catch {
-                    await self.streamEnded(error)
+                    await self.streamEnded(error, run: myRun)
                 }
+            }
+        }
+
+        /// Heartbeat watchdog. The server pings every 20s, so if nothing has arrived for
+        /// `streamStuckTimeout` the stream is stuck / half-open (a `client.isConnected` TCP that
+        /// silently died and will never throw). Force a reconnect. Re-armed by each `start()`,
+        /// cancelled by `stop()`.
+        private func startWatchdog() {
+            watchdogTask?.cancel()
+            watchdogTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)   // poll every 5s
+                    guard let self, !self.stopped, !self.sawExited else { return }
+                    if Date().timeIntervalSince(self.lastStreamActivity) > Self.streamStuckTimeout {
+                        self.scheduleReconnect("no response for \(Int(Self.streamStuckTimeout))s")
+                        return   // scheduleReconnect → start() re-arms a fresh watchdog
+                    }
+                }
+            }
+        }
+
+        /// Auto-restart a dropped or stuck stream with capped exponential backoff, instead of
+        /// leaving a dead terminal that needs a manual refresh. No-op after a deliberate `stop()`
+        /// or a real process `exited`; at most one restart in flight.
+        @MainActor
+        private func scheduleReconnect(_ reason: String) {
+            guard !stopped, !sawExited, reconnectTask == nil else { return }
+            reconnectAttempts += 1
+            let capped = min(20.0, 0.5 * pow(2.0, Double(max(0, reconnectAttempts - 1))))  // 0.5,1,2,4,8,16,20
+            let delay = capped * Double.random(in: 0.6...1.0)                               // full-ish jitter
+            if let view {
+                let notice = "\r\n\u{1b}[2m— \(reason); reconnecting…\u{1b}[0m\r\n"
+                view.feed(byteArray: [UInt8](notice.utf8)[...])
+            }
+            reconnectTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !self.stopped, !self.sawExited else { return }
+                self.reconnectTask = nil
+                self.start()   // re-open the stream (cancels any lingering task, re-arms the watchdog)
             }
         }
 
         @MainActor
         private func handle(_ event: TerminalStreamEvent) async {
             guard let view else { return }
+            lastStreamActivity = Date()   // any event (data, ping, resize) means the stream is alive
             switch event {
             case .started(let started):
                 // Align the emulator to the pane's real geometry the ack carries.
@@ -508,6 +571,7 @@ struct LiveTerminalView: UIViewRepresentable {
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
+                    reconnectAttempts = 0   // a full keyframe = the stream genuinely (re)established
                     let firstReset = !didSeedOnce
                     if firstReset {
                         didSeedOnce = true
@@ -557,16 +621,19 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         @MainActor
-        private func streamEnded(_ error: Error?) {
-            guard let view else { return }
-            // An `exited` frame already painted the terminal's final state — nothing
-            // to add. ANY other end (a thrown error, OR a clean EOF with no `exited`)
-            // means the feed died while the process may still be live: surface it so a
-            // frozen last frame is not mistaken for a live terminal.
+        private func streamEnded(_ error: Error?, run: Int) {
+            // Only the CURRENT stream's end may reconnect. A superseded task (cancelled by a
+            // watchdog/refresh restart, or replaced by a newer start()) ending here must be ignored,
+            // or it double-reconnects and double-counts the backoff.
+            guard run == streamRunID else { return }
+            // An `exited` frame already painted the terminal's final state (the process ended, so
+            // reconnecting would only re-show that). A deliberate stop() (back out / teardown) or a
+            // torn-down view must not reconnect either.
             if sawExited { return }
-            let reason = error.map { "unavailable: \($0)" } ?? "connection closed"
-            let notice = "\r\n\u{1b}[2m— live terminal \(reason); reopen to reconnect —\u{1b}[0m\r\n"
-            view.feed(byteArray: [UInt8](notice.utf8)[...])
+            guard !stopped, view != nil else { return }
+            // Otherwise the feed died while the process may still be live — auto-restart with backoff
+            // rather than stranding a dead terminal behind a manual refresh.
+            scheduleReconnect(error == nil ? "connection closed" : "connection lost")
         }
 
         // MARK: geometry
