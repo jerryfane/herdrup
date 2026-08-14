@@ -1634,6 +1634,10 @@ struct TerminalPaneContent: View {
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
     @State private var ctrlArmed = false
+    /// True while dictating into the reply: disables the field (so typing can't be
+    /// overwritten by the next partial) and suppresses the ctrl-chord interception (so a
+    /// single-char dictation partial can't be misread as a control chord).
+    @State private var replyDictating = false
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
     @FocusState private var replyFocused: Bool
@@ -1685,7 +1689,7 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering && !replyDictating }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -2003,11 +2007,23 @@ struct TerminalPaneContent: View {
                 .padding(.horizontal, 16).padding(.vertical, 11)
                 .background(Palette.surface).clipShape(Capsule())
                 .focused($replyFocused)
+                .disabled(replyDictating)   // dictation owns the field while live
                 // Ctrl-toggle interception: while armed, the next character typed
                 // here becomes a control byte instead of message text.
                 .onChange(of: reply) { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 }
+            // Dictate into the reply (on-device). isActive: isForeground stops the mic
+            // if this pane stops being the front one (no hot mic behind a hidden pane);
+            // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
+            // chord interception, so a dictation partial is never read as a control byte.
+            MicButton(text: $reply, diameter: 40, iconSize: 15,
+                      isActive: isForeground && !autoDelivering, recording: $replyDictating,
+                      onStart: { ctrlArmed = false })
+                // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
+                // isActive drops on autoDelivering so an in-flight dictation stops before
+                // the auto-deliver clears the reply, and it can't be started during either.
+                .disabled(sending || autoDelivering)
             Button { sendTapped() } label: {
                 Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
@@ -2058,6 +2074,9 @@ struct TerminalPaneContent: View {
     /// single added character (typing) — not deletion or the programmatic clear
     /// after a send — so a backspace can never be misread as a chord.
     private func handleReplyChange(old: String, new: String) {
+        // A dictation append (even a single-char first partial) must never be read as a
+        // ctrl chord — only real typing arms and fires one.
+        guard !replyDictating else { return }
         guard ctrlArmed else { return }
         // Treat ONLY a clean single-char APPEND as a chord: `new` must be `old`
         // plus one trailing character. A mid-cursor insertion or paste (where the
