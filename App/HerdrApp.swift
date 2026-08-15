@@ -528,7 +528,7 @@ struct ConnectView: View {
             Text("Connects privately over your Tailscale network — nothing is exposed to the public internet.")
                 .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
                 .multilineTextAlignment(.center)
-            Text("Your key stays in this device's Keychain, never uploaded.")
+            Text("Your key or password stays in this device's Keychain, never uploaded.")
                 .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
                 .multilineTextAlignment(.center)
         }
@@ -586,14 +586,31 @@ struct ConnectView: View {
     /// One-tap connect from a saved host. If the key is unreadable (deleted / device
     /// locked), open the editor so it can be re-added rather than a silent dead tap.
     private func tapSavedHost(_ saved: SavedHost) {
-        guard let ep = HostEndpoint.parse(saved.host),
-              let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty else {
+        guard let ep = HostEndpoint.parse(saved.host) else {
             editorTarget = .edit(saved)
             return
         }
-        onConnect(SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
-                                 privateKeyPEM: key, remoteSocketPath: ""))
+        let creds: SSHCredentials
+        switch saved.auth {
+        case .key:
+            // A missing secret opens the editor rather than a silent dead tap.
+            guard let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !key.isEmpty else {
+                editorTarget = .edit(saved)
+                return
+            }
+            creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
+                                   privateKeyPEM: key, remoteSocketPath: "")
+        case .password:
+            // Not trimmed — a password's leading/trailing spaces can be significant.
+            guard let password = savedHosts.password(for: saved), !password.isEmpty else {
+                editorTarget = .edit(saved)
+                return
+            }
+            creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
+                                   password: password, remoteSocketPath: "")
+        }
+        onConnect(creds)
     }
 }
 

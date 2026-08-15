@@ -31,6 +31,11 @@ struct HostEditor: View {
     @State private var username: String
     @State private var keyPEM = ""
     @State private var showingKeySheet = false
+    /// Whether this host authenticates with a key or a password (segmented picker).
+    @State private var authKind: SavedAuthKind
+    /// The password (password mode). Masked by a SecureField, so unlike the key it can
+    /// be entered inline; write-only on edit (blank keeps the stored one).
+    @State private var password = ""
     @State private var error: String?
     @State private var keyError: String?
 
@@ -46,11 +51,13 @@ struct HostEditor: View {
             _nickname = State(initialValue: "")
             _host = State(initialValue: "")
             _username = State(initialValue: "")
+            _authKind = State(initialValue: .key)
         case .edit(let h):
             editing = h
             _nickname = State(initialValue: h.nickname ?? "")
             _host = State(initialValue: h.host)
             _username = State(initialValue: h.username)
+            _authKind = State(initialValue: h.auth)
         }
     }
 
@@ -60,10 +67,20 @@ struct HostEditor: View {
     private var hostInvalid: Bool {
         !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && endpoint == nil
     }
-    /// Add requires a key; edit keeps the existing one when the field is left blank.
+    /// Add requires the chosen secret; edit keeps the existing one when the field is
+    /// left blank (whichever auth kind).
     private var canSave: Bool {
         guard endpoint != nil, !trimmedUser.isEmpty else { return false }
-        return editing != nil || !trimmedKey.isEmpty
+        if editing != nil { return true }
+        return authKind == .key ? !trimmedKey.isEmpty : !password.isEmpty
+    }
+
+    /// The secret to persist, or nil when the field is blank (edit keeps the current one).
+    private func currentSecret() -> HostSecret? {
+        switch authKind {
+        case .key: return trimmedKey.isEmpty ? nil : .key(trimmedKey)
+        case .password: return password.isEmpty ? nil : .password(password)
+        }
     }
 
     var body: some View {
@@ -76,7 +93,8 @@ struct HostEditor: View {
                         fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
                         if hostInvalid { caption("check host or host:port", color: Palette.died) }
                         fieldRow("User", text: $username, placeholder: "jerry")
-                        keyRow
+                        authPicker
+                        if authKind == .key { keyRow } else { passwordRow }
                         if let error { caption(error, color: Palette.died) }
 
                         if editing == nil {
@@ -107,21 +125,33 @@ struct HostEditor: View {
     /// Persist the host (add or update). Returns success; sets `error` on failure.
     @discardableResult
     private func save() -> Bool {
+        let secret = currentSecret()
         let ok: Bool
         if let editing {
-            ok = store.update(editing, nickname: nickname, host: host, username: trimmedUser, privateKeyPEM: keyPEM)
+            // nil secret = keep the stored one (blank field on edit).
+            ok = store.update(editing, nickname: nickname, host: host, username: trimmedUser, secret: secret)
+        } else if let secret {
+            ok = store.add(nickname: nickname, host: host, username: trimmedUser, secret: secret)
         } else {
-            ok = store.add(nickname: nickname, host: host, username: trimmedUser, privateKeyPEM: trimmedKey)
+            ok = false  // add needs a secret; canSave already prevents this — defensive.
         }
-        if !ok { error = "Couldn't save this host. Check the fields (a private key is required) and try again." }
+        if !ok { error = "Couldn't save this host. Check the fields (a key or password is required) and try again." }
         return ok
     }
 
     private func saveAndConnect() {
         guard let ep = endpoint, save() else { return }
-        // Add mode requires a key, so it is in hand here — connect straight away.
-        onConnect(SSHCredentials(host: ep.host, port: ep.port, username: trimmedUser,
-                                 privateKeyPEM: trimmedKey, remoteSocketPath: ""))
+        // Add mode requires the secret, so it is in hand here — connect straight away.
+        let creds: SSHCredentials
+        switch authKind {
+        case .key:
+            creds = SSHCredentials(host: ep.host, port: ep.port, username: trimmedUser,
+                                   privateKeyPEM: trimmedKey, remoteSocketPath: "")
+        case .password:
+            creds = SSHCredentials(host: ep.host, port: ep.port, username: trimmedUser,
+                                   password: password, remoteSocketPath: "")
+        }
+        onConnect(creds)
         dismiss()
     }
 
@@ -131,6 +161,31 @@ struct HostEditor: View {
         HStack {
             Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
             TextField(placeholder, text: text)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(Typography.machine(15)).foregroundStyle(Palette.text)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Choose how this host authenticates. Switching hides/shows the key vs password row.
+    private var authPicker: some View {
+        Picker("Auth", selection: $authKind) {
+            Text("Key").tag(SavedAuthKind.key)
+            Text("Password").tag(SavedAuthKind.password)
+        }
+        .pickerStyle(.segmented)
+        .padding(.vertical, 2)
+    }
+
+    /// The password field. A SecureField masks the value, so unlike the key it is safe
+    /// to enter inline; on edit it starts blank and the stored password is kept unless a
+    /// new one is typed. Stored in the Keychain (device-only), same as the key.
+    private var passwordRow: some View {
+        HStack {
+            Text("Password").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            SecureField(editing == nil ? "password" : "saved · type to replace", text: $password)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .font(Typography.machine(15)).foregroundStyle(Palette.text)

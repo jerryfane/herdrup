@@ -112,20 +112,36 @@ public actor CitadelTransport: HerdrTransport {
     }
 
     private func makeConnection() async throws -> SSHClient {
-        let privateKey = try Curve25519.Signing.PrivateKey(
-            sshEd25519: Data(credentials.privateKeyPEM.utf8),
-            decryptionKey: credentials.passphrase.map { Data($0.utf8) }
-        )
+        let method: SSHAuthenticationMethod
+        switch credentials.auth {
+        case .privateKey(let pem, let passphrase):
+            let privateKey = try Curve25519.Signing.PrivateKey(
+                sshEd25519: Data(pem.utf8),
+                decryptionKey: passphrase.map { Data($0.utf8) }
+            )
+            method = .ed25519(username: credentials.username, privateKey: privateKey)
+        case .password(let password):
+            method = .passwordBased(username: credentials.username, password: password)
+        }
         // A client that resolves after a concurrent close() is reaped by the
         // generation check in connectedClient() (the only publisher of `self.client`),
         // so no cancellation handling is needed here.
-        return try await SSHClient.connect(
-            host: credentials.host,
-            port: Int(credentials.port),
-            authenticationMethod: .ed25519(username: credentials.username, privateKey: privateKey),
-            hostKeyValidator: hostKeyValidator,
-            reconnect: .never
-        )
+        do {
+            return try await SSHClient.connect(
+                host: credentials.host,
+                port: Int(credentials.port),
+                authenticationMethod: method,
+                hostKeyValidator: hostKeyValidator,
+                reconnect: .never
+            )
+        } catch SSHClientError.unsupportedPasswordAuthentication {
+            // The server offers no password auth (e.g. `PasswordAuthentication no`).
+            throw TransportError.passwordAuthUnsupported(host: credentials.host)
+        } catch SSHClientError.allAuthenticationOptionsFailed {
+            // Wrong password / rejected key. Host-key rejection is thrown by the
+            // validator, not caught here, so it keeps its dedicated recovery path.
+            throw TransportError.authenticationFailed(host: credentials.host)
+        }
     }
 
     /// Conservative ceiling on the full command line, well under the kernel's
