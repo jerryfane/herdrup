@@ -153,6 +153,46 @@ struct PaneReadResult: Decodable {
     let read: PaneRead
 }
 
+// MARK: - Pane scroll geometry
+
+/// How much scrollback the SERVER holds for a pane.
+///
+/// This is the one authoritative answer to "does earlier output exist at all", and it is
+/// carried by `pane.get` / `pane.list` / `pane.current` — but **not** by `agent.list`,
+/// which is otherwise all this client consumes. Verified against a live daemon: an
+/// `agent.list` response has no `scroll` key on any agent, while `pane.get` returns it for
+/// every pane.
+///
+/// It matters because the client cannot answer the question locally. A pane that redraws
+/// in place (a background-spawned agent session) has no scrollback anywhere, while an
+/// ordinary pane whose connect-time backfill has not landed yet ALSO has none *locally*
+/// for up to six seconds. Those two states demand opposite handling and only the server
+/// can tell them apart.
+///
+/// Every field is optional so an older server, or a pane the daemon reports without scroll
+/// geometry, decodes to `nil` rather than failing the whole response.
+public struct PaneScrollInfo: Decodable, Equatable, Sendable {
+    /// Rows of retained scrollback above the viewport — how far up the reader could go.
+    /// `0` means there is genuinely nothing earlier to show.
+    public let maxOffsetFromBottom: Int?
+    /// How far the pane is currently scrolled up from the live edge.
+    public let offsetFromBottom: Int?
+    /// Rows visible in the pane right now.
+    public let viewportRows: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case maxOffsetFromBottom = "max_offset_from_bottom"
+        case offsetFromBottom = "offset_from_bottom"
+        case viewportRows = "viewport_rows"
+    }
+
+    public init(maxOffsetFromBottom: Int?, offsetFromBottom: Int? = nil, viewportRows: Int? = nil) {
+        self.maxOffsetFromBottom = maxOffsetFromBottom
+        self.offsetFromBottom = offsetFromBottom
+        self.viewportRows = viewportRows
+    }
+}
+
 // MARK: - Prompt delivery
 
 /// herdr's `AgentPromptDelivery`: whether the prompt bytes only reached the pane's

@@ -66,9 +66,19 @@ final class ReadmeLayoutTests: XCTestCase {
         // dispatch before shipping it.
         //
         // The block is a bare code fence, so decoration is not expected and
-        // rejecting it is correct. Two shapes are legal and nothing else is:
+        // rejecting it is correct. Three shapes are legal and nothing else is:
         //     <name>.swift        a file under Sources/HerdrKit
         //     Sources/<name>/     a source directory
+        //     Tests/<name>/       a test directory
+        //
+        // The third shape was missing, and the README grew a `Tests/HerdrKitTests/`
+        // row that the grammar could only reject — so this guard failed on main,
+        // unnoticed, because CI runs `-only-testing:HerdrUITests` and never invokes
+        // `swift test` at all. A guard nothing runs is the same shape of problem as
+        // the generator that lived in a shell: it fails closed and no one hears it.
+        // Rejecting a legitimate row is not strictness, it is an incomplete grammar,
+        // so the shape is named explicitly here rather than loosened generally.
+        let directoryPrefixes = ["Sources/", "Tests/"]
         var named: [String] = []
         var unparsed: [String] = []
         for line in block.split(separator: "\n") {
@@ -78,9 +88,11 @@ final class ReadmeLayoutTests: XCTestCase {
             let isFile = token.hasSuffix(".swift")
                 && token.dropLast(6).allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
                 && !token.dropLast(6).isEmpty
-            let isDir = token.hasPrefix("Sources/") && token.hasSuffix("/")
-                && token.dropFirst(8).dropLast().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-                && !token.dropFirst(8).dropLast().isEmpty
+            let isDir = token.hasSuffix("/") && directoryPrefixes.contains { prefix in
+                guard token.hasPrefix(prefix) else { return false }
+                let name = token.dropFirst(prefix.count).dropLast()
+                return !name.isEmpty && name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+            }
             if isFile { named.append("Sources/HerdrKit/" + token) }
             else if isDir { named.append(String(token.dropLast())) }
             else { unparsed.append(text) }

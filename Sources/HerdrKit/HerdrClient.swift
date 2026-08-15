@@ -514,6 +514,36 @@ public actor HerdrClient {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
     }
 
+    struct PaneScrollResult: Decodable {
+        let pane: PaneScrollRef
+        /// Only `scroll` is modelled; the rest of the pane record is deliberately left
+        /// alone so a schema addition on the server cannot break this decode — the same
+        /// discipline as `PaneInfoResult`.
+        struct PaneScrollRef: Decodable {
+            let scroll: PaneScrollInfo?
+        }
+    }
+
+    /// How many rows of scrollback the SERVER holds for `pane`, or `nil` when that cannot
+    /// be established (older server, no `scroll` block, or the call failed).
+    ///
+    /// `agent.list` — the app's usual source — does not carry this; `pane.get` does.
+    /// Verified live: a background-spawned agent pane reports `0` while an interactive one
+    /// on the same host reports 2639.
+    ///
+    /// Deliberately NON-THROWING. This is advisory evidence feeding a scroll-policy
+    /// decision, and the policy treats `nil` as "no evidence, do not drive". Surfacing a
+    /// transport error to the caller would invite a call site that fails a pane open over
+    /// a scroll hint; swallowing it degrades to exactly the safe default instead.
+    public func paneScrollbackRows(pane: String) async -> Int? {
+        do {
+            let result = try await call("pane.get", PaneTarget(paneID: pane), as: PaneScrollResult.self)
+            return result.pane.scroll?.maxOffsetFromBottom
+        } catch {
+            return nil
+        }
+    }
+
     /// True when `pane` reports an agent WITH a composer — the observable proxy for
     /// "a prompt will land NOW". This is the STRICTER new-agent PRE-FILL gate
     /// (`InputRouter.isPromptable(for:)`), deliberately NOT the reply-routing gate

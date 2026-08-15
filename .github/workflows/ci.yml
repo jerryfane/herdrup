@@ -17,6 +17,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # HerdrKit's pure-logic suite. It existed long before this job and gated NOTHING:
+  # every step below ran `-only-testing:HerdrUITests`, so `swift test` was never
+  # invoked in CI at all. A guard nobody runs is not a guard — `ReadmeLayoutTests` was
+  # sitting red on main, undetected, which is exactly how that gap announces itself.
+  #
+  # Runs on Linux on purpose. HerdrKit deliberately contains no UIKit/SwiftUI so this
+  # stays a fast, simulator-free check, and it keeps the policy/pacing logic honest on
+  # every push instead of only when someone has a Mac and 45 minutes.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        run: swift test --parallel
+
   build-and-uitest:
     runs-on: macos-latest
     timeout-minutes: 45
