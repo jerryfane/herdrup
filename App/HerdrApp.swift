@@ -864,6 +864,12 @@ struct TerminalHomeView: View {
     @State private var loading = true
     @State private var rejectedFingerprint: String?
     @State private var trustFailed = false
+    /// Set when the connect failed because herdr is not installed on the host
+    /// (`TransportError.herdrNotInstalled`). Drives the install-guidance branch in
+    /// `errorView` instead of surfacing the raw stderr. Reset at the start of each load.
+    @State private var herdrMissing = false
+    /// Latches the "Copied ✓" state on the install-command copy button.
+    @State private var installCmdCopied = false
     @State private var search = ""
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
@@ -1445,35 +1451,96 @@ struct TerminalHomeView: View {
     private func errorView(_ error: String) -> some View {
         Spacer()
         VStack(spacing: 14) {
-            Text(error).font(Typography.machine(13)).foregroundStyle(Palette.died)
-                .multilineTextAlignment(.center)
-            if let fingerprint = rejectedFingerprint {
-                VStack(spacing: 8) {
-                    Text("the host key changed. the server now presents:")
-                        .font(Typography.app(12)).foregroundStyle(Palette.textDim)
-                    Text(fingerprint).font(Typography.machine(11)).foregroundStyle(Palette.text)
-                        .textSelection(.enabled).multilineTextAlignment(.center)
-                    Text("trust it ONLY if this exactly matches the key you verified out of band.")
-                        .font(Typography.app(12)).foregroundStyle(Palette.textDim).multilineTextAlignment(.center)
+            // A connect that failed because herdr is not installed gets its OWN
+            // recovery screen (heading + install command + instructions link),
+            // not the raw stderr — a brand-new user has no way to read the shell
+            // diagnostic and know they need to go install the fork.
+            if herdrMissing {
+                herdrInstallGuidance
+            } else {
+                Text(error).font(Typography.machine(13)).foregroundStyle(Palette.died)
+                    .multilineTextAlignment(.center)
+                if let fingerprint = rejectedFingerprint {
+                    VStack(spacing: 8) {
+                        Text("the host key changed. the server now presents:")
+                            .font(Typography.app(12)).foregroundStyle(Palette.textDim)
+                        Text(fingerprint).font(Typography.machine(11)).foregroundStyle(Palette.text)
+                            .textSelection(.enabled).multilineTextAlignment(.center)
+                        Text("trust it ONLY if this exactly matches the key you verified out of band.")
+                            .font(Typography.app(12)).foregroundStyle(Palette.textDim).multilineTextAlignment(.center)
+                    }
+                    Button("trust this key & reconnect") { trustFailed = !onTrustHostKey(fingerprint) }
+                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.died)
+                    if trustFailed {
+                        Text("could not save the verified key to the keychain — not reconnecting. try again.")
+                            .font(Typography.app(12)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
+                    }
                 }
-                Button("trust this key & reconnect") { trustFailed = !onTrustHostKey(fingerprint) }
-                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.died)
-                if trustFailed {
-                    Text("could not save the verified key to the keychain — not reconnecting. try again.")
-                        .font(Typography.app(12)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
+                // Plain retry ONLY for non-host-key errors. After a host-key
+                // rejection a bare reconnect could first-contact-trust whatever key
+                // next appears (bypassing the fingerprint the user must verify), so
+                // the only routes then are "trust this key" above or disconnect.
+                if rejectedFingerprint == nil {
+                    Button("retry") { Task { await load() } }
+                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
                 }
-            }
-            // Plain retry ONLY for non-host-key errors. After a host-key
-            // rejection a bare reconnect could first-contact-trust whatever key
-            // next appears (bypassing the fingerprint the user must verify), so
-            // the only routes then are "trust this key" above or disconnect.
-            if rejectedFingerprint == nil {
-                Button("retry") { Task { await load() } }
-                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
             }
         }
         .padding(24)
         Spacer()
+    }
+
+    /// The one-liner that installs the fork on the remote machine, condensed from
+    /// the onboarding doc's happy path (clone, build, install to `~/.local/bin`).
+    /// `install -D` creates the parent dir, so no separate `mkdir` step is needed.
+    private static let herdrInstallCommand =
+        "git clone https://github.com/jerryfane/herdr && cd herdr && "
+        + "cargo build --release && "
+        + "install -D -m 0755 target/release/herdr ~/.local/bin/herdr"
+
+    /// Shown in place of the raw stderr when the connect failed because herdr is not
+    /// installed (`herdrMissing`). Mirrors `ForkNoticeView`'s language and reuses the
+    /// Gram setup card's command-box + Copy idiom, plus the shared install link.
+    @ViewBuilder private var herdrInstallGuidance: some View {
+        Image(systemName: "arrow.triangle.branch")
+            .font(.system(size: 34, weight: .regular))
+            .foregroundStyle(Palette.waiting)
+        VStack(spacing: 8) {
+            Text("herdr isn't installed here")
+                .font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
+                .multilineTextAlignment(.center)
+            Text("Herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
+                .font(Typography.app(14)).foregroundStyle(Palette.textDim)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // Copy box: run this on the machine, then reconnect.
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Run this on your machine, then reconnect:")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(Self.herdrInstallCommand)
+                .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.groundMachine))
+            Button {
+                UIPasteboard.general.string = Self.herdrInstallCommand
+                installCmdCopied = true
+            } label: {
+                Text(installCmdCopied ? "Copied ✓" : "Copy command")
+                    .font(Typography.app(13, .semibold)).foregroundStyle(Palette.ground)
+                    .frame(maxWidth: .infinity).padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Palette.text))
+            }
+        }
+        .padding(.top, 4)
+        // Full instructions (every install variant) + retry once it's installed.
+        InstallInstructionsLink(label: "Full install instructions")
+        Button("retry") { Task { await load() } }
+            .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            .padding(.top, 2)
     }
 
     @MainActor
@@ -1489,6 +1556,7 @@ struct TerminalHomeView: View {
             error = nil
             rejectedFingerprint = nil
             trustFailed = false
+            herdrMissing = false
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
             // terminal lingers warm — but only a slot that was ONCE seen live and has now
             // vanished (never a still-booting spawn pane, which is absent by design while its
@@ -1501,9 +1569,14 @@ struct TerminalHomeView: View {
             openGramIfPending()              // a cold-launch gram tap opens the Gram page once loaded
         } catch {
             let rejected: String?
-            if let transportError = error as? TransportError,
-               case .hostKeyRejected(_, let fingerprint) = transportError {
-                rejected = fingerprint
+            var notInstalled = false
+            if let transportError = error as? TransportError {
+                if case .hostKeyRejected(_, let fingerprint) = transportError {
+                    rejected = fingerprint
+                } else {
+                    rejected = nil
+                    if case .herdrNotInstalled = transportError { notInstalled = true }
+                }
             } else {
                 rejected = nil
             }
@@ -1514,6 +1587,9 @@ struct TerminalHomeView: View {
             if agents.isEmpty || rejected != nil {
                 self.error = "\(error)"
                 rejectedFingerprint = rejected
+                // Only when this is the surfaced error do we drive the install-guidance
+                // branch; a no-herdr connect always has an empty list, so it surfaces here.
+                herdrMissing = notInstalled
             }
             // DROP a pending deep-link this failed load couldn't service, rather than leave it armed:
             // a push targets a just-now event, so firing it after some much-later successful load would

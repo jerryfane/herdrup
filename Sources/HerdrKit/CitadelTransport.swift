@@ -159,16 +159,39 @@ public actor CitadelTransport: HerdrTransport {
         Data(requestLine.utf8).base64EncodedString()
     }
 
+    /// Sentinel the exec wrapper prints to stderr when herdr is absent (see
+    /// `herdrPathResolution`). `classifyBridgeFailure` matches it to raise
+    /// `.herdrNotInstalled` rather than a generic `.bridgeFailed`. A fixed ASCII
+    /// token, deliberately NOT the shell's locale-dependent "not found" wording.
+    static let herdrNotInstalledSentinel = "__HERDR_NOT_INSTALLED__"
+
     /// Resolves herdr on the remote host: prefer `PATH`, fall back to the
-    /// standard `~/.local/bin` install location.
+    /// standard `~/.local/bin` install location — then GUARD that the resolved
+    /// path is actually executable before exec'ing it.
     ///
     /// A non-interactive SSH exec runs a NON-login shell, whose `PATH` does not
     /// include `~/.local/bin` — where herdr installs by default — so a bare
     /// `herdr api-bridge` fails with "command not found". A live round-trip
     /// caught exactly this. This mirrors herdr's own remote wrapper
     /// (src/remote/unix.rs: `command -v herdr`, else `$HOME/.local/bin/herdr`).
+    ///
+    /// The `[ -x "$HERDR" ]` guard separates "herdr is not installed at all" from
+    /// every other bridge failure: when neither PATH nor the fallback path holds an
+    /// executable, it prints `herdrNotInstalledSentinel` and exits BEFORE exec, so
+    /// `classifyBridgeFailure` can raise `.herdrNotInstalled` and the client can
+    /// offer install guidance instead of surfacing a raw stderr line.
     static let herdrPathResolution =
-        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); exec "$HERDR" api-bridge "#
+        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" api-bridge "#
+
+    /// Classifies an empty-stdout bridge failure. When herdr is absent the exec
+    /// wrapper prints `herdrNotInstalledSentinel` (see `herdrPathResolution`), so a
+    /// stderr carrying it becomes `.herdrNotInstalled(host:)`; anything else stays a
+    /// generic `.bridgeFailed(stderr:)`. Pure, so it is host-testable without SSH.
+    static func classifyBridgeFailure(stderr: String, host: String) -> TransportError {
+        stderr.contains(herdrNotInstalledSentinel)
+            ? .herdrNotInstalled(host: host)
+            : .bridgeFailed(stderr: stderr)
+    }
 
     /// The full exec command line: resolve herdr, then run
     /// `api-bridge <base64(requestLine)>`. base64 so no JSON metacharacter needs
@@ -208,7 +231,7 @@ public actor CitadelTransport: HerdrTransport {
         if lines.hasRemainder { return lines.flush() }   // a reply that lacked a trailing newline
         // Empty stdout: surface the bridge/remote diagnostic rather than handing
         // the caller an empty string it can only fail to decode.
-        if !stderr.isEmpty { throw TransportError.bridgeFailed(stderr: stderr) }
+        if !stderr.isEmpty { throw Self.classifyBridgeFailure(stderr: stderr, host: credentials.host) }
         throw TransportError.closedBeforeResponse
     }
 
