@@ -859,6 +859,12 @@ struct TerminalHomeView: View {
     /// stopped section has something to show.
     var livePaneIDs: Set<String>? = nil
 
+    /// How often the connected agent list is re-fetched to stay live. agent.list is
+    /// a small JSON query (unlike a screen fetch), so a 5s floor is cheap even over a
+    /// forwarded SSH connection while keeping the list, header, and Live Activity in
+    /// step with the herd without a reconnect.
+    private static let agentListPollInterval: UInt64 = 5_000_000_000
+
     @State private var agents: [AgentInfo] = []
     @State private var error: String?
     @State private var loading = true
@@ -1081,7 +1087,23 @@ struct TerminalHomeView: View {
         // keeping these here fires load / fork-probe / first-run / deep-links ONCE per
         // connect (this view is .id(session)-scoped) rather than on every tab switch —
         // which otherwise re-showed the fork notice and cancelled an in-flight load.
-        .task { await load() }
+        //
+        // Load the agent list on connect, then keep it LIVE with a periodic refresh.
+        // Without the poll the list was fetched only once per connect (plus after a
+        // local spawn / close), so a server-side change — a new agent, a
+        // working → needs-you → exit transition, an agent that died — stayed invisible
+        // until the user reconnected to force a fresh load. agent.list is small JSON
+        // (cheap, unlike a screen fetch), and load() is stale-while-revalidate: a
+        // failed refresh keeps the last-good list rather than blanking it, and the
+        // spinner shows only while the list is empty. Still one .task, .id(session)-
+        // scoped, so tab switches never restart or duplicate it.
+        .task {
+            await load()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.agentListPollInterval)
+                await load()
+            }
+        }
         // Ambient unread-gram poll for the tab badge, running ONLY while the Gram
         // tab is not showing — GramView keeps its own 6s poll while visible and
         // writes the count on load / mark-read. Keyed on selectedTab so it
