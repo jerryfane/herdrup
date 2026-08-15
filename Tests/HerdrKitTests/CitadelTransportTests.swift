@@ -109,4 +109,57 @@ final class CitadelTransportTests: XCTestCase {
         // A normal request is well under and does not throw.
         XCTAssertNoThrow(try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#))
     }
+
+    // MARK: - "herdr not installed" detection
+
+    /// AXIS: the exec wrapper guards that the resolved herdr path is executable and,
+    /// when it is not, emits the sentinel and exits BEFORE `exec`. This is what lets
+    /// the client tell "herdr is not installed" apart from every other bridge failure
+    /// and show install guidance instead of a raw stderr line. Pins the guard so it
+    /// cannot be silently dropped back to an unconditional `exec`.
+    func testBridgeCommandGuardsHerdrExecutableWithSentinel() throws {
+        let command = try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#)
+
+        XCTAssertTrue(command.contains(#"[ -x "$HERDR" ]"#),
+                      "the command does not guard that the resolved herdr path is executable")
+        XCTAssertTrue(command.contains(CitadelTransport.herdrNotInstalledSentinel),
+                      "the command does not emit the not-installed sentinel")
+        // The guard must run BEFORE exec, otherwise exec of a missing file wins and
+        // the sentinel is never printed.
+        let guardIndex = try XCTUnwrap(command.range(of: #"[ -x "$HERDR" ]"#)?.lowerBound)
+        let execIndex = try XCTUnwrap(command.range(of: #"exec "$HERDR""#)?.lowerBound)
+        XCTAssertLessThan(guardIndex, execIndex, "the executable guard runs after exec, so it never fires")
+        // The installed path is unchanged: it still runs api-bridge.
+        XCTAssertTrue(command.contains(" api-bridge "),
+                      "the command no longer invokes the api-bridge subcommand for the installed path")
+    }
+
+    /// A stderr carrying the sentinel classifies as `.herdrNotInstalled(host:)`,
+    /// carrying the host through for the client's guidance copy.
+    func testClassifyBridgeFailureDetectsMissingHerdr() {
+        let stderr = "bash: line 1: \(CitadelTransport.herdrNotInstalledSentinel)\n"
+        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        guard case TransportError.herdrNotInstalled(let host) = error else {
+            return XCTFail("expected .herdrNotInstalled, got \(error)")
+        }
+        XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// Any OTHER stderr stays a generic `.bridgeFailed` — the sentinel is the only
+    /// signal that promotes it, so an unrelated failure is never mislabelled as
+    /// "herdr not installed" (which would wrongly tell the user to reinstall).
+    func testClassifyBridgeFailurePassesThroughUnrelatedStderr() {
+        let stderr = "api-bridge: permission denied while opening the control socket\n"
+        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        guard case TransportError.bridgeFailed(let passed) = error else {
+            return XCTFail("expected .bridgeFailed, got \(error)")
+        }
+        XCTAssertEqual(passed, stderr, "the original stderr was not preserved")
+    }
+
+    /// The description names the host so the surfaced error is legible on its own.
+    func testHerdrNotInstalledDescriptionNamesHost() {
+        let error = TransportError.herdrNotInstalled(host: "box.example")
+        XCTAssertEqual(error.description, "herdr is not installed on box.example")
+    }
 }

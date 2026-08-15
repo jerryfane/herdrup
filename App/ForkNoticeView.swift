@@ -50,17 +50,7 @@ struct ForkNoticeView: View {
             Spacer(minLength: 0)
             VStack(spacing: 8) {
                 // Primary action: send them to the fork's install instructions.
-                Link(destination: URL(string: "https://github.com/jerryfane/herdr")!) {
-                    HStack(spacing: 6) {
-                        Text("Install instructions")
-                        Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .semibold))
-                    }
-                    .font(Typography.app(16, .semibold))
-                    .foregroundStyle(Palette.ground)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
-                }
+                InstallInstructionsLink()
                 // Never a lockout: dismissing is always one tap away.
                 Button(action: onDismiss) {
                     Text("Continue anyway")
@@ -93,5 +83,31 @@ struct ForkNoticeView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
+    }
+}
+
+/// The shared primary action that opens the fork's install instructions on GitHub.
+/// One source of truth for the URL and the button styling, reused by `ForkNoticeView`
+/// (the "wrong daemon" notice) and the no-herdr install-guidance screen in
+/// `TerminalHomeView.errorView`, so the two "daemon not ready" states point at the
+/// same place with the same affordance.
+struct InstallInstructionsLink: View {
+    /// Button label. The two call sites word it slightly differently: the fork notice
+    /// says "Install instructions"; the no-herdr screen, where a copy-paste command
+    /// already sits above, says "Full install instructions".
+    var label: String = "Install instructions"
+
+    var body: some View {
+        Link(destination: URL(string: "https://github.com/jerryfane/herdr")!) {
+            HStack(spacing: 6) {
+                Text(label)
+                Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .semibold))
+            }
+            .font(Typography.app(16, .semibold))
+            .foregroundStyle(Palette.ground)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
+        }
     }
 }

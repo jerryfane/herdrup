@@ -107,6 +107,13 @@ public enum TransportError: Error, CustomStringConvertible {
     /// The api-bridge (or the remote shell) produced no reply on stdout but wrote
     /// to stderr — surfaced rather than handed back as an empty, undecodable line.
     case bridgeFailed(stderr: String)
+    /// herdr is not installed on the host: neither on `PATH` nor at the default
+    /// `~/.local/bin/herdr`, so the api-bridge command line has no executable to
+    /// run. Distinguished from a generic `bridgeFailed` by an explicit sentinel the
+    /// exec wrapper emits (not by matching the shell's locale-specific "not found"
+    /// text), so the client can guide the user to install it rather than showing a
+    /// raw stderr line.
+    case herdrNotInstalled(host: String)
     /// A password connection was attempted against a server that does not offer
     /// password authentication (e.g. `PasswordAuthentication no`). Distinct from a
     /// wrong password and from a host-key mismatch.
@@ -128,6 +135,8 @@ public enum TransportError: Error, CustomStringConvertible {
             return "host key for \(h) rejected: \(fp) does not match the pinned key"
         case .bridgeFailed(let stderr):
             return "api-bridge produced no reply; stderr: \(stderr)"
+        case .herdrNotInstalled(let h):
+            return "herdr is not installed on \(h)"
         case .passwordAuthUnsupported(let h):
             return "\(h) does not offer password authentication — use a key instead"
         case .authenticationFailed(let h):
