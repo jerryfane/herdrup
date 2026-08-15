@@ -230,7 +230,9 @@ struct RootView: View {
             .onChange(of: push.deviceToken) { _, _ in registerPush() }
             // The Live Activity push token also arrives async (after start) and can rotate; register
             // it whenever it lands so the server can push widget updates while the app is closed.
-            .onChange(of: liveActivity.pushToken) { _, _ in registerActivityPush() }
+            // initial: true so a token that arrived BEFORE this connected subtree mounted (or a
+            // reclaimed activity's existing token) is registered on appear, not silently missed.
+            .onChange(of: liveActivity.pushToken, initial: true) { _, _ in registerActivityPush() }
             // A push-category toggle flipped in Settings while connected: re-register the new prefs
             // (and prompt if a category was just enabled), instead of waiting for a reconnect.
             .onChange(of: notifyNeedsInput) { _, _ in pushPrefsChanged() }
@@ -378,13 +380,19 @@ struct RootView: View {
     }
 
     private func disconnect() {
-        // Tell the server to stop pushing to the Live Activity we're about to end — capture the
-        // token + client BEFORE we drop them below.
-        if let token = liveActivity.pushToken, let c = client {
-            Task { try? await c.unregisterActivity(token: token) }
-        }
+        // Unregister the Live Activity token, THEN close the transport — in ONE task so the
+        // unregister reaches the server over the still-open connection before close tears it down.
+        // Independent tasks would race, and close winning would strand the registration
+        // server-side. Capture token + client before we drop them below.
         let closing = transport
-        Task { await closing?.close() }
+        let activityToken = liveActivity.pushToken
+        let liveClient = client
+        Task {
+            if let token = activityToken, let liveClient {
+                try? await liveClient.unregisterActivity(token: token)
+            }
+            await closing?.close()
+        }
         client = nil
         transport = nil
         credentials = nil
