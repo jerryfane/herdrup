@@ -64,3 +64,32 @@ final class PushCenter: ObservableObject {
         var anyEnabled: Bool { needsInput || dies || finishes || gram }
     }
 }
+
+/// The pane ids the owner has muted for push, per-device. Sent to the server on
+/// `notifications.register_device` (the daemon skips a muted pane's pushes), so a
+/// mute silences that agent even while the app is closed. Muting is PER-PANE — a
+/// new agent gets a new pane id and starts un-muted. A UserDefaults-backed singleton
+/// (mirrors PushCenter.Prefs' storage) so the deep terminal header can toggle it and
+/// RootView can observe it to re-register.
+final class MuteStore: ObservableObject {
+    static let shared = MuteStore()
+    private let key = "push.mutedPanes"
+
+    @Published private(set) var mutedPanes: Set<String>
+
+    init() {
+        mutedPanes = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    func isMuted(_ paneID: String) -> Bool { mutedPanes.contains(paneID) }
+
+    /// Set (and persist) a pane's mute. `@Published` publishes the change, so an
+    /// observing RootView re-registers the device and the header updates its icon.
+    func setMuted(_ muted: Bool, for paneID: String) {
+        guard !paneID.isEmpty else { return }
+        if muted { mutedPanes.insert(paneID) } else { mutedPanes.remove(paneID) }
+        UserDefaults.standard.set(Array(mutedPanes), forKey: key)
+    }
+
+    func toggle(_ paneID: String) { setMuted(!isMuted(paneID), for: paneID) }
+}

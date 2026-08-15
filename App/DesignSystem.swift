@@ -170,3 +170,33 @@ struct TurningRing: View {
             }
     }
 }
+
+/// A filled status dot that softly pulses while `active` (i.e. working) and
+/// holds perfectly still otherwise. Reuses TurningRing's onAppear +
+/// repeatForever idiom; a fading scale reads "alive" without implying a
+/// duration. Colour still carries the meaning — only the working state moves.
+struct PulsingDot: View {
+    var color: Color
+    var active: Bool
+    var diameter: CGFloat = 7
+    @State private var pulse = false
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: diameter, height: diameter)
+            .opacity(active && pulse ? 0.4 : 1)
+            .scaleEffect(active && pulse ? 1.35 : 1)
+            .onAppear { if active { startPulsing() } }
+            .onChange(of: active) { _, isActive in
+                // Snap back to solid when it stops working, restart when it resumes.
+                pulse = false
+                if isActive { startPulsing() }
+            }
+    }
+
+    private func startPulsing() {
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            pulse = true
+        }
+    }
+}
