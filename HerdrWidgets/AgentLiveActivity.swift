@@ -122,11 +122,15 @@ private struct StatusDot: View {
 
     var body: some View {
         if status == .working {
-            Image(systemName: "circle.fill")
-                .resizable()
+            // An indeterminate circular spinner is a SYSTEM view; Live Activities are
+            // far more likely to actually animate it on the lock screen / Dynamic Island
+            // than a `.symbolEffect(.pulse)` (which the snapshot renderer left static).
+            // Sized to sit in the same footprint as the dot.
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.mini)
+                .tint(WidgetPalette.color(status))
                 .frame(width: diameter, height: diameter)
-                .foregroundStyle(WidgetPalette.color(status))
-                .symbolEffect(.pulse, options: .repeating)
         } else {
             Circle()
                 .fill(WidgetPalette.color(status))

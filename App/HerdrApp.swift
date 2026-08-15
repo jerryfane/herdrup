@@ -1705,7 +1705,7 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !autoDelivering && !replyDictating }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !replyDictating }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -1867,11 +1867,19 @@ struct TerminalPaneContent: View {
                 Label(mute.isMuted(paneID) ? "Unmute notifications" : "Mute notifications",
                       systemImage: mute.isMuted(paneID) ? "bell" : "bell.slash")
             }
+            Button(role: .destructive) {
+                Task {
+                    try? await client.closePane(paneID: paneID)
+                    onClose()   // the pane is gone → back to the agents list
+                }
+            } label: {
+                Label("Close agent", systemImage: "xmark.circle")
+            }
         } label: {
-            Image(systemName: mute.isMuted(paneID) ? "bell.slash.fill" : "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
+            Image(systemName: mute.isMuted(paneID) ? "bell.slash" : "ellipsis")
+                .font(.system(size: 13))
                 .foregroundStyle(mute.isMuted(paneID) ? Palette.waiting : Palette.textDim)
-                .frame(width: 30, height: 24)
+                .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
         }
     }
@@ -2284,8 +2292,12 @@ struct TerminalPaneContent: View {
             actionNote = "starting \(title)…"
             ticks += 1
             if ticks >= maxTicks {
-                actionNote = "still starting — tap Send when \(title) is ready"
-                return   // stop polling; pendingPrefill stays true → Send is prompt-only
+                // Give up the AUTO-deliver but NEVER trap the reader: release the lock so
+                // the reply bar is fully usable and a manual Send goes through the normal
+                // path. The typed task stays in the field for one tap.
+                pendingPrefill = false
+                actionNote = "couldn't auto-send — tap Send to deliver it"
+                return
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if Task.isCancelled { return }     // don't spin after teardown
@@ -2297,13 +2309,12 @@ struct TerminalPaneContent: View {
     /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
     /// (never rawKeys, at any time); a normal reply uses the usual routing.
     private func sendTapped() {
-        guard pendingPrefill else { send(.submitText(reply)); return }
-        Task {
-            sending = true
-            defer { sending = false }
-            if await deliverPrefillOnce() { return }
-            actionNote = "still starting — tap Send when \(title) is ready"
-        }
+        // An explicit Send ALWAYS takes over from any pending auto-deliver and goes
+        // through the normal prompt path (`send` → agent.prompt, server-gated). It must
+        // never be gated on the pre-fill delivery succeeding — that is exactly what could
+        // trap the reader on a stuck pre-fill with the reply bar locked.
+        pendingPrefill = false
+        send(.submitText(reply))
     }
 }
 
