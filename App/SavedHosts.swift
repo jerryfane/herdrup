@@ -1,10 +1,23 @@
 import Foundation
 import Security
 
+/// Which credential a saved host authenticates with.
+enum SavedAuthKind: String, Codable {
+    case key
+    case password
+}
+
+/// The secret half of a saved host, routed to the matching Keychain store by the
+/// store's add/update. Keeps one code path for both auth kinds.
+enum HostSecret {
+    case key(String)
+    case password(String)
+}
+
 /// A saved connection target for one-tap reconnect. Holds ONLY the non-secret
-/// fields (host — which may include ":port" — and username). The private key is
-/// NEVER stored here; it lives in the Keychain (`KeychainCredentialStore`), keyed
-/// by `id`. So the on-disk (UserDefaults) list can be read without exposing a key.
+/// fields (host — which may include ":port" — and username). The private key or
+/// password is NEVER stored here; it lives in the Keychain (`KeychainCredentialStore`),
+/// keyed by `id`. So the on-disk (UserDefaults) list can be read without exposing a secret.
 struct SavedHost: Codable, Identifiable, Hashable {
     let id: UUID
     var host: String
@@ -12,6 +25,13 @@ struct SavedHost: Codable, Identifiable, Hashable {
     /// Optional friendly label ("My Mac"). Legacy saved hosts predate this field, so it
     /// is OPTIONAL — old JSON without the key decodes to `nil` (no migration needed).
     var nickname: String?
+    /// Which credential this host uses. OPTIONAL for migration exactly like `nickname`:
+    /// JSON written before password auth has no `authKind`, decodes to nil, and resolves
+    /// to `.key` via `auth` — so every legacy host stays key-based.
+    var authKind: SavedAuthKind?
+
+    /// The resolved auth kind for callers — a legacy (nil) host is key-based.
+    var auth: SavedAuthKind { authKind ?? .key }
 
     /// The primary display label: the nickname if set, else the host itself.
     var label: String {
@@ -29,6 +49,9 @@ final class SavedHostsStore: ObservableObject {
 
     private let defaultsKey = "dev.herdr.savedHosts.v1"
     private let keychain = KeychainCredentialStore(service: "dev.herdr.credentials")
+    /// A host's password lives in its own Keychain service so a host's key and
+    /// password never collide on the same account id. Same device-only discipline.
+    private let passwordKeychain = KeychainCredentialStore(service: "dev.herdr.credentials.password")
 
     @Published private(set) var hosts: [SavedHost]
 
@@ -41,44 +64,76 @@ final class SavedHostsStore: ObservableObject {
         }
     }
 
-    /// Adds a NEW saved host (its own id) and stores its key in the Keychain. Returns
-    /// false — WITHOUT recording the host — if a required field is missing or the key
-    /// could not be persisted, so the UI never offers a one-tap host it cannot open.
+    /// Adds a NEW saved host (its own id) and stores its secret (key or password) in
+    /// the Keychain. Returns false — WITHOUT recording the host — if a required field
+    /// is missing or the secret could not be persisted, so the UI never offers a
+    /// one-tap host it cannot open.
     @discardableResult
-    func add(nickname: String, host: String, username: String, privateKeyPEM: String) -> Bool {
+    func add(nickname: String, host: String, username: String, secret: HostSecret) -> Bool {
         let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let n = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = privateKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !h.isEmpty, !u.isEmpty, !key.isEmpty else { return false }
+        guard !h.isEmpty, !u.isEmpty else { return false }
         let id = UUID()
-        // Persist the key FIRST; only record the host if the key actually stuck.
-        guard keychain.save(account: id.uuidString, secret: key) else { return false }
-        hosts.insert(SavedHost(id: id, host: h, username: u, nickname: n.isEmpty ? nil : n), at: 0)
+        // Persist the secret FIRST; only record the host if it actually stuck.
+        let kind: SavedAuthKind
+        switch secret {
+        case .key(let pem):
+            let key = pem.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, keychain.save(account: id.uuidString, secret: key) else { return false }
+            kind = .key
+        case .password(let password):
+            // A password is NOT trimmed — leading/trailing spaces can be significant.
+            guard !password.isEmpty,
+                  passwordKeychain.save(account: id.uuidString, secret: password) else { return false }
+            kind = .password
+        }
+        hosts.insert(
+            SavedHost(id: id, host: h, username: u, nickname: n.isEmpty ? nil : n, authKind: kind),
+            at: 0)
         persist()
         return true
     }
 
     /// Updates an existing saved host IN PLACE (by id): host / username / nickname, and
-    /// the private key only when `privateKeyPEM` is non-empty (empty = keep the current
-    /// key, so an edit never forces re-entering it). Returns false without changing
-    /// anything if a required field is missing or a provided key fails to persist.
+    /// the secret only when `secret` is non-nil (nil = keep the current one, so an edit
+    /// never forces re-entering it). Switching auth kind drops the now-stale other
+    /// secret. Returns false without changing anything if a required field is missing
+    /// or a provided secret fails to persist.
     @discardableResult
-    func update(_ existing: SavedHost, nickname: String, host: String, username: String, privateKeyPEM: String) -> Bool {
+    func update(_ existing: SavedHost, nickname: String, host: String, username: String, secret: HostSecret?) -> Bool {
         let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let n = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = privateKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !h.isEmpty, !u.isEmpty else { return false }
         guard let i = hosts.firstIndex(where: { $0.id == existing.id }) else { return false }
-        // Replace the key only if a new one was entered; a failed persist aborts the whole
-        // update so the record never drifts out of lockstep with the Keychain.
-        if !key.isEmpty {
-            guard keychain.save(account: existing.id.uuidString, secret: key) else { return false }
+        var newKind = existing.auth
+        // Replace the secret only if a new one was entered; a failed persist aborts the
+        // whole update so the record never drifts out of lockstep with the Keychain.
+        if let secret {
+            switch secret {
+            case .key(let pem):
+                let key = pem.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty,
+                      keychain.save(account: existing.id.uuidString, secret: key) else { return false }
+                newKind = .key
+            case .password(let password):
+                guard !password.isEmpty,
+                      passwordKeychain.save(account: existing.id.uuidString, secret: password) else { return false }
+                newKind = .password
+            }
+            // Auth kind changed → best-effort drop the stale secret from the other store.
+            if newKind != existing.auth {
+                switch existing.auth {
+                case .key: _ = keychain.delete(account: existing.id.uuidString)
+                case .password: _ = passwordKeychain.delete(account: existing.id.uuidString)
+                }
+            }
         }
         hosts[i].host = h
         hosts[i].username = u
         hosts[i].nickname = n.isEmpty ? nil : n
+        hosts[i].authKind = newKind
         persist()
         return true
     }
@@ -87,13 +142,18 @@ final class SavedHostsStore: ObservableObject {
     /// — the caller must treat that as "cannot reconnect", not "empty key".
     func key(for host: SavedHost) -> String? { keychain.load(account: host.id.uuidString) }
 
-    /// Removes a saved host. Deletes the KEY first and drops the host record ONLY if
-    /// the key is confirmed gone — a failed Keychain delete must not leave the private
-    /// key orphaned while the host vanishes from the UI. Returns whether it removed;
-    /// on false the row stays put (a visible "it didn't remove") so the user can retry.
+    /// The password for a saved host, from the Keychain. Nil if missing/unreadable.
+    func password(for host: SavedHost) -> String? { passwordKeychain.load(account: host.id.uuidString) }
+
+    /// Removes a saved host. Deletes the secret from BOTH stores first and drops the
+    /// host record ONLY if both confirm it is gone — a failed Keychain delete must not
+    /// leave a secret orphaned while the host vanishes from the UI. Each delete returns
+    /// true on errSecItemNotFound, so a host with only one secret still deletes cleanly.
+    /// Returns whether it removed; on false the row stays put so the user can retry.
     @discardableResult
     func delete(_ host: SavedHost) -> Bool {
-        guard keychain.delete(account: host.id.uuidString) else { return false }
+        guard keychain.delete(account: host.id.uuidString),
+              passwordKeychain.delete(account: host.id.uuidString) else { return false }
         hosts.removeAll { $0.id == host.id }
         persist()
         return true

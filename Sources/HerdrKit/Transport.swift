@@ -15,20 +15,26 @@ public struct SSHCredentials: Sendable {
     public var host: String
     public var port: UInt16
     public var username: String
-    /// PEM private key bytes. Held in memory and handed to the SSH stack
-    /// directly — never written to disk and never referenced by path, so the key
-    /// material's lifetime is the caller's to control rather than the
-    /// filesystem's.
-    public var privateKeyPEM: String
-    /// Optional public key bytes. Unused by the pure-Swift transport (nio-ssh
-    /// derives it from the private key); retained for source compatibility.
-    public var publicKeyPEM: String?
-    public var passphrase: String?
+    /// How to authenticate to the host. Either method's secret is held in memory
+    /// and handed to the SSH stack directly — never written to disk, never
+    /// referenced by path — so its lifetime is the caller's, not the filesystem's.
+    public var auth: Auth
     /// Vestigial under the pure-Swift transport: the server-side `api-bridge`
     /// resolves the API socket itself, so `CitadelTransport` ignores this. Kept
     /// so existing call sites compile; pruning it is a follow-up.
     public var remoteSocketPath: String
 
+    /// The two SSH auth methods herdr offers. `Equatable` for tests; the secrets
+    /// live only here and in the Keychain on the client.
+    public enum Auth: Sendable, Equatable {
+        /// PEM private key bytes, plus an optional passphrase for an encrypted key.
+        case privateKey(pem: String, passphrase: String?)
+        /// A plaintext password, offered to the server's password authentication.
+        case password(String)
+    }
+
+    /// Key-based auth. Signature preserved so existing call sites are unchanged;
+    /// `publicKeyPEM` is accepted and ignored (nio-ssh derives it from the key).
     public init(
         host: String,
         port: UInt16 = 22,
@@ -41,9 +47,22 @@ public struct SSHCredentials: Sendable {
         self.host = host
         self.port = port
         self.username = username
-        self.privateKeyPEM = privateKeyPEM
-        self.publicKeyPEM = publicKeyPEM
-        self.passphrase = passphrase
+        self.auth = .privateKey(pem: privateKeyPEM, passphrase: passphrase)
+        self.remoteSocketPath = remoteSocketPath
+    }
+
+    /// Password-based auth. Disambiguated from the key init by the `password:` label.
+    public init(
+        host: String,
+        port: UInt16 = 22,
+        username: String,
+        password: String,
+        remoteSocketPath: String
+    ) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.auth = .password(password)
         self.remoteSocketPath = remoteSocketPath
     }
 }
@@ -88,6 +107,13 @@ public enum TransportError: Error, CustomStringConvertible {
     /// The api-bridge (or the remote shell) produced no reply on stdout but wrote
     /// to stderr — surfaced rather than handed back as an empty, undecodable line.
     case bridgeFailed(stderr: String)
+    /// A password connection was attempted against a server that does not offer
+    /// password authentication (e.g. `PasswordAuthentication no`). Distinct from a
+    /// wrong password and from a host-key mismatch.
+    case passwordAuthUnsupported(host: String)
+    /// The server rejected the credentials — a wrong password, or a key it would
+    /// not accept.
+    case authenticationFailed(host: String)
 
     public var description: String {
         switch self {
@@ -102,6 +128,10 @@ public enum TransportError: Error, CustomStringConvertible {
             return "host key for \(h) rejected: \(fp) does not match the pinned key"
         case .bridgeFailed(let stderr):
             return "api-bridge produced no reply; stderr: \(stderr)"
+        case .passwordAuthUnsupported(let h):
+            return "\(h) does not offer password authentication — use a key instead"
+        case .authenticationFailed(let h):
+            return "authentication to \(h) failed — check the password or key"
         }
     }
 }
