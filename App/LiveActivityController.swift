@@ -121,17 +121,25 @@ final class LiveActivityController: ObservableObject {
         case .working:                 status = .working
         case .idle, .none:             status = .idle
         }
+        // Only the working state carries a start time — the headline agent's current
+        // turn ≈ its last completed-turn boundary (stable while it works that turn, so
+        // the widget timer doesn't reset on every list refresh). Same signal the
+        // in-app header uses.
+        let workingSince: Double? = status == .working
+            ? lead?.info.lastCompletedTurn?.completedUnixMs.map { Double($0) / 1000 }
+            : nil
         return AgentActivityAttributes.ContentState(
             headline: lead?.title ?? "No agents",
             status: status,
             needsYouCount: list.needsYouCount,
             workingCount: rows.filter { $0.group == .working }.count,
-            totalCount: rows.count
+            totalCount: rows.count,
+            workingSince: workingSince
         )
     }
 
     /// The state shown at connect, before the first agent list arrives.
     static var connecting: AgentActivityAttributes.ContentState {
-        .init(headline: "Connecting…", status: .idle, needsYouCount: 0, workingCount: 0, totalCount: 0)
+        .init(headline: "Connecting…", status: .idle, needsYouCount: 0, workingCount: 0, totalCount: 0, workingSince: nil)
     }
 }

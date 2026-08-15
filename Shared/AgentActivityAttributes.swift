@@ -31,6 +31,13 @@ struct AgentActivityAttributes: ActivityAttributes {
         var workingCount: Int
         /// Total agents in the session.
         var totalCount: Int
+        /// When the headline agent's CURRENT turn started (Unix SECONDS), set only
+        /// while `status == .working`. Drives a live `Text(timerInterval:)` in the
+        /// widget — the one thing iOS actually frame-interpolates in a Live Activity,
+        /// so the working state shows real motion on the lock screen / Dynamic Island.
+        /// A plain Double (not Date) so the daemon-pushed JSON decodes identically,
+        /// dodging Swift's Date reference-date Codable strategy. `nil` when not working.
+        var workingSince: Double?
     }
 
     /// The display bucket. Mirrors HerdrKit's `AgentGroup` (needs-you / stopped /

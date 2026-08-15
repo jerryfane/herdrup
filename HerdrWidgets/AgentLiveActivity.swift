@@ -34,20 +34,31 @@ struct AgentLiveActivity: Widget {
                             .font(.headline)
                             .foregroundStyle(WidgetPalette.text)
                             .lineLimit(1)
-                        Text(summary(context.state))
-                            .font(.caption)
-                            .foregroundStyle(WidgetPalette.color(context.state.status))
+                        if context.state.status == .working, let since = context.state.workingSince {
+                            HStack(spacing: 5) {
+                                Text("Working").font(.caption).foregroundStyle(WidgetPalette.color(.working))
+                                WorkingTimer(since: since, font: .caption)
+                            }
                             .lineLimit(1)
+                        } else {
+                            Text(summary(context.state))
+                                .font(.caption)
+                                .foregroundStyle(WidgetPalette.color(context.state.status))
+                                .lineLimit(1)
+                        }
                     }
                 }
             } compactLeading: {
                 StatusDot(status: context.state.status)
             } compactTrailing: {
-                // Only the count that demands action gets the scarce compact slot.
+                // The action count wins the scarce compact slot; otherwise, a working
+                // session ticks its elapsed time here — the compact view's live motion.
                 if context.state.needsYouCount > 0 {
                     Text("\(context.state.needsYouCount)")
                         .font(.caption2).bold()
                         .foregroundStyle(WidgetPalette.color(.needsYou))
+                } else if context.state.status == .working, let since = context.state.workingSince {
+                    WorkingTimer(since: since, font: .caption2)
                 }
             } minimal: {
                 StatusDot(status: context.state.status)
@@ -78,10 +89,19 @@ private struct LockScreenView: View {
                     .font(.headline)
                     .foregroundStyle(WidgetPalette.text)
                     .lineLimit(1)
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundStyle(WidgetPalette.color(state.status))
+                if state.status == .working, let since = state.workingSince {
+                    // The live ticking time IS the motion — the dot can't animate here.
+                    HStack(spacing: 5) {
+                        Text("Working").font(.subheadline).foregroundStyle(WidgetPalette.color(.working))
+                        WorkingTimer(since: since)
+                    }
                     .lineLimit(1)
+                } else {
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(WidgetPalette.color(state.status))
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
@@ -108,34 +128,35 @@ private struct LockScreenView: View {
     }
 }
 
-/// A filled status circle. A working agent gets a soft pulse so a glance at the
-/// Dynamic Island / lock screen reads "something is running" without any text;
-/// every other state stays a still circle (colour carries the meaning).
-///
-/// Best-effort: a Live Activity is rendered from system snapshots, not a live
-/// run loop, so `.symbolEffect(.pulse)` — the supported iOS 17 route — may be
-/// subtle or absent on some devices. It degrades to a static dot with no change
-/// to the colour contract.
+/// A filled status circle; colour carries the meaning (amber = needs you, blue =
+/// working, red = stopped, faint = idle). STATIC on purpose: a Live Activity is
+/// rendered from snapshots and iOS frame-interpolates ONLY time-driven views
+/// (`Text(timerInterval:)` / `ProgressView(timerInterval:)`), so a pulsing or
+/// spinning dot genuinely cannot animate here. The working state's MOTION comes
+/// from the live `WorkingTimer` beside the dot, not from the dot itself.
 private struct StatusDot: View {
     let status: AgentActivityAttributes.Status
     var diameter: CGFloat = 10
 
     var body: some View {
-        if status == .working {
-            // An indeterminate circular spinner is a SYSTEM view; Live Activities are
-            // far more likely to actually animate it on the lock screen / Dynamic Island
-            // than a `.symbolEffect(.pulse)` (which the snapshot renderer left static).
-            // Sized to sit in the same footprint as the dot.
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.mini)
-                .tint(WidgetPalette.color(status))
-                .frame(width: diameter, height: diameter)
-        } else {
-            Circle()
-                .fill(WidgetPalette.color(status))
-                .frame(width: diameter, height: diameter)
-        }
+        Circle()
+            .fill(WidgetPalette.color(status))
+            .frame(width: diameter, height: diameter)
+    }
+}
+
+/// A live, up-counting elapsed-time readout ("1:23") for the working state — the
+/// one thing iOS actually animates in a Live Activity (`Text(_, style: .timer)` is
+/// frame-interpolated, unlike `symbolEffect`/spinners). `since` is Unix SECONDS.
+private struct WorkingTimer: View {
+    let since: Double
+    var font: Font = .subheadline
+
+    var body: some View {
+        Text(Date(timeIntervalSince1970: since), style: .timer)
+            .font(font)
+            .monospacedDigit()
+            .foregroundStyle(WidgetPalette.color(.working))
     }
 }
 
