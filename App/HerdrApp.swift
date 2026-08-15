@@ -186,6 +186,9 @@ struct RootView: View {
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
     // (re)sends the token to the server whenever a connection exists.
     @ObservedObject private var push = PushCenter.shared
+    // The #90 Live Activity's per-activity push token lives here (survives reconnect like the
+    // device token); RootView registers it with the server so the widget updates in the background.
+    @ObservedObject private var liveActivity = LiveActivityController.shared
     // Mirror the Settings push toggles here so a change WHILE CONNECTED re-registers the new prefs
     // with the server (and can surface the permission prompt if a category was just enabled) —
     // otherwise a toggle would only take effect on the next connect/reconnect. Keys + defaults match
@@ -225,6 +228,9 @@ struct RootView: View {
             // A device token can arrive AFTER connect (the APNs callback is async + independent of
             // SSH); register it whenever it lands while connected.
             .onChange(of: push.deviceToken) { _, _ in registerPush() }
+            // The Live Activity push token also arrives async (after start) and can rotate; register
+            // it whenever it lands so the server can push widget updates while the app is closed.
+            .onChange(of: liveActivity.pushToken) { _, _ in registerActivityPush() }
             // A push-category toggle flipped in Settings while connected: re-register the new prefs
             // (and prompt if a category was just enabled), instead of waiting for a reconnect.
             .onChange(of: notifyNeedsInput) { _, _ in pushPrefsChanged() }
@@ -244,6 +250,14 @@ struct RootView: View {
         guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
         let p = PushCenter.Prefs.current
         Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram) }
+    }
+
+    /// Register the current Live Activity push token with the server, if we have both a live client
+    /// and a token. Idempotent + best-effort — mirrors registerPush; a server without the method
+    /// just throws, and the widget still updates in the foreground.
+    private func registerActivityPush(with explicitClient: HerdrClient? = nil) {
+        guard let client = explicitClient ?? self.client, let token = liveActivity.pushToken else { return }
+        Task { try? await client.registerActivity(token: token) }
     }
 
     /// A push-category toggle changed while connected: re-register the current prefs with the server so the
@@ -349,6 +363,7 @@ struct RootView: View {
         // connection). Best-effort: a failure here surfaces normally in load().
         Task { _ = try? await newClient.agentList() }
         registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
+        registerActivityPush(with: newClient)   // and any existing Live Activity token (reclaimed activity)
         // Request the notification permission PROMPT here — push can now actually deliver: the build
         // carries the aps-environment entitlement AND the server runs the 2c APNs sender. This is the
         // call the 2b scaffolding deferred: 2b left it out on purpose (iOS grants alert authorization
@@ -363,6 +378,11 @@ struct RootView: View {
     }
 
     private func disconnect() {
+        // Tell the server to stop pushing to the Live Activity we're about to end — capture the
+        // token + client BEFORE we drop them below.
+        if let token = liveActivity.pushToken, let c = client {
+            Task { try? await c.unregisterActivity(token: token) }
+        }
         let closing = transport
         Task { await closing?.close() }
         client = nil
@@ -385,6 +405,7 @@ struct RootView: View {
         client = newClient
         session += 1
         registerPush(with: newClient)   // the reconnect built a fresh client actor — re-register the token with it
+        registerActivityPush(with: newClient)   // re-register the Live Activity token with the fresh client too
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
