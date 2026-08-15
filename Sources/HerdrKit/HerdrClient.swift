@@ -176,6 +176,9 @@ public actor HerdrClient {
         let notifyDies: Bool
         let notifyFinishes: Bool
         let notifyGram: Bool
+        /// Public pane ids the owner muted on this device — the server skips their
+        /// pushes. The client owns the set and sends the full list each time.
+        let mutedPanes: [String]
         enum CodingKeys: String, CodingKey {
             case deviceToken = "device_token"
             case platform
@@ -183,6 +186,7 @@ public actor HerdrClient {
             case notifyDies = "notify_dies"
             case notifyFinishes = "notify_finishes"
             case notifyGram = "notify_gram"
+            case mutedPanes = "muted_panes"
         }
     }
 
@@ -192,12 +196,14 @@ public actor HerdrClient {
     /// pref changes. A server that does not yet implement the method (or the `notify_gram` field)
     /// just ignores what it does not know, and an older server throws, which the caller ignores.
     public func registerDevice(
-        token: String, needsInput: Bool, dies: Bool, finishes: Bool, gram: Bool
+        token: String, needsInput: Bool, dies: Bool, finishes: Bool, gram: Bool,
+        mutedPanes: [String] = []
     ) async throws {
         _ = try await call("notifications.register_device",
                            RegisterDeviceParams(deviceToken: token, platform: "apns",
                                                 notifyNeedsInput: needsInput, notifyDies: dies,
-                                                notifyFinishes: finishes, notifyGram: gram),
+                                                notifyFinishes: finishes, notifyGram: gram,
+                                                mutedPanes: mutedPanes),
                            as: JSONNull.self)
     }
 

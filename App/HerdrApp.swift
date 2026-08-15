@@ -186,6 +186,9 @@ struct RootView: View {
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
     // (re)sends the token to the server whenever a connection exists.
     @ObservedObject private var push = PushCenter.shared
+    /// Per-agent push mutes (the terminal header's ⋯ menu). Observed so a toggle
+    /// re-registers the device immediately (like the category prefs below).
+    @ObservedObject private var mute = MuteStore.shared
     // The #90 Live Activity's per-activity push token lives here (survives reconnect like the
     // device token); RootView registers it with the server so the widget updates in the background.
     @ObservedObject private var liveActivity = LiveActivityController.shared
@@ -239,6 +242,9 @@ struct RootView: View {
             .onChange(of: notifyDies) { _, _ in pushPrefsChanged() }
             .onChange(of: notifyFinishes) { _, _ in pushPrefsChanged() }
             .onChange(of: notifyGram) { _, _ in pushPrefsChanged() }
+            // A per-agent mute toggled in the terminal header: re-register the new set
+            // so the daemon starts/stops skipping that pane's pushes immediately.
+            .onChange(of: mute.mutedPanes) { _, _ in registerPush() }
         } else {
             ConnectView { connect($0) }
         }
@@ -251,7 +257,8 @@ struct RootView: View {
         // `client`, which the SwiftUI setter may not have published through yet on the same tick.
         guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
         let p = PushCenter.Prefs.current
-        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram) }
+        let muted = Array(MuteStore.shared.mutedPanes)
+        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram, mutedPanes: muted) }
     }
 
     /// Register the current Live Activity push token with the server, if we have both a live client
@@ -1597,6 +1604,9 @@ struct TerminalPaneContent: View {
     /// lets a freshly-spawned agent flip rawKeys→intent once its composer appears,
     /// so a pre-filled task sends as a proper prompt.
     @State private var agent: AgentInfo?
+    /// Per-agent push mute, toggled from the header's ⋯ menu (keyed by this pane's
+    /// public id — the same id the push payload carries).
+    @ObservedObject private var mute = MuteStore.shared
     @State private var sending = false
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
@@ -1778,18 +1788,75 @@ struct TerminalPaneContent: View {
                 }
             }
             if let group {
-                HStack(spacing: 6) {
-                    PulsingDot(color: group.color, active: group == .working)
-                    Text(group.sectionTitle).font(Typography.microLabel).tracking(1).foregroundStyle(group.color)
-                    Spacer()
+                HStack(spacing: 8) {
+                    // Left: the pulsing status pill (dot + status word).
+                    HStack(spacing: 6) {
+                        PulsingDot(color: group.color, active: group == .working)
+                        Text(group.sectionTitle).font(Typography.microLabel).tracking(1)
+                            .foregroundStyle(group.color)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(group.color.opacity(0.12)).clipShape(Capsule())
+
+                    Spacer(minLength: 6)
+
+                    // Center: how long the agent has been in this status (live).
+                    if let sinceMs = statusSinceMs {
+                        let start = Date(timeIntervalSince1970: Double(sinceMs) / 1000)
+                        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                            Text(elapsedLabel(ctx.date.timeIntervalSince(start)))
+                                .font(Typography.machine(12)).monospacedDigit()
+                                .foregroundStyle(Palette.textFaint)
+                        }
+                    }
+
+                    Spacer(minLength: 6)
+
+                    // Right: per-agent actions (⋯) — mute lives here.
+                    agentActionsMenu
                 }
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(group.color.opacity(0.12)).clipShape(Capsule())
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .background(Palette.surface)
+    }
+
+    /// When the agent entered its current status — approximated by the last completed
+    /// turn (for idle, when it finished; for working, ≈ the current turn's start). Nil
+    /// when there is no completed turn yet, which hides the timer.
+    private var statusSinceMs: Int64? { agent?.lastCompletedTurn?.completedUnixMs }
+
+    /// Compact elapsed-time label: "45s", "1m 20s", "12m", "1h 5m". Seconds show only
+    /// for the first ten minutes, where they read as motion; past that the minute (then
+    /// hour) is enough.
+    private func elapsedLabel(_ interval: TimeInterval) -> String {
+        let total = Int(max(0, interval))
+        let s = total % 60, m = (total / 60) % 60, h = total / 3600
+        if h > 0 { return "\(h)h \(m)m" }
+        if m >= 10 { return "\(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+
+    /// The header's ⋯ overflow — the per-agent mute today, and the home for future
+    /// per-agent actions. When muted, the button shows a struck bell so the state reads
+    /// at a glance without opening the menu.
+    private var agentActionsMenu: some View {
+        Menu {
+            Button {
+                mute.toggle(paneID)
+            } label: {
+                Label(mute.isMuted(paneID) ? "Unmute notifications" : "Mute notifications",
+                      systemImage: mute.isMuted(paneID) ? "bell" : "bell.slash")
+            }
+        } label: {
+            Image(systemName: mute.isMuted(paneID) ? "bell.slash.fill" : "ellipsis")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(mute.isMuted(paneID) ? Palette.waiting : Palette.textDim)
+                .frame(width: 30, height: 24)
+                .contentShape(Rectangle())
+        }
     }
 
     // MARK: classic-renderer banner
