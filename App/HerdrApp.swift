@@ -331,7 +331,11 @@ struct RootView: View {
         client = newClient
         // Bring up the session Live Activity (#90) in a "connecting" state; the home
         // view's onChange pushes real agent status the moment the first list arrives.
-        LiveActivityController.shared.start(hostLabel: creds.host, state: LiveActivityController.connecting)
+        // Label it with the saved host's NICKNAME when there is one (falling back to the
+        // raw host/IP), so the lock screen reads "My Mac" rather than an address.
+        let savedLabel = SavedHostsStore.shared.hosts
+            .first { $0.host == creds.host && $0.username == creds.username }?.label
+        LiveActivityController.shared.start(hostLabel: savedLabel ?? creds.host, state: LiveActivityController.connecting)
         // PRE-WARM: start the SSH handshake + first agent fetch the instant Connect
         // is tapped, so it overlaps the ConnectView→TerminalHomeView transition
         // instead of following it. The transport dedups concurrent connects, so this
