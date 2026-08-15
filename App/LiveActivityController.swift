@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import ActivityKit
 import HerdrKit
 
@@ -11,11 +12,19 @@ import HerdrKit
 /// starts/ends it around connect/disconnect, while the agents list view pushes status
 /// updates — neither owns the other, so they share this.
 @MainActor
-final class LiveActivityController {
+final class LiveActivityController: ObservableObject {
     static let shared = LiveActivityController()
     private init() {}
 
     private var activity: Activity<AgentActivityAttributes>?
+
+    /// The current activity's APNs push token (hex), or nil when there is no activity / no token
+    /// yet. RootView observes this and registers it with the server so the widget can update in
+    /// the BACKGROUND. Published because the token arrives asynchronously after `start`.
+    @Published private(set) var pushToken: String?
+
+    /// Watches `activity.pushTokenUpdates`; cancelled/replaced whenever the activity changes.
+    private var tokenTask: Task<Void, Never>?
 
     /// Whether the system currently permits Live Activities (user toggle + capability).
     private var enabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
@@ -43,18 +52,35 @@ final class LiveActivityController {
                 }
             }
         }
-        if activity != nil { update(state); return }
+        if activity != nil { observePushToken(); update(state); return }
         let attributes = AgentActivityAttributes(hostLabel: hostLabel)
         do {
+            // pushType: .token so ActivityKit issues a per-activity push token — the server uses
+            // it to update the widget in the BACKGROUND (locked / app closed). Foreground updates
+            // still go through update() directly.
             activity = try Activity.request(
                 attributes: attributes,
                 content: ActivityContent(state: state, staleDate: nil),
-                pushType: nil
+                pushType: .token
             )
+            observePushToken()
         } catch {
             // request() can throw (activities disabled mid-call, too many active).
             // Non-fatal — the app is fully usable without the Live Activity.
             activity = nil
+        }
+    }
+
+    /// Watch the current activity's push-token stream and publish the latest token as hex, so
+    /// RootView can register it with the server for background updates. Re-entrant: cancels any
+    /// prior watch first (a reclaimed activity across relaunch re-issues its token here too).
+    private func observePushToken() {
+        tokenTask?.cancel()
+        guard let activity else { pushToken = nil; return }
+        tokenTask = Task { [weak self] in
+            for await data in activity.pushTokenUpdates {
+                self?.pushToken = data.map { String(format: "%02x", $0) }.joined()
+            }
         }
     }
 
@@ -68,6 +94,9 @@ final class LiveActivityController {
     /// activity of this type, not just the tracked one, so an orphan left by a prior
     /// process (killed mid-session) can't survive as a stuck banner.
     func end() {
+        tokenTask?.cancel()
+        tokenTask = nil
+        pushToken = nil
         activity = nil
         Task {
             for a in Activity<AgentActivityAttributes>.activities {

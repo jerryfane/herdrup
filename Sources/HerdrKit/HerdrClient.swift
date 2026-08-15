@@ -201,6 +201,33 @@ public actor HerdrClient {
                            as: JSONNull.self)
     }
 
+    struct RegisterActivityParams: Encodable {
+        let activityPushToken: String
+        enum CodingKeys: String, CodingKey {
+            case activityPushToken = "activity_push_token"
+        }
+    }
+
+    /// Register a Live Activity's PER-ACTIVITY push token so the server can update the
+    /// lock-screen / Dynamic Island widget with the session's agent status while the app is
+    /// closed. Distinct from `registerDevice` (that is the one device APNs token; this is one
+    /// token per running Live Activity). Idempotent — safe to re-send on (re)connect and each
+    /// time the token rotates. A server that does not implement the method throws, which the
+    /// caller ignores (the widget still updates in the foreground).
+    public func registerActivity(token: String) async throws {
+        _ = try await call("notifications.register_activity",
+                           RegisterActivityParams(activityPushToken: token),
+                           as: JSONNull.self)
+    }
+
+    /// Stop pushing to a Live Activity token (the activity ended / the session disconnected),
+    /// so the server prunes it instead of pushing to a dead activity. Best-effort like the above.
+    public func unregisterActivity(token: String) async throws {
+        _ = try await call("notifications.unregister_activity",
+                           RegisterActivityParams(activityPushToken: token),
+                           as: JSONNull.self)
+    }
+
     // MARK: - Gram (owner<->agent messages)
 
     struct GramListParams: Encodable {
