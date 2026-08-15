@@ -109,15 +109,29 @@ private struct LockScreenView: View {
 }
 
 /// A filled status circle. A working agent gets a soft pulse so a glance at the
-/// Dynamic Island reads "something is running" without any text.
+/// Dynamic Island / lock screen reads "something is running" without any text;
+/// every other state stays a still circle (colour carries the meaning).
+///
+/// Best-effort: a Live Activity is rendered from system snapshots, not a live
+/// run loop, so `.symbolEffect(.pulse)` — the supported iOS 17 route — may be
+/// subtle or absent on some devices. It degrades to a static dot with no change
+/// to the colour contract.
 private struct StatusDot: View {
     let status: AgentActivityAttributes.Status
     var diameter: CGFloat = 10
 
     var body: some View {
-        Circle()
-            .fill(WidgetPalette.color(status))
-            .frame(width: diameter, height: diameter)
+        if status == .working {
+            Image(systemName: "circle.fill")
+                .resizable()
+                .frame(width: diameter, height: diameter)
+                .foregroundStyle(WidgetPalette.color(status))
+                .symbolEffect(.pulse, options: .repeating)
+        } else {
+            Circle()
+                .fill(WidgetPalette.color(status))
+                .frame(width: diameter, height: diameter)
+        }
     }
 }
 

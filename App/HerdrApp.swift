@@ -1762,7 +1762,7 @@ struct TerminalPaneContent: View {
             }
             if let group {
                 HStack(spacing: 6) {
-                    Circle().fill(group.color).frame(width: 7, height: 7)
+                    PulsingDot(color: group.color, active: group == .working)
                     Text(group.sectionTitle).font(Typography.microLabel).tracking(1).foregroundStyle(group.color)
                     Spacer()
                 }
