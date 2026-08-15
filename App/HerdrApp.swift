@@ -846,6 +846,9 @@ struct TerminalHomeView: View {
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
     /// Settings were modal covers before #88; they are persistent tabs now.
     @State private var selectedTab: HomeTab = .agents
+    /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
+    /// by GramView while visible and by an ambient poll (below) while it isn't.
+    @StateObject private var gramUnread = GramUnreadTracker()
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
     /// Shown once per connect when the daemon lacks the fork features (probe ==
@@ -1008,9 +1011,10 @@ struct TerminalHomeView: View {
 
                 // Gram and Settings were modal covers; they are persistent tabs now.
                 // Both are nav-agnostic and take no onClose as tabs (no close button).
-                GramView(client: client, agents: agents)
+                GramView(client: client, agents: agents, unread: gramUnread)
                     .tag(HomeTab.gram)
                     .tabItem { Label("Gram", systemImage: "bubble.left.and.bubble.right") }
+                    .badge(gramUnread.count == 0 ? nil : Text("\(gramUnread.count)"))
 
                 SettingsView(
                     host: host,
@@ -1054,6 +1058,19 @@ struct TerminalHomeView: View {
         // connect (this view is .id(session)-scoped) rather than on every tab switch —
         // which otherwise re-showed the fork notice and cancelled an in-flight load.
         .task { await load() }
+        // Ambient unread-gram poll for the tab badge, running ONLY while the Gram
+        // tab is not showing — GramView keeps its own 6s poll while visible and
+        // writes the count on load / mark-read. Keyed on selectedTab so it
+        // restarts on tab change and idles on Gram: exactly one poller is live.
+        .task(id: selectedTab) {
+            guard selectedTab != .gram else { return }
+            while !Task.isCancelled {
+                if let count = try? await client.gramList(unreadOnly: true).count {
+                    gramUnread.count = count
+                }
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+            }
+        }
         // Keep the session Live Activity (#90) in step with the herd: push a fresh
         // summary whenever the derived list changes, and once on appear so a
         // freshly-connected session reflects its agents right away. A no-op when the

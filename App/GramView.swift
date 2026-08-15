@@ -6,6 +6,14 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// The unread-gram count, lifted out of `GramView` so the tab bar can badge it
+/// even while the Gram tab is off-screen. Owned by the session-scoped home view;
+/// GramView writes it on load / mark-read while visible, and an ambient poller
+/// keeps it fresh while another tab is showing.
+final class GramUnreadTracker: ObservableObject {
+    @Published var count = 0
+}
+
 /// The Gram page: the owner's side of the owner<->agent message channel.
 ///
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
@@ -25,6 +33,10 @@ struct GramView: View {
     /// addressed directly (the server validates `to` against a live agent name).
     let agents: [AgentInfo]
     var onClose: (() -> Void)?
+    /// Shared unread count for the tab-bar badge. Optional (defaulted) so existing
+    /// call sites (and the DEBUG harness) compile unchanged; written on load and
+    /// mark-read so reading a message clears the badge without leaving the tab.
+    var unread: GramUnreadTracker? = nil
 
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
@@ -699,6 +711,8 @@ struct GramView: View {
         do {
             let fetched = try await client.gramList()
             serverMessages = fetched
+            // Keep the tab badge in step with what we just loaded.
+            unread?.count = fetched.filter { $0.isUnread }.count
             // Drop optimistic posts the server now reflects; unconfirmed ones stay
             // visible via `messages` (gram.post writes synchronously, so any in-flight
             // load started BEFORE a post can no longer discard it).
@@ -1123,6 +1137,8 @@ struct GramView: View {
                 // agent->owner message always lives in the server snapshot.
                 if let index = serverMessages.firstIndex(where: { $0.id == message.id }) {
                     serverMessages[index].readByOwner = true
+                    // Reading a message clears it from the badge immediately.
+                    unread?.count = serverMessages.filter { $0.isUnread }.count
                 }
             } catch {
                 // Leave it unread; the next poll re-surfaces it.
