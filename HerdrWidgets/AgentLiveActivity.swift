@@ -51,14 +51,14 @@ struct AgentLiveActivity: Widget {
             } compactLeading: {
                 StatusDot(status: context.state.status)
             } compactTrailing: {
-                // The action count wins the scarce compact slot; otherwise, a working
-                // session ticks its elapsed time here — the compact view's live motion.
+                // ONLY the count that demands action gets the scarce compact slot. A ticking
+                // timer here widened the notch pill (and kept growing as it counted up), so the
+                // working state stays a bare dot in the compact view; its live elapsed timer
+                // lives in the EXPANDED view and the lock screen, where width isn't constrained.
                 if context.state.needsYouCount > 0 {
                     Text("\(context.state.needsYouCount)")
                         .font(.caption2).bold()
                         .foregroundStyle(WidgetPalette.color(.needsYou))
-                } else if context.state.status == .working, let since = context.state.workingSince {
-                    WorkingTimer(since: since, font: .caption2)
                 }
             } minimal: {
                 StatusDot(status: context.state.status)
