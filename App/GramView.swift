@@ -56,6 +56,9 @@ struct GramView: View {
     /// A non-fatal refresh failure while messages are already shown.
     @State private var refreshNote: String?
     @State private var isLoading = false
+    /// Saved (bookmarked) Gram messages + whether the page is showing the Saved section.
+    @ObservedObject private var savedGrams = SavedGramStore.shared
+    @State private var showingSaved = false
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
@@ -297,10 +300,10 @@ struct GramView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("Gram")
+            Text(showingSaved ? "Saved" : "Gram")
                 .font(Typography.app(20, .semibold))
                 .foregroundStyle(Palette.text)
-            if unreadCount > 0 {
+            if !showingSaved, unreadCount > 0 {
                 Text("\(unreadCount)")
                     .font(Typography.machine(11, .semibold))
                     .foregroundStyle(Palette.ground)
@@ -309,12 +312,22 @@ struct GramView: View {
                     .background(Capsule().fill(Palette.waiting))
             }
             Spacer()
+            // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
-                Task { await load(initial: false) }
+                withAnimation(.easeInOut(duration: 0.15)) { showingSaved.toggle() }
             } label: {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: showingSaved ? "bookmark.fill" : "bookmark")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Palette.textDim)
+                    .foregroundStyle(showingSaved ? Palette.brand : Palette.textDim)
+            }
+            if !showingSaved {
+                Button {
+                    Task { await load(initial: false) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
             }
             if let onClose {
                 Button(action: onClose) {
@@ -335,6 +348,44 @@ struct GramView: View {
 
     @ViewBuilder
     private var content: some View {
+        if showingSaved { savedContent } else { inboxContent }
+    }
+
+    /// The Saved section: locally-kept copies of bookmarked messages. Rendered from the local
+    /// store (independent of the poll), so a saved message survives even after the original is
+    /// deleted from the server.
+    @ViewBuilder
+    private var savedContent: some View {
+        if savedGrams.saved.isEmpty {
+            centered {
+                VStack(spacing: 8) {
+                    Image(systemName: "bookmark")
+                        .font(.system(size: 28))
+                        .foregroundStyle(Palette.textFaint)
+                    Text("No saved messages yet")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("Tap the bookmark on a message to keep it here.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 32)
+            }
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(savedGrams.saved) { s in
+                        SavedGramRow(saved: s, onUnsave: { savedGrams.remove(s.id) })
+                    }
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var inboxContent: some View {
         switch phase {
         case .loading:
             centered { ProgressView().tint(Palette.textDim) }
@@ -383,7 +434,9 @@ struct GramView: View {
                         GramRow(
                             message: message,
                             isDownloadingFile: downloadingFileFor == message.id,
+                            isSaved: savedGrams.isSaved(message.id),
                             onOpenFile: { openFile(message) },
+                            onToggleSave: { savedGrams.toggle(message) },
                             onDelete: { delete(message) }
                         )
                         .onAppear { markReadIfNeeded(message) }
@@ -1152,7 +1205,9 @@ struct GramView: View {
 private struct GramRow: View {
     let message: GramMessage
     var isDownloadingFile: Bool
+    var isSaved: Bool
     var onOpenFile: () -> Void
+    var onToggleSave: () -> Void
     var onDelete: () -> Void
 
     var body: some View {
@@ -1170,6 +1225,15 @@ private struct GramRow: View {
                     Text(age)
                         .font(Typography.machine(11))
                         .foregroundStyle(Palette.textFaint)
+                    // Small save/unsave tap target (the same action is also in the long-press menu).
+                    Button(action: onToggleSave) {
+                        Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(isSaved ? Palette.brand : Palette.textFaint)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 if !message.text.isEmpty {
                     Text(message.text)
@@ -1202,6 +1266,9 @@ private struct GramRow: View {
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                 }
+            }
+            Button(action: onToggleSave) {
+                Label(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark")
             }
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
