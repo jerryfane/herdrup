@@ -34,7 +34,13 @@ struct AgentLiveActivity: Widget {
                             .font(.headline)
                             .foregroundStyle(WidgetPalette.text)
                             .lineLimit(1)
-                        if context.state.status == .working, let since = context.state.workingSince {
+                        // The ticking timer shows ONLY when exactly one agent is working, so it
+                        // unambiguously tracks THAT agent and stops the moment it finishes. The
+                        // Live Activity is one aggregate per machine, so with several agents working
+                        // a single "since" is meaningless (and the timer would appear to run on as
+                        // the busiest agent changes) — show the "N working" count instead.
+                        if context.state.status == .working, context.state.workingCount == 1,
+                           let since = context.state.workingSince {
                             HStack(spacing: 5) {
                                 Text("Working").font(.caption).foregroundStyle(WidgetPalette.color(.working))
                                 WorkingTimer(since: since, font: .caption)
@@ -89,8 +95,11 @@ private struct LockScreenView: View {
                     .font(.headline)
                     .foregroundStyle(WidgetPalette.text)
                     .lineLimit(1)
-                if state.status == .working, let since = state.workingSince {
-                    // The live ticking time IS the motion — the dot can't animate here.
+                // Timer ONLY for a single working agent (see the Dynamic Island note): it then
+                // tracks that agent and stops when it finishes. With several working, the "since"
+                // is ambiguous and looks like it never stops, so show the "N working" count. The
+                // live ticking time IS the motion here — the dot can't animate on a Live Activity.
+                if state.status == .working, state.workingCount == 1, let since = state.workingSince {
                     HStack(spacing: 5) {
                         Text("Working").font(.subheadline).foregroundStyle(WidgetPalette.color(.working))
                         WorkingTimer(since: since)
