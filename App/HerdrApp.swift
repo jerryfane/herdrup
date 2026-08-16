@@ -1722,6 +1722,11 @@ struct TerminalPaneContent: View {
     /// Per-agent push mute, toggled from the header's ⋯ menu (keyed by this pane's
     /// public id — the same id the push payload carries).
     @ObservedObject private var mute = MuteStore.shared
+    /// Saved prompts, shown from the reply bar when the input is empty (the send arrow would be
+    /// dead then). Tapping one inserts it and sends it via the normal path.
+    @ObservedObject private var savedPrompts = SavedPromptsStore.shared
+    /// Presents the "save a new prompt" sheet.
+    @State private var showSavePrompt = false
     @State private var sending = false
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
@@ -2203,15 +2208,57 @@ struct TerminalPaneContent: View {
                 // isActive drops on autoDelivering so an in-flight dictation stops before
                 // the auto-deliver clears the reply, and it can't be started during either.
                 .disabled(sending || autoDelivering)
-            Button { sendTapped() } label: {
-                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
-                    .frame(width: 40, height: 40)
-                    .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
+            // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
+            // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
+            // by the same empty predicate `canSend` uses).
+            if reply.trimmingCharacters(in: .whitespaces).isEmpty {
+                savedPromptsButton
+            } else {
+                Button { sendTapped() } label: {
+                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
+                        .frame(width: 40, height: 40)
+                        .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
+                }
+                .disabled(!canSend)
             }
-            .disabled(!canSend)
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+        .sheet(isPresented: $showSavePrompt) {
+            SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
+        }
+    }
+
+    /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
+    /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
+    private var savedPromptsButton: some View {
+        Menu {
+            ForEach(savedPrompts.prompts) { p in
+                Button { usePrompt(p) } label: { Label(p.label, systemImage: "text.quote") }
+            }
+            if !savedPrompts.prompts.isEmpty { Divider() }
+            Button { showSavePrompt = true } label: { Label("Save new prompt…", systemImage: "plus") }
+            if !savedPrompts.prompts.isEmpty {
+                Menu {
+                    ForEach(savedPrompts.prompts) { p in
+                        Button(role: .destructive) { savedPrompts.delete(p.id) } label: { Text(p.label) }
+                    }
+                } label: { Label("Delete a prompt", systemImage: "trash") }
+            }
+        } label: {
+            Image(systemName: "bookmark").font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+                .frame(width: 40, height: 40)
+                .background(Palette.surface).clipShape(Circle())
+        }
+        .disabled(sending || autoDelivering)
+    }
+
+    /// Insert a saved prompt into the reply field and send it — the same path a typed reply
+    /// takes (`sendTapped` → mode-aware `send(.submitText)` → confirmed `agent.prompt`).
+    private func usePrompt(_ p: SavedPrompt) {
+        reply = p.text
+        sendTapped()
     }
 
     /// Routes a reader action through InputRouter, then executes the plan. A
