@@ -376,7 +376,12 @@ struct GramView: View {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(savedGrams.saved) { s in
-                        SavedGramRow(saved: s, onUnsave: { savedGrams.remove(s.id) })
+                        SavedGramRow(
+                            saved: s,
+                            isDownloadingFile: downloadingFileFor == s.id,
+                            onOpenFile: { openFile(id: s.id) },
+                            onUnsave: { savedGrams.remove(s.id) }
+                        )
                     }
                 }
                 .padding(16)
@@ -435,7 +440,7 @@ struct GramView: View {
                             message: message,
                             isDownloadingFile: downloadingFileFor == message.id,
                             isSaved: savedGrams.isSaved(message.id),
-                            onOpenFile: { openFile(message) },
+                            onOpenFile: { openFile(id: message.id) },
                             onToggleSave: { savedGrams.toggle(message) },
                             onDelete: { delete(message) }
                         )
@@ -1042,13 +1047,13 @@ struct GramView: View {
 
     /// Download a message's file to a temp URL and present it in QuickLook (which
     /// offers the system share action to save it).
-    private func openFile(_ message: GramMessage) {
+    private func openFile(id: String) {
         guard downloadingFileFor == nil else { return }
-        downloadingFileFor = message.id
+        downloadingFileFor = id
         openFileTask = Task {
             defer { downloadingFileFor = nil }
             do {
-                let (name, mime, data) = try await client.gramGetFile(id: message.id)
+                let (name, mime, data) = try await client.gramGetFile(id: id)
                 // The page went away mid-download (task cancelled in .onDisappear): stop
                 // before writing any temp file, so a late completion can't strand one.
                 if Task.isCancelled { return }

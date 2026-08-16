@@ -8,6 +8,23 @@ import HerdrKit
 /// re-fetch (only whole-list `gramList` + on-demand `gramGetFile`), so an id-only bookmark
 /// would orphan the moment the original is deleted. The file BYTES are never copied (they can
 /// be up to 100 MiB and are fetched on demand); we only note whether the original had a file.
+/// The metadata of a saved message's attachment — enough to show a chip and re-fetch the bytes
+/// on demand via `gramGetFile(id:)`. A local Codable mirror of HerdrKit's `GramFile` (which is
+/// Decodable-only). The bytes are NOT stored (they can be up to 100 MiB); they're fetched when
+/// the chip is tapped, which works while the original message still exists on the server.
+struct SavedGramFile: Codable, Hashable {
+    let name: String
+    let size: UInt64
+    let mime: String
+
+    var displaySize: String {
+        let b = Double(size)
+        if b < 1024 { return "\(size) B" }
+        if b < 1024 * 1024 { return String(format: "%.0f KB", b / 1024) }
+        return String(format: "%.1f MB", b / (1024 * 1024))
+    }
+}
+
 struct SavedGram: Codable, Identifiable, Hashable {
     let id: String
     var text: String
@@ -15,7 +32,9 @@ struct SavedGram: Codable, Identifiable, Hashable {
     /// direction == .agentToOwner — so the saved copy can render the same avatar/side.
     var fromAgent: Bool
     var createdUnixMs: UInt64
-    var hasFile: Bool
+    /// The attachment's metadata, if any (bytes fetched on demand). Optional so a pre-existing
+    /// saved entry (which stored only a `hasFile` flag) still decodes cleanly, to `nil`.
+    var file: SavedGramFile?
 
     var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000) }
 }
@@ -57,7 +76,7 @@ final class SavedGramStore: ObservableObject {
                 from: message.from,
                 fromAgent: message.isFromAgent,
                 createdUnixMs: message.createdUnixMs,
-                hasFile: message.file != nil
+                file: message.file.map { SavedGramFile(name: $0.name, size: $0.size, mime: $0.mime) }
             )
             saved.append(copy)
             saved.sort { $0.createdUnixMs > $1.createdUnixMs }
@@ -84,6 +103,8 @@ final class SavedGramStore: ObservableObject {
 /// saved attachment shows only a note (its original may already be gone from the server).
 struct SavedGramRow: View {
     let saved: SavedGram
+    var isDownloadingFile: Bool
+    var onOpenFile: () -> Void
     var onUnsave: () -> Void
 
     var body: some View {
@@ -112,16 +133,42 @@ struct SavedGramRow: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if saved.hasFile {
-                Label("had an attachment", systemImage: "paperclip")
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
+            if let file = saved.file {
+                fileChip(file)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
+    }
+
+    /// A tappable chip that fetches the attachment from the server on demand (`gramGetFile`) and
+    /// previews it — works while the original message still exists (it fails gracefully if the
+    /// owner has since deleted it, since the bytes were never copied locally).
+    private func fileChip(_ file: SavedGramFile) -> some View {
+        Button(action: onOpenFile) {
+            HStack(spacing: 8) {
+                if isDownloadingFile {
+                    ProgressView().controlSize(.mini).tint(Palette.textDim)
+                } else {
+                    Image(systemName: "paperclip").font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(file.name).font(Typography.app(12, .medium)).foregroundStyle(Palette.text).lineLimit(1)
+                    Text(file.displaySize).font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.down.circle").font(.system(size: 13)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surfaceRaised))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Palette.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloadingFile)
+        .padding(.top, 2)
     }
 
     /// Compact relative age ("now" / "5m" / "3h" / "2d"), matching the inbox row's terse style.
