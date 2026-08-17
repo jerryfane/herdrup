@@ -59,6 +59,9 @@ struct GramView: View {
     /// Saved (bookmarked) Gram messages + whether the page is showing the Saved section.
     @ObservedObject private var savedGrams = SavedGramStore.shared
     @State private var showingSaved = false
+    /// On iPad (regular width) Gram becomes a two-pane split — an Inbox/Saved rail beside the
+    /// message feed + composer — instead of the phone's header toggle. iPhone stays single-column.
+    @Environment(\.horizontalSizeClass) private var hSizeClass
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
@@ -189,12 +192,12 @@ struct GramView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().overlay(Palette.hairlineQuiet)
-            content
-            bannerView
-            composer
+        Group {
+            if hSizeClass == .regular {
+                iPadBody
+            } else {
+                phoneBody
+            }
         }
         .background(Palette.ground.ignoresSafeArea())
         // Poll while the page is open so new agent messages appear without a manual
@@ -279,6 +282,105 @@ struct GramView: View {
         // Don't let a swipe-down (the new sheet dismissal) abandon an in-flight send
         // or a photo load mid-way — the chunked upload would keep running off-screen.
         .interactiveDismissDisabled(sending || loadingPhoto)
+    }
+
+    // MARK: - Layout roots
+
+    /// iPhone / compact width: the original single column — header (with the All/Saved toggle),
+    /// the message feed, banner, and composer stacked top to bottom. Unchanged from before.
+    private var phoneBody: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().overlay(Palette.hairlineQuiet)
+            content
+            bannerView
+            composer
+        }
+    }
+
+    /// iPad / regular width: a two-pane split — a fixed Inbox/Saved rail on the left (the phone's
+    /// header toggle, promoted to a persistent list) beside the message feed + composer on the
+    /// right. Reuses the SAME `content` / `bannerView` / `composer` as the phone; only the framing
+    /// differs, so every send/attach/poll behaviour is identical.
+    private var iPadBody: some View {
+        HStack(spacing: 0) {
+            gramRail
+                .frame(width: 260)
+            Divider().overlay(Palette.hairlineQuiet)
+            VStack(spacing: 0) {
+                content
+                bannerView
+                composer
+            }
+        }
+    }
+
+    /// The left rail of the iPad two-pane: the section title, a refresh action, and the two
+    /// "conversations" this channel has — Inbox (all messages, with an unread badge) and Saved
+    /// (bookmarked copies, with a count). Selecting one drives the same `showingSaved` state the
+    /// phone's header toggle does, so the right pane's `content` swaps in place.
+    private var gramRail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Gram")
+                    .font(Typography.app(20, .semibold))
+                    .foregroundStyle(Palette.text)
+                Spacer()
+                Button {
+                    Task { await load(initial: false) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            Divider().overlay(Palette.hairlineQuiet)
+            VStack(spacing: 4) {
+                railRow(title: "Inbox", icon: "tray", selected: !showingSaved,
+                        badge: unreadCount) { showingSaved = false }
+                railRow(title: "Saved", icon: "bookmark", selected: showingSaved,
+                        badge: savedGrams.saved.count, badgeMuted: true) { showingSaved = true }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            Spacer(minLength: 0)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Palette.surface.ignoresSafeArea())
+    }
+
+    /// One selectable row in the Gram rail. `badgeMuted` renders the count as a quiet pill
+    /// (Saved) rather than the attention-coloured unread pill (Inbox).
+    private func railRow(title: String, icon: String, selected: Bool, badge: Int,
+                         badgeMuted: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: selected && icon == "bookmark" ? "bookmark.fill" : icon)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(selected ? Palette.brand : Palette.textDim)
+                    .frame(width: 20)
+                Text(title)
+                    .font(Typography.app(15, selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Palette.text : Palette.textDim)
+                Spacer(minLength: 0)
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(Typography.machine(11, .semibold))
+                        .foregroundStyle(badgeMuted ? Palette.textDim : Palette.ground)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(badgeMuted ? Palette.surfaceRaised : Palette.waiting))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(selected ? Palette.surfaceRaised : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
