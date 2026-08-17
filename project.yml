@@ -164,6 +164,12 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # iPhone stays portrait-only (above); iPad (universal now) rotates freely.
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # NOTE: no UIBackgroundModes here. Our push is an ALERT the user taps (agent transition) —
         # the system delivers alert pushes with no background mode, and `remote-notification` only
         # matters for silent `content-available` wakes (which also require a fetch handler we don't
@@ -175,7 +181,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         # APNs entitlement (App/Herdr.entitlements): aps-environment = $(APS_ENVIRONMENT), resolved
         # per-config below (development for Debug, production for Release/Distribution). The App ID has
         # the Push capability and the "Herdrup App Store" profile was re-minted WITH Push, so the device
@@ -237,7 +243,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.uitests
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: YES
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
 
   # Widget extension — the #90 Live Activity (agent-session status on the lock screen +
@@ -271,7 +277,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         # Team + automatic signing for the base (Mac lane / local). INERT for the sim
         # build (never signed). The Distribution config overrides to manual with the
         # widget's own App Store profile, mirroring the app target.
