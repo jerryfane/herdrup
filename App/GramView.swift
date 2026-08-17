@@ -1241,9 +1241,10 @@ private struct GramRow: View {
                     .buttonStyle(.plain)
                 }
                 if !message.text.isEmpty {
-                    Text(message.text)
+                    Text(linkified(message.text))
                         .font(Typography.app(14))
                         .foregroundStyle(Palette.textDim)
+                        .tint(Palette.brand)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let file = message.file {
