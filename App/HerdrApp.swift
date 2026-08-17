@@ -886,6 +886,10 @@ struct TerminalHomeView: View {
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    /// iPad: which Settings section the sidebar index last selected (drives the detail's scroll).
+    @State private var settingsAnchor: SettingsSection?
+    /// iPad: the ⌘/ keyboard-shortcut reference sheet.
+    @State private var showShortcuts = false
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
     @StateObject private var gramUnread = GramUnreadTracker()
@@ -1059,8 +1063,10 @@ struct TerminalHomeView: View {
                         } else {
                             agentList
                         }
+                    case .settings:
+                        settingsIndex   // the section index; each jumps the detail pane
                     default:
-                        Spacer()   // Gram / Settings / Call live in the detail pane
+                        Spacer()   // Gram / Call live in the detail pane
                     }
                 }
             }
@@ -1089,7 +1095,8 @@ struct TerminalHomeView: View {
                         host: host,
                         connected: error == nil && !loading,
                         canReconnect: rejectedFingerprint == nil,
-                        onReconnect: onReconnect)
+                        onReconnect: onReconnect,
+                        scrollTo: settingsAnchor)
                 case .call:
                     detailPlaceholder("Voice call is coming soon", "phone")
                 }
@@ -1098,6 +1105,63 @@ struct TerminalHomeView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .tint(Palette.brand)
+        // Hardware-keyboard shortcuts (iPad): ⌘K collapses/shows the sidebar, ⌘/ opens the
+        // shortcut reference. Hidden zero-size buttons carry the key bindings.
+        .background { keyboardShortcuts }
+        .sheet(isPresented: $showShortcuts) {
+            ShortcutsSheet(onClose: { showShortcuts = false })
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
+    private var keyboardShortcuts: some View {
+        ZStack {
+            Button("Toggle sidebar") {
+                withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            Button("Shortcuts") { showShortcuts = true }
+                .keyboardShortcut("/", modifiers: .command)
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// The iPad Settings sidebar index: one row per section, each scrolls the detail's
+    /// SettingsView to that section. Selecting the same row re-arms the jump via a nil bounce.
+    @ViewBuilder
+    private var settingsIndex: some View {
+        VStack(spacing: 4) {
+            ForEach(SettingsSection.allCases, id: \.self) { section in
+                Button {
+                    // Re-select the same row = jump again: bounce through nil so onChange fires.
+                    if settingsAnchor == section { settingsAnchor = nil }
+                    DispatchQueue.main.async { settingsAnchor = section }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: section.icon)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(settingsAnchor == section ? Palette.brand : Palette.textDim)
+                            .frame(width: 22)
+                        Text(section.label)
+                            .font(Typography.app(15, settingsAnchor == section ? .semibold : .regular))
+                            .foregroundStyle(settingsAnchor == section ? Palette.text : Palette.textDim)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 11)
+                    .background(settingsAnchor == section ? Palette.surfaceRaised : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .hoverEffect(.highlight)
+            }
+        }
+        .padding(.horizontal, 10).padding(.top, 6)
+        Spacer(minLength: 0)
     }
 
     /// The four top-level sections, a pill at the top of the iPad sidebar (the phone's tab bar,
@@ -2579,6 +2643,86 @@ struct TerminalPaneContent: View {
 /// Settings (screen 05): connection status, notification preferences, and the
 /// trouble actions. Preferences persist locally via @AppStorage; wiring them to
 /// real push delivery is a follow-up, so they record intent, not delivery.
+/// A jump target within Settings. The iPad sidebar index uses it to scroll the detail pane's
+/// SettingsView to a section; iPhone tabs and modal presentations leave it nil (no scrolling).
+enum SettingsSection: Hashable, CaseIterable {
+    case connection, notify, trouble, help, about
+
+    var label: String {
+        switch self {
+        case .connection: return "Connection"
+        case .notify:     return "Notifications"
+        case .trouble:    return "Troubleshooting"
+        case .help:       return "Help"
+        case .about:      return "About"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .connection: return "wifi"
+        case .notify:     return "bell"
+        case .trouble:    return "wrench.and.screwdriver"
+        case .help:       return "questionmark.circle"
+        case .about:      return "info.circle"
+        }
+    }
+}
+
+/// A compact reference of the iPad hardware-keyboard shortcuts, shown by ⌘/.
+struct ShortcutsSheet: View {
+    var onClose: () -> Void = {}
+
+    private let rows: [(keys: String, label: String)] = [
+        ("⌘ K", "Show or hide the sidebar"),
+        ("⌘ /", "This shortcut list"),
+    ]
+
+    var body: some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Keyboard Shortcuts")
+                        .font(Typography.app(20, .semibold))
+                        .foregroundStyle(Palette.text)
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Palette.textDim)
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14)
+                Divider().overlay(Palette.hairlineQuiet)
+                VStack(spacing: 0) {
+                    ForEach(rows, id: \.keys) { row in
+                        HStack(spacing: 14) {
+                            Text(row.keys)
+                                .font(Typography.machine(14, .semibold))
+                                .foregroundStyle(Palette.text)
+                                .frame(minWidth: 54, alignment: .leading)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                            Text(row.label)
+                                .font(Typography.app(15))
+                                .foregroundStyle(Palette.textDim)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                    }
+                }
+                Text("Arrow keys, Tab and control keys pass straight through to the focused terminal.")
+                    .font(Typography.app(13))
+                    .foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16).padding(.top, 8)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
 struct SettingsView: View {
     var host: String
     var connected: Bool = true
@@ -2591,6 +2735,9 @@ struct SettingsView: View {
     /// Nil when Settings is a persistent tab (no close button); a modal sheet passes
     /// one and the header shows an xmark — mirrors GramView's nav-agnostic contract.
     var onClose: (() -> Void)?
+    /// iPad only: when the sidebar index selects a section, this changes and the detail's
+    /// SettingsView scrolls to it. Nil on iPhone / modal (no jump, plain top-to-bottom scroll).
+    var scrollTo: SettingsSection? = nil
 
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
@@ -2618,20 +2765,27 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 header
                 Divider().overlay(Palette.hairlineQuiet)
-                ScrollView {
-                    // Grouped into subviews so the top-level builder stays well under
-                    // SwiftUI's 10-child ViewBuilder ceiling.
-                    VStack(alignment: .leading, spacing: 0) {
-                        connectionSection
-                        notifySection
-                        troubleSection
-                        helpSection
-                        supportSection
-                        aboutSection
-                        versionFooter
-                        githubFooter
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        // Grouped into subviews so the top-level builder stays well under
+                        // SwiftUI's 10-child ViewBuilder ceiling. `.id` anchors let the iPad
+                        // sidebar index jump to a section (no-op when scrollTo stays nil).
+                        VStack(alignment: .leading, spacing: 0) {
+                            connectionSection.id(SettingsSection.connection)
+                            notifySection.id(SettingsSection.notify)
+                            troubleSection.id(SettingsSection.trouble)
+                            helpSection.id(SettingsSection.help)
+                            supportSection
+                            aboutSection.id(SettingsSection.about)
+                            versionFooter
+                            githubFooter
+                        }
+                        .padding(.bottom, 16)
                     }
-                    .padding(.bottom, 16)
+                    .onChange(of: scrollTo) { _, target in
+                        guard let target else { return }
+                        withAnimation { proxy.scrollTo(target, anchor: .top) }
+                    }
                 }
             }
         }
