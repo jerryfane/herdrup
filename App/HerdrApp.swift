@@ -2028,7 +2028,12 @@ struct TerminalPaneContent: View {
                 // input stays on the keycaps + reply bar below (sendText/sendKeys/
                 // prompt), never routed through the terminal itself.
                 LiveTerminalView(client: client, paneID: paneID,
-                                 onNavigate: onNavigate, isForeground: isForeground)
+                                 onNavigate: onNavigate, isForeground: isForeground,
+                                 // iPad + hardware keyboard: let the terminal hold key focus so keys
+                                 // drive the PTY directly — but yield focus while the reply field is
+                                 // focused, and never on iPhone (the terminal can't become first
+                                 // responder there, so this is inert).
+                                 wantsTerminalKeyFocus: isForeground && !replyFocused)
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -98,6 +98,10 @@ targets:
       # explicitly for the same reason as the frameworks above.
       - sdk: AVFoundation.framework
       - sdk: Speech.framework
+      # GameController backs hardware-keyboard detection for the iPad key-drive mode
+      # (`GCKeyboard.coalesced` + the GCKeyboardDidConnect/Disconnect notifications in
+      # LiveTerminalView). Linked explicitly for the same reason as the frameworks above.
+      - sdk: GameController.framework
       # ActivityKit backs the agent-session Live Activity (#90) — `LiveActivityController`
       # starts/updates/ends it. Linked explicitly for the same reason as the others.
       - sdk: ActivityKit.framework
