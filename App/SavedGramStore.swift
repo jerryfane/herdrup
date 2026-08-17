@@ -127,9 +127,10 @@ struct SavedGramRow: View {
                 .buttonStyle(.plain)
             }
             if !saved.text.isEmpty {
-                Text(saved.text)
+                Text(linkified(saved.text))
                     .font(Typography.app(14))
                     .foregroundStyle(Palette.textDim)
+                    .tint(Palette.brand)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
