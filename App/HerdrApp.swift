@@ -882,6 +882,10 @@ struct TerminalHomeView: View {
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
     /// Settings were modal covers before #88; they are persistent tabs now.
     @State private var selectedTab: HomeTab = .agents
+    /// On iPad (regular width) the app becomes a NavigationSplitView (sidebar + detail);
+    /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    @State private var columnVisibility = NavigationSplitViewVisibility.all
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
     @StateObject private var gramUnread = GramUnreadTracker()
@@ -897,7 +901,7 @@ struct TerminalHomeView: View {
 
     /// The bottom tabs. Terminal is deliberately absent — a terminal fronts a
     /// keep-mounted pane over the tabs rather than being one.
-    private enum HomeTab: Hashable { case agents, gram, settings }
+    private enum HomeTab: Hashable { case agents, gram, settings, call }
 
     /// The only remaining MODAL covers: the new-agent form and the first-run gestures
     /// tutorial. Gram and Settings became persistent tabs (#88).
@@ -1035,8 +1039,115 @@ struct TerminalHomeView: View {
         return AgentList(agents: filtered, livePaneIDs: livePaneIDs).sections
     }
 
+    /// The iPad (regular-width) layout: a two-column `NavigationSplitView`. Sidebar = the section
+    /// pill + the agents list; detail = the selected agent's LIVE TERMINAL (or Gram / Settings for
+    /// those sections). Reuses the SAME views + terminal machinery as the phone layout — only the
+    /// arrangement differs. iPhone / narrow width keeps the tab-bar-with-terminal-over layout.
+    private var iPadLayout: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    sidebarSectionPicker
+                    switch selectedTab {
+                    case .agents:
+                        header
+                        if let error {
+                            errorView(error)
+                        } else if loading && agents.isEmpty {
+                            Spacer(); ProgressView().tint(Palette.textDim); Spacer()
+                        } else {
+                            agentList
+                        }
+                    default:
+                        Spacer()   // Gram / Settings / Call live in the detail pane
+                    }
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 460)
+            .toolbar(.hidden, for: .navigationBar)
+        } detail: {
+            ZStack {
+                Palette.groundMachine.ignoresSafeArea()
+                switch selectedTab {
+                case .agents:
+                    if frontID != nil {
+                        // The same keep-mounted terminal container as the phone, just placed in the
+                        // detail column instead of overlaid — the front pane holds the PTY lock exactly
+                        // as before, so none of that machinery changes.
+                        PaneKeepAliveContainer(
+                            client: client, slots: slots, frontID: frontID,
+                            onClose: { frontID = nil; Task { await load() } },
+                            onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
+                    } else {
+                        detailPlaceholder("Select an agent", "square.grid.2x2")
+                    }
+                case .gram:
+                    GramView(client: client, agents: agents, unread: gramUnread)
+                case .settings:
+                    SettingsView(
+                        host: host,
+                        connected: error == nil && !loading,
+                        canReconnect: rejectedFingerprint == nil,
+                        onReconnect: onReconnect)
+                case .call:
+                    detailPlaceholder("Voice call is coming soon", "phone")
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .tint(Palette.brand)
+    }
+
+    /// The four top-level sections, a pill at the top of the iPad sidebar (the phone's tab bar,
+    /// rotated up here — same sections, so the future Call tab already has its slot).
+    private var sidebarSectionPicker: some View {
+        HStack(spacing: 4) {
+            sectionButton(.agents, "Agents", "square.grid.2x2.fill")
+            sectionButton(.gram, "Gram", "bubble.left.and.bubble.right", badge: gramUnread.count)
+            sectionButton(.call, "Call", "phone")
+            sectionButton(.settings, "Settings", "gearshape")
+        }
+        .padding(5)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
+    }
+
+    private func sectionButton(_ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0) -> some View {
+        Button { selectedTab = tab } label: {
+            VStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .overlay(alignment: .topTrailing) {
+                        if badge > 0 {
+                            Circle().fill(Palette.waiting).frame(width: 7, height: 7).offset(x: 5, y: -2)
+                        }
+                    }
+                Text(label).font(Typography.app(9, .medium))
+            }
+            .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textFaint)
+            .frame(maxWidth: .infinity).padding(.vertical, 7)
+            .background(selectedTab == tab ? Palette.surfaceRaised : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func detailPlaceholder(_ text: String, _ icon: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 34)).foregroundStyle(Palette.textFaint)
+            Text(text).font(Typography.app(15, .medium)).foregroundStyle(Palette.textDim)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     var body: some View {
-        ZStack {
+        Group {
+            if hSizeClass == .regular {
+                iPadLayout
+            } else {
+            ZStack {
             // Apple's standard tab bar (Liquid Glass automatically on iOS 26, the clean
             // standard bar below that) replaces the old hand-built pill (#88). Terminal
             // is NOT a tab — it fronts a keep-mounted pane over everything (below).
@@ -1087,6 +1198,8 @@ struct TerminalHomeView: View {
                 // cross-fading the inner pane swap and disturbing the paging XCUITest.
                 // `frontID != nil` only flips on the list<->terminal open/close.
                 .animation(.easeOut(duration: 0.26), value: frontID != nil)
+            }
+            }
         }
         // Connect-scoped lifecycle, attached to the PERSISTENT ROOT, not a tab: a
         // TabView re-runs a tab's .task / .onAppear every time that tab re-appears, so
