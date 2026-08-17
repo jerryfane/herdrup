@@ -2,6 +2,7 @@
 import SwiftUI
 import UIKit
 import SwiftTerm
+import GameController
 import HerdrKit
 
 /// One-shot claim gate: `claim()` returns true to EXACTLY ONE caller, so a
@@ -24,13 +25,16 @@ private final class ResumeGate: @unchecked Sendable {
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
 /// instead of a reflowed snapshot.
 ///
-/// READ-ONLY for keyboard/typed input: the view never becomes first responder (no
-/// keyboard) and its delegate `send` is a no-op, so SwiftTerm keystrokes are never
-/// routed to the PTY. Command/message input stays exclusively on the reply/Send +
-/// keycap affordances in `TerminalPaneContent` (`sendText`/`sendKeys`/`prompt`). The
-/// ONE narrow input exception is SCROLL: a pan on the alternate screen sends
-/// constrained wheel/arrow sequences to the agent so its full-screen view can scroll
-/// (see `handleScrollPan`) — never a keystroke, never arbitrary typed text.
+/// READ-ONLY for keyboard/typed input on iPhone/touch: the view never becomes first
+/// responder (no keyboard) and its delegate `send` early-returns, so SwiftTerm keystrokes
+/// are never routed to the PTY. Command/message input stays on the reply/Send + keycap
+/// affordances in `TerminalPaneContent` (`sendText`/`sendKeys`/`prompt`). Two input
+/// exceptions: (1) SCROLL — a pan on the alternate screen sends constrained wheel/arrow
+/// sequences to the agent so its full-screen view can scroll (see `handleScrollPan`) —
+/// never a keystroke; and (2) iPad KEY DRIVE — on iPad with a hardware keyboard the view
+/// becomes first responder and `send` forwards SwiftTerm's key→bytes to the PTY, so a Magic
+/// Keyboard types straight into the terminal (see `ReadOnlyTerminalView.keyDriveEnabled`).
+/// iPhone and touch behaviour are unchanged.
 ///
 /// Geometry: the view reports its own laid-out grid to the server via `setPTYSize`
 /// so the stream is generated at the phone's width. While the terminal view is open
@@ -53,6 +57,11 @@ struct LiveTerminalView: UIViewRepresentable {
     /// width while nobody's looking; it re-takes the lock when fronted again. Only the
     /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
+    /// Whether the terminal itself should hold keyboard focus (drive keys straight to the PTY).
+    /// Only ever true on iPad with a hardware keyboard AND when the reply field is not focused;
+    /// on iPhone the terminal cannot become first responder, so this is inert (see
+    /// `ReadOnlyTerminalView.keyDriveEnabled`). Refreshed on every update.
+    var wantsTerminalKeyFocus: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -66,15 +75,26 @@ struct LiveTerminalView: UIViewRepresentable {
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.setForeground(isForeground)
+        // Drive terminal key focus from SwiftUI intent. Inert on iPhone: `becomeFirstResponder`
+        // returns false there (the view can't become first responder), so `isFirstResponder`
+        // stays false and read-only behaviour is unchanged.
+        if wantsTerminalKeyFocus {
+            if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
+        } else if uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
     }
 
     static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
         coordinator.stop()
     }
 
-    /// A `TerminalView` that never accepts keyboard input — display + scroll only.
-    /// Blocking first-responder status is what keeps this observe-only: no keyboard
-    /// appears and no keystroke can reach the (unwired) PTY input path.
+    /// A `TerminalView` that is read-only for keyboard input on iPhone/touch — display +
+    /// scroll only. Blocking first-responder status is what keeps it observe-only: no keyboard
+    /// appears and no keystroke can reach the PTY input path. The ONE exception is iPad with a
+    /// hardware keyboard (`keyDriveEnabled`): there the view DOES become first responder and its
+    /// `send` delegate forwards SwiftTerm's key→bytes translation to the PTY, so a Magic Keyboard
+    /// drives the terminal like a real one. iPhone and touch behaviour are unchanged.
     ///
     /// SCROLL is the LIBRARY's job now. On a normal (shell) buffer the reader
     /// finger-scrolls the retained scrollback through SwiftTerm's own `UIScrollView`,
@@ -89,8 +109,22 @@ struct LiveTerminalView: UIViewRepresentable {
     /// (`Coordinator.handleScrollPan`), which sends wheel/arrow scroll INTO a
     /// full-screen TUI that keeps no scrollback of its own.
     final class ReadOnlyTerminalView: TerminalView {
-        override var canBecomeFirstResponder: Bool { false }
-        override func becomeFirstResponder() -> Bool { false }
+        /// Only on iPad with a PHYSICAL keyboard attached do we let the terminal take key input.
+        /// Gate on the `.pad` idiom (NOT horizontalSizeClass — an iPhone Max in landscape is
+        /// regular width and must stay read-only) AND a coalesced hardware keyboard. On iPhone
+        /// this is always false, so `canBecomeFirstResponder`/`becomeFirstResponder` stay false
+        /// and the terminal remains read-only exactly as before.
+        var keyDriveEnabled: Bool {
+            UIDevice.current.userInterfaceIdiom == .pad && GCKeyboard.coalesced != nil
+        }
+        override var canBecomeFirstResponder: Bool { keyDriveEnabled }
+        override func becomeFirstResponder() -> Bool { keyDriveEnabled ? super.becomeFirstResponder() : false }
+        /// Zero-frame input view so becoming first responder shows NO soft keyboard — hardware
+        /// keys still arrive via UIKeyInput/pressesBegan. SwiftTerm declares `inputView` and
+        /// `inputAccessoryView` as `public override` (NOT `open`), so this module cannot re-override
+        /// them; we SET them in init instead (they expose public setters). Inert on iPhone: this
+        /// view never becomes first responder there, so neither input is ever consulted.
+        private let emptyInputView = UIView(frame: .zero)
 
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
@@ -98,6 +132,11 @@ struct LiveTerminalView: UIViewRepresentable {
             // flush and the library's scroll-offset math (`maxContentOffsetY`) free of a
             // shifting safe-area / keyboard inset.
             contentInsetAdjustmentBehavior = .never
+            // Suppress the soft keyboard + SwiftTerm's TerminalAccessory bar while keeping HARDWARE
+            // keys flowing. `setupAccessoryView()` (which installs the accessory) runs once during
+            // super.init's setup, so overwriting these here sticks.
+            inputView = emptyInputView
+            inputAccessoryView = nil
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     }
@@ -201,6 +240,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// left screen EDGE to the back gesture — a right-swipe there means "go back",
         /// not "previous agent".
         private weak var swipeAgentPrev: UISwipeGestureRecognizer?
+        /// Hardware-keyboard connect/disconnect observers so key-drive focus follows the keyboard
+        /// live (plug in → the front pane takes focus; unplug → it resigns). Removed in `stop()`.
+        private var keyboardObservers: [NSObjectProtocol] = []
 
         /// IBM Plex Mono (the design's MACHINE voice) at the pane size, falling back
         /// to the system monospace if the bundled face is unavailable. The
@@ -234,6 +276,29 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
+            // KEY DRIVE (iPad + hardware keyboard): `send` now FORWARDS SwiftTerm's output to the
+            // PTY, so a tap SwiftTerm would turn into a mouse report could leak bytes. Turn the
+            // VIEW's touch→mouse reporting off in that mode. This touches ONLY the view's own
+            // tap-to-mouse-byte conversion — NOT the emulator's `term.mouseMode` (what
+            // emitScroll/handleScrollPan read), so alt-screen / Claude-Code wheel scroll is
+            // unaffected.
+            if view.keyDriveEnabled { view.allowMouseReporting = false }
+            // Track hardware-keyboard connect/disconnect so key-drive focus follows the keyboard.
+            // On connect the front pane becomes first responder (iPad-gated by keyDriveEnabled);
+            // on disconnect it resigns. Tokens removed in stop().
+            keyboardObservers.append(
+                NotificationCenter.default.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { [weak self, weak view] _ in
+                    // keyDriveEnabled gate keeps this iPad-only (a BT keyboard on iPhone is a no-op,
+                    // preserving the read-only path). A keyboard attached MID-session also needs
+                    // mouse reporting off, or a tap could leak a mouse report through the now-live send.
+                    guard let self, let view, self.foreground, view.keyDriveEnabled else { return }
+                    view.allowMouseReporting = false
+                    _ = view.becomeFirstResponder()
+                })
+            keyboardObservers.append(
+                NotificationCenter.default.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { [weak view] _ in
+                    view?.resignFirstResponder()
+                })
             // Claim geometry ownership for this pane (see geometryGeneration): the newest
             // attach wins, and an older coordinator's delayed release checks this before
             // unlocking.
@@ -261,10 +326,12 @@ struct LiveTerminalView: UIViewRepresentable {
             // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
             // RecognizeSimultaneouslyWith:)` returns true below, and UIKit guarantees
             // simultaneous recognition when EITHER delegate says yes — so SwiftTerm's
-            // mouse-pan (which has no delegate) cannot starve this one, and any mouse
-            // button/motion events it emits are discarded by our no-op `send` delegate
-            // (read-only). We therefore do NOT disable `allowMouseReporting` — leaving it
-            // at its default keeps SwiftTerm's selection-clear-on-linefeed working.
+            // mouse-pan (which has no delegate) cannot starve this one. In the read-only case
+            // (iPhone/touch, no key drive) any mouse button/motion events SwiftTerm emits are
+            // discarded because `send` early-returns, so we leave `allowMouseReporting` at its
+            // default there and keep SwiftTerm's selection-clear-on-linefeed working. Only under
+            // key drive (handled above) do we turn `allowMouseReporting` off, so forwarded taps
+            // can't leak mouse bytes to the PTY.
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
             pan.delegate = self
             view.addGestureRecognizer(pan)
@@ -346,6 +413,10 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollPan?.isEnabled = false    // no drag can send bytes to an exited/replaced pane
             scrollSendTask?.cancel()
             scrollSendTask = nil
+            inputSendTask?.cancel()         // no forwarded keystroke can reach an exited/replaced pane
+            inputSendTask = nil
+            for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
+            keyboardObservers.removeAll()
             streamTask?.cancel()
             streamTask = nil
             watchdogTask?.cancel()          // stop the heartbeat checker
@@ -763,12 +834,38 @@ struct LiveTerminalView: UIViewRepresentable {
 
         // MARK: TerminalViewDelegate — read-only, so most are inert
 
-        /// READ-ONLY: swallow any bytes SwiftTerm would send upstream (keystrokes,
-        /// mouse events it generates). Keyboard/typed input is never routed to the
-        /// PTY through this delegate. (The one deliberate write from this view is the
-        /// alt-screen SCROLL path in `handleScrollPan`, which sends only wheel/arrow
-        /// sequences directly via `sendText` — not through this no-op.)
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {}
+        /// KEY DRIVE (iPad + hardware keyboard only): forward SwiftTerm's own key→bytes
+        /// translation to the PTY. DOUBLE-GATED — the view must be `keyDriveEnabled` AND the
+        /// current first responder — so on iPhone/touch (where the view never becomes first
+        /// responder) this stays a no-op and no keystroke or SwiftTerm-generated mouse byte is
+        /// ever routed to the PTY, exactly as before. Serialized through `enqueueInput` for the
+        /// same reason `emitScroll` serializes: batch a fast key burst into one send instead of a
+        /// flood of concurrent, possibly-reordered SSH channels. (The alt-screen SCROLL path in
+        /// `handleScrollPan` still writes wheel/arrow sequences directly via `sendText`.)
+        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            guard !stopped, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
+            enqueueInput(String(decoding: data, as: UTF8.self))
+        }
+
+        /// Serialized key-input queue, mirroring the scroll queue (`pendingScroll`/`scrollSendTask`):
+        /// bytes waiting to go to the PTY, drained one send at a time so a fast burst coalesces into
+        /// batched writes. Nonisolated like `emitScroll` (called on the main thread from the
+        /// delegate callback); the drain hops to the main actor for the async `sendText`.
+        private var pendingInput = ""
+        private var inputSendTask: Task<Void, Never>?
+        private func enqueueInput(_ s: String) {
+            guard !s.isEmpty else { return }
+            pendingInput += s
+            guard inputSendTask == nil else { return }   // a drain is running; it will pick this up
+            inputSendTask = Task { @MainActor [weak self] in
+                while let self, !self.stopped, !self.pendingInput.isEmpty {
+                    let batch = self.pendingInput
+                    self.pendingInput = ""
+                    _ = try? await self.client.sendText(pane: self.paneID, text: batch)
+                }
+                self?.inputSendTask = nil
+            }
+        }
         func scrolled(source: TerminalView, position: Double) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
