@@ -2379,6 +2379,14 @@ struct TerminalPaneContent: View {
                 .onChange(of: reply) { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 }
+                .submitLabel(.send)
+                // Hardware Return submits, exactly like tapping the send arrow. Guarded by
+                // `canSend` (mirrors the arrow's `.disabled(!canSend)`) so an empty/whitespace box
+                // is a true no-op and a fast second Return can't double-fire mid-send. Re-assert
+                // focus so the box stays ready for the next line — SwiftUI otherwise drops first
+                // responder on submit, which would hand key focus back to the terminal
+                // (wantsTerminalKeyFocus = isForeground && !replyFocused).
+                .onSubmit { if canSend { sendTapped() }; replyFocused = true }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
