@@ -116,9 +116,11 @@ final class ScrollTests: XCTestCase {
 
         // Swipe DOWN on the terminal body to reveal the backfilled history above the current
         // screen (same gesture the omp scroll receipt uses).
-        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
-        for _ in 0..<3 {
+        // Longer, more numerous drags than the other two scroll tests so more backfilled
+        // history is revealed, giving the assert headroom on the CI sim (see #124).
+        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.90))
+        for _ in 0..<5 {
             high.press(forDuration: 0.05, thenDragTo: low)
             Thread.sleep(forTimeInterval: 0.2)
         }
@@ -127,7 +129,10 @@ final class ScrollTests: XCTestCase {
         let after = app.screenshot()
         attach(after, name: "bf-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
-        XCTAssertGreaterThan(movedDiff, 0.10,
+        // Threshold 0.06 is ~3x the <0.02 idle-noise ceiling asserted above, so it cleanly
+        // separates a working scroll (~0.09 on the CI sim) from a broken backfill (~idle). The
+        // old 0.10 chronically false-failed a working scroll (#122 0.0945, #123 0.0921); see #124.
+        XCTAssertGreaterThan(movedDiff, 0.06,
             "No backfilled history to scroll into: content unchanged after swiping (diff=\(movedDiff)). The connect-time scrollback backfill did not populate SwiftTerm's scrollback.")
     }
 
