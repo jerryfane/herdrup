@@ -439,6 +439,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 relockPending = true            // hold off ALL sendPTYSize until the release lands
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
+                    // Re-fronting a keep-mounted pane whose geometry changed while hidden can leave
+                    // stale/overlapping cells visible until the resize round-trip lands — repaint now
+                    // (main-actor Task, so the @MainActor forceFullRepaint is called safely).
+                    if let self, let view = self.view, self.foreground, !self.stopped {
+                        self.forceFullRepaint(view)
+                    }
                     await pending?.value        // let any committed lock:false land FIRST
                     guard let self, self.foreground, !self.stopped,
                           self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
@@ -645,6 +651,23 @@ struct LiveTerminalView: UIViewRepresentable {
         @MainActor
         private func resizeEmulator(cols: Int, rows: Int, in view: ReadOnlyTerminalView) {
             view.getTerminal().resize(cols: max(4, cols), rows: max(2, rows))
+            // A server-driven resize reflows the emulator grid but — unlike a `.data` feed —
+            // never triggers the view to repaint, so the next feed can paint new cells OVER stale
+            // ones (the "overdraw" bug that previously only a manual refresh cleared). Force a
+            // display-only full repaint at the new geometry. Purely display-side (see helper).
+            forceFullRepaint(view)
+        }
+
+        /// Repaint the entire visible grid from the current buffer, without changing content or
+        /// clearing. `updateFullScreen()` marks every row dirty (no content change); `setNeedsDisplay()`
+        /// drives the iOS view's `draw(_:)` over the full bounds, which renders cells from the buffer
+        /// via CoreText. Both are public SwiftTerm / UIKit APIs. DISPLAY-ONLY — never calls
+        /// `set_pty_size` and never touches `desiredCols`/`lastSentCols`/`relockPending`, so the PTY
+        /// width-lock is untouched.
+        @MainActor
+        private func forceFullRepaint(_ view: ReadOnlyTerminalView) {
+            view.getTerminal().updateFullScreen()
+            view.setNeedsDisplay()
         }
 
         /// The view laid out (first appearance, rotation, keyboard) and computed a
