@@ -62,11 +62,17 @@ struct LiveTerminalView: UIViewRepresentable {
     /// on iPhone the terminal cannot become first responder, so this is inert (see
     /// `ReadOnlyTerminalView.keyDriveEnabled`). Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
+    /// Terminal font size in points (the `terminal.fontSize` preference). Applied
+    /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
+    /// no view recreation.
+    var fontSize: CGFloat = 12.5
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
     func makeUIView(context: Context) -> ReadOnlyTerminalView {
-        let view = ReadOnlyTerminalView(frame: .zero, font: Coordinator.paneFont)
+        context.coordinator.paneFontSize =
+            min(max(fontSize, Coordinator.minFontSize), Coordinator.maxFontSize)
+        let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
         context.coordinator.onNavigate = onNavigate
         context.coordinator.attach(view)
         return view
@@ -83,6 +89,7 @@ struct LiveTerminalView: UIViewRepresentable {
         } else if uiView.isFirstResponder {
             uiView.resignFirstResponder()
         }
+        context.coordinator.applyFont(size: fontSize)
     }
 
     static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
@@ -247,10 +254,28 @@ struct LiveTerminalView: UIViewRepresentable {
         /// IBM Plex Mono (the design's MACHINE voice) at the pane size, falling back
         /// to the system monospace if the bundled face is unavailable. The
         /// PostScript name matches `DesignSystem.Typography`'s mono regular cut.
-        static let paneFontSize: CGFloat = 12.5
-        static let paneFont: UIFont =
+        static let minFontSize: CGFloat = 9
+        static let maxFontSize: CGFloat = 24
+        static let defaultFontSize: CGFloat = 12.5
+        /// Terminal font size in points, driven by the `terminal.fontSize` preference.
+        /// Instance (not static) so it can change at runtime: setting `view.font` from
+        /// `applyFont` flows through SwiftTerm's resetFont → resize → sizeChanged →
+        /// sendPTYSize, which re-locks the PTY at the new column count.
+        var paneFontSize: CGFloat = 12.5
+        var paneFont: UIFont {
             UIFont(name: "IBMPlexMono", size: paneFontSize)
-            ?? UIFont.monospacedSystemFont(ofSize: paneFontSize, weight: .regular)
+                ?? UIFont.monospacedSystemFont(ofSize: paneFontSize, weight: .regular)
+        }
+
+        /// Apply a new terminal font size (clamped to [minFontSize, maxFontSize]).
+        /// A no-op if unchanged; otherwise setting `view.font` drives the full
+        /// re-layout (cell recompute → grid resize → sizeChanged → sendPTYSize).
+        func applyFont(size: CGFloat) {
+            let clamped = min(max(size, Self.minFontSize), Self.maxFontSize)
+            guard clamped != paneFontSize else { return }
+            paneFontSize = clamped
+            view?.font = paneFont
+        }
 
         /// Scrollback backfill — so scrolling up shows output produced BEFORE this connection
         /// (open/refresh only seeds the current screen otherwise). On each connect we fetch the
@@ -535,7 +560,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // MARK: styling (the design's machine voice)
 
         private func style(_ view: ReadOnlyTerminalView) {
-            view.font = Self.paneFont
+            view.font = paneFont
             // groundMachine #0B0D1C behind, ink #EEF0F7 text, working-blue caret —
             // the same tokens `DesignSystem.Palette` uses, so the terminal is the
             // one darker ground the design calls for.
@@ -790,7 +815,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // deferred re-lock re-sends at the LIVE grid once the release lands.
             guard foreground, !relockPending else { return }
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
-            let cell = Self.cellPixels()
+            let cell = cellPixels()
             resizeTask = Task { @MainActor [weak self] in
                 // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
                 // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
@@ -829,7 +854,7 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// Cell size from the actual mono font — the DPI hint the server stores.
-        private static func cellPixels() -> (width: UInt32, height: UInt32) {
+        private func cellPixels() -> (width: UInt32, height: UInt32) {
             let attrs: [NSAttributedString.Key: Any] = [.font: paneFont]
             let advance = ("W" as NSString).size(withAttributes: attrs).width
             let lineHeight = paneFont.lineHeight
@@ -971,7 +996,7 @@ struct LiveTerminalView: UIViewRepresentable {
             case .changed:
                 scrollAccum += gr.translation(in: view).y
                 gr.setTranslation(.zero, in: view)
-                let line = max(1, Self.paneFont.lineHeight)
+                let line = max(1, paneFont.lineHeight)
                 let ticks = Int(scrollAccum / line)
                 guard ticks != 0 else { return }
                 // Pace the wheel: a MOUSE-MODE agent (Claude Code) accelerates its own
@@ -1015,8 +1040,8 @@ struct LiveTerminalView: UIViewRepresentable {
                 // understand these; a documented limit of the private protocol, not a
                 // runtime bug.
                 let code = up ? 64 : 65
-                let cw = ("W" as NSString).size(withAttributes: [.font: Self.paneFont]).width
-                let ch = Self.paneFont.lineHeight
+                let cw = ("W" as NSString).size(withAttributes: [.font: paneFont]).width
+                let ch = paneFont.lineHeight
                 let col = max(1, min(Int(point.x / max(1, cw)) + 1, max(1, term.cols)))
                 let row = max(1, min(Int(point.y / max(1, ch)) + 1, max(1, term.rows)))
                 seq = String(repeating: "\u{1b}[<\(code);\(col);\(row)M", count: count)
