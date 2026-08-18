@@ -415,6 +415,10 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollSendTask = nil
             inputSendTask?.cancel()         // no forwarded keystroke can reach an exited/replaced pane
             inputSendTask = nil
+            if let channel = inputChannel { // tear down the persistent input channel (issue #62)
+                inputChannel = nil
+                Task { await channel.close() }
+            }
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
             streamTask?.cancel()
@@ -853,6 +857,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// delegate callback); the drain hops to the main actor for the async `sendText`.
         private var pendingInput = ""
         private var inputSendTask: Task<Void, Never>?
+        /// Persistent input channel (issue #62): opened lazily on first key-drive
+        /// input, after which keystrokes ride one held SSH channel instead of a
+        /// fresh `send_text` exec per batch. nil = not yet tried, or the daemon
+        /// lacks the method / the channel died = `send_text` fallback.
+        private var inputChannel: PaneInputChannel?
+        private var inputChannelTried = false
         private func enqueueInput(_ s: String) {
             guard !s.isEmpty else { return }
             pendingInput += s
@@ -861,10 +871,43 @@ struct LiveTerminalView: UIViewRepresentable {
                 while let self, !self.stopped, !self.pendingInput.isEmpty {
                     let batch = self.pendingInput
                     self.pendingInput = ""
-                    _ = try? await self.client.sendText(pane: self.paneID, text: batch)
+                    await self.deliverInput(batch)
                 }
                 self?.inputSendTask = nil
             }
+        }
+
+        /// Delivers one input batch, preferring the persistent `pane.input.stream`
+        /// channel and falling back to per-call `sendText`. Order is preserved: the
+        /// single `inputSendTask` drain calls this serially, and the channel writes
+        /// frames through one ordered writer.
+        @MainActor
+        private func deliverInput(_ batch: String) async {
+            // Open the channel lazily on first use. An older daemon without
+            // pane.input.stream makes start() throw, and we stay on send_text.
+            if !inputChannelTried {
+                inputChannelTried = true
+                if let channel = await client.openPaneInput(pane: paneID) {
+                    do {
+                        try await channel.start()
+                        inputChannel = channel
+                    } catch {
+                        await channel.close()
+                        inputChannel = nil
+                    }
+                }
+            }
+            if let channel = inputChannel, await channel.send(batch) {
+                return
+            }
+            // Channel unavailable or died mid-session: drop it and fall back. A
+            // dropped channel is NOT re-opened here (no replay) — a fresh
+            // Coordinator on reconnect retries the open.
+            if let channel = inputChannel {
+                await channel.close()
+                inputChannel = nil
+            }
+            _ = try? await self.client.sendText(pane: self.paneID, text: batch)
         }
         func scrolled(source: TerminalView, position: Double) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
