@@ -1,22 +1,24 @@
 import XCTest
 
-/// The SWIPE-BETWEEN-AGENTS receipt (JARVIS-commissioned under standing rule 47814/47874:
-/// a gesture change ships with an on-simulator gesture proof, not static review alone).
+/// The SWIPE-REMOVAL receipt (JARVIS standing rule 47814/47874: a gesture change ships with an
+/// on-simulator gesture proof, not static review alone).
+///
+/// The horizontal swipe-between-agents gesture was REMOVED: a finger/mouse drag meant to SELECT
+/// terminal text was triggering it and paging to an unwanted agent. This test is the inverted
+/// receipt — it proves the removal held: a fast horizontal flick on the terminal body no longer
+/// changes the front pane. (Agent switching now lives entirely in the list/sidebar.)
 ///
 /// Launches the keep-mounted paging harness (`HERDR_SCREENSHOT_MOCK=paging`) — three
 /// distinctively-named agents (ALFA / BRAVO / CHARLIE) in the real `PaneKeepAliveContainer`.
-/// A horizontal swipe fronts the neighbour, and the header heading changes accordingly. Only
-/// the FRONT pane is in the accessibility tree (`.accessibilityHidden(!isFront)`), so an
-/// existence assertion genuinely proves which pane is on screen: after swiping to BRAVO the
-/// ALFA header is GONE, and swiping back makes it reappear (a warm keep-mounted hit).
-///
-/// If the swipe never registered, the front pane would not change and the target header would
-/// never appear → this fails. So a PASS proves the discrete swipe recognizers page the panes.
+/// Only the FRONT pane is hittable (`.accessibilityHidden(!isFront)` + opacity/hit-testing off on
+/// the rest), so an existence+hittable assertion genuinely proves which pane is on screen. If a
+/// swipe still paged, BRAVO would become the hittable front → this fails. So a PASS proves the
+/// swipe recognizers are gone and a horizontal flick leaves the agent unchanged.
 final class PagingTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
-    func testSwipeBetweenAgents() {
+    func testSwipeDoesNotPageAgents() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "paging"
         app.launch()
@@ -27,35 +29,20 @@ final class PagingTests: XCTestCase {
             "Paging harness did not open on the first agent (ALFA).")
         attach(app, "01-alfa")
 
-        // Swipe LEFT → next agent (BRAVO) becomes the FRONT (hittable) pane. The discrete swipe
-        // recognizer is velocity-sensitive, so retry the flick until it lands (a swipe that never
-        // fires leaves ALFA fronted; a swipe that pages makes BRAVO the hittable front). Retrying
-        // can only ADVANCE when it actually fires, and stops the instant BRAVO is front, so it
-        // cannot overshoot.
-        XCTAssertTrue(pageUntilFront(app, .left, to: "BRAVO"),
-            "Swipe-left did not page to the next agent (BRAVO).")
-        XCTAssertFalse(frontIs(app, "ALFA", timeout: 1),
-            "ALFA is still the front pane after paging to BRAVO — the swap did not front BRAVO.")
-        attach(app, "02-bravo")
+        // A firm leftward flick used to page to BRAVO. With the swipe recognizers removed it must
+        // be inert: BRAVO never fronts and ALFA stays the hittable front pane.
+        swipe(app, .left)
+        XCTAssertFalse(frontIs(app, "BRAVO", timeout: 2),
+            "A horizontal swipe paged to BRAVO — the swipe-between-agents gesture should be removed.")
+        XCTAssertTrue(frontIs(app, "ALFA"),
+            "ALFA is no longer the front pane after a horizontal swipe — the swipe must leave the agent unchanged.")
+        attach(app, "02-still-alfa")
 
-        // Swipe RIGHT → previous agent (back to ALFA), a warm keep-mounted hit that re-fronts it.
-        XCTAssertTrue(pageUntilFront(app, .right, to: "ALFA"),
-            "Swipe-right did not page back to the previous agent (ALFA).")
-        attach(app, "03-alfa-again")
-    }
-
-    /// Flick in `dir` until the named agent is the hittable front pane, or give up after a few
-    /// tries. Each attempt only pages when the discrete recognizer actually fires, and returns as
-    /// soon as `to` is front — so it recovers a dropped flick without overshooting past the target.
-    private func pageUntilFront(_ app: XCUIApplication, _ dir: Dir, to name: String) -> Bool {
-        // A generous per-attempt wait (the neighbour's header renders within ~1s of a fired
-        // flick), so a retry fires only when the flick genuinely dropped — never overshooting a
-        // target that just hadn't rendered yet.
-        for _ in 0..<3 {
-            swipe(app, dir)
-            if frontIs(app, name, timeout: 4) { return true }
-        }
-        return false
+        // The other direction is equally inert.
+        swipe(app, .right)
+        XCTAssertTrue(frontIs(app, "ALFA"),
+            "A rightward swipe changed the front pane — it must be inert after the gesture removal.")
+        attach(app, "03-still-alfa")
     }
 
     // MARK: helpers
@@ -76,18 +63,17 @@ final class PagingTests: XCTestCase {
 
     private enum Dir { case left, right }
 
-    /// A firm, FAST horizontal flick on the terminal body at mid-height. The discrete
-    /// `UISwipeGestureRecognizer` fires only on real velocity — a plain drag is read as the
-    /// scroll pan and never pages — so we drive the drag at `.fast` velocity explicitly. Both
-    /// directions start well clear of the left screen edge (dx ≥ 0.45 ≫ the ~44pt edge-back
-    /// zone), so the previous-agent (rightward) swipe is never ceded to the edge-back gesture.
+    /// A firm, FAST horizontal flick on the terminal body at mid-height — the same gesture that
+    /// used to page agents. Both directions start well clear of the left screen edge (dx ≥ 0.45 ≫
+    /// the ~44pt edge-back zone), so the flick reaches the terminal rather than the system back
+    /// gesture. It must now leave the front pane unchanged.
     private func swipe(_ app: XCUIApplication, _ dir: Dir) {
         let startX: CGFloat = dir == .left ? 0.85 : 0.45
         let endX:   CGFloat = dir == .left ? 0.15 : 0.95
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
         let end   = app.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
         start.press(forDuration: 0.0, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0.0)
-        Thread.sleep(forTimeInterval: 1.2)   // let the front swap + repaint
+        Thread.sleep(forTimeInterval: 1.2)   // let any (now-absent) front swap + repaint settle
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {
