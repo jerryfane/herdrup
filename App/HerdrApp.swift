@@ -1926,6 +1926,15 @@ struct TerminalPaneContent: View {
     /// the LiveTerminalView (new Coordinator → a fresh pane.stream over a new connection, re-seeded
     /// from the current server state). Useful when the stream has gone stale or its connection dropped.
     @State private var streamGen = 0
+    /// App foreground/background phase. On return to `.active` the front pane's
+    /// live `pane.stream` has stalled (no network while backgrounded) and
+    /// reconnects from the live tail, missing output produced while away — so we
+    /// reseed the front pane from durable scrollback (issue #62 follow-up).
+    @Environment(\.scenePhase) private var scenePhase
+    /// Set when the app actually goes `.background`, so the reseed on the next
+    /// `.active` fires only after a real background — not a transient `.inactive`
+    /// (Control Center / a notification banner), which would flash needlessly.
+    @State private var wasBackgrounded = false
     /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
@@ -2068,6 +2077,24 @@ struct TerminalPaneContent: View {
         // backgrounds so a hidden keep-mounted pane can't hold the software keyboard.
         .onChange(of: isForeground) { _, nowFront in
             if nowFront { Task { await refresh() } } else { replyFocused = false }
+        }
+        // When the app returns to the foreground after a real background, reseed the
+        // FRONT pane the same way the header refresh button does (bump streamGen →
+        // remount → startBackfill() reads the durable current screen + scrollback).
+        // Its live stream stalled while backgrounded and reconnects from the live
+        // tail, so output produced while away is otherwise lost until a manual
+        // refresh (issue #62 follow-up). Gated on isForeground so only the visible
+        // pane pays the reseed; hidden keep-mounted panes reseed when next front.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                wasBackgrounded = true
+            case .active:
+                if wasBackgrounded && isForeground { streamGen += 1 }
+                wasBackgrounded = false
+            default:
+                break
+            }
         }
     }
 
