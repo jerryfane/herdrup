@@ -81,12 +81,13 @@ struct LiveTerminalView: UIViewRepresentable {
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.setForeground(isForeground)
-        // Drive terminal key focus from SwiftUI intent. Inert on iPhone: `becomeFirstResponder`
-        // returns false there (the view can't become first responder), so `isFirstResponder`
-        // stays false and read-only behaviour is unchanged.
+        // Drive terminal KEY focus from SwiftUI intent (iPad key-drive only). The resign is
+        // gated on keyDriveEnabled so it manages ONLY key-drive focus: on iPhone/touch the view
+        // may hold first-responder status transiently for a TEXT SELECTION, and we must not yank
+        // it out from under an active selection on the next SwiftUI update.
         if wantsTerminalKeyFocus {
             if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
-        } else if uiView.isFirstResponder {
+        } else if uiView.keyDriveEnabled, uiView.isFirstResponder {
             uiView.resignFirstResponder()
         }
         context.coordinator.applyFont(size: fontSize)
@@ -116,21 +117,25 @@ struct LiveTerminalView: UIViewRepresentable {
     /// (`Coordinator.handleScrollPan`), which sends wheel/arrow scroll INTO a
     /// full-screen TUI that keeps no scrollback of its own.
     final class ReadOnlyTerminalView: TerminalView {
-        /// Only on iPad with a PHYSICAL keyboard attached do we let the terminal take key input.
-        /// Gate on the `.pad` idiom (NOT horizontalSizeClass — an iPhone Max in landscape is
-        /// regular width and must stay read-only) AND a coalesced hardware keyboard. On iPhone
-        /// this is always false, so `canBecomeFirstResponder`/`becomeFirstResponder` stay false
-        /// and the terminal remains read-only exactly as before.
+        /// KEY DRIVE (hardware keys → PTY) is allowed only on iPad with a PHYSICAL keyboard:
+        /// the `.pad` idiom (NOT horizontalSizeClass — an iPhone Max in landscape is regular
+        /// width and must stay read-only) AND a coalesced hardware keyboard. This gates the
+        /// `send` delegate, so keystrokes reach the PTY ONLY under key drive — independently of
+        /// first-responder status below.
         var keyDriveEnabled: Bool {
             UIDevice.current.userInterfaceIdiom == .pad && GCKeyboard.coalesced != nil
         }
-        override var canBecomeFirstResponder: Bool { keyDriveEnabled }
-        override func becomeFirstResponder() -> Bool { keyDriveEnabled ? super.becomeFirstResponder() : false }
+        /// First responder is allowed on EVERY platform, because SwiftTerm's text selection
+        /// (long-press word-select, drag-to-extend, the Copy callout) requires it. This does NOT
+        /// make the pane writable: keystroke routing stays gated on `keyDriveEnabled` in the
+        /// `send` delegate, and the zero-frame `emptyInputView` below means no soft keyboard ever
+        /// appears. Net effect on iPhone: the terminal can be selected and copied, never typed into.
+        override var canBecomeFirstResponder: Bool { true }
+        override func becomeFirstResponder() -> Bool { super.becomeFirstResponder() }
         /// Zero-frame input view so becoming first responder shows NO soft keyboard — hardware
         /// keys still arrive via UIKeyInput/pressesBegan. SwiftTerm declares `inputView` and
         /// `inputAccessoryView` as `public override` (NOT `open`), so this module cannot re-override
-        /// them; we SET them in init instead (they expose public setters). Inert on iPhone: this
-        /// view never becomes first responder there, so neither input is ever consulted.
+        /// them; we SET them in init instead (they expose public setters).
         private let emptyInputView = UIView(frame: .zero)
 
         override init(frame: CGRect, font: UIFont?) {
@@ -243,10 +248,6 @@ struct LiveTerminalView: UIViewRepresentable {
         /// redundant `lock:false` (re-resizing the shared PTY) AND let the first release's
         /// generation-keyed self-prune clobber the newer release's registry handle.
         private var releasedGeneration: Int?
-        /// The rightward (previous-agent) swipe, remembered so the delegate can cede the
-        /// left screen EDGE to the back gesture — a right-swipe there means "go back",
-        /// not "previous agent".
-        private weak var swipeAgentPrev: UISwipeGestureRecognizer?
         /// Hardware-keyboard connect/disconnect observers so key-drive focus follows the keyboard
         /// live (plug in → the front pane takes focus; unplug → it resigns). Removed in `stop()`.
         private var keyboardObservers: [NSObjectProtocol] = []
@@ -301,13 +302,14 @@ struct LiveTerminalView: UIViewRepresentable {
         func attach(_ view: ReadOnlyTerminalView) {
             self.view = view
             view.terminalDelegate = self
-            // KEY DRIVE (iPad + hardware keyboard): `send` now FORWARDS SwiftTerm's output to the
-            // PTY, so a tap SwiftTerm would turn into a mouse report could leak bytes. Turn the
-            // VIEW's touch→mouse reporting off in that mode. This touches ONLY the view's own
-            // tap-to-mouse-byte conversion — NOT the emulator's `term.mouseMode` (what
-            // emitScroll/handleScrollPan read), so alt-screen / Claude-Code wheel scroll is
-            // unaffected.
-            if view.keyDriveEnabled { view.allowMouseReporting = false }
+            // Turn the VIEW's touch→mouse-byte conversion OFF unconditionally. Two reasons:
+            // (1) under key drive a tap SwiftTerm turned into a mouse report could leak bytes to
+            // the PTY (`send` FORWARDS output there); (2) in the read-only case it lets a tap or
+            // long-press start a LOCAL text selection instead of being swallowed as a mouse event
+            // over a mouse-mode TUI. This touches ONLY the view's tap-to-mouse conversion — NOT
+            // the emulator's `term.mouseMode` (what emitScroll/handleScrollPan read), so alt-screen
+            // / Claude-Code wheel scroll is unaffected.
+            view.allowMouseReporting = false
             // Track hardware-keyboard connect/disconnect so key-drive focus follows the keyboard.
             // On connect the front pane becomes first responder (iPad-gated by keyDriveEnabled);
             // on disconnect it resigns. Tokens removed in stop().
@@ -351,12 +353,10 @@ struct LiveTerminalView: UIViewRepresentable {
             // SIMULTANEOUSLY with SwiftTerm's own gestures: `gestureRecognizer(_:should
             // RecognizeSimultaneouslyWith:)` returns true below, and UIKit guarantees
             // simultaneous recognition when EITHER delegate says yes — so SwiftTerm's
-            // mouse-pan (which has no delegate) cannot starve this one. In the read-only case
-            // (iPhone/touch, no key drive) any mouse button/motion events SwiftTerm emits are
-            // discarded because `send` early-returns, so we leave `allowMouseReporting` at its
-            // default there and keep SwiftTerm's selection-clear-on-linefeed working. Only under
-            // key drive (handled above) do we turn `allowMouseReporting` off, so forwarded taps
-            // can't leak mouse bytes to the PTY.
+            // mouse-pan (which has no delegate) cannot starve this one. `allowMouseReporting` is
+            // turned OFF for every pane (see attach above), so a tap/long-press starts a LOCAL
+            // text selection rather than a mouse report — and under key drive it also means a
+            // forwarded tap can never leak mouse bytes to the PTY.
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
             pan.delegate = self
             view.addGestureRecognizer(pan)
@@ -376,20 +376,10 @@ struct LiveTerminalView: UIViewRepresentable {
                     t.require(toFail: doubleTap)
                 }
             }
-            // Horizontal swipe → page to the previous/next agent in the list. These are
-            // DISCRETE UISwipe recognizers (not the scroll pan), so a vertical scroll drag
-            // never triggers them, and they recognize simultaneously with the pan via the
-            // delegate below. Swipe left = next agent; swipe right = previous. The right
-            // swipe cedes the left screen edge to the back gesture (see `shouldReceive`).
-            let swipeNext = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeNav(_:)))
-            swipeNext.direction = .left
-            swipeNext.delegate = self
-            view.addGestureRecognizer(swipeNext)
-            let swipePrev = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeNav(_:)))
-            swipePrev.direction = .right
-            swipePrev.delegate = self
-            view.addGestureRecognizer(swipePrev)
-            swipeAgentPrev = swipePrev
+            // (Removed: the horizontal swipe-between-agents recognizers. A finger/mouse drag to
+            // SELECT text was triggering them and paging to an unwanted agent; agent switching
+            // stays fully reachable via the list/sidebar, and their removal frees horizontal drag
+            // for SwiftTerm's drag-to-extend selection. `onNavigate` is left wired but unused.)
             style(view)
             startBackfill()   // fetch history CONCURRENTLY with the stream; the first reset awaits it
             start()
@@ -415,19 +405,6 @@ struct LiveTerminalView: UIViewRepresentable {
                 let maxY = max(0, view.contentSize.height - view.bounds.height)
                 view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
             }
-        }
-
-        /// Horizontal swipe → move to the previous/next agent. The pane view owns the
-        /// ordered list and the clamping; here we only report the direction.
-        ///
-        /// Deliberately NOT gated on `stopped`: onNavigate writes NO bytes to the PTY (it
-        /// only moves a SwiftUI @State to the neighbour), so it is safe after stop(). And
-        /// stop() also runs on an `.exited` pane that is STILL on screen — a `stopped` guard
-        /// there would strand the reader on a dead terminal with no way to page to a live
-        /// neighbour. After dismantle the recognizer dies with the view, so nothing else can
-        /// fire this.
-        @objc private func handleSwipeNav(_ gr: UISwipeGestureRecognizer) {
-            onNavigate?(gr.direction == .left ? 1 : -1)
         }
 
         func stop() {
@@ -1074,21 +1051,6 @@ struct LiveTerminalView: UIViewRepresentable {
         /// lets our handler drive the agent scroll.
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
-
-        /// The previous-agent (rightward) swipe must not fire from the left screen edge —
-        /// that zone belongs to the back gesture (a window-level edge pan). Ignoring
-        /// touches that begin there keeps a right-swipe-at-the-edge meaning "go back",
-        /// while a right-swipe further in pages to the previous agent. All other
-        /// recognizers (scroll pan, double-tap, the next-agent swipe) accept every touch.
-        func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            guard g === swipeAgentPrev else { return true }
-            // Measured in WINDOW space (location(in: nil)), not the terminal view's: the view
-            // sits inside horizontal padding and the safe area, so a view-relative cutoff
-            // drifts with orientation (a landscape dead band between the system edge zone and
-            // the reserved band). 44pt is a true screen-edge band that clears the ~20-30pt
-            // system edge-pan zone with margin in both orientations.
-            return touch.location(in: nil).x > 44
-        }
 
         // MARK: palette helpers
 
