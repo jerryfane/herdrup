@@ -354,6 +354,13 @@ public enum TerminalStreamEvent: Sendable, Equatable {
 /// server defaults / resume hints (v1 ignores resume and always re-seeds). Nil
 /// optionals are omitted by the synthesized encoder, matching serde's
 /// `skip_serializing_if = "Option::is_none"`.
+/// Open params for the persistent `pane.input.stream` write channel (issue #62).
+public struct PaneInputStreamParams: Encodable, Sendable {
+    public let paneID: String
+    public init(paneID: String) { self.paneID = paneID }
+    enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+}
+
 public struct PaneStreamParams: Encodable, Sendable {
     public let paneID: String
     public let includeHistory: Bool

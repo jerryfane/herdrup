@@ -169,6 +169,23 @@ public actor HerdrClient {
         _ = try await call("pane.send_text", SendTextParams(paneID: pane, text: text), as: JSONNull.self)
     }
 
+    /// Opens a persistent `pane.input.stream` write channel for one pane (issue
+    /// #62), the write-side mirror of `streamTerminal`. Returns nil when the
+    /// transport cannot provide one (e.g. the in-memory test transport) — the
+    /// caller then uses per-call `sendText`. Feature detection is by ATTEMPT:
+    /// `PaneInputChannel.start()` throws against a daemon lacking the method (or an
+    /// older server), so the caller falls back on the throw.
+    public func openPaneInput(pane: String) -> PaneInputChannel? {
+        guard let citadel = transport as? CitadelTransport else { return nil }
+        let env = RequestEnvelope(
+            id: "herdrkit:pane.input.stream:\(pane)",
+            method: "pane.input.stream",
+            params: PaneInputStreamParams(paneID: pane)
+        )
+        guard let data = try? encoder.encode(env) else { return nil }
+        return citadel.openInputChannel(String(decoding: data, as: UTF8.self))
+    }
+
     struct RegisterDeviceParams: Encodable {
         let deviceToken: String
         let platform: String
