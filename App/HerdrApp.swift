@@ -890,6 +890,9 @@ struct TerminalHomeView: View {
     @State private var settingsAnchor: SettingsSection?
     /// iPad: the ⌘/ keyboard-shortcut reference sheet.
     @State private var showShortcuts = false
+    /// Terminal font size preference (points), shared app-wide via UserDefaults with the
+    /// per-pane ⋯ control; driven here by ⌘+ / ⌘- / ⌘0 (Mac + hardware keyboard).
+    @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
     @StateObject private var gramUnread = GramUnreadTracker()
@@ -1124,6 +1127,14 @@ struct TerminalHomeView: View {
             .keyboardShortcut("k", modifiers: .command)
             Button("Shortcuts") { showShortcuts = true }
                 .keyboardShortcut("/", modifiers: .command)
+            // Terminal font zoom (Mac + hardware keyboard). ⌘+ registers from "=" (its
+            // unshifted key), ⌘- shrinks, ⌘0 resets — the standard zoom idiom.
+            Button("Zoom in") { terminalFontSize = min(terminalFontSize + 1, 24) }
+                .keyboardShortcut("=", modifiers: .command)
+            Button("Zoom out") { terminalFontSize = max(terminalFontSize - 1, 9) }
+                .keyboardShortcut("-", modifiers: .command)
+            Button("Reset zoom") { terminalFontSize = 12.5 }
+                .keyboardShortcut("0", modifiers: .command)
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -1926,6 +1937,10 @@ struct TerminalPaneContent: View {
     /// the LiveTerminalView (new Coordinator → a fresh pane.stream over a new connection, re-seeded
     /// from the current server state). Useful when the stream has gone stale or its connection dropped.
     @State private var streamGen = 0
+    /// Terminal font size preference (points), app-wide via UserDefaults. Read here to
+    /// drive `LiveTerminalView.fontSize` (applied in-place, no view recreation) and
+    /// mutated by ⌘± and the ⋯ "Text size" control. Clamped to [9, 24].
+    @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
     /// App foreground/background phase. On return to `.active` the front pane's
     /// live `pane.stream` has stalled (no network while backgrounded) and
     /// reconnects from the live tail, missing output produced while away — so we
@@ -2042,7 +2057,8 @@ struct TerminalPaneContent: View {
                                  // drive the PTY directly — but yield focus while the reply field is
                                  // focused, and never on iPhone (the terminal can't become first
                                  // responder there, so this is inert).
-                                 wantsTerminalKeyFocus: isForeground && !replyFocused)
+                                 wantsTerminalKeyFocus: isForeground && !replyFocused,
+                                 fontSize: CGFloat(terminalFontSize))
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2173,6 +2189,33 @@ struct TerminalPaneContent: View {
     /// at a glance without opening the menu.
     private var agentActionsMenu: some View {
         Menu {
+            Section {
+                Button {
+                    Task {
+                        if let out = try? await client.read(pane: paneID, source: .visible, format: .text) {
+                            UIPasteboard.general.string = out.text
+                        }
+                    }
+                } label: { Label("Copy screen", systemImage: "doc.on.doc") }
+                Button {
+                    Task {
+                        if let out = try? await client.read(pane: paneID, source: .recentUnwrapped, format: .text) {
+                            UIPasteboard.general.string = out.text
+                        }
+                    }
+                } label: { Label("Copy recent output", systemImage: "doc.on.clipboard") }
+            }
+            Section("Text size") {
+                Button {
+                    terminalFontSize = min(terminalFontSize + 1, 24)
+                } label: { Label("Increase", systemImage: "textformat.size.larger") }
+                Button {
+                    terminalFontSize = max(terminalFontSize - 1, 9)
+                } label: { Label("Decrease", systemImage: "textformat.size.smaller") }
+                Button {
+                    terminalFontSize = 12.5
+                } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
+            }
             Button {
                 mute.toggle(paneID)
             } label: {
@@ -2716,6 +2759,9 @@ struct ShortcutsSheet: View {
     private let rows: [(keys: String, label: String)] = [
         ("⌘ K", "Show or hide the sidebar"),
         ("⌘ /", "This shortcut list"),
+        ("⌘ +", "Increase terminal font size"),
+        ("⌘ −", "Decrease terminal font size"),
+        ("⌘ 0", "Reset terminal font size"),
     ]
 
     var body: some View {
