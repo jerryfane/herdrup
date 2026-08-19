@@ -296,7 +296,7 @@ struct RootView: View {
                                  agent: MockTransport.demoPaneAgent)
             }
         case .settings:
-            SettingsView(host: "mac.tail-scale.ts.net")
+            SettingsView(client: mockClient, agents: [], host: "mac.tail-scale.ts.net")
         case .newAgent:
             NewAgentView(client: mockClient,
                          initialFolder: "/root/herdr-ios", initialKind: "codex",
@@ -464,6 +464,9 @@ struct ConnectView: View {
                     captions
                 }
                 .padding(22)
+                // Cap + center the column on iPad/macOS so the host list doesn't
+                // stretch edge to edge; inert on iPhone (narrower than the cap).
+                .readableColumn()
             }
         }
         // Add / edit a host. Save & Connect (add) hands credentials up via onConnect.
@@ -1095,6 +1098,8 @@ struct TerminalHomeView: View {
                     GramView(client: client, agents: agents, unread: gramUnread)
                 case .settings:
                     SettingsView(
+                        client: client,
+                        agents: agents,
                         host: host,
                         connected: error == nil && !loading,
                         canReconnect: rejectedFingerprint == nil,
@@ -1239,6 +1244,8 @@ struct TerminalHomeView: View {
                     .badge(gramUnread.count == 0 ? nil : Text("\(gramUnread.count)"))
 
                 SettingsView(
+                    client: client,
+                    agents: agents,
                     host: host,
                     connected: error == nil && !loading,
                     // Withhold reconnect during a host-key rejection — reconnecting then
@@ -2743,11 +2750,12 @@ struct TerminalPaneContent: View {
 /// A jump target within Settings. The iPad sidebar index uses it to scroll the detail pane's
 /// SettingsView to a section; iPhone tabs and modal presentations leave it nil (no scrolling).
 enum SettingsSection: Hashable, CaseIterable {
-    case connection, notify, trouble, help, about
+    case connection, federation, notify, trouble, help, about
 
     var label: String {
         switch self {
         case .connection: return "Connection"
+        case .federation: return "Federation"
         case .notify:     return "Notifications"
         case .trouble:    return "Troubleshooting"
         case .help:       return "Help"
@@ -2758,6 +2766,7 @@ enum SettingsSection: Hashable, CaseIterable {
     var icon: String {
         switch self {
         case .connection: return "wifi"
+        case .federation: return "point.3.connected.trianglepath.dotted"
         case .notify:     return "bell"
         case .trouble:    return "wrench.and.screwdriver"
         case .help:       return "questionmark.circle"
@@ -2824,6 +2833,10 @@ struct ShortcutsSheet: View {
 }
 
 struct SettingsView: View {
+    let client: HerdrClient
+    /// Live agents, mirrored in from the home view exactly like GramView's — the
+    /// Federation section derives its remote-machine (peer) list from these.
+    let agents: [AgentInfo]
     var host: String
     var connected: Bool = true
     /// Whether "Reconnect now" is safe to offer. FALSE while the connection is in
@@ -2847,6 +2860,9 @@ struct SettingsView: View {
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
+    /// The "add a machine" federation setup guide, opened from the Federation
+    /// section's "How to add a machine" row. A child sheet over Settings.
+    @State private var showFederationSetup = false
     /// The tip jar (StoreKit 2). Renders nothing until products load, so the section
     /// is invisible before the App Store Connect products exist.
     @ObservedObject private var tipStore = TipStore.shared
@@ -2872,6 +2888,7 @@ struct SettingsView: View {
                         // sidebar index jump to a section (no-op when scrollTo stays nil).
                         VStack(alignment: .leading, spacing: 0) {
                             connectionSection.id(SettingsSection.connection)
+                            federationSection.id(SettingsSection.federation)
                             notifySection.id(SettingsSection.notify)
                             troubleSection.id(SettingsSection.trouble)
                             helpSection.id(SettingsSection.help)
@@ -2893,6 +2910,12 @@ struct SettingsView: View {
         // reuse the same self-contained help view the first-run popup shows.
         .sheet(isPresented: $showGestures) {
             GesturesHelpView(onClose: { showGestures = false })
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+        // The federation setup guide, opened from the Federation section.
+        .sheet(isPresented: $showFederationSetup) {
+            FederationSetupView(onClose: { showFederationSetup = false })
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
@@ -2941,6 +2964,95 @@ struct SettingsView: View {
             }
             .rowShell()
             .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
+        }
+    }
+
+    /// The remote machines (federation peers) whose agents this home box lists —
+    /// one row per peer, derived from the injected `agents` (grouped by machineID,
+    /// reachability aggregated worst-case in HerdrKit's `PeerSummary`). Empty until
+    /// a machine running the herdr fork is added; the "How to add a machine" row
+    /// opens the setup guide.
+    @ViewBuilder
+    private var federationSection: some View {
+        let peers = PeerSummary.peerSummaries(from: agents)
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("FEDERATION")
+            if peers.isEmpty {
+                federationEmpty
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(peers.enumerated()), id: \.element.id) { index, peer in
+                        peerRow(peer)
+                        if index < peers.count - 1 { rowDivider }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .padding(.horizontal, 16).padding(.top, 10)
+            }
+            richActionRow("How to add a machine", systemImage: "plus.circle",
+                          subtitle: "Connect another computer to your home box") {
+                showFederationSetup = true
+            }
+        }
+    }
+
+    /// Local-only: no agent carries a machineID, so there are no remote peers yet.
+    /// Explainer copy in the section body rather than a bare empty card.
+    private var federationEmpty: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("No machines connected yet.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+            Text("Machines running an agent appear here.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// One peer: an identity chip keyed on the alias (the same gradient+glyph the
+    /// agent cards use), the alias, an "N agent(s)" line, and a reachability badge.
+    private func peerRow(_ peer: PeerSummary) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: peer.alias))
+                    .frame(width: 40, height: 40)
+                Text(AgentIdentity.glyph(for: peer.alias))
+                    .font(Typography.app(18, .bold)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(peer.alias)
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                Text("\(peer.agentCount) agent\(peer.agentCount == 1 ? "" : "s")")
+                    .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+            }
+            Spacer(minLength: 8)
+            peerBadge(peer.reachability)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    /// The peer's aggregate reachability as a badge. Offline reuses the agent list's
+    /// quiet `wifi.slash` square (faint ink — offline is quiet, not the stopped-red
+    /// alarm); degraded is an amber dot, reachable a quiet green dot.
+    @ViewBuilder
+    private func peerBadge(_ reachability: PeerReachability) -> some View {
+        switch reachability {
+        case .offline:
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.textDim)
+                .frame(width: 26, height: 26)
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.textDim.opacity(0.55), lineWidth: 1.5))
+                .accessibilityLabel(Text("offline"))
+        case .degraded:
+            Circle().fill(Palette.waiting).frame(width: 8, height: 8)
+                .accessibilityLabel(Text("degraded"))
+        case .reachable:
+            Circle().fill(Palette.done).frame(width: 8, height: 8)
+                .accessibilityLabel(Text("reachable"))
         }
     }
 
@@ -3332,6 +3444,20 @@ struct SettingsView: View {
     }
 }
 
+/// Caps a column at a readable width and centers it. On a wide canvas (iPad /
+/// macOS) an edge-to-edge single column of cards drifts far past a comfortable
+/// measure; capping then re-expanding centers the capped column in the available
+/// space. On iPhone (narrower than the cap) it is inert — the inner cap never
+/// binds, so the layout is unchanged.
+private struct ReadableColumn: ViewModifier {
+    let cap: CGFloat
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: cap)
+            .frame(maxWidth: .infinity)
+    }
+}
+
 /// The kit's row shell: transparent fill, a 1px hairline border, and the tap
 /// shape confined to the card (so the outer gutter/gap is not a tap target).
 private extension View {
@@ -3341,6 +3467,12 @@ private extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Center + cap a column at a comfortable reading width on wide canvases;
+    /// inert on iPhone (narrower than `cap`). See `ReadableColumn`.
+    func readableColumn(_ cap: CGFloat = 560) -> some View {
+        modifier(ReadableColumn(cap: cap))
     }
 }
 
