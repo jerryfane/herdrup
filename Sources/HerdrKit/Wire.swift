@@ -93,6 +93,15 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let turn: Int?
     public let turnEpoch: UInt64?
     public let lastCompletedTurn: CompletedTurn?
+    /// Federation (daemon W3+): for a remote agent, the owning peer's alias
+    /// (`machineID`, also carried as the `<alias>/…` prefix on `name`/`paneID`),
+    /// the peer's reachability as of the home's last poll, and the agent's
+    /// last-known status while its machine is unreachable. All absent on a local
+    /// agent or a non-federated server — decoded leniently, so an older or
+    /// non-federated server is unaffected.
+    public let machineID: String?
+    public let reachability: String?
+    public let lastKnownStatus: String?
 
     public var id: String { paneID }
 
@@ -103,8 +112,14 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
 
     public var isWorking: Bool { agentStatus == "working" }
 
+    /// A remote (federated) agent whose owning machine is currently unreachable.
+    /// Its `agentStatus` is a stale last-known value, so the UI must render it as
+    /// offline rather than as a live status. Unknown reachability strings (a newer
+    /// server) read as reachable — the safe default is "not offline".
+    public var isUnreachable: Bool { reachability == "unreachable" }
+
     enum CodingKeys: String, CodingKey {
-        case agent, name, composer, revision, turn, cwd, focused
+        case agent, name, composer, revision, turn, cwd, focused, reachability
         case agentStatus = "agent_status"
         case paneID = "pane_id"
         case tabID = "tab_id"
@@ -115,6 +130,8 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case stateChangeSeq = "state_change_seq"
         case turnEpoch = "turn_epoch"
         case lastCompletedTurn = "last_completed_turn"
+        case machineID = "machine_id"
+        case lastKnownStatus = "last_known_status"
     }
 }
 

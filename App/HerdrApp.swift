@@ -1578,7 +1578,13 @@ struct TerminalHomeView: View {
                     .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
             }
             Spacer(minLength: 8)
-            statusBadge(row.group)
+            // A remote agent whose machine is unreachable has a stale status, so
+            // it reads as offline rather than showing a misleading live badge.
+            if row.info.isUnreachable {
+                offlineBadge()
+            } else {
+                statusBadge(row.group)
+            }
         }
         .padding(12)
         .background(Palette.card)
@@ -1605,6 +1611,14 @@ struct TerminalHomeView: View {
     private func statusBadge(_ group: AgentGroup) -> some View {
         // The status is colour+shape; name it for VoiceOver too.
         badgeContent(group).accessibilityLabel(Text(group.label))
+    }
+
+    /// A remote agent whose owning machine is unreachable: its live status is a
+    /// stale last-known value, so show a muted "offline" mark, never a live badge.
+    /// The stopped SQUARE shape (gone, not a live state) but in faint ink, not the
+    /// stopped red — offline is quiet, not an alarm.
+    private func offlineBadge() -> some View {
+        badgeSquare("wifi.slash", Palette.textDim).accessibilityLabel(Text("offline"))
     }
 
     @ViewBuilder
