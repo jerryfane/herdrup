@@ -2079,7 +2079,10 @@ struct TerminalPaneContent: View {
                                  // focused, and never on iPhone (the terminal can't become first
                                  // responder there, so this is inert).
                                  wantsTerminalKeyFocus: isForeground && !replyFocused,
-                                 fontSize: CGFloat(terminalFontSize))
+                                 fontSize: CGFloat(terminalFontSize),
+                                 // A federated/remote pane routes key-drive input via pane.send_text
+                                 // (home can't proxy the persistent pane.input.stream channel). (#139)
+                                 isFederated: agent?.machineID != nil)
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -66,6 +66,11 @@ struct LiveTerminalView: UIViewRepresentable {
     /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
     /// no view recreation.
     var fontSize: CGFloat = 12.5
+    /// Whether this pane's agent is federated/remote (`AgentInfo.machineID != nil`).
+    /// A federated pane routes key-drive input via `pane.send_text` (the home daemon
+    /// can't proxy the persistent `pane.input.stream` channel). Refreshed on every
+    /// update since the agent can resolve as federated after the view mounts. (#139)
+    var isFederated: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -74,12 +79,14 @@ struct LiveTerminalView: UIViewRepresentable {
             min(max(fontSize, Coordinator.minFontSize), Coordinator.maxFontSize)
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
         context.coordinator.onNavigate = onNavigate
+        context.coordinator.isFederated = isFederated
         context.coordinator.attach(view)
         return view
     }
 
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
+        context.coordinator.isFederated = isFederated
         context.coordinator.setForeground(isForeground)
         // Drive terminal KEY focus from SwiftUI intent (iPad key-drive only). The resign is
         // gated on keyDriveEnabled so it manages ONLY key-drive focus: on iPhone/touch the view
@@ -159,6 +166,21 @@ struct LiveTerminalView: UIViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate, UIGestureRecognizerDelegate {
         private let client: HerdrClient
         private let paneID: String
+        /// Stable per-view identity for the daemon's PTY width-lease (#137). Generated
+        /// ONCE per Coordinator (= one view = one live `pane.stream`) and sent UNCHANGED
+        /// on BOTH this view's `pane.stream` open AND every `pane.set_pty_size` it makes,
+        /// so the lease taken by the resize is the one the daemon drops when this stream
+        /// closes. A fresh UUID per instance is deliberate: sharing one id across two
+        /// concurrent streams to a pane would let the FIRST close drop the shared lease
+        /// while the second is still open (JARVIS review finding #2 — premature shrink).
+        private let viewerID = UUID().uuidString
+        /// Whether this pane lives on a REMOTE (federated) machine (`AgentInfo.machineID
+        /// != nil`). The home daemon can route one-shot `pane.send_text` to a remote pane
+        /// (#84) but CANNOT proxy the persistent `pane.input.stream` duplex channel, so a
+        /// federated pane skips the channel and delivers every key-drive batch via
+        /// `sendText` (see `deliverInput`). Refreshed by `updateUIView` because the agent
+        /// can resolve as federated AFTER the view first mounts.
+        var isFederated = false
         private weak var view: ReadOnlyTerminalView?
         private var streamTask: Task<Void, Never>?
         /// The single serialized resize drain, if running. Only ever ONE at a time —
@@ -176,6 +198,15 @@ struct LiveTerminalView: UIViewRepresentable {
         /// set_pty_size). The drain stops once this equals `desired`.
         private var lastSentCols = 0
         private var lastSentRows = 0
+        /// The EFFECTIVE winsize the daemon actually applied, from the `set_pty_size`
+        /// response (#137). Under the width-lease arbiter this can EXCEED what this view
+        /// requested — a wider co-viewer's lease wins — so it is recorded for truth but
+        /// deliberately NOT fed back into `lastSent`: driving the drain toward the
+        /// arbiter's width would re-send forever, fighting the arbiter. The view still
+        /// RENDERS the applied (wider) grid because SwiftTerm reflows to the server cols
+        /// carried on the `pane.stream` itself; this is the coordinator's copy of that truth.
+        private var appliedCols = 0
+        private var appliedRows = 0
         /// Consecutive failures for the CURRENT target, so the drain's self-retry
         /// backs off and is capped; reset whenever a new target is requested.
         private var resizeRetries = 0
@@ -209,6 +240,20 @@ struct LiveTerminalView: UIViewRepresentable {
         /// No stream event (data, ping, resize) for this long → treat the stream as stuck and
         /// reconnect. 2.5× the server's 20s ping, so a single dropped ping is tolerated.
         private static let streamStuckTimeout: TimeInterval = 50
+
+        /// PTY width-lease heartbeat (#137). The daemon expires a viewer's lease on a
+        /// 5-minute TTL backstop (`DEFAULT_PTY_LEASE_TTL`), so a stable-size FOREGROUND
+        /// view — one that never fires a fresh `sizeChanged` — would silently lose its
+        /// lease. This task periodically re-asserts the current committed size (carrying
+        /// the same `viewerID`) to refresh the lease. Re-armed by `start()`, cancelled by
+        /// `stop()`. Backgrounded/relocking panes are skipped: they have no lease to keep.
+        private var heartbeatTask: Task<Void, Never>?
+        /// Lease TTL we request on every `lock:true` (`ttl_ms`). Explicit rather than the
+        /// server default so the refresh cadence below is provably under it.
+        private static let leaseTTLMillis: UInt64 = 300_000                 // 5 min
+        /// Lease-refresh cadence — comfortably under `leaseTTLMillis` so a single missed
+        /// beat can't lapse the lease (2 min refresh vs 5 min TTL).
+        private static let heartbeatIntervalNanos: UInt64 = 120_000_000_000  // 2 min
 
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
@@ -425,8 +470,10 @@ struct LiveTerminalView: UIViewRepresentable {
             keyboardObservers.removeAll()
             streamTask?.cancel()
             streamTask = nil
-            watchdogTask?.cancel()          // stop the heartbeat checker
+            watchdogTask?.cancel()          // stop the stream-stuck watchdog
             watchdogTask = nil
+            heartbeatTask?.cancel()         // stop the PTY width-lease keep-alive (#137)
+            heartbeatTask = nil
             reconnectTask?.cancel()         // cancel any pending backoff restart
             reconnectTask = nil
             backfillTask?.cancel()
@@ -468,6 +515,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
+            let viewerID = self.viewerID   // release THIS view's lease (#137), not the pane's
             // CHAIN releases: await the PREVIOUS entry first, so awaiting the newest release
             // transitively awaits every older one. Without this, overwriting the map here would
             // orphan an older ALREADY-committed lock:false (past its generation guard), and a later
@@ -483,7 +531,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 // generation, `setForeground(true)` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
-                _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false)
+                _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false, viewerID: viewerID)
                 // Best-effort: drop our own registry entry once settled (no newer show/hide/attach
                 // bumped the generation). This only runs when the release actually SENT; a release
                 // that bailed on the generation guard above leaves the entry for the newer owner
@@ -590,10 +638,13 @@ struct LiveTerminalView: UIViewRepresentable {
             streamRunID &+= 1
             let myRun = streamRunID
             startWatchdog()
+            startHeartbeat()
             streamTask = Task { [weak self] in
                 guard let self else { return }
                 do {
-                    for try await event in self.client.streamTerminal(pane: self.paneID) {
+                    // Same viewerID as this view's set_pty_size: the daemon ties the
+                    // width-lease taken by the resize to THIS stream, dropping it on close.
+                    for try await event in self.client.streamTerminal(pane: self.paneID, viewerID: self.viewerID) {
                         if Task.isCancelled { return }
                         await self.handle(event)
                     }
@@ -618,6 +669,31 @@ struct LiveTerminalView: UIViewRepresentable {
                         self.scheduleReconnect("no response for \(Int(Self.streamStuckTimeout))s")
                         return   // scheduleReconnect → start() re-arms a fresh watchdog
                     }
+                }
+            }
+        }
+
+        /// PTY width-lease keep-alive (#137). A stable-size foreground view fires no fresh
+        /// `sizeChanged`, so without this its lease would lapse at the daemon's 5-minute TTL
+        /// and a co-viewing desktop would reclaim the width. Every `heartbeatIntervalNanos`
+        /// we re-assert the current COMMITTED size (defeating `sendPTYSize`'s dedup so the
+        /// same size actually re-sends), which the drain delivers as a fresh `lock:true`
+        /// carrying our `viewerID` + TTL. Only a FOREGROUND, non-relocking, idle-drain view
+        /// with a committed size refreshes: a hidden/relocking pane has already released its
+        /// lease (or is mid-retake) and must not re-pin, and skipping while a drain is in
+        /// flight preserves the "at most one set_pty_size in flight per pane" invariant.
+        private func startHeartbeat() {
+            heartbeatTask?.cancel()
+            heartbeatTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanos)
+                    guard let self, !self.stopped else { return }
+                    guard self.foreground, !self.relockPending, self.resizeTask == nil,
+                          self.lastSentCols >= 4, self.lastSentRows >= 2 else { continue }
+                    let cols = self.lastSentCols, rows = self.lastSentRows
+                    self.lastSentCols = 0        // defeat sendPTYSize's dedup so the same size re-sends
+                    self.lastSentRows = 0
+                    self.sendPTYSize(cols: cols, rows: rows)
                 }
             }
         }
@@ -803,11 +879,20 @@ struct LiveTerminalView: UIViewRepresentable {
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
                     do {
-                        _ = try await self.client.setPTYSize(
+                        // lock:true carries THIS view's viewerID + a lease TTL (#137): the
+                        // daemon width-lease is keyed on the viewerID and refreshed by every
+                        // such send (the heartbeat re-sends this same size under the TTL).
+                        let applied = try await self.client.setPTYSize(
                             pane: self.paneID, cols: c, rows: r,
-                            cellWidthPx: cell.width, cellHeightPx: cell.height, lock: true)
-                        self.lastSentCols = c        // confirmed
+                            cellWidthPx: cell.width, cellHeightPx: cell.height, lock: true,
+                            viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
+                        self.lastSentCols = c        // confirmed: OUR request is committed
                         self.lastSentRows = r
+                        // The arbiter's EFFECTIVE size (a wider co-viewer can exceed our
+                        // request). Recorded for truth but NOT written back into lastSent —
+                        // converging the drain on it would re-send forever, fighting the arbiter.
+                        self.appliedCols = applied.cols
+                        self.appliedRows = applied.rows
                         self.resizeRetries = 0
                     } catch {
                         if Task.isCancelled { break }
@@ -885,6 +970,15 @@ struct LiveTerminalView: UIViewRepresentable {
         /// frames through one ordered writer.
         @MainActor
         private func deliverInput(_ batch: String) async {
+            // A federated (remote) pane can't host the persistent pane.input.stream duplex
+            // channel — the home daemon can't proxy it (channelSetupRejected) — so skip the
+            // channel entirely and route every batch through the federation-routable
+            // pane.send_text (#84). Order is still preserved: the single inputSendTask drain
+            // calls deliverInput serially. (#139)
+            if isFederated {
+                _ = try? await self.client.sendText(pane: self.paneID, text: batch)
+                return
+            }
             // Open the channel lazily on first use. An older daemon without
             // pane.input.stream makes start() throw, and we stay on send_text.
             if !inputChannelTried {
