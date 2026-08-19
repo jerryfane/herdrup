@@ -385,6 +385,13 @@ public struct PaneStreamParams: Encodable, Sendable {
     public let epoch: UInt64?
     public let maxFrameBytes: Int?
     public let scrollbackLines: Int?
+    /// Opaque per-view identity for the daemon's PTY width-lease bookkeeping (#137).
+    /// The daemon ties a viewer's width-lease liveness to its `pane.stream`: it drops
+    /// that viewer's lease when this stream closes. MUST be the SAME value the view
+    /// sends on its `pane.set_pty_size` (`PaneSetPtySizeParams.viewerID`) so the lease
+    /// taken there is the one released when this stream ends. Optional/omitted-when-nil:
+    /// an older daemon ignores it and a caller that doesn't lease leaves it nil.
+    public let viewerID: String?
 
     public init(
         paneID: String,
@@ -392,7 +399,8 @@ public struct PaneStreamParams: Encodable, Sendable {
         resumeFrom: UInt64? = nil,
         epoch: UInt64? = nil,
         maxFrameBytes: Int? = nil,
-        scrollbackLines: Int? = nil
+        scrollbackLines: Int? = nil,
+        viewerID: String? = nil
     ) {
         self.paneID = paneID
         self.includeHistory = includeHistory
@@ -400,6 +408,7 @@ public struct PaneStreamParams: Encodable, Sendable {
         self.epoch = epoch
         self.maxFrameBytes = maxFrameBytes
         self.scrollbackLines = scrollbackLines
+        self.viewerID = viewerID
     }
 
     enum CodingKeys: String, CodingKey {
@@ -409,6 +418,7 @@ public struct PaneStreamParams: Encodable, Sendable {
         case epoch
         case maxFrameBytes = "max_frame_bytes"
         case scrollbackLines = "scrollback_lines"
+        case viewerID = "viewer_id"
     }
 }
 
@@ -424,6 +434,18 @@ public struct PaneSetPtySizeParams: Encodable, Sendable {
     public let cellWidthPx: UInt32?
     public let cellHeightPx: UInt32?
     public let lock: Bool
+    /// Opaque per-view identity for the daemon's PTY width-lease (#137). The daemon
+    /// keys a viewer's width-lease on this: the WIDEST active viewer's geometry wins,
+    /// so a narrow viewer no longer shrinks a wider co-viewer. MUST equal the value
+    /// this view sends on its `pane.stream` open (`PaneStreamParams.viewerID`) — the
+    /// daemon drops this lease when that stream closes. Optional/omitted-when-nil so an
+    /// older daemon (and a non-leasing caller) is unaffected.
+    public let viewerID: String?
+    /// Lease time-to-live in milliseconds (#137). The daemon clamps to [1, 86_400_000]
+    /// and applies a 5-minute default (`DEFAULT_PTY_LEASE_TTL`) when omitted. A
+    /// foreground view re-sends within the TTL to keep its lease alive. Optional/
+    /// omitted-when-nil.
+    public let ttl: UInt64?
 
     public init(
         paneID: String,
@@ -431,7 +453,9 @@ public struct PaneSetPtySizeParams: Encodable, Sendable {
         rows: Int,
         cellWidthPx: UInt32? = nil,
         cellHeightPx: UInt32? = nil,
-        lock: Bool = false
+        lock: Bool = false,
+        viewerID: String? = nil,
+        ttl: UInt64? = nil
     ) {
         self.paneID = paneID
         self.cols = cols
@@ -439,6 +463,8 @@ public struct PaneSetPtySizeParams: Encodable, Sendable {
         self.cellWidthPx = cellWidthPx
         self.cellHeightPx = cellHeightPx
         self.lock = lock
+        self.viewerID = viewerID
+        self.ttl = ttl
     }
 
     enum CodingKeys: String, CodingKey {
@@ -446,6 +472,8 @@ public struct PaneSetPtySizeParams: Encodable, Sendable {
         case cols, rows, lock
         case cellWidthPx = "cell_width_px"
         case cellHeightPx = "cell_height_px"
+        case viewerID = "viewer_id"
+        case ttl = "ttl_ms"
     }
 }
 

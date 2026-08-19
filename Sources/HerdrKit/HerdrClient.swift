@@ -616,7 +616,8 @@ public actor HerdrClient {
         pane: String,
         includeHistory: Bool = true,
         maxFrameBytes: Int? = nil,
-        scrollbackLines: Int? = nil
+        scrollbackLines: Int? = nil,
+        viewerID: String? = nil
     ) -> AsyncThrowingStream<TerminalStreamEvent, Error> {
         let encoder = JSONEncoder()
         let env = RequestEnvelope(
@@ -625,7 +626,8 @@ public actor HerdrClient {
             params: PaneStreamParams(
                 paneID: pane, includeHistory: includeHistory,
                 resumeFrom: nil, epoch: nil,
-                maxFrameBytes: maxFrameBytes, scrollbackLines: scrollbackLines)
+                maxFrameBytes: maxFrameBytes, scrollbackLines: scrollbackLines,
+                viewerID: viewerID)
         )
         guard let data = try? encoder.encode(env) else {
             return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
@@ -712,13 +714,16 @@ public actor HerdrClient {
         rows: Int,
         cellWidthPx: UInt32? = nil,
         cellHeightPx: UInt32? = nil,
-        lock: Bool = false
+        lock: Bool = false,
+        viewerID: String? = nil,
+        ttl: UInt64? = nil
     ) async throws -> PanePtySize {
         let clampedCols = min(max(cols, 4), Int(UInt16.max))
         let clampedRows = min(max(rows, 2), Int(UInt16.max))
         let params = PaneSetPtySizeParams(
             paneID: pane, cols: clampedCols, rows: clampedRows,
-            cellWidthPx: cellWidthPx, cellHeightPx: cellHeightPx, lock: lock)
+            cellWidthPx: cellWidthPx, cellHeightPx: cellHeightPx, lock: lock,
+            viewerID: viewerID, ttl: ttl)
         return try await call("pane.set_pty_size", params, as: PanePtySize.self)
     }
 }
