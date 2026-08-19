@@ -34,6 +34,45 @@ final class AgentListTests: XCTestCase {
                        + "— not paneID order p1<p2<p3")
     }
 
+    // MARK: - federation fields (daemon W3+)
+
+    /// A remote agent carries machine_id / reachability / last_known_status; they
+    /// decode through the same wire path, and only an `unreachable` agent surfaces
+    /// as offline. A local agent leaves them nil and is never offline. Building the
+    /// JSON keeps the keys honest — a wrong CodingKey would fail these.
+    func testFederationFieldsDecodeAndDriveOffline() throws {
+        let remote = try JSONDecoder().decode(
+            AgentInfo.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "pane_id": "mcb-air/w1:p2",
+                "name": "mcb-air/build",
+                "agent_status": "idle",
+                "machine_id": "mcb-air",
+                "reachability": "unreachable",
+                "last_known_status": "working",
+            ]))
+        XCTAssertEqual(remote.machineID, "mcb-air")
+        XCTAssertEqual(remote.reachability, "unreachable")
+        XCTAssertEqual(remote.lastKnownStatus, "working")
+        XCTAssertTrue(remote.isUnreachable, "an unreachable agent must read as offline")
+
+        // A local agent has none of the federation fields, and is not offline.
+        let local = try agent(pane: "p1", status: "working")
+        XCTAssertNil(local.machineID)
+        XCTAssertNil(local.reachability)
+        XCTAssertNil(local.lastKnownStatus)
+        XCTAssertFalse(local.isUnreachable)
+
+        // Only "unreachable" is offline; reachable/degraded and any unknown newer
+        // value are treated as reachable (the safe default is "not offline").
+        for value in ["reachable", "degraded", "some_future_state"] {
+            let a = try JSONDecoder().decode(
+                AgentInfo.self,
+                from: JSONSerialization.data(withJSONObject: ["pane_id": "x", "reachability": value]))
+            XCTAssertFalse(a.isUnreachable, "reachability=\(value) must not read as offline")
+        }
+    }
+
     // MARK: - the three ways of not knowing
 
     /// AXIS: absent, indefinite and unrecognised are three different situations
