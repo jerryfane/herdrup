@@ -11,6 +11,7 @@ final class MockWireFixtureTests: XCTestCase {
     /// A canned-response transport standing in for MockTransport.
     private struct FixtureTransport: HerdrTransport {
         func roundTrip(_ requestLine: String) async throws -> String {
+            if requestLine.contains("accounts.list") { return MockWireFixtures.accountsList }
             if requestLine.contains("agent.list") { return MockWireFixtures.agentList }
             if requestLine.contains("agent.read") { return MockWireFixtures.agentRead }
             if requestLine.contains("gram.list") { return MockWireFixtures.gramList }
@@ -203,6 +204,75 @@ final class MockWireFixtureTests: XCTestCase {
                              "an invalid base64 payload must be rejected")
     }
 
+    /// The `accounts.list` fixture must decode through the real client path — the
+    /// only Linux-runnable check on the new `CredentialAccount`/`AccountUsage` wire
+    /// models (the SwiftUI Accounts section can't be compiled here). Covers a full
+    /// usage block (both percents + plan + resets_at), an exhausted account
+    /// (active:false, 100%), tier-only usage (no percent), and no usage at all —
+    /// each optional field must decode to nil rather than fail.
+    func testMockAccountsListDecodes() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let accounts = try await client.accountsList()
+        XCTAssertEqual(accounts.count, 4, "accounts.list fixture did not decode to 4 accounts")
+
+        // Full usage block on an active Claude Max account.
+        let first = try XCTUnwrap(accounts.first)
+        XCTAssertEqual(first.id, "acc-claude-1")
+        XCTAssertEqual(first.kind, "claude", "kind is the AgentInfo.agent string the swap menu filters on")
+        XCTAssertEqual(first.label, "Claude Max (work)")
+        XCTAssertTrue(first.active)
+        XCTAssertEqual(first.usage?.primaryUsedPercent, 42)
+        XCTAssertEqual(first.usage?.secondaryUsedPercent, 68)
+        XCTAssertEqual(first.usage?.resetsAt, "2026-08-20T18:00:00Z")
+        XCTAssertEqual(first.usage?.plan, "Max")
+
+        // Exhausted: active:false drives the red "exhausted" pill; percents at 100.
+        let exhausted = try XCTUnwrap(accounts.first { $0.id == "acc-claude-2" })
+        XCTAssertFalse(exhausted.active)
+        XCTAssertEqual(exhausted.usage?.primaryUsedPercent, 100)
+
+        // Tier-only usage: no percent → nil percents, tier text present.
+        let codex = try XCTUnwrap(accounts.first { $0.id == "acc-codex-1" })
+        XCTAssertNil(codex.usage?.primaryUsedPercent, "no primary_used_percent must decode to nil, not 0")
+        XCTAssertEqual(codex.usage?.tier, "Plus")
+
+        // No usage object at all → nil, not a decode failure.
+        let kimi = try XCTUnwrap(accounts.first { $0.id == "acc-kimi-1" })
+        XCTAssertNil(kimi.usage, "an omitted usage must decode to nil")
+
+        // The swap menu filters same-kind: two claude accounts here.
+        XCTAssertEqual(accounts.filter { $0.kind == "claude" }.count, 2,
+                       "the per-agent swap submenu offers the same-kind accounts")
+    }
+
+    /// `agent.restart` gained an optional `account` (the swap id). The param must
+    /// OMIT `account` when nil so a plain restart sends the old `{ target }` payload
+    /// (an older daemon is unaffected), and INCLUDE it — snake-free key `account` —
+    /// when swapping. Asserts the encoded request line directly.
+    func testRestartAccountParamOmittedWhenNilPresentWhenSet() async throws {
+        final class Capture: HerdrTransport, @unchecked Sendable {
+            var lastLine = ""
+            func roundTrip(_ requestLine: String) async throws -> String {
+                lastLine = requestLine
+                return #"{"id":"x","result":{"type":"agent_restarted","agent":{"pane_id":"w1:p1"}}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let capture = Capture()
+        let client = HerdrClient(transport: capture)
+
+        _ = try await client.restartAgent(target: "w1:p1")
+        XCTAssertTrue(capture.lastLine.contains("\"target\":\"w1:p1\""), "target must be sent")
+        XCTAssertFalse(capture.lastLine.contains("account"),
+                       "a no-account restart must not send an account key: \(capture.lastLine)")
+
+        _ = try await client.restartAgent(target: "w1:p1", account: "acc-claude-2")
+        XCTAssertTrue(capture.lastLine.contains("\"account\":\"acc-claude-2\""),
+                      "swapping must send the account id: \(capture.lastLine)")
+    }
+
     /// The `gram.list` fixture must decode through the real client path, and the
     /// GramMessage flags the Gram page renders on (unread, open-queue, grabbed,
     /// direct) must resolve correctly. Optional fields (`to`, `grabbed_by`) are
@@ -339,6 +409,19 @@ enum MockWireFixtures {
 
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
+    """#
+
+    /// An `accounts.list` owner view: two claude accounts (one active-with-usage, one
+    /// exhausted), a codex account with tier-only usage (no percent), and a kimi
+    /// account with no usage at all. Exercises every optionality of AccountUsage. Keep
+    /// in sync with the App's MockTransport.accountsList.
+    static let accountsList = #"""
+    {"id":"mock","result":{"type":"accounts_list","accounts":[
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
+      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
+      {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
+    ]}}
     """#
 
     /// A `gram.list` owner view: unread + read agent->owner messages, an unclaimed

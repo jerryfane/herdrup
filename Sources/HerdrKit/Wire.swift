@@ -139,6 +139,46 @@ struct AgentListResult: Decodable {
     let agents: [AgentInfo]
 }
 
+// MARK: - Accounts (credential subscriptions)
+
+/// One credential account (subscription) the daemon knows about — the app half of
+/// "multiple subscriptions per harness + swap". Mirrors the server's `AccountInfo`
+/// (`accounts.list` → `{ accounts: [AccountInfo] }`) BYTE-FOR-BYTE.
+///
+/// `kind` carries the SAME strings as `AgentInfo.agent` (claude/codex/kimi), so an
+/// agent may swap only among accounts whose `kind == agent.agent`. `usage` is
+/// omitted by the server when it has no usage data, so it decodes to nil.
+public struct CredentialAccount: Decodable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let kind: String
+    public let label: String
+    public let active: Bool
+    public let usage: AccountUsage?
+}
+
+/// A credential account's usage snapshot. EVERY field is optional — the server
+/// omits any it cannot report, so a bare `{}` (or a missing `usage`) is valid and
+/// must decode without failing. `primaryUsedPercent`/`secondaryUsedPercent` are the
+/// two rolling windows (e.g. Claude's 5-hour and weekly); `plan`/`tier` are the
+/// human plan name when there is no percent.
+public struct AccountUsage: Decodable, Equatable, Sendable {
+    public let primaryUsedPercent: Double?
+    public let secondaryUsedPercent: Double?
+    public let resetsAt: String?
+    public let plan: String?
+    public let tier: String?
+    enum CodingKeys: String, CodingKey {
+        case primaryUsedPercent = "primary_used_percent"
+        case secondaryUsedPercent = "secondary_used_percent"
+        case resetsAt = "resets_at"
+        case plan, tier
+    }
+}
+
+struct AccountsListResult: Decodable {
+    let accounts: [CredentialAccount]
+}
+
 // MARK: - Reads
 
 public enum ReadSource: String, Codable, Sendable {

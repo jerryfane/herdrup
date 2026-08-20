@@ -869,6 +869,10 @@ struct TerminalHomeView: View {
     private static let agentListPollInterval: UInt64 = 5_000_000_000
 
     @State private var agents: [AgentInfo] = []
+    /// The credential accounts (subscriptions), for the per-agent "Swap subscription"
+    /// submenu. Refreshed alongside `agents` in `load()`; a stale list is fine (the
+    /// worst case is offering a swap that no-ops or fails loudly, never a wrong swap).
+    @State private var accounts: [CredentialAccount] = []
     @State private var error: String?
     @State private var loading = true
     @State private var rejectedFingerprint: String?
@@ -884,6 +888,15 @@ struct TerminalHomeView: View {
     /// dialog). Set from the agent card's context menu; a restart interrupts a
     /// busy agent's turn, so it is confirmed before firing.
     @State private var restartCandidate: AgentRow?
+    /// A pending "Swap subscription" confirmation: which agent, and the target
+    /// account. A swap IS a full restart (kills + --resume) onto a different
+    /// credential account, so it interrupts a busy turn exactly like the plain
+    /// restart above — and is confirmed before firing for the same reason.
+    private struct PendingSwap {
+        let row: AgentRow
+        let account: CredentialAccount
+    }
+    @State private var swapCandidate: PendingSwap?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -1468,6 +1481,36 @@ struct TerminalHomeView: View {
                     "Interrupts \(row.title)'s current turn. Its session is preserved and reopened with --resume."
                 )
             }
+            .confirmationDialog(
+                "Swap subscription?",
+                isPresented: Binding(
+                    get: { swapCandidate != nil },
+                    set: { if !$0 { swapCandidate = nil } }
+                ),
+                presenting: swapCandidate
+            ) { cand in
+                Button("Swap", role: .destructive) {
+                    let target = cand.row.info.paneID
+                    let title = cand.row.title
+                    let accountID = cand.account.id
+                    Task {
+                        do {
+                            try await client.restartAgent(target: target, account: accountID)
+                            await load()
+                        } catch let e {
+                            // `\(e)` surfaces the APIError's "code: message"
+                            // (CustomStringConvertible); `.localizedDescription`
+                            // would bridge to a useless generic NSError string.
+                            error = "couldn't swap \(title): \(e)"
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { cand in
+                Text(
+                    "Switches \(cand.row.title) to \(cand.account.label) and restarts it — this interrupts its current turn. The session is reopened with --resume on the new subscription."
+                )
+            }
         }
     }
 
@@ -1608,6 +1651,28 @@ struct TerminalHomeView: View {
                         Button {
                             restartCandidate = row
                         } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
+                        // Swap = restart the agent onto a DIFFERENT credential account
+                        // of the same kind (an agent runs only on its own kind's
+                        // subscriptions). Shown only when the daemon reported at least
+                        // one same-kind account; we can't tell which one it's on now,
+                        // so the list may include the current account. Picking an
+                        // account does NOT fire immediately — it stages a confirmation
+                        // (swapCandidate), because a swap is a full turn-interrupting
+                        // restart, and even swapping to the current account restarts
+                        // (interrupts) the agent rather than being a no-op.
+                        let swapTargets = accounts.filter { $0.kind == row.info.agent }
+                        if !swapTargets.isEmpty {
+                            Menu {
+                                ForEach(swapTargets) { acct in
+                                    Button {
+                                        swapCandidate = PendingSwap(row: row, account: acct)
+                                    } label: {
+                                        Label(acct.label + (acct.active ? "" : " (exhausted)"),
+                                              systemImage: "person.crop.circle")
+                                    }
+                                }
+                            } label: { Label("Swap subscription", systemImage: "arrow.left.arrow.right") }
+                        }
                     }
                 }
             }
@@ -1827,6 +1892,11 @@ struct TerminalHomeView: View {
         do {
             let fetched = try await client.agentList()
             agents = fetched
+            // Refresh the account roster for the swap submenu. Best-effort and
+            // stale-preserving: only overwrite on a successful fetch, so a transient
+            // failure — or an older daemon without `accounts.list` — keeps the
+            // last-good list rather than blanking the submenu mid-session.
+            if let fetchedAccounts = try? await client.accountsList() { accounts = fetchedAccounts }
             error = nil
             rejectedFingerprint = nil
             trustFailed = false
@@ -2796,12 +2866,13 @@ struct TerminalPaneContent: View {
 /// A jump target within Settings. The iPad sidebar index uses it to scroll the detail pane's
 /// SettingsView to a section; iPhone tabs and modal presentations leave it nil (no scrolling).
 enum SettingsSection: Hashable, CaseIterable {
-    case connection, federation, notify, trouble, help, about
+    case connection, federation, accounts, notify, trouble, help, about
 
     var label: String {
         switch self {
         case .connection: return "Connection"
         case .federation: return "Federation"
+        case .accounts:   return "Accounts"
         case .notify:     return "Notifications"
         case .trouble:    return "Troubleshooting"
         case .help:       return "Help"
@@ -2813,6 +2884,7 @@ enum SettingsSection: Hashable, CaseIterable {
         switch self {
         case .connection: return "wifi"
         case .federation: return "point.3.connected.trianglepath.dotted"
+        case .accounts:   return "key.horizontal"
         case .notify:     return "bell"
         case .trouble:    return "wrench.and.screwdriver"
         case .help:       return "questionmark.circle"
@@ -2903,6 +2975,13 @@ struct SettingsView: View {
     @AppStorage("notify.finishes") private var notifyFinishes = false
     @AppStorage("notify.gram") private var notifyGram = true
     @State private var copied = false
+    /// The credential accounts (subscriptions) for the Accounts section. Fetched by
+    /// this view itself (`.task` below) via the injected `client`, mirroring how the
+    /// Federation section derives from the injected agents. Empty until loaded, and
+    /// on an older daemon lacking `accounts.list` (the fetch is `try?`).
+    @State private var accounts: [CredentialAccount] = []
+    /// The "How accounts work" explainer alert, opened from the Accounts section.
+    @State private var showAccountsHelp = false
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
@@ -2935,13 +3014,18 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             connectionSection.id(SettingsSection.connection)
                             federationSection.id(SettingsSection.federation)
+                            accountsSection.id(SettingsSection.accounts)
                             notifySection.id(SettingsSection.notify)
                             troubleSection.id(SettingsSection.trouble)
                             helpSection.id(SettingsSection.help)
                             supportSection
                             aboutSection.id(SettingsSection.about)
-                            versionFooter
-                            githubFooter
+                            // Grouped so the top-level builder stays at/under SwiftUI's
+                            // 10-child ViewBuilder ceiling now that Accounts is a child.
+                            Group {
+                                versionFooter
+                                githubFooter
+                            }
                         }
                         .padding(.bottom, 16)
                     }
@@ -2968,6 +3052,18 @@ struct SettingsView: View {
         // Load the tip products when Settings opens. No-ops after a successful load;
         // re-tries after a prior failure, so products created in ASC later appear.
         .task { await tipStore.loadProducts() }
+        // Fetch the credential accounts for the Accounts section when Settings opens.
+        // `try?` so an older daemon without `accounts.list` (or a transient failure)
+        // just leaves the section empty rather than surfacing an error here.
+        .task { accounts = (try? await client.accountsList()) ?? [] }
+        // The "How accounts work" explainer — accounts are configured on the box, not
+        // in the app, so this points there rather than offering an in-app add flow.
+        .alert("How accounts work", isPresented: $showAccountsHelp) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Subscriptions are configured on your home box with the herdr CLI. "
+                + "Each agent runs on one; swap it from the agent's menu on the Agents tab.")
+        }
         // Keep the notify section's permission state honest: on open, and again when the
         // app returns to the foreground (the user may have flipped it in iOS Settings).
         .onAppear { refreshNotifyAuth() }
@@ -3099,6 +3195,142 @@ struct SettingsView: View {
         case .reachable:
             Circle().fill(Palette.done).frame(width: 8, height: 8)
                 .accessibilityLabel(Text("reachable"))
+        }
+    }
+
+    // MARK: Accounts (credential subscriptions)
+
+    /// The credential accounts (subscriptions) configured on the home box — one row
+    /// per account with its kind identity, status, and usage. Mirrors
+    /// `federationSection`: a section label, a rounded/stroked card of `accountRow`s
+    /// (or an empty explainer), and a trailing "How accounts work" info row. Accounts
+    /// are set up on the box, so there is no in-app add flow — the info row explains.
+    @ViewBuilder
+    private var accountsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("ACCOUNTS")
+            if accounts.isEmpty {
+                accountsEmpty
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
+                        accountRow(account)
+                        if index < accounts.count - 1 { rowDivider }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .padding(.horizontal, 16).padding(.top, 10)
+            }
+            richActionRow("How accounts work", systemImage: "info.circle",
+                          subtitle: "Subscriptions are set up on your home box") {
+                showAccountsHelp = true
+            }
+        }
+    }
+
+    /// No accounts reported (an older daemon, or none configured). Explainer copy in
+    /// the section body rather than a bare empty card — mirrors `federationEmpty`.
+    private var accountsEmpty: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("No accounts configured.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+            Text("Subscriptions set up on your home box appear here.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// One account: an identity chip keyed on the KIND (the same gradient+glyph the
+    /// agent cards use, so an account reads as the same family as the agents that run
+    /// on it), the label as title, a "kind · plan" subtitle, and a trailing usage +
+    /// status view. Mirrors `peerRow`.
+    private func accountRow(_ account: CredentialAccount) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: account.kind))
+                    .frame(width: 40, height: 40)
+                Text(AgentIdentity.glyph(for: account.kind))
+                    .font(Typography.app(18, .bold)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(account.label)
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                Text(accountSubtitle(account))
+                    .font(Typography.app(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            accountTrailing(account)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    /// "kind" or "kind · plan" — the plan/tier name folds into the subtitle so the
+    /// trailing view can stay the meter+status. Nothing extra when usage is absent.
+    private func accountSubtitle(_ account: CredentialAccount) -> String {
+        var parts: [String] = [account.kind]
+        if let plan = account.usage?.plan ?? account.usage?.tier, !plan.isEmpty {
+            parts.append(plan)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The trailing status/usage cluster: the usage meter(s) when a percent is
+    /// reported, then the status indicator — a green dot when active, a red
+    /// "exhausted" pill when not (colour = meaning, like the agent status badges).
+    @ViewBuilder
+    private func accountTrailing(_ account: CredentialAccount) -> some View {
+        HStack(spacing: 10) {
+            if let usage = account.usage, usage.primaryUsedPercent != nil {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let primary = usage.primaryUsedPercent {
+                        usageMeter(percent: primary, window: "5h")
+                    }
+                    if let secondary = usage.secondaryUsedPercent {
+                        usageMeter(percent: secondary, window: "wk")
+                    }
+                }
+            }
+            if account.active {
+                Circle().fill(Palette.done).frame(width: 8, height: 8)
+                    .accessibilityLabel(Text("active"))
+            } else {
+                Text("exhausted")
+                    .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Palette.died.opacity(0.12)))
+                    .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
+                    .accessibilityLabel(Text("exhausted"))
+            }
+        }
+    }
+
+    /// A tiny usage bar + "NN% · <window>" readout. The bar fills proportional to use
+    /// and shifts green→amber→red as it nears the cap (colour = meaning).
+    private func usageMeter(percent: Double, window: String) -> some View {
+        let clamped = max(0.0, min(100.0, percent))
+        let fill = CGFloat(max(2.0, 34.0 * clamped / 100.0))
+        return HStack(spacing: 6) {
+            ZStack(alignment: .leading) {
+                Capsule().fill(Palette.hairline).frame(width: 34, height: 4)
+                Capsule().fill(usageColor(clamped)).frame(width: fill, height: 4)
+            }
+            Text("\(Int(clamped.rounded()))% · \(window)")
+                .font(Typography.machine(11)).foregroundStyle(Palette.textDim).fixedSize()
+        }
+    }
+
+    /// Usage colour by headroom: comfortable green, amber as it tightens, red at the
+    /// cap. The same meaning-carrying palette as the agent status badges.
+    private func usageColor(_ percent: Double) -> Color {
+        switch percent {
+        case ..<75:  return Palette.done
+        case ..<95:  return Palette.waiting
+        default:     return Palette.died
         }
     }
 
@@ -3630,6 +3862,7 @@ struct MockTransport: HerdrTransport {
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
+        if requestLine.contains("accounts.list") { return Self.accountsList }
         if requestLine.contains("agent.list") { return Self.agentList }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") { return Self.gramList }
@@ -3722,6 +3955,19 @@ struct MockTransport: HerdrTransport {
     static let demoLivePaneIDs: Set<String> = [
         "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2",
     ]
+
+    /// `accounts.list` for the Settings mock render: two claude accounts (one active
+    /// with usage, one exhausted), a codex account with tier-only usage, and a kimi
+    /// account with none. Byte-identical to MockWireFixtures.accountsList in the
+    /// tests, where it is machine-checked to decode. If you change one, change both.
+    static let accountsList = #"""
+    {"id":"mock","result":{"type":"accounts_list","accounts":[
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
+      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
+      {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
+    ]}}
+    """#
 
     static let agentRead = #"""
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
