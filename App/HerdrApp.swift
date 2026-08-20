@@ -1454,7 +1454,11 @@ struct TerminalHomeView: View {
                             try await client.restartAgent(target: target)
                             await load()
                         } catch let e {
-                            error = "couldn't restart \(title): \(e.localizedDescription)"
+                            // Interpolate the APIError directly ("code: message",
+                            // via CustomStringConvertible) — `.localizedDescription`
+                            // bridges through NSError to a useless generic string,
+                            // hiding the daemon's `no_resumable_session`.
+                            error = "couldn't restart \(title): \(e)"
                         }
                     }
                 }
@@ -1591,7 +1595,10 @@ struct TerminalHomeView: View {
                                     try await client.closePane(paneID: row.info.paneID)
                                     await load()
                                 } catch let e {
-                                    error = "couldn't stop \(row.title): \(e.localizedDescription)"
+                                    // `\(e)` surfaces the APIError's "code: message"
+                                    // (CustomStringConvertible); `.localizedDescription`
+                                    // would bridge to a useless generic NSError string.
+                                    error = "couldn't stop \(row.title): \(e)"
                                 }
                             }
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
