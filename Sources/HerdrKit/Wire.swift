@@ -156,22 +156,67 @@ public struct CredentialAccount: Decodable, Equatable, Sendable, Identifiable {
     public let usage: AccountUsage?
 }
 
+/// One rate-limit window for an account (a 5-hour or weekly bucket, etc.).
+public struct UsageWindow: Decodable, Equatable, Sendable, Identifiable {
+    public let label: String
+    public let usedPercent: Double?
+    public let resetsAt: String?
+    public let status: String?
+    public var id: String { label }
+    enum CodingKeys: String, CodingKey {
+        case label
+        case usedPercent = "used_percent"
+        case resetsAt = "resets_at"
+        case status
+    }
+}
+
 /// A credential account's usage snapshot. EVERY field is optional — the server
 /// omits any it cannot report, so a bare `{}` (or a missing `usage`) is valid and
-/// must decode without failing. `primaryUsedPercent`/`secondaryUsedPercent` are the
-/// two rolling windows (e.g. Claude's 5-hour and weekly); `plan`/`tier` are the
-/// human plan name when there is no percent.
+/// must decode without failing.
+///
+/// `windows` is the current shape (any number of rate-limit buckets). `source`
+/// is "live" (fetched from the provider) or "local" (read on-disk). The flat
+/// `primaryUsedPercent`/`secondaryUsedPercent`/`resetsAt` are back-compat mirrors
+/// of the first two windows (older daemons send only those); prefer `windows`.
 public struct AccountUsage: Decodable, Equatable, Sendable {
+    public let windows: [UsageWindow]
+    public let source: String?
     public let primaryUsedPercent: Double?
     public let secondaryUsedPercent: Double?
     public let resetsAt: String?
     public let plan: String?
     public let tier: String?
     enum CodingKeys: String, CodingKey {
+        case windows, source, plan, tier
         case primaryUsedPercent = "primary_used_percent"
         case secondaryUsedPercent = "secondary_used_percent"
         case resetsAt = "resets_at"
-        case plan, tier
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // `windows` may be absent on older daemons — default to empty.
+        windows = try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? []
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        primaryUsedPercent = try c.decodeIfPresent(Double.self, forKey: .primaryUsedPercent)
+        secondaryUsedPercent = try c.decodeIfPresent(Double.self, forKey: .secondaryUsedPercent)
+        resetsAt = try c.decodeIfPresent(String.self, forKey: .resetsAt)
+        plan = try c.decodeIfPresent(String.self, forKey: .plan)
+        tier = try c.decodeIfPresent(String.self, forKey: .tier)
+    }
+
+    /// The windows to render: the real `windows` list when present, else a
+    /// synthesized pair from the back-compat flat fields (older daemon).
+    public var effectiveWindows: [UsageWindow] {
+        if !windows.isEmpty { return windows }
+        var out: [UsageWindow] = []
+        if let p = primaryUsedPercent {
+            out.append(UsageWindow(label: "5h", usedPercent: p, resetsAt: resetsAt, status: nil))
+        }
+        if let s = secondaryUsedPercent {
+            out.append(UsageWindow(label: "weekly", usedPercent: s, resetsAt: nil, status: nil))
+        }
+        return out
     }
 }
 
