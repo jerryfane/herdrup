@@ -153,6 +153,9 @@ public struct CredentialAccount: Decodable, Equatable, Sendable, Identifiable {
     public let kind: String
     public let label: String
     public let active: Bool
+    /// The account's login email, when the daemon can derive it. Optional → an
+    /// older daemon that omits it decodes to nil. Identity only, never a secret.
+    public let email: String?
     public let usage: AccountUsage?
 }
 
