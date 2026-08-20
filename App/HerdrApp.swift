@@ -888,6 +888,15 @@ struct TerminalHomeView: View {
     /// dialog). Set from the agent card's context menu; a restart interrupts a
     /// busy agent's turn, so it is confirmed before firing.
     @State private var restartCandidate: AgentRow?
+    /// A pending "Swap subscription" confirmation: which agent, and the target
+    /// account. A swap IS a full restart (kills + --resume) onto a different
+    /// credential account, so it interrupts a busy turn exactly like the plain
+    /// restart above — and is confirmed before firing for the same reason.
+    private struct PendingSwap {
+        let row: AgentRow
+        let account: CredentialAccount
+    }
+    @State private var swapCandidate: PendingSwap?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -1472,6 +1481,36 @@ struct TerminalHomeView: View {
                     "Interrupts \(row.title)'s current turn. Its session is preserved and reopened with --resume."
                 )
             }
+            .confirmationDialog(
+                "Swap subscription?",
+                isPresented: Binding(
+                    get: { swapCandidate != nil },
+                    set: { if !$0 { swapCandidate = nil } }
+                ),
+                presenting: swapCandidate
+            ) { cand in
+                Button("Swap", role: .destructive) {
+                    let target = cand.row.info.paneID
+                    let title = cand.row.title
+                    let accountID = cand.account.id
+                    Task {
+                        do {
+                            try await client.restartAgent(target: target, account: accountID)
+                            await load()
+                        } catch let e {
+                            // `\(e)` surfaces the APIError's "code: message"
+                            // (CustomStringConvertible); `.localizedDescription`
+                            // would bridge to a useless generic NSError string.
+                            error = "couldn't swap \(title): \(e)"
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { cand in
+                Text(
+                    "Switches \(cand.row.title) to \(cand.account.label) and restarts it — this interrupts its current turn. The session is reopened with --resume on the new subscription."
+                )
+            }
         }
     }
 
@@ -1616,25 +1655,17 @@ struct TerminalHomeView: View {
                         // of the same kind (an agent runs only on its own kind's
                         // subscriptions). Shown only when the daemon reported at least
                         // one same-kind account; we can't tell which one it's on now,
-                        // so the list may include the current account — swapping to it
-                        // is a harmless no-op restart, not a wrong swap.
+                        // so the list may include the current account. Picking an
+                        // account does NOT fire immediately — it stages a confirmation
+                        // (swapCandidate), because a swap is a full turn-interrupting
+                        // restart, and even swapping to the current account restarts
+                        // (interrupts) the agent rather than being a no-op.
                         let swapTargets = accounts.filter { $0.kind == row.info.agent }
                         if !swapTargets.isEmpty {
                             Menu {
                                 ForEach(swapTargets) { acct in
                                     Button {
-                                        Task {
-                                            do {
-                                                try await client.restartAgent(
-                                                    target: row.info.paneID, account: acct.id)
-                                                await load()
-                                            } catch let e {
-                                                // `\(e)` surfaces the APIError's
-                                                // "code: message"; `.localizedDescription`
-                                                // would bridge to a useless generic string.
-                                                error = "couldn't swap \(row.title): \(e)"
-                                            }
-                                        }
+                                        swapCandidate = PendingSwap(row: row, account: acct)
                                     } label: {
                                         Label(acct.label + (acct.active ? "" : " (exhausted)"),
                                               systemImage: "person.crop.circle")
