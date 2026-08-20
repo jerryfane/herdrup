@@ -59,6 +59,15 @@ public actor HerdrClient {
         try await call("agent.list", EmptyParams(), as: AgentListResult.self).agents
     }
 
+    /// Every credential account (subscription) the daemon knows about, for the
+    /// Settings → Accounts list and the per-agent "Swap subscription" menu. Mirrors
+    /// `agentList()`: a small parameterless JSON query. THROWS the server's
+    /// `APIError` on an older daemon that lacks the method, so callers that want a
+    /// quiet degrade use `try?`.
+    public func accountsList() async throws -> [CredentialAccount] {
+        try await call("accounts.list", EmptyParams(), as: AccountsListResult.self).accounts
+    }
+
     /// The complete pane set, as a value that carries its own provenance.
     ///
     /// `SessionRecovery.observe` takes this rather than `[AgentInfo]` because an
@@ -535,18 +544,40 @@ public actor HerdrClient {
         let target: String
     }
 
+    /// `agent.restart` params. `account` is the credential-account id to swap the
+    /// agent onto; it is OMITTED when nil (a plain in-place restart) via the custom
+    /// `encode`, so a no-account restart sends exactly the old `{ target }` payload
+    /// and an older daemon is unaffected. Mirrors the server's optional/skip-if-none.
+    struct AgentRestartParams: Encodable {
+        let target: String
+        let account: String?
+
+        enum CodingKeys: String, CodingKey {
+            case target, account
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(target, forKey: .target)
+            try container.encodeIfPresent(account, forKey: .account)
+        }
+    }
+
     struct AgentInfoResult: Decodable {
         let agent: AgentInfo
     }
 
     /// Restarts an agent in place: the daemon kills its harness process and
     /// reopens the SAME session with `--resume`, keeping the pane and identity.
-    /// `target` is the pane id (or agent name). Throws when the agent has no
+    /// `target` is the pane id (or agent name). Passing `account` reopens the
+    /// session on that credential subscription instead (the "swap subscription"
+    /// action); nil keeps the current account. Throws when the agent has no
     /// resumable session (`no_resumable_session` — not a herdr-launched agent, or
     /// none reported). Returns the restarted agent.
     @discardableResult
-    public func restartAgent(target: String) async throws -> AgentInfo {
-        try await call("agent.restart", AgentTargetParams(target: target), as: AgentInfoResult.self)
+    public func restartAgent(target: String, account: String? = nil) async throws -> AgentInfo {
+        try await call("agent.restart", AgentRestartParams(target: target, account: account),
+                       as: AgentInfoResult.self)
             .agent
     }
 
