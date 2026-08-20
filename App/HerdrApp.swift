@@ -3013,6 +3013,13 @@ struct SettingsView: View {
     /// Federation section derives from the injected agents. Empty until loaded, and
     /// on an older daemon lacking `accounts.list` (the fetch is `try?`).
     @State private var accounts: [CredentialAccount] = []
+    /// A pending "use this account for ALL agents of its harness" bulk swap (nil =
+    /// no dialog). Set from an account row's long-press menu; the confirm fans the
+    /// per-agent swap out over every same-kind agent.
+    @State private var bulkSwapTarget: CredentialAccount?
+    /// The result summary of the last bulk swap ("Moved 3 of 4 …"), shown in an
+    /// alert. nil = no alert.
+    @State private var bulkResult: String?
     /// The "how to set up accounts" guide sheet, opened from the Accounts section.
     @State private var showAccountsSetup = false
     /// The gestures tutorial, opened from the Help row (its persistent home now that
@@ -3072,6 +3079,68 @@ struct SettingsView: View {
             AccountsSetupView(onClose: { showAccountsSetup = false })
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        // Bulk swap: "use this account for all <kind> agents". Confirms (naming the
+        // count, since it restarts each one's turn), then fans the per-agent swap
+        // out sequentially and reports the outcome in an alert.
+        .confirmationDialog(
+            bulkSwapTarget.map { "Use \($0.label) for all \($0.kind.capitalized) agents?" } ?? "",
+            isPresented: Binding(
+                get: { bulkSwapTarget != nil },
+                set: { if !$0 { bulkSwapTarget = nil } }
+            ),
+            presenting: bulkSwapTarget
+        ) { account in
+            let targets = agents.filter { $0.agent == account.kind }
+            Button("Move \(targets.count) agent\(targets.count == 1 ? "" : "s")", role: .destructive) {
+                let accountID = account.id
+                let label = account.label
+                let total = targets.count
+                Task {
+                    var moved = 0
+                    var failed = 0
+                    var lastError: String?
+                    for info in targets {
+                        do {
+                            try await client.restartAgent(target: info.paneID, account: accountID)
+                            moved += 1
+                        } catch {
+                            // Any failure (no_resumable_session OR anything else):
+                            // count it generically and keep the REAL error to surface,
+                            // rather than mislabelling every failure as "no resumable
+                            // session". `\(error)` is the APIError's "code: message" —
+                            // same interpolation the per-agent swap uses.
+                            failed += 1
+                            lastError = "\(error)"
+                        }
+                    }
+                    if failed == 0 {
+                        bulkResult = "Moved all \(moved) agent\(moved == 1 ? "" : "s") to \(label)."
+                    } else {
+                        bulkResult = "Moved \(moved) of \(total). \(failed) couldn't be moved"
+                            + (lastError.map { " — \($0)" } ?? "") + "."
+                    }
+                    accounts = (try? await client.accountsList()) ?? []
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { account in
+            let n = agents.filter { $0.agent == account.kind }.count
+            Text("Restarts \(n) \(account.kind.capitalized) agent\(n == 1 ? "" : "s") onto "
+                + "\(account.label) — this interrupts each one's current turn. "
+                + "Sessions reopen with --resume.")
+        }
+        .alert(
+            "Swap subscription",
+            isPresented: Binding(
+                get: { bulkResult != nil },
+                set: { if !$0 { bulkResult = nil } }
+            ),
+            presenting: bulkResult
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { result in
+            Text(result)
         }
         // Keep the notify section's permission state honest: on open, and again when the
         // app returns to the foreground (the user may have flipped it in iOS Settings).
@@ -3560,6 +3629,19 @@ struct SettingsView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                         accountRow(account)
+                            .contextMenu {
+                                // Bulk swap: move every same-kind agent onto this
+                                // account at once (e.g. an exhausted Claude → the
+                                // spare). Shown only when there are agents to move.
+                                if agents.contains(where: { $0.agent == account.kind }) {
+                                    Button {
+                                        bulkSwapTarget = account
+                                    } label: {
+                                        Label("Use for all \(account.kind.capitalized) agents",
+                                              systemImage: "arrow.left.arrow.right")
+                                    }
+                                }
+                            }
                         if index < accounts.count - 1 { rowDivider }
                     }
                 }
