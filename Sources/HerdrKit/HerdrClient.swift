@@ -531,6 +531,25 @@ public actor HerdrClient {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
     }
 
+    struct AgentTargetParams: Encodable {
+        let target: String
+    }
+
+    struct AgentInfoResult: Decodable {
+        let agent: AgentInfo
+    }
+
+    /// Restarts an agent in place: the daemon kills its harness process and
+    /// reopens the SAME session with `--resume`, keeping the pane and identity.
+    /// `target` is the pane id (or agent name). Throws when the agent has no
+    /// resumable session (`no_resumable_session` — not a herdr-launched agent, or
+    /// none reported). Returns the restarted agent.
+    @discardableResult
+    public func restartAgent(target: String) async throws -> AgentInfo {
+        try await call("agent.restart", AgentTargetParams(target: target), as: AgentInfoResult.self)
+            .agent
+    }
+
     /// True when `pane` reports an agent WITH a composer — the observable proxy for
     /// "a prompt will land NOW". This is the STRICTER new-agent PRE-FILL gate
     /// (`InputRouter.isPromptable(for:)`), deliberately NOT the reply-routing gate

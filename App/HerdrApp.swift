@@ -880,6 +880,10 @@ struct TerminalHomeView: View {
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
+    /// The agent a pending "Restart agent" confirmation is about (nil = no
+    /// dialog). Set from the agent card's context menu; a restart interrupts a
+    /// busy agent's turn, so it is confirmed before firing.
+    @State private var restartCandidate: AgentRow?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -1434,6 +1438,36 @@ struct TerminalHomeView: View {
             // full-screen (the pane overlay covers it too; this animates it away and
             // guards against the bar drawing over the overlay on some iOS versions).
             .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
+            .confirmationDialog(
+                "Restart agent?",
+                isPresented: Binding(
+                    get: { restartCandidate != nil },
+                    set: { if !$0 { restartCandidate = nil } }
+                ),
+                presenting: restartCandidate
+            ) { row in
+                Button("Restart", role: .destructive) {
+                    let target = row.info.paneID
+                    let title = row.title
+                    Task {
+                        do {
+                            try await client.restartAgent(target: target)
+                            await load()
+                        } catch let e {
+                            // Interpolate the APIError directly ("code: message",
+                            // via CustomStringConvertible) — `.localizedDescription`
+                            // bridges through NSError to a useless generic string,
+                            // hiding the daemon's `no_resumable_session`.
+                            error = "couldn't restart \(title): \(e)"
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { row in
+                Text(
+                    "Interrupts \(row.title)'s current turn. Its session is preserved and reopened with --resume."
+                )
+            }
         }
     }
 
@@ -1561,10 +1595,19 @@ struct TerminalHomeView: View {
                                     try await client.closePane(paneID: row.info.paneID)
                                     await load()
                                 } catch let e {
-                                    error = "couldn't stop \(row.title): \(e.localizedDescription)"
+                                    // `\(e)` surfaces the APIError's "code: message"
+                                    // (CustomStringConvertible); `.localizedDescription`
+                                    // would bridge to a useless generic NSError string.
+                                    error = "couldn't stop \(row.title): \(e)"
                                 }
                             }
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
+                        // Restart = close the agent's session and reopen it with
+                        // --resume in place (keeps the pane). It interrupts a busy
+                        // agent's turn, so it routes through a confirmation.
+                        Button {
+                            restartCandidate = row
+                        } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
                     }
                 }
             }
