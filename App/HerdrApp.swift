@@ -906,8 +906,9 @@ struct TerminalHomeView: View {
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var columnVisibility = NavigationSplitViewVisibility.all
-    /// iPad: which Settings section the sidebar index last selected (drives the detail's scroll).
-    @State private var settingsAnchor: SettingsSection?
+    /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
+    /// detail column). Defaults to Machines so the split opens on a section, not blank.
+    @State private var settingsAnchor: SettingsSection? = .machines
     /// iPad: the ⌘/ keyboard-shortcut reference sheet.
     @State private var showShortcuts = false
     /// Terminal font size preference (points), shared app-wide via UserDefaults with the
@@ -1121,7 +1122,7 @@ struct TerminalHomeView: View {
                         connected: error == nil && !loading,
                         canReconnect: rejectedFingerprint == nil,
                         onReconnect: onReconnect,
-                        scrollTo: settingsAnchor)
+                        detail: settingsAnchor ?? .machines)
                 case .call:
                     detailPlaceholder("Voice call is coming soon", "phone")
                 }
@@ -1163,16 +1164,15 @@ struct TerminalHomeView: View {
         .accessibilityHidden(true)
     }
 
-    /// The iPad Settings sidebar index: one row per section, each scrolls the detail's
-    /// SettingsView to that section. Selecting the same row re-arms the jump via a nil bounce.
+    /// The iPad Settings sidebar index: one row per grouped destination (Machines /
+    /// Accounts / Notifications / App & About), each selecting the detail rendered in the
+    /// split's detail column (violet selection highlight as today).
     @ViewBuilder
     private var settingsIndex: some View {
         VStack(spacing: 4) {
             ForEach(SettingsSection.allCases, id: \.self) { section in
                 Button {
-                    // Re-select the same row = jump again: bounce through nil so onChange fires.
-                    if settingsAnchor == section { settingsAnchor = nil }
-                    DispatchQueue.main.async { settingsAnchor = section }
+                    settingsAnchor = section
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: section.icon)
@@ -2865,30 +2865,29 @@ struct TerminalPaneContent: View {
 /// real push delivery is a follow-up, so they record intent, not delivery.
 /// A jump target within Settings. The iPad sidebar index uses it to scroll the detail pane's
 /// SettingsView to a section; iPhone tabs and modal presentations leave it nil (no scrolling).
+/// The Settings index→detail destinations (redesign #144). `machines` folds
+/// Connection + Federation (the box you talk to and the boxes it aggregates);
+/// `accounts` and `notifications` each own a screen; `about` bundles the light
+/// sections (Trouble / Help / Support / About) — rendered INLINE on the iPhone
+/// index, and as a single "App & About" detail on the iPad split.
 enum SettingsSection: Hashable, CaseIterable {
-    case connection, federation, accounts, notify, trouble, help, about
+    case machines, accounts, notifications, about
 
     var label: String {
         switch self {
-        case .connection: return "Connection"
-        case .federation: return "Federation"
-        case .accounts:   return "Accounts"
-        case .notify:     return "Notifications"
-        case .trouble:    return "Troubleshooting"
-        case .help:       return "Help"
-        case .about:      return "About"
+        case .machines:      return "Machines"
+        case .accounts:      return "Accounts"
+        case .notifications: return "Notifications"
+        case .about:         return "App & About"
         }
     }
 
     var icon: String {
         switch self {
-        case .connection: return "wifi"
-        case .federation: return "point.3.connected.trianglepath.dotted"
-        case .accounts:   return "key.horizontal"
-        case .notify:     return "bell"
-        case .trouble:    return "wrench.and.screwdriver"
-        case .help:       return "questionmark.circle"
-        case .about:      return "info.circle"
+        case .machines:      return "server.rack"
+        case .accounts:      return "key.horizontal"
+        case .notifications: return "bell"
+        case .about:         return "info.circle"
         }
     }
 }
@@ -2950,6 +2949,27 @@ struct ShortcutsSheet: View {
     }
 }
 
+/// The back affordance on a pushed Settings detail (iPhone). It is its OWN view so its
+/// `@Environment(\.dismiss)` resolves to the NavigationStack push it sits under and pops
+/// exactly that — reading dismiss on `SettingsView` itself would target the enclosing
+/// tab/sheet, the wrong level. The iPad split passes `showBack: false` (its sidebar is
+/// the navigation, so there is nothing to pop).
+private struct SettingsBackButton: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        Button { dismiss() } label: {
+            ZStack {
+                Circle().fill(Palette.surfaceRaised).frame(width: 32, height: 32)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.text)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("Back"))
+    }
+}
+
 struct SettingsView: View {
     let client: HerdrClient
     /// Live agents, mirrored in from the home view exactly like GramView's — the
@@ -2966,9 +2986,10 @@ struct SettingsView: View {
     /// Nil when Settings is a persistent tab (no close button); a modal sheet passes
     /// one and the header shows an xmark — mirrors GramView's nav-agnostic contract.
     var onClose: (() -> Void)?
-    /// iPad only: when the sidebar index selects a section, this changes and the detail's
-    /// SettingsView scrolls to it. Nil on iPhone / modal (no jump, plain top-to-bottom scroll).
-    var scrollTo: SettingsSection? = nil
+    /// iPad only: which grouped detail the sidebar index selected, rendered directly in
+    /// the split's detail column (no NavigationStack — the split view IS the nav). Nil =
+    /// iPhone (and the screenshot mock): the whole index → detail flow in a NavigationStack.
+    var detail: SettingsSection? = nil
 
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
@@ -3001,39 +3022,16 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        ZStack {
-            Palette.ground.ignoresSafeArea()
-            VStack(spacing: 0) {
-                header
-                Divider().overlay(Palette.hairlineQuiet)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        // Grouped into subviews so the top-level builder stays well under
-                        // SwiftUI's 10-child ViewBuilder ceiling. `.id` anchors let the iPad
-                        // sidebar index jump to a section (no-op when scrollTo stays nil).
-                        VStack(alignment: .leading, spacing: 0) {
-                            connectionSection.id(SettingsSection.connection)
-                            federationSection.id(SettingsSection.federation)
-                            accountsSection.id(SettingsSection.accounts)
-                            notifySection.id(SettingsSection.notify)
-                            troubleSection.id(SettingsSection.trouble)
-                            helpSection.id(SettingsSection.help)
-                            supportSection
-                            aboutSection.id(SettingsSection.about)
-                            // Grouped so the top-level builder stays at/under SwiftUI's
-                            // 10-child ViewBuilder ceiling now that Accounts is a child.
-                            Group {
-                                versionFooter
-                                githubFooter
-                            }
-                        }
-                        .padding(.bottom, 16)
-                    }
-                    .onChange(of: scrollTo) { _, target in
-                        guard let target else { return }
-                        withAnimation { proxy.scrollTo(target, anchor: .top) }
-                    }
-                }
+        Group {
+            if let detail {
+                // iPad split: the sidebar is the index, so render ONLY the selected
+                // group's detail here (no NavigationStack — the split view IS the nav).
+                detailColumn(detail)
+            } else {
+                // iPhone (and the screenshot mock): the index → detail flow. A
+                // NavigationStack whose root is the AT A GLANCE / MANAGE index; the
+                // MANAGE rows push the same detail bodies the iPad renders inline.
+                indexStack
             }
         }
         // The gestures reference lives here now (moved out of the main tab bar);
@@ -3069,6 +3067,338 @@ struct SettingsView: View {
         .onAppear { refreshNotifyAuth() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { refreshNotifyAuth() } }
     }
+
+    // MARK: Index → detail (iPhone NavigationStack)
+
+    /// The iPhone Settings index: an AT A GLANCE status card and a MANAGE group of
+    /// drill-in rows above the fold, the light sections (Trouble / Help / Support /
+    /// About) inline below. The MANAGE rows are value-based `NavigationLink`s; the one
+    /// `navigationDestination` renders the shared detail bodies with a back button.
+    private var indexStack: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    header
+                    Divider().overlay(Palette.hairlineQuiet)
+                    ScrollView {
+                        // Grouped subviews keep this builder well under SwiftUI's 10-child
+                        // ViewBuilder ceiling (7 children + the footers Group).
+                        VStack(alignment: .leading, spacing: 0) {
+                            atAGlanceSection
+                            manageSection
+                            troubleSection
+                            helpSection
+                            supportSection
+                            aboutSection
+                            Group {
+                                versionFooter
+                                githubFooter
+                            }
+                        }
+                        .padding(.bottom, 16)
+                    }
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: SettingsSection.self) { section in
+                detailScreen(section, showBack: true)
+            }
+        }
+    }
+
+    /// The iPad detail column: one group's detail, on the app ground, no back button
+    /// (the sidebar index is the navigation).
+    private func detailColumn(_ section: SettingsSection) -> some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            detailScreen(section, showBack: false)
+        }
+    }
+
+    /// Maps a grouped destination to its detail body. Machines folds Connection +
+    /// Federation; Accounts and Notifications reuse their section views verbatim; About
+    /// bundles the light sections (only reached as a destination on iPad — inline on the
+    /// iPhone index).
+    @ViewBuilder
+    private func detailScreen(_ section: SettingsSection, showBack: Bool) -> some View {
+        switch section {
+        case .machines:      machinesDetail(showBack: showBack)
+        case .accounts:      accountsDetail(showBack: showBack)
+        case .notifications: notificationsDetail(showBack: showBack)
+        case .about:         aboutDetail(showBack: showBack)
+        }
+    }
+
+    private func machinesDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Machines", subtitle: machinesSubtitle, showBack: showBack) {
+            connectionSection
+            federationSection
+        }
+    }
+
+    private func accountsDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Accounts", subtitle: accountsHeaderSubtitle,
+                       subtitleTint: accountsHeaderTint, showBack: showBack) {
+            accountsSection
+        }
+    }
+
+    private func notificationsDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Notifications", subtitle: notifyHeaderSubtitle,
+                       subtitleTint: notifyBlocked ? Palette.waiting : Palette.textFaint,
+                       showBack: showBack) {
+            notifySection
+        }
+    }
+
+    /// iPad "App & About": the light sections that stay inline on the iPhone index.
+    private func aboutDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "App & About", subtitle: "Trouble, help, support & legal",
+                       showBack: showBack) {
+            troubleSection
+            helpSection
+            supportSection
+            aboutSection
+            Group {
+                versionFooter
+                githubFooter
+            }
+        }
+    }
+
+    /// A detail screen shell: the custom dark header (title + subtitle + optional back
+    /// button) over a scroll of the composed section views. Hides the system nav bar so
+    /// the app's own header is the only chrome, matching the Gram / Gestures sheets.
+    @ViewBuilder
+    private func detailScaffold<Content: View>(
+        title: String, subtitle: String, subtitleTint: Color = Palette.textFaint,
+        showBack: Bool, @ViewBuilder content: () -> Content
+    ) -> some View {
+        ZStack {
+            Palette.ground.ignoresSafeArea()
+            VStack(spacing: 0) {
+                detailHeader(title, subtitle: subtitle, tint: subtitleTint, showBack: showBack)
+                Divider().overlay(Palette.hairlineQuiet)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        content()
+                    }
+                    .padding(.bottom, 16)
+                }
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    /// The detail header: an optional circular back button, then a title in the app
+    /// voice with a machine-voice subtitle beneath it.
+    private func detailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
+        HStack(spacing: 12) {
+            if showBack { SettingsBackButton() }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(Typography.app(20, .semibold)).foregroundStyle(Palette.text)
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    // MARK: AT A GLANCE (index status card)
+
+    /// The first card answers "is anything wrong?" in three lines: the connection, any
+    /// exhausted account (a shortcut into Accounts), and the machines/agents reach.
+    private var atAGlanceSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("AT A GLANCE")
+            VStack(spacing: 0) {
+                glanceConnectionRow
+                if let exhausted = exhaustedAccounts.first {
+                    rowDivider
+                    glanceExhaustedRow(exhausted)
+                }
+                rowDivider
+                glanceMachinesRow
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
+
+    private var glanceConnectionRow: some View {
+        HStack(spacing: 10) {
+            Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
+            Text(connected ? "Connected" : "Disconnected")
+                .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
+            Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 13)
+    }
+
+    /// The amber shortcut line — a `NavigationLink` into the Accounts detail, since the
+    /// section that owns the problem is one tap away.
+    private func glanceExhaustedRow(_ account: CredentialAccount) -> some View {
+        NavigationLink(value: SettingsSection.accounts) {
+            HStack(spacing: 10) {
+                Circle().fill(Palette.waiting).frame(width: 8, height: 8)
+                Text("\(account.label) is exhausted")
+                    .font(Typography.app(14)).foregroundStyle(Palette.textDim).lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var glanceMachinesRow: some View {
+        let reach = machinesReachability
+        return HStack(spacing: 10) {
+            Text("\(machineCount) machine\(machineCount == 1 ? "" : "s") · \(agents.count) agent\(agents.count == 1 ? "" : "s")")
+                .font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
+            Spacer(minLength: 0)
+            Text(reach.text).font(Typography.machine(13)).foregroundStyle(reach.color)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 13)
+    }
+
+    // MARK: MANAGE (drill-in rows)
+
+    /// The three drill-in rows → Machines / Accounts / Notifications, each a value-based
+    /// `NavigationLink` with a one-line live summary and a status trailing.
+    private var manageSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("MANAGE")
+            VStack(spacing: 0) {
+                manageRow(.machines, subtitle: machinesSubtitle) { manageMachinesTrailing }
+                rowDivider
+                manageRow(.accounts, subtitle: accountsSubtitle) { manageAccountsTrailing }
+                rowDivider
+                manageRow(.notifications, subtitle: "Push via the herdr fork") { manageNotifyTrailing }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
+
+    private func manageRow<Trailing: View>(
+        _ section: SettingsSection, subtitle: String, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        NavigationLink(value: section) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(section.label).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                    Text(subtitle).font(Typography.app(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                trailing()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var manageMachinesTrailing: some View {
+        Text("\(agents.count) agent\(agents.count == 1 ? "" : "s")")
+            .font(Typography.machine(12)).foregroundStyle(Palette.textDim)
+        Circle().fill(machinesReachability.color).frame(width: 8, height: 8)
+    }
+
+    @ViewBuilder private var manageAccountsTrailing: some View {
+        if !exhaustedAccounts.isEmpty {
+            Text("\(exhaustedAccounts.count) exhausted")
+                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Palette.died.opacity(0.12)))
+                .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
+        }
+    }
+
+    @ViewBuilder private var manageNotifyTrailing: some View {
+        Text(notifyManageValue).font(Typography.machine(12)).foregroundStyle(notifyManageTint)
+    }
+
+    // MARK: Index summaries (computed from live state)
+
+    /// The federation peers, derived from the injected agents (the same source the
+    /// Machines detail's `federationSection` uses).
+    private var machinePeers: [PeerSummary] { PeerSummary.peerSummaries(from: agents) }
+
+    /// This box + its federated peers.
+    private var machineCount: Int { machinePeers.count + 1 }
+
+    /// "This box only" / "This box + N peers" — the Machines row + detail subtitle.
+    private var machinesSubtitle: String {
+        let n = machinePeers.count
+        if n == 0 { return "This box only" }
+        return "This box + \(n) federated peer\(n == 1 ? "" : "s")"
+    }
+
+    /// Aggregate reachability across the peers, worst case wins — a word + its colour.
+    private var machinesReachability: (text: String, color: Color) {
+        let offline = machinePeers.filter { $0.reachability == .offline }.count
+        if offline > 0 { return ("\(offline) offline", Palette.textDim) }
+        if machinePeers.contains(where: { $0.reachability == .degraded }) {
+            return ("some slow", Palette.waiting)
+        }
+        return ("all reachable", Palette.done)
+    }
+
+    private var exhaustedAccounts: [CredentialAccount] { accounts.filter { !$0.active } }
+
+    /// The distinct account kinds, in first-seen order (for "claude, codex, kimi").
+    private var accountKinds: [String] {
+        var seen = Set<String>(); var out: [String] = []
+        for account in accounts where !seen.contains(account.kind) {
+            seen.insert(account.kind); out.append(account.kind)
+        }
+        return out
+    }
+
+    /// "N subscriptions · claude, codex, kimi" — the Accounts MANAGE-row subtitle.
+    private var accountsSubtitle: String {
+        guard !accounts.isEmpty else { return "None configured yet" }
+        let n = accounts.count
+        return "\(n) subscription\(n == 1 ? "" : "s") · \(accountKinds.joined(separator: ", "))"
+    }
+
+    /// "N subscriptions · M exhausted" — the Accounts detail-header subtitle (amber when
+    /// any is exhausted).
+    private var accountsHeaderSubtitle: String {
+        guard !accounts.isEmpty else { return "None configured yet" }
+        let n = accounts.count
+        var text = "\(n) subscription\(n == 1 ? "" : "s")"
+        let exhausted = exhaustedAccounts.count
+        if exhausted > 0 { text += " · \(exhausted) exhausted" }
+        return text
+    }
+    private var accountsHeaderTint: Color { exhaustedAccounts.isEmpty ? Palette.textFaint : Palette.waiting }
+
+    private var notifyOnCount: Int { [notifyNeedsInput, notifyDies, notifyFinishes, notifyGram].filter { $0 }.count }
+
+    /// iOS is blocking the alerts the user asked for (at least one on, permission denied).
+    private var notifyBlocked: Bool { anyNotifyOn && notifyAuth == .denied }
+
+    /// "N of 4 alerts on" — the Notifications detail-header subtitle.
+    private var notifyHeaderSubtitle: String { "\(notifyOnCount) of 4 alerts on" }
+
+    /// "N on · blocked" (amber) when iOS is blocking, else "N of 4 on".
+    private var notifyManageValue: String {
+        notifyBlocked ? "\(notifyOnCount) on · blocked" : "\(notifyOnCount) of 4 on"
+    }
+    private var notifyManageTint: Color { notifyBlocked ? Palette.waiting : Palette.textDim }
 
     // Matches the Gram/Gestures header exactly: a left-aligned title in the app
     // voice at .semibold, a bare xmark close on the right, and NO baked-in hairline
@@ -3284,14 +3614,16 @@ struct SettingsView: View {
     /// "exhausted" pill when not (colour = meaning, like the agent status badges).
     @ViewBuilder
     private func accountTrailing(_ account: CredentialAccount) -> some View {
+        // One meter per reported rate-limit window (the #144 live-usage render): loop
+        // `effectiveWindows` — the real `windows` list, or a pair synthesized from the
+        // older flat fields — skipping any window without a percent. Handles 0
+        // (tier-only / no usage), 1, or many windows gracefully.
+        let windows = (account.usage?.effectiveWindows ?? []).filter { $0.usedPercent != nil }
         HStack(spacing: 10) {
-            if let usage = account.usage, usage.primaryUsedPercent != nil {
+            if !windows.isEmpty {
                 VStack(alignment: .trailing, spacing: 4) {
-                    if let primary = usage.primaryUsedPercent {
-                        usageMeter(percent: primary, window: "5h")
-                    }
-                    if let secondary = usage.secondaryUsedPercent {
-                        usageMeter(percent: secondary, window: "wk")
+                    ForEach(windows) { window in
+                        usageMeter(window, live: account.usage?.source == "live")
                     }
                 }
             }
@@ -3309,20 +3641,50 @@ struct SettingsView: View {
         }
     }
 
-    /// A tiny usage bar + "NN% · <window>" readout. The bar fills proportional to use
-    /// and shifts green→amber→red as it nears the cap (colour = meaning).
-    private func usageMeter(percent: Double, window: String) -> some View {
-        let clamped = max(0.0, min(100.0, percent))
+    /// A tiny usage bar + "NN% · <label>" readout for ONE window, coloured by the
+    /// green→amber→red headroom ramp (colour = meaning). Appends a compact reset hint
+    /// (today → time, else weekday) when the window carries `resetsAt`, and prefixes a
+    /// subtle freshness dot when the snapshot is `source == "live"`.
+    private func usageMeter(_ window: UsageWindow, live: Bool) -> some View {
+        let clamped = max(0.0, min(100.0, window.usedPercent ?? 0))
         let fill = CGFloat(max(2.0, 34.0 * clamped / 100.0))
         return HStack(spacing: 6) {
+            if live {
+                Circle().fill(Palette.done).frame(width: 4, height: 4)
+                    .accessibilityLabel(Text("live"))
+            }
             ZStack(alignment: .leading) {
                 Capsule().fill(Palette.hairline).frame(width: 34, height: 4)
                 Capsule().fill(usageColor(clamped)).frame(width: fill, height: 4)
             }
-            Text("\(Int(clamped.rounded()))% · \(window)")
+            Text(usageMeterLabel(window, percent: clamped))
                 .font(Typography.machine(11)).foregroundStyle(Palette.textDim).fixedSize()
         }
     }
+
+    /// "NN% · <label>" plus a compact reset token when present, e.g. "42% · 5h · 18:00".
+    private func usageMeterLabel(_ window: UsageWindow, percent: Double) -> String {
+        var text = "\(Int(percent.rounded()))% · \(window.label)"
+        if let hint = resetHint(window.resetsAt) { text += " · \(hint)" }
+        return text
+    }
+
+    /// A compact reset hint from an ISO-8601 instant (`UsageWindow.resetsAt`): the time
+    /// when it falls today, else the weekday. Nil when absent or unparseable — the meter
+    /// then simply shows no reset token.
+    private func resetHint(_ iso: String?) -> String? {
+        guard let iso, let date = Self.isoResetParser.date(from: iso) else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE"
+        return formatter.string(from: date)
+    }
+
+    /// Shared parser for `resetsAt` (e.g. "2026-08-20T18:00:00Z").
+    private static let isoResetParser: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     /// Usage colour by headroom: comfortable green, amber as it tightens, red at the
     /// cap. The same meaning-carrying palette as the agent status badges.
@@ -3962,7 +4324,7 @@ struct MockTransport: HerdrTransport {
     /// tests, where it is machine-checked to decode. If you change one, change both.
     static let accountsList = #"""
     {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
       {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
       {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
       {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}

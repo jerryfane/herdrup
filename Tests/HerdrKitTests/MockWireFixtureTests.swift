@@ -225,11 +225,23 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(first.usage?.secondaryUsedPercent, 68)
         XCTAssertEqual(first.usage?.resetsAt, "2026-08-20T18:00:00Z")
         XCTAssertEqual(first.usage?.plan, "Max")
+        // New windows shape: two live buckets, and source marks live-fetched data.
+        XCTAssertEqual(first.usage?.source, "live")
+        XCTAssertEqual(first.usage?.windows.count, 2)
+        XCTAssertEqual(first.usage?.windows.first?.label, "5h")
+        XCTAssertEqual(first.usage?.windows.first?.usedPercent, 42)
+        XCTAssertEqual(first.usage?.windows.first?.status, "ok")
+        XCTAssertEqual(first.usage?.effectiveWindows.count, 2, "windows present → used directly")
 
         // Exhausted: active:false drives the red "exhausted" pill; percents at 100.
+        // This one has NO windows (older-daemon flat shape) → effectiveWindows
+        // must synthesize the pair from the back-compat flat fields.
         let exhausted = try XCTUnwrap(accounts.first { $0.id == "acc-claude-2" })
         XCTAssertFalse(exhausted.active)
         XCTAssertEqual(exhausted.usage?.primaryUsedPercent, 100)
+        XCTAssertTrue(exhausted.usage?.windows.isEmpty ?? false, "flat-only fixture has no windows")
+        XCTAssertEqual(exhausted.usage?.effectiveWindows.count, 2, "synthesized from flat fields")
+        XCTAssertEqual(exhausted.usage?.effectiveWindows.first?.usedPercent, 100)
 
         // Tier-only usage: no percent → nil percents, tier text present.
         let codex = try XCTUnwrap(accounts.first { $0.id == "acc-codex-1" })
@@ -417,7 +429,7 @@ enum MockWireFixtures {
     /// in sync with the App's MockTransport.accountsList.
     static let accountsList = #"""
     {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
       {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
       {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
       {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
