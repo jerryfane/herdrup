@@ -206,10 +206,12 @@ struct RootView: View {
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
     var body: some View {
-        // Apply the user's text-size multiplier before the tree renders, and key
-        // the content on it so a change rebuilds the UI at the new size. The root
-        // client `@StateObject` lives above this content, so it survives the
-        // rebuild — changing text size never reconnects.
+        // Apply the user's text-size multiplier before the tree renders. Do NOT
+        // key the content on it (`.id()`) — that would change identity and reset
+        // the home tab / terminal panes / scroll on every step. Instead, the
+        // views that render chrome observe `@AppStorage("ui.fontScale")` (Settings
+        // directly; the home reads it too), so their bodies
+        // re-run at the new `Typography.scale` with their @State intact.
         Typography.scale = CGFloat(min(1.4, max(0.9, uiFontScale)))
         return Group {
             #if DEBUG
@@ -223,7 +225,6 @@ struct RootView: View {
             #endif
         }
         .preferredColorScheme(.dark)
-        .id(uiFontScale)
     }
 
     @ViewBuilder
@@ -923,6 +924,10 @@ struct TerminalHomeView: View {
     /// Terminal font size preference (points), shared app-wide via UserDefaults with the
     /// per-pane ⋯ control; driven here by ⌘+ / ⌘- / ⌘0 (Mac + hardware keyboard).
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// The UI text-size setting. Read in `body` purely to observe it, so the home
+    /// re-renders at the new `Typography.scale` when it changes — WITHOUT the
+    /// identity churn `.id()` would cause (which reset the tab / terminal panes).
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
     @StateObject private var gramUnread = GramUnreadTracker()
@@ -1249,7 +1254,10 @@ struct TerminalHomeView: View {
     }
 
     var body: some View {
-        Group {
+        // Observe the text-size setting so the home re-renders at the new
+        // `Typography.scale` on change (identity unchanged → @State preserved).
+        let _ = uiFontScale
+        return Group {
             if hSizeClass == .regular {
                 iPadLayout
             } else {
