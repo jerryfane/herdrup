@@ -221,6 +221,7 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(first.kind, "claude", "kind is the AgentInfo.agent string the swap menu filters on")
         XCTAssertEqual(first.label, "Claude Max (work)")
         XCTAssertTrue(first.active)
+        XCTAssertEqual(first.email, "work@example.com", "account email decodes")
         XCTAssertEqual(first.usage?.primaryUsedPercent, 42)
         XCTAssertEqual(first.usage?.secondaryUsedPercent, 68)
         XCTAssertEqual(first.usage?.resetsAt, "2026-08-20T18:00:00Z")
@@ -248,8 +249,9 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertNil(codex.usage?.primaryUsedPercent, "no primary_used_percent must decode to nil, not 0")
         XCTAssertEqual(codex.usage?.tier, "Plus")
 
-        // No usage object at all → nil, not a decode failure.
+        // No usage object at all → nil, not a decode failure. Also no email → nil.
         let kimi = try XCTUnwrap(accounts.first { $0.id == "acc-kimi-1" })
+        XCTAssertNil(kimi.email, "an omitted email must decode to nil")
         XCTAssertNil(kimi.usage, "an omitted usage must decode to nil")
 
         // The swap menu filters same-kind: two claude accounts here.
@@ -429,9 +431,9 @@ enum MockWireFixtures {
     /// in sync with the App's MockTransport.accountsList.
     static let accountsList = #"""
     {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
-      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
-      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"email":"work@example.com","usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"email":"personal@example.com","usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
+      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"email":"team@example.com","usage":{"tier":"Plus"}},
       {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
     ]}}
     """#

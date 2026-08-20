@@ -2970,6 +2970,18 @@ private struct SettingsBackButton: View {
     }
 }
 
+/// Left-edge swipe-back for a pushed Settings detail screen. Holds its OWN
+/// `@Environment(\.dismiss)` — like `SettingsBackButton` — so the swipe pops
+/// exactly the NavigationStack push it sits under, not the enclosing tab/sheet.
+/// Reuses the app's window-level `EdgeSwipeBack` recognizer (the same one the
+/// terminal pane uses), which works even though the nav bar is hidden.
+private struct DetailSwipeBack: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        EdgeSwipeBack { dismiss() }
+    }
+}
+
 struct SettingsView: View {
     let client: HerdrClient
     /// Live agents, mirrored in from the home view exactly like GramView's — the
@@ -3001,8 +3013,8 @@ struct SettingsView: View {
     /// Federation section derives from the injected agents. Empty until loaded, and
     /// on an older daemon lacking `accounts.list` (the fetch is `try?`).
     @State private var accounts: [CredentialAccount] = []
-    /// The "How accounts work" explainer alert, opened from the Accounts section.
-    @State private var showAccountsHelp = false
+    /// The "how to set up accounts" guide sheet, opened from the Accounts section.
+    @State private var showAccountsSetup = false
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
@@ -3054,13 +3066,12 @@ struct SettingsView: View {
         // `try?` so an older daemon without `accounts.list` (or a transient failure)
         // just leaves the section empty rather than surfacing an error here.
         .task { accounts = (try? await client.accountsList()) ?? [] }
-        // The "How accounts work" explainer — accounts are configured on the box, not
-        // in the app, so this points there rather than offering an in-app add flow.
-        .alert("How accounts work", isPresented: $showAccountsHelp) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Subscriptions are configured on your home box with the herdr CLI. "
-                + "Each agent runs on one; swap it from the agent's menu on the Agents tab.")
+        // "How to set up accounts" — a step-by-step guide for adding another
+        // subscription on the box (accounts live there, not in the app).
+        .sheet(isPresented: $showAccountsSetup) {
+            AccountsSetupView(onClose: { showAccountsSetup = false })
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
         // Keep the notify section's permission state honest: on open, and again when the
         // app returns to the foreground (the user may have flipped it in iOS Settings).
@@ -3189,6 +3200,10 @@ struct SettingsView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        // Hiding the nav bar kills UIKit's default interactive-pop, so re-add a
+        // left-edge swipe-back on pushed detail screens (iPhone). iPad's split
+        // view is the nav (showBack:false), so no gesture there.
+        .overlay { if showBack { DetailSwipeBack() } }
     }
 
     /// The detail header: an optional circular back button, then a title in the app
@@ -3552,9 +3567,9 @@ struct SettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
                 .padding(.horizontal, 16).padding(.top, 10)
             }
-            richActionRow("How accounts work", systemImage: "info.circle",
-                          subtitle: "Subscriptions are set up on your home box") {
-                showAccountsHelp = true
+            richActionRow("How to set up accounts", systemImage: "plus.circle",
+                          subtitle: "Add another subscription on your box") {
+                showAccountsSetup = true
             }
         }
     }
@@ -3592,6 +3607,10 @@ struct SettingsView: View {
                     .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                 Text(accountSubtitle(account))
                     .font(Typography.app(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+                if let email = account.email, !email.isEmpty {
+                    Text(email)
+                        .font(Typography.machine(11)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             accountTrailing(account)
@@ -4324,9 +4343,9 @@ struct MockTransport: HerdrTransport {
     /// tests, where it is machine-checked to decode. If you change one, change both.
     static let accountsList = #"""
     {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
-      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
-      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"usage":{"tier":"Plus"}},
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"email":"work@example.com","usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"email":"personal@example.com","usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
+      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"email":"team@example.com","usage":{"tier":"Plus"}},
       {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
     ]}}
     """#
