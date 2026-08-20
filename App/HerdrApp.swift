@@ -880,6 +880,10 @@ struct TerminalHomeView: View {
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
+    /// The agent a pending "Restart agent" confirmation is about (nil = no
+    /// dialog). Set from the agent card's context menu; a restart interrupts a
+    /// busy agent's turn, so it is confirmed before firing.
+    @State private var restartCandidate: AgentRow?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -1434,6 +1438,32 @@ struct TerminalHomeView: View {
             // full-screen (the pane overlay covers it too; this animates it away and
             // guards against the bar drawing over the overlay on some iOS versions).
             .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
+            .confirmationDialog(
+                "Restart agent?",
+                isPresented: Binding(
+                    get: { restartCandidate != nil },
+                    set: { if !$0 { restartCandidate = nil } }
+                ),
+                presenting: restartCandidate
+            ) { row in
+                Button("Restart", role: .destructive) {
+                    let target = row.info.paneID
+                    let title = row.title
+                    Task {
+                        do {
+                            try await client.restartAgent(target: target)
+                            await load()
+                        } catch let e {
+                            error = "couldn't restart \(title): \(e.localizedDescription)"
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { row in
+                Text(
+                    "Interrupts \(row.title)'s current turn. Its session is preserved and reopened with --resume."
+                )
+            }
         }
     }
 
@@ -1565,6 +1595,12 @@ struct TerminalHomeView: View {
                                 }
                             }
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
+                        // Restart = close the agent's session and reopen it with
+                        // --resume in place (keeps the pane). It interrupts a busy
+                        // agent's turn, so it routes through a confirmation.
+                        Button {
+                            restartCandidate = row
+                        } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
                     }
                 }
             }
