@@ -3094,21 +3094,32 @@ struct SettingsView: View {
             let targets = agents.filter { $0.agent == account.kind }
             Button("Move \(targets.count) agent\(targets.count == 1 ? "" : "s")", role: .destructive) {
                 let accountID = account.id
+                let label = account.label
                 let total = targets.count
                 Task {
                     var moved = 0
-                    var skipped = 0
+                    var failed = 0
+                    var lastError: String?
                     for info in targets {
                         do {
                             try await client.restartAgent(target: info.paneID, account: accountID)
                             moved += 1
                         } catch {
-                            // e.g. no_resumable_session — skip and count it.
-                            skipped += 1
+                            // Any failure (no_resumable_session OR anything else):
+                            // count it generically and keep the REAL error to surface,
+                            // rather than mislabelling every failure as "no resumable
+                            // session". `\(error)` is the APIError's "code: message" —
+                            // same interpolation the per-agent swap uses.
+                            failed += 1
+                            lastError = "\(error)"
                         }
                     }
-                    bulkResult = "Moved \(moved) of \(total)"
-                        + (skipped > 0 ? " · \(skipped) had no resumable session" : "")
+                    if failed == 0 {
+                        bulkResult = "Moved all \(moved) agent\(moved == 1 ? "" : "s") to \(label)."
+                    } else {
+                        bulkResult = "Moved \(moved) of \(total). \(failed) couldn't be moved"
+                            + (lastError.map { " — \($0)" } ?? "") + "."
+                    }
                     accounts = (try? await client.accountsList()) ?? []
                 }
             }
