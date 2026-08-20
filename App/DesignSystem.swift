@@ -52,16 +52,23 @@ enum Palette {
 /// fixed contract avoids that regression; a Dynamic-Type pass is its own later audit.
 /// A requested weight maps to the nearest of the four bundled cuts (400/500/600/700).
 enum Typography {
+    /// User text-size multiplier (1.0 = default). Set at the app root from the
+    /// "Text size" setting; the three members below multiply their point size by
+    /// it, so ALL app chrome scales together with no call-site changes. The
+    /// terminal has its own font control and does not go through `Typography`.
+    static var scale: CGFloat = 1
+
     /// App voice — Geist (screen titles, names, buttons, labels).
     static func app(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .custom(geistName(weight), fixedSize: size)
+        .custom(geistName(weight), fixedSize: size * scale)
     }
     /// Machine voice — IBM Plex Mono (terminal, pane ids, status words, counts, keys).
     static func machine(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .custom(plexMonoName(weight), fixedSize: size)
+        .custom(plexMonoName(weight), fixedSize: size * scale)
     }
     /// Uppercase micro-label for section headers (machine voice, semibold).
-    static let microLabel = Font.custom("IBMPlexMono-SmBld", fixedSize: 11)
+    /// Computed (not a `let`) so it also honors `scale`.
+    static var microLabel: Font { .custom("IBMPlexMono-SmBld", fixedSize: 11 * scale) }
 
     // Nearest bundled cut → its exact PostScript name. IBM Plex Mono's are irregular
     // (Regular is bare "IBMPlexMono"; Medium/SemiBold are abbreviated "-Medm"/"-SmBld").

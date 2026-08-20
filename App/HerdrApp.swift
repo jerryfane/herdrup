@@ -201,9 +201,17 @@ struct RootView: View {
     @AppStorage("notify.dies") private var notifyDies = true
     @AppStorage("notify.finishes") private var notifyFinishes = false
     @AppStorage("notify.gram") private var notifyGram = true
+    /// UI text-size multiplier (the "Text size" setting). Applied to `Typography`
+    /// so all app chrome scales; the terminal has its own font control.
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
     var body: some View {
-        Group {
+        // Apply the user's text-size multiplier before the tree renders, and key
+        // the content on it so a change rebuilds the UI at the new size. The root
+        // client `@StateObject` lives above this content, so it survives the
+        // rebuild — changing text size never reconnects.
+        Typography.scale = CGFloat(min(1.4, max(0.9, uiFontScale)))
+        return Group {
             #if DEBUG
             if let mock = ScreenshotMock.mode {
                 mockView(mock)
@@ -215,6 +223,7 @@ struct RootView: View {
             #endif
         }
         .preferredColorScheme(.dark)
+        .id(uiFontScale)
     }
 
     @ViewBuilder
@@ -3167,6 +3176,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             atAGlanceSection
                             manageSection
+                            appearanceSection
                             troubleSection
                             helpSection
                             supportSection
@@ -3961,6 +3971,58 @@ struct SettingsView: View {
 
     private func openIOSSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+    }
+
+    /// The UI text-size multiplier (same UserDefaults key RootView applies to
+    /// `Typography.scale`). Writing it here re-renders the whole app at the new
+    /// size — the terminal is unaffected (it has its own font control).
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+
+    /// "Text size" — scales all app chrome (agents, settings, menus). Especially
+    /// useful on iPad/Mac. Mirrors the terminal's A−/Reset/A+ control style.
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("TEXT SIZE")
+            VStack(spacing: 0) {
+                HStack {
+                    Text("The quick brown fox")
+                        .font(Typography.app(15)).foregroundStyle(Palette.text).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text("\(Int((uiFontScale * 100).rounded()))%")
+                        .font(Typography.machine(13, .bold)).foregroundStyle(Palette.textDim)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14)
+                rowDivider
+                HStack(spacing: 10) {
+                    textSizeButton("A\u{2212}", enabled: uiFontScale > 0.9) { stepFontScale(-0.1) }
+                    textSizeButton("Reset", enabled: uiFontScale != 1.0) { uiFontScale = 1.0 }
+                    textSizeButton("A+", enabled: uiFontScale < 1.4) { stepFontScale(0.1) }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
+
+    /// Step the UI scale by `delta`, rounded to 0.1 and clamped to [0.9, 1.4].
+    private func stepFontScale(_ delta: Double) {
+        let next = ((uiFontScale + delta) * 10).rounded() / 10
+        uiFontScale = min(1.4, max(0.9, next))
+    }
+
+    private func textSizeButton(_ title: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(Typography.app(15, .semibold))
+                .foregroundStyle(enabled ? Palette.text : Palette.textFaint)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 
     private var troubleSection: some View {
