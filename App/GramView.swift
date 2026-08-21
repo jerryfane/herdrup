@@ -97,6 +97,11 @@ struct GramView: View {
     /// Dismissed the "set up gram for your agents" card. It also auto-hides once any
     /// agent has messaged (proof they've set the skill up), so this is the manual out.
     @AppStorage("gram.setupCardDismissed") private var setupCardDismissed = false
+    /// The UI text-size setting. Read in `body` only to observe it: `Typography.scale`
+    /// is a global static outside SwiftUI's dependency graph, so a parent re-render
+    /// does not re-run this separate child struct — without this, Gram would show
+    /// old-size text after a size change until it re-rendered for another reason.
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
     /// Momentary "Copied ✓" on the setup card's copy button.
     @State private var setupCommandCopied = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
@@ -192,7 +197,9 @@ struct GramView: View {
     }
 
     var body: some View {
-        Group {
+        // Observe the text-size setting so Gram re-renders at the new Typography.scale.
+        let _ = uiFontScale
+        return Group {
             if hSizeClass == .regular {
                 iPadBody
             } else {
