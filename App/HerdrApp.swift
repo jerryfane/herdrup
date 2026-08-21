@@ -1143,6 +1143,9 @@ struct TerminalHomeView: View {
                 // an agent pane is fronted, otherwise fully inert, and the panes stay warm.
                 PaneKeepAliveContainer(
                     client: client, slots: slots, frontID: frontID,
+                    // Hidden behind Settings/Gram (frontID stays set here) → not presented, so
+                    // the front pane drops key focus + the PTY lock instead of leaking input.
+                    isPresented: selectedTab == .agents,
                     onClose: { frontID = nil; Task { await load() } },
                     onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                     .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
@@ -1306,6 +1309,9 @@ struct TerminalHomeView: View {
             // covers it and captures touches; otherwise the overlay is fully inert.
             PaneKeepAliveContainer(
                 client: client, slots: slots, frontID: frontID,
+                // Always presented on iPhone: a fronted pane covers the whole screen and the
+                // tab bar hides, so there is no foreground-while-hidden state to guard against.
+                isPresented: true,
                 onClose: { frontID = nil; Task { await load() } },
                 onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                 .opacity(frontID != nil ? 1 : 0)
@@ -4336,6 +4342,7 @@ struct PagingTestHarness: View {
     var body: some View {
         PaneKeepAliveContainer(
             client: client, slots: slots, frontID: frontID,
+            isPresented: true,
             onClose: { frontID = nil },
             onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
     }
