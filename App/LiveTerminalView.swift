@@ -708,7 +708,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let capped = min(20.0, 0.5 * pow(2.0, Double(max(0, reconnectAttempts - 1))))  // 0.5,1,2,4,8,16,20
             let delay = capped * Double.random(in: 0.6...1.0)                               // full-ish jitter
             if let view {
-                let notice = "\r\n\u{1b}[2m— \(reason); reconnecting…\u{1b}[0m\r\n"
+                let notice = "\r\n\u{1b}[2m\(reason); reconnecting…\u{1b}[0m\r\n"
                 view.feed(byteArray: [UInt8](notice.utf8)[...])
             }
             reconnectTask = Task { @MainActor [weak self] in
@@ -1157,7 +1157,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// `handleScrollPan`, which sends wheel/arrow scroll INTO the agent.)
         private static let clearSequence = [UInt8]("\u{1b}[2J\u{1b}[H".utf8)
         /// The dim terminated marker shown when the process exits.
-        private static let exitedNotice = [UInt8]("\r\n\u{1b}[2m— process exited —\u{1b}[0m\r\n".utf8)
+        private static let exitedNotice = [UInt8]("\r\n\u{1b}[2mprocess exited\u{1b}[0m\r\n".utf8)
 
         private static func color(_ hex: UInt32) -> UIColor {
             UIColor(

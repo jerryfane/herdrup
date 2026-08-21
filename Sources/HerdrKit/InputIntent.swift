@@ -122,7 +122,7 @@ public struct InputRouter: Sendable {
             // Characters: Swift clusters "\r\n" into ONE grapheme that equals
             // neither "\n" nor "\r", so a Character scan would wave CRLF through.
             guard !text.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-                return .refused(reason: "newline not allowed here — press Enter to submit")
+                return .refused(reason: "newline not allowed here; press Enter to submit")
             }
             return .text(pane: pane, text)
 

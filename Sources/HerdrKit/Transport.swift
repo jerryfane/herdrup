@@ -144,11 +144,11 @@ public enum TransportError: Error, CustomStringConvertible {
         case .herdrNotInstalled(let h):
             return "herdr is not installed on \(h)"
         case .herdrIncompatible(let h):
-            return "the herdr on \(h) is too old or isn't the fork — update it (or install the fork) and reconnect"
+            return "the herdr on \(h) is too old or isn't the fork. Update it (or install the fork) and reconnect"
         case .passwordAuthUnsupported(let h):
-            return "\(h) does not offer password authentication — use a key instead"
+            return "\(h) does not offer password authentication; use a key instead"
         case .authenticationFailed(let h):
-            return "authentication to \(h) failed — check the password or key"
+            return "authentication to \(h) failed. Check the password or key"
         }
     }
 }

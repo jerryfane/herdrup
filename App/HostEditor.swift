@@ -227,7 +227,7 @@ struct HostEditor: View {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Copy your ed25519 private key (PEM) to the clipboard, then paste it here. It is stored in the Keychain (device-only) and sent over the SSH connection — it is never displayed, so it can't appear in a screenshot.")
+                    Text("Copy your ed25519 private key (PEM) to the clipboard, then paste it here. It is stored in the Keychain (device-only) and sent over the SSH connection; it is never displayed, so it can't appear in a screenshot.")
                         .font(Typography.app(13)).foregroundStyle(Palette.textDim)
 
                     Button { pasteKeyFromClipboard() } label: {
@@ -271,7 +271,7 @@ struct HostEditor: View {
     private func pasteKeyFromClipboard() {
         guard let s = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
               !s.isEmpty else {
-            keyError = "Nothing to paste — copy your private key to the clipboard first."
+            keyError = "Nothing to paste. Copy your private key to the clipboard first."
             return
         }
         guard s.contains("PRIVATE KEY") else {

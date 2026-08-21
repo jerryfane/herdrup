@@ -538,7 +538,7 @@ struct ConnectView: View {
     // Two faint captions: what the connection is, and where the key lives.
     private var captions: some View {
         VStack(spacing: 8) {
-            Text("Connects privately over your Tailscale network — nothing is exposed to the public internet.")
+            Text("Connects privately over your Tailscale network. Nothing is exposed to the public internet.")
                 .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
                 .multilineTextAlignment(.center)
             Text("Your key or password stays in this device's Keychain, never uploaded.")
@@ -848,7 +848,7 @@ struct NewAgentView: View {
                         errorMessage = "couldn't start the agent: \(startError)"
                     } catch {
                         errorMessage = "couldn't start the agent (\(startError)); also failed to "
-                            + "clean up the empty pane (\(error)) — it may need closing manually"
+                            + "clean up the empty pane (\(error)). It may need closing manually"
                     }
                 } else {
                     errorMessage = "couldn't create the pane: \(startError)"
@@ -1546,7 +1546,7 @@ struct TerminalHomeView: View {
                 Button("Cancel", role: .cancel) {}
             } message: { cand in
                 Text(
-                    "Switches \(cand.row.title) to \(cand.account.label) and restarts it — this interrupts its current turn. The session is reopened with --resume on the new subscription."
+                    "Switches \(cand.row.title) to \(cand.account.label) and restarts it. This interrupts its current turn. The session is reopened with --resume on the new subscription."
                 )
             }
         }
@@ -1849,7 +1849,7 @@ struct TerminalHomeView: View {
                     Button("trust this key & reconnect") { trustFailed = !onTrustHostKey(fingerprint) }
                         .font(Typography.app(15, .semibold)).foregroundStyle(Palette.died)
                     if trustFailed {
-                        Text("could not save the verified key to the keychain — not reconnecting. try again.")
+                        Text("could not save the verified key to the keychain; not reconnecting. try again.")
                             .font(Typography.app(12)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
                     }
                 }
@@ -1887,7 +1887,7 @@ struct TerminalHomeView: View {
                 .font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
                 .multilineTextAlignment(.center)
             Text(herdrIncompatibleBuild
-                 ? "Herdrup runs the herdr daemon on your machine over SSH. The herdr on this host can't run the app bridge — it's too old, or isn't the jerryfane/herdr fork. Update or install the fork, then reconnect."
+                 ? "Herdrup runs the herdr daemon on your machine over SSH. The herdr on this host can't run the app bridge. It's too old, or isn't the jerryfane/herdr fork. Update or install the fork, then reconnect."
                  : "Herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
                 .font(Typography.app(14)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
@@ -2507,9 +2507,9 @@ struct TerminalPaneContent: View {
                 _ = try await client.prompt(pane: pane, text: "/tui default",
                                             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
                 tuiClassicPrompted = true
-                actionNote = "Switched — Claude Code will open in smooth-scroll mode from now on"
+                actionNote = "Switched. Claude Code will open in smooth-scroll mode from now on"
             } catch {
-                actionNote = "Couldn't switch — tap Switch to try again"
+                actionNote = "Couldn't switch. Tap Switch to try again"
             }
         }
     }
@@ -2807,11 +2807,11 @@ struct TerminalPaneContent: View {
         case "agent_input_pending":
             return "answer the on-screen prompt first (use the keys), then send"
         case "agent_not_ready":
-            return "agent not ready — try again"
+            return "agent not ready, try again"
         case "agent_prompt_not_received":
-            return "not delivered — try again"
+            return "not delivered, try again"
         case "timeout":
-            return "sent — awaiting confirmation"
+            return "sent, awaiting confirmation"
         default:
             return "send failed: \(error)"
         }
@@ -2896,7 +2896,7 @@ struct TerminalPaneContent: View {
                 // the reply bar is fully usable and a manual Send goes through the normal
                 // path. The typed task stays in the field for one tap.
                 pendingPrefill = false
-                actionNote = "couldn't auto-send — tap Send to deliver it"
+                actionNote = "couldn't auto-send, tap Send to deliver it"
                 return
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -3176,7 +3176,7 @@ struct SettingsView: View {
                         bulkResult = "Moved all \(moved) agent\(moved == 1 ? "" : "s") to \(label)."
                     } else {
                         bulkResult = "Moved \(moved) of \(total). \(failed) couldn't be moved"
-                            + (lastError.map { " — \($0)" } ?? "") + "."
+                            + (lastError.map { ": \($0)" } ?? "") + "."
                     }
                     accounts = (try? await client.accountsList()) ?? []
                 }
@@ -3185,7 +3185,7 @@ struct SettingsView: View {
         } message: { account in
             let n = agents.filter { $0.agent == account.kind }.count
             Text("Restarts \(n) \(account.kind.capitalized) agent\(n == 1 ? "" : "s") onto "
-                + "\(account.label) — this interrupts each one's current turn. "
+                + "\(account.label). This interrupts each one's current turn. "
                 + "Sessions reopen with --resume.")
         }
         .alert(
@@ -4131,7 +4131,7 @@ struct SettingsView: View {
     private var supportFeedback: some View {
         switch tipStore.purchaseState {
         case .thankYou:
-            Text("Thank you — it means a lot.")
+            Text("Thank you, it means a lot.")
                 .font(Typography.app(12, .medium)).foregroundStyle(Palette.done)
                 .padding(.horizontal, 20).padding(.top, 8)
         case .failed(let message):
@@ -4187,8 +4187,8 @@ struct SettingsView: View {
     /// design's one-line stance. Version + build come from the bundle (MARKETING_VERSION
     /// / CFBundleVersion), so they track the shipped build, not a hardcoded string.
     private var versionFooter: some View {
-        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
         return VStack(spacing: 4) {
             Text("herdrup mobile \(short) (\(build))")
                 .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
@@ -4289,7 +4289,7 @@ struct SettingsView: View {
     private func copyDiagnostics() {
         // Host + app version only — never anything sensitive (no key, ever).
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        UIPasteboard.general.string = "herdr-ios \(version) — host \(host)"
+        UIPasteboard.general.string = "herdr-ios \(version), host \(host)"
         copied = true
         // Revert the confirmation so a second copy gives feedback.
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); copied = false }
@@ -4484,7 +4484,7 @@ struct MockTransport: HerdrTransport {
         for i in 1...200 {
             body += String(format: "SCROLLTEST line %03d  the quick brown fox jumps over the lazy dog\r\n", i)
         }
-        body += "SCROLLTEST end — swipe down to reveal earlier lines"
+        body += "SCROLLTEST end, swipe down to reveal earlier lines"
         let b64 = Data(body.utf8).base64EncodedString()
         return "{\"stream\":\"pane.bytes\",\"frame\":\"reset\",\"seq\":0,\"epoch\":7,\"cols\":80,\"rows\":24,\"data_b64\":\"\(b64)\"}"
     }
@@ -4499,7 +4499,7 @@ struct MockTransport: HerdrTransport {
         for i in 1...1000 {
             body += String(format: "BACKFILL line %04d  the quick brown fox jumps over the lazy dog\r\n", i)
         }
-        body += "BACKFILL end — swipe down to reveal earlier lines"
+        body += "BACKFILL end, swipe down to reveal earlier lines"
         let payload: [String: Any] = ["id": "mock", "result": ["read": [
             "pane_id": "w1:p1", "text": body, "truncated": false,
             "source": "recent", "format": "ansi"]]]
@@ -4556,7 +4556,7 @@ struct MockTransport: HerdrTransport {
       {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
       {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
       {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
+      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev, it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
     ]}}
     """#
 

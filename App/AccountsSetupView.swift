@@ -20,7 +20,7 @@ struct AccountsSetupView: View {
     private static let steps: [Step] = [
         .init(symbol: "folder.badge.plus",
               title: "Make a folder for it",
-              detail: "Each subscription lives in its own config-home folder on your box — e.g. ~/.codex-work or ~/.claude-2. One folder per account keeps their logins separate."),
+              detail: "Each subscription lives in its own config-home folder on your box, e.g. ~/.codex-work or ~/.claude-2. One folder per account keeps their logins separate."),
         .init(symbol: "person.badge.key",
               title: "Log in pointed at that folder",
               detail: "Run the harness with its config-home env var set, then sign in (see the commands below). That writes the login into the folder, not your default one."),
@@ -28,7 +28,7 @@ struct AccountsSetupView: View {
               title: "Register it in your config",
               detail: "Add an [[accounts]] block to ~/.config/herdr/config.toml with an id, kind, label, and config_dir (the folder path)."),
         .init(symbol: "arrow.clockwise",
-              title: "Reload — no restart",
+              title: "Reload, no restart",
               detail: "Run herdr server reload-config on the home box. The account appears here, and each agent's menu lets you swap onto it."),
     ]
 
