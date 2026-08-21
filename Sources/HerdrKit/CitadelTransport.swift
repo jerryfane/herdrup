@@ -193,7 +193,11 @@ public actor CitadelTransport: HerdrTransport {
     static func classifyBridgeFailure(stderr: String, exitCode: Int, host: String) -> TransportError {
         if stderr.contains(herdrNotInstalledSentinel) { return .herdrNotInstalled(host: host) }
         // clap's usage-error exit code. The only thing the wrapper runs is
-        // `herdr api-bridge`, so exit 2 means herdr is there but can't run the app.
+        // `herdr api-bridge`, so exit 2 almost always means herdr is there but can't run
+        // the app. TRADE-OFF: a fork that HAS api-bridge but exits 2 for an unrelated
+        // usage error is mis-badged "incompatible" — accepted, because the guidance is
+        // non-destructive advice and the alternative is the raw exit code; matching on
+        // clap's stderr text instead would re-couple to a fragile, version-specific string.
         if exitCode == 2 { return .herdrIncompatible(host: host) }
         return .bridgeFailed(stderr: stderr)
     }
@@ -217,11 +221,24 @@ public actor CitadelTransport: HerdrTransport {
     public func roundTrip(_ requestLine: String) async throws -> String {
         let client = try await connectedClient()
         let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
+        return try await Self.parseBridgeOutput(output, host: credentials.host)
+    }
 
-        // One request, one reply line. Accumulate RAW bytes and decode UTF-8 only
-        // at newline boundaries: decoding each SSH channel-data chunk on its own
-        // (String(buffer:)) turns a multi-byte scalar split across a chunk boundary
-        // into U+FFFD, silently corrupting the reply.
+    /// Consumes the api-bridge exec output stream into its single reply line, or throws
+    /// a classified `TransportError`. Extracted from `roundTrip` for ONE reason: to make
+    /// the reachability of the exit-code classification testable. Citadel throws
+    /// `CommandFailed` at EOF on ANY non-zero exit, so the `do/catch` MUST enclose the
+    /// throwing loop or the raw "command failed, exit code N" escapes and the
+    /// not-installed / incompatible guidance is never reached. `SSHClient` itself is not
+    /// injectable, but a test can feed this a fake `AsyncThrowingStream` that finishes
+    /// `throwing:` a `RemoteExitError`, binding that the catch is present AND scoped.
+    static func parseBridgeOutput(
+        _ output: AsyncThrowingStream<ExecCommandOutput, Error>, host: String
+    ) async throws -> String {
+        // One request, one reply line. Accumulate RAW bytes and decode UTF-8 only at
+        // newline boundaries: decoding each SSH channel-data chunk on its own
+        // (String(buffer:)) turns a multi-byte scalar split across a chunk boundary into
+        // U+FFFD, silently corrupting the reply.
         var lines = LineAccumulator()
         var stderr = ""
         do {
@@ -233,22 +250,21 @@ public actor CitadelTransport: HerdrTransport {
                     stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here
                 }
             }
-        } catch let failure as SSHClient.CommandFailed {
+        } catch let failure as RemoteExitError {
             // A non-zero remote exit: Citadel throws `CommandFailed` at EOF instead of
             // ending the stream, so this catch is the ONLY place the exit status is
             // visible — without it the raw "command failed, exit code N" escapes and the
-            // not-installed / incompatible guidance below is never reached. A reply may
-            // still have arrived first (returned above); reaching here means it did not.
+            // not-installed / incompatible guidance is never reached. A reply may still
+            // have arrived first (returned above); reaching here means it did not.
             if lines.hasRemainder { return lines.flush() }
-            throw Self.classifyBridgeFailure(
-                stderr: stderr, exitCode: failure.exitCode, host: credentials.host)
+            throw classifyBridgeFailure(stderr: stderr, exitCode: failure.remoteExitCode, host: host)
         }
         // Channel closed on exit 0 without a newline-terminated reply.
         if lines.hasRemainder { return lines.flush() }   // a reply that lacked a trailing newline
         // Empty stdout: surface the bridge/remote diagnostic rather than handing
         // the caller an empty string it can only fail to decode.
         if !stderr.isEmpty {
-            throw Self.classifyBridgeFailure(stderr: stderr, exitCode: 0, host: credentials.host)
+            throw classifyBridgeFailure(stderr: stderr, exitCode: 0, host: host)
         }
         throw TransportError.closedBeforeResponse
     }
@@ -284,7 +300,7 @@ public actor CitadelTransport: HerdrTransport {
                 } catch is CancellationError {
                     await connection.close()
                     continuation.finish()
-                } catch let failure as SSHClient.CommandFailed {
+                } catch let failure as RemoteExitError {
                     // Same non-zero-exit mapping as `roundTrip`, so a pane stream against
                     // an incompatible/absent herdr fails legibly instead of as a raw
                     // CommandFailed. This path accumulates no stderr, so classify by code
@@ -293,7 +309,7 @@ public actor CitadelTransport: HerdrTransport {
                     await connection.close()
                     continuation.finish(
                         throwing: Self.classifyBridgeFailure(
-                            stderr: "", exitCode: failure.exitCode, host: self.credentials.host))
+                            stderr: "", exitCode: failure.remoteExitCode, host: self.credentials.host))
                 } catch {
                     await connection.close()
                     continuation.finish(throwing: error)
@@ -398,4 +414,17 @@ actor StreamConnection {
         client = nil
         try? await held?.close()
     }
+}
+
+/// A remote command's non-zero exit, abstracted so `parseBridgeOutput`'s classification
+/// path is unit-testable. A test cannot construct Citadel's `SSHClient.CommandFailed`
+/// (its memberwise initialiser is internal to that module), so `parseBridgeOutput`
+/// catches THIS protocol instead of the concrete type; the test injects its own
+/// conforming error through a fake stream. Citadel's error conforms below.
+protocol RemoteExitError: Error {
+    var remoteExitCode: Int { get }
+}
+
+extension SSHClient.CommandFailed: RemoteExitError {
+    var remoteExitCode: Int { exitCode }
 }

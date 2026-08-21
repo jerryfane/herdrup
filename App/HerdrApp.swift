@@ -1941,6 +1941,7 @@ struct TerminalHomeView: View {
             rejectedFingerprint = nil
             trustFailed = false
             herdrMissing = false
+            herdrIncompatibleBuild = false
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
             // terminal lingers warm — but only a slot that was ONCE seen live and has now
             // vanished (never a still-booting spawn pane, which is absent by design while its
