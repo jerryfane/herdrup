@@ -31,6 +31,14 @@ struct PaneKeepAliveContainer: View {
     let client: HerdrClient
     let slots: [PaneSlot]
     let frontID: String?
+    /// Whether this container is the ON-SCREEN context (not hidden behind another tab/screen).
+    /// On iPhone the fronted pane covers everything and the tab bar hides, so this is always
+    /// `true`. On iPad/Mac the container is always mounted in the split's detail column but the
+    /// sidebar can switch to Settings/Gram with `frontID` still set — so it must be
+    /// `selectedTab == .agents` there. It gates `isForeground` (below): a pane that is mounted
+    /// but hidden must NOT be foreground, or its opacity-0 terminal keeps key focus and leaks
+    /// hardware keystrokes into the live PTY while the user is elsewhere.
+    let isPresented: Bool
     /// Back out of the fronted pane to the list (header chevron / left-edge swipe).
     let onClose: () -> Void
     /// Swipe to the prev/next agent: (the slot the swipe came from, ±1).
@@ -46,7 +54,10 @@ struct PaneKeepAliveContainer: View {
                     title: slot.title,
                     agent: slot.agent,
                     initialReply: slot.initialReply,
-                    isForeground: isFront,
+                    // Foreground = the front slot AND the container is actually on screen. The
+                    // `isPresented` term is what stops a hidden-behind-Settings pane (iPad/Mac,
+                    // frontID still set) from holding key focus + the PTY width-lock.
+                    isForeground: isFront && isPresented,
                     onNavigate: { onNavigate(slot, $0) },
                     onClose: onClose)
                     // STABLE identity — the pane id, NEVER a swipe-varying `currentID`. So a
