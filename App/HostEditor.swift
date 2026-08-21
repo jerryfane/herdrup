@@ -230,16 +230,20 @@ struct HostEditor: View {
                     Text("Copy your ed25519 private key (PEM) to the clipboard, then paste it here. It is stored in the Keychain (device-only) and sent over the SSH connection; it is never displayed, so it can't appear in a screenshot.")
                         .font(Typography.app(13)).foregroundStyle(Palette.textDim)
 
-                    Button { pasteKeyFromClipboard() } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc.on.clipboard").font(.system(size: 15, weight: .semibold))
-                            Text("Paste key from clipboard").font(Typography.app(15, .semibold))
-                        }
-                        .foregroundStyle(Palette.text)
-                        .frame(maxWidth: .infinity).padding(.vertical, 14)
-                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                    // System PasteButton, NOT a programmatic UIPasteboard read: the tap
+                    // itself is the paste consent, so it never shows the "Allow Paste"
+                    // permission prompt (which was the iPad App Review failure) and still
+                    // hands us the key WITHOUT rendering it. Auto-disables when the
+                    // clipboard holds no text.
+                    PasteButton(payloadType: String.self) { items in
+                        // The action can run off the main actor; hop before touching @State.
+                        Task { @MainActor in ingestKey(items.first) }
                     }
-                    .buttonStyle(.plain)
+                    .labelStyle(.titleAndIcon)
+                    .tint(Palette.text)
+                    .buttonBorderShape(.roundedRectangle(radius: 12))
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
 
                     if !keyPEM.isEmpty {
                         HStack(spacing: 8) {
@@ -266,11 +270,13 @@ struct HostEditor: View {
         }
     }
 
-    /// Ingest a PEM key from the clipboard WITHOUT rendering it. Loosely sanity-checks it
-    /// looks like a PEM private key so a stray clipboard string isn't stored as a key.
-    private func pasteKeyFromClipboard() {
-        guard let s = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !s.isEmpty else {
+    /// Ingest a PEM key handed over by the system `PasteButton`, WITHOUT rendering it.
+    /// Loosely sanity-checks it looks like a PEM private key so a stray clipboard string
+    /// isn't stored as a key. Never reads `UIPasteboard` directly — a programmatic read
+    /// triggers the system paste-permission prompt (the iPad App Review failure); the
+    /// PasteButton delivers the string instead.
+    private func ingestKey(_ raw: String?) {
+        guard let s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else {
             keyError = "Nothing to paste. Copy your private key to the clipboard first."
             return
         }
