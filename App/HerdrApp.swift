@@ -2184,8 +2184,16 @@ struct TerminalPaneContent: View {
         return (agent?.agent?.contains("claude") ?? false) && !tuiClassicPrompted
     }
 
+    /// The UI text-size setting. Read in `body` only to observe it, so the pane
+    /// CHROME (header/keycaps, which use Typography) re-renders at the new
+    /// Typography.scale even while kept mounted. Terminal CONTENT is insulated —
+    /// it uses its own `terminal.fontSize`, unaffected by this.
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+
     var body: some View {
-        ZStack {
+        // Observe the text-size setting so the pane chrome re-renders at the new scale.
+        let _ = uiFontScale
+        return ZStack {
             // The terminal is its own ground — one shade under the app (groundMachine
             // #0B0D1C vs ground #13162A). Per the design, the output IS the ground and
             // the chrome floats over it; this is that base shade.
