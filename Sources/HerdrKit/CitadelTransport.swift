@@ -183,14 +183,19 @@ public actor CitadelTransport: HerdrTransport {
     static let herdrPathResolution =
         #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" api-bridge "#
 
-    /// Classifies an empty-stdout bridge failure. When herdr is absent the exec
-    /// wrapper prints `herdrNotInstalledSentinel` (see `herdrPathResolution`), so a
-    /// stderr carrying it becomes `.herdrNotInstalled(host:)`; anything else stays a
-    /// generic `.bridgeFailed(stderr:)`. Pure, so it is host-testable without SSH.
-    static func classifyBridgeFailure(stderr: String, host: String) -> TransportError {
-        stderr.contains(herdrNotInstalledSentinel)
-            ? .herdrNotInstalled(host: host)
-            : .bridgeFailed(stderr: stderr)
+    /// Classifies a bridge failure from its stderr and the remote EXIT CODE. When
+    /// herdr is absent the exec wrapper prints `herdrNotInstalledSentinel` (see
+    /// `herdrPathResolution`) → `.herdrNotInstalled(host:)`. When herdr IS present but
+    /// does not understand the `api-bridge` subcommand — an upstream build, or a fork
+    /// too old to have it — its arg-parser (clap) rejects the subcommand and exits
+    /// with code 2 → `.herdrIncompatible(host:)`. Anything else stays a generic
+    /// `.bridgeFailed(stderr:)`. Pure, so it is host-testable without SSH.
+    static func classifyBridgeFailure(stderr: String, exitCode: Int, host: String) -> TransportError {
+        if stderr.contains(herdrNotInstalledSentinel) { return .herdrNotInstalled(host: host) }
+        // clap's usage-error exit code. The only thing the wrapper runs is
+        // `herdr api-bridge`, so exit 2 means herdr is there but can't run the app.
+        if exitCode == 2 { return .herdrIncompatible(host: host) }
+        return .bridgeFailed(stderr: stderr)
     }
 
     /// The full exec command line: resolve herdr, then run
@@ -219,19 +224,32 @@ public actor CitadelTransport: HerdrTransport {
         // into U+FFFD, silently corrupting the reply.
         var lines = LineAccumulator()
         var stderr = ""
-        for try await chunk in output {
-            switch chunk {
-            case .stdout(let buffer):
-                if let first = lines.append(buffer).first { return first }
-            case .stderr(let buffer):
-                stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here
+        do {
+            for try await chunk in output {
+                switch chunk {
+                case .stdout(let buffer):
+                    if let first = lines.append(buffer).first { return first }
+                case .stderr(let buffer):
+                    stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here
+                }
             }
+        } catch let failure as SSHClient.CommandFailed {
+            // A non-zero remote exit: Citadel throws `CommandFailed` at EOF instead of
+            // ending the stream, so this catch is the ONLY place the exit status is
+            // visible — without it the raw "command failed, exit code N" escapes and the
+            // not-installed / incompatible guidance below is never reached. A reply may
+            // still have arrived first (returned above); reaching here means it did not.
+            if lines.hasRemainder { return lines.flush() }
+            throw Self.classifyBridgeFailure(
+                stderr: stderr, exitCode: failure.exitCode, host: credentials.host)
         }
-        // Channel closed without a newline-terminated reply.
+        // Channel closed on exit 0 without a newline-terminated reply.
         if lines.hasRemainder { return lines.flush() }   // a reply that lacked a trailing newline
         // Empty stdout: surface the bridge/remote diagnostic rather than handing
         // the caller an empty string it can only fail to decode.
-        if !stderr.isEmpty { throw Self.classifyBridgeFailure(stderr: stderr, host: credentials.host) }
+        if !stderr.isEmpty {
+            throw Self.classifyBridgeFailure(stderr: stderr, exitCode: 0, host: credentials.host)
+        }
         throw TransportError.closedBeforeResponse
     }
 
@@ -266,6 +284,16 @@ public actor CitadelTransport: HerdrTransport {
                 } catch is CancellationError {
                     await connection.close()
                     continuation.finish()
+                } catch let failure as SSHClient.CommandFailed {
+                    // Same non-zero-exit mapping as `roundTrip`, so a pane stream against
+                    // an incompatible/absent herdr fails legibly instead of as a raw
+                    // CommandFailed. This path accumulates no stderr, so classify by code
+                    // (exit 2 → incompatible); the sentinel case is caught by roundTrip
+                    // on the initial connect before any stream is opened.
+                    await connection.close()
+                    continuation.finish(
+                        throwing: Self.classifyBridgeFailure(
+                            stderr: "", exitCode: failure.exitCode, host: self.credentials.host))
                 } catch {
                     await connection.close()
                     continuation.finish(throwing: error)

@@ -138,11 +138,38 @@ final class CitadelTransportTests: XCTestCase {
     /// carrying the host through for the client's guidance copy.
     func testClassifyBridgeFailureDetectsMissingHerdr() {
         let stderr = "bash: line 1: \(CitadelTransport.herdrNotInstalledSentinel)\n"
-        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        // The not-installed wrapper exits 127, but the sentinel wins regardless of code.
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 127, host: "box.example")
         guard case TransportError.herdrNotInstalled(let host) = error else {
             return XCTFail("expected .herdrNotInstalled, got \(error)")
         }
         XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// Exit code 2 (clap's usage error for an unknown subcommand) with no sentinel
+    /// means herdr is present but doesn't understand `api-bridge` — too old, or not
+    /// the fork. It classifies as `.herdrIncompatible(host:)` so the client can say
+    /// "update / install the fork" instead of showing "command failed, exit code 2".
+    func testClassifyBridgeFailureExitTwoIsIncompatible() {
+        let stderr = "error: unrecognized subcommand 'api-bridge'\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 2, host: "box.example")
+        guard case TransportError.herdrIncompatible(let host) = error else {
+            return XCTFail("expected .herdrIncompatible, got \(error)")
+        }
+        XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// The sentinel outranks the exit code: an absent herdr must read as
+    /// not-installed even though its wrapper also exits non-zero.
+    func testClassifyBridgeFailureSentinelBeatsExitCode() {
+        let stderr = "\(CitadelTransport.herdrNotInstalledSentinel)\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 2, host: "box.example")
+        guard case TransportError.herdrNotInstalled = error else {
+            return XCTFail("expected .herdrNotInstalled, got \(error)")
+        }
     }
 
     /// Any OTHER stderr stays a generic `.bridgeFailed` — the sentinel is the only
@@ -150,7 +177,9 @@ final class CitadelTransportTests: XCTestCase {
     /// "herdr not installed" (which would wrongly tell the user to reinstall).
     func testClassifyBridgeFailurePassesThroughUnrelatedStderr() {
         let stderr = "api-bridge: permission denied while opening the control socket\n"
-        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        // A non-2, non-sentinel failure (e.g. exit 1) stays a generic bridge failure.
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 1, host: "box.example")
         guard case TransportError.bridgeFailed(let passed) = error else {
             return XCTFail("expected .bridgeFailed, got \(error)")
         }
