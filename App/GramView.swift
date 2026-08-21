@@ -913,7 +913,7 @@ struct GramView: View {
                 phase = .unavailable(
                     "Gram isn't available on this server yet, or the messages couldn't load.")
             } else {
-                refreshNote = "Refresh failed — showing the last loaded messages."
+                refreshNote = "Refresh failed. Showing the last loaded messages."
             }
         }
     }
@@ -1014,7 +1014,7 @@ struct GramView: View {
         attachedFiles = remaining
         if let failure {
             sendError = sentCount > 0
-                ? "Sent \(sentCount) of \(files.count) — \(failure)"
+                ? "Sent \(sentCount) of \(files.count). \(failure)"
                 : failure
         }
     }
@@ -1028,7 +1028,7 @@ struct GramView: View {
         if let bad { parts.append(bad) }
         if capped > 0 { parts.append("\(capped) over the \(Self.maxAttachments)-file limit") }
         guard !parts.isEmpty else { return nil }
-        return "Skipped — " + parts.joined(separator: "; ") + "."
+        return "Skipped: " + parts.joined(separator: "; ") + "."
     }
 
     /// Read picked files into memory (each bounded by the server's size cap) so each

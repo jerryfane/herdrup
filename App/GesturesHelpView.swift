@@ -39,7 +39,7 @@ struct GesturesHelpView: View {
               detail: "Stops it."),
         .init(symbol: "trash",
               title: "Press and hold a message in Gram",
-              detail: "Deletes it — and its file — for good."),
+              detail: "Deletes it, and its file, for good."),
         .init(symbol: "arrow.clockwise",
               title: "Pull down in Gram",
               detail: "Refreshes the messages."),

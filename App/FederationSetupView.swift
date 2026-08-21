@@ -21,7 +21,7 @@ struct FederationSetupView: View {
     private static let steps: [Step] = [
         .init(symbol: "arrow.down.circle",
               title: "Install the herdr fork",
-              detail: "On the machine, install the jerryfane/herdr fork — it has the api-bridge the home box connects through. Official herdr does not."),
+              detail: "On the machine, install the jerryfane/herdr fork; it has the api-bridge the home box connects through. Official herdr does not."),
         .init(symbol: "network",
               title: "Put it on your network",
               detail: "Join it to your Tailscale tailnet (or any address your home box can reach) and authorize your home box's SSH key."),
@@ -29,7 +29,7 @@ struct FederationSetupView: View {
               title: "Add it to your config",
               detail: "Add a peer to ~/.config/herdr/config.toml: an alias and ssh://user@host."),
         .init(symbol: "arrow.clockwise",
-              title: "Reload — no restart",
+              title: "Reload, no restart",
               detail: "Run herdr server reload-config on the home box. The machine's agents appear here; no restart needed."),
     ]
 
