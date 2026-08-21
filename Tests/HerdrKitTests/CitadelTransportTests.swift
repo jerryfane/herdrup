@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import NIOCore
+import Citadel
 @testable import HerdrKit
 
 final class CitadelTransportTests: XCTestCase {
@@ -138,11 +139,38 @@ final class CitadelTransportTests: XCTestCase {
     /// carrying the host through for the client's guidance copy.
     func testClassifyBridgeFailureDetectsMissingHerdr() {
         let stderr = "bash: line 1: \(CitadelTransport.herdrNotInstalledSentinel)\n"
-        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        // The not-installed wrapper exits 127, but the sentinel wins regardless of code.
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 127, host: "box.example")
         guard case TransportError.herdrNotInstalled(let host) = error else {
             return XCTFail("expected .herdrNotInstalled, got \(error)")
         }
         XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// Exit code 2 (clap's usage error for an unknown subcommand) with no sentinel
+    /// means herdr is present but doesn't understand `api-bridge` — too old, or not
+    /// the fork. It classifies as `.herdrIncompatible(host:)` so the client can say
+    /// "update / install the fork" instead of showing "command failed, exit code 2".
+    func testClassifyBridgeFailureExitTwoIsIncompatible() {
+        let stderr = "error: unrecognized subcommand 'api-bridge'\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 2, host: "box.example")
+        guard case TransportError.herdrIncompatible(let host) = error else {
+            return XCTFail("expected .herdrIncompatible, got \(error)")
+        }
+        XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// The sentinel outranks the exit code: an absent herdr must read as
+    /// not-installed even though its wrapper also exits non-zero.
+    func testClassifyBridgeFailureSentinelBeatsExitCode() {
+        let stderr = "\(CitadelTransport.herdrNotInstalledSentinel)\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 2, host: "box.example")
+        guard case TransportError.herdrNotInstalled = error else {
+            return XCTFail("expected .herdrNotInstalled, got \(error)")
+        }
     }
 
     /// Any OTHER stderr stays a generic `.bridgeFailed` — the sentinel is the only
@@ -150,7 +178,9 @@ final class CitadelTransportTests: XCTestCase {
     /// "herdr not installed" (which would wrongly tell the user to reinstall).
     func testClassifyBridgeFailurePassesThroughUnrelatedStderr() {
         let stderr = "api-bridge: permission denied while opening the control socket\n"
-        let error = CitadelTransport.classifyBridgeFailure(stderr: stderr, host: "box.example")
+        // A non-2, non-sentinel failure (e.g. exit 1) stays a generic bridge failure.
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 1, host: "box.example")
         guard case TransportError.bridgeFailed(let passed) = error else {
             return XCTFail("expected .bridgeFailed, got \(error)")
         }
@@ -161,5 +191,89 @@ final class CitadelTransportTests: XCTestCase {
     func testHerdrNotInstalledDescriptionNamesHost() {
         let error = TransportError.herdrNotInstalled(host: "box.example")
         XCTAssertEqual(error.description, "herdr is not installed on box.example")
+    }
+
+    // MARK: - parseBridgeOutput reachability (the do/catch WIRING, not the pure classifier)
+
+    /// A fake non-zero exit the test can inject — `SSHClient.CommandFailed`'s init is
+    /// internal to Citadel, so `parseBridgeOutput` catches the `RemoteExitError` protocol
+    /// (which `CommandFailed` conforms to) and this stands in for it here.
+    private struct FakeExit: RemoteExitError { let remoteExitCode: Int }
+
+    /// Builds the exec output stream a test wants: some stdout/stderr, then either a
+    /// clean finish or a `throwing:` finish (what Citadel does on non-zero exit).
+    private func bridgeStream(
+        stdout: [String] = [], stderr: [String] = [], finishThrowing: Error? = nil
+    ) -> AsyncThrowingStream<ExecCommandOutput, Error> {
+        AsyncThrowingStream { continuation in
+            for s in stdout { continuation.yield(.stdout(ByteBuffer(string: s))) }
+            for s in stderr { continuation.yield(.stderr(ByteBuffer(string: s))) }
+            if let finishThrowing { continuation.finish(throwing: finishThrowing) }
+            else { continuation.finish() }
+        }
+    }
+
+    /// THE REACHABILITY TEST. A stream that finishes `throwing:` a non-zero exit (as
+    /// Citadel does) must be classified, not rethrown raw. Deleting or mis-scoping the
+    /// do/catch in `parseBridgeOutput` reintroduces the raw "command failed, exit code 2"
+    /// bug — this fails then, where the pure-classifier tests stay green.
+    func testParseBridgeOutputExitTwoRethrowsIncompatible() async {
+        let stream = bridgeStream(
+            stderr: ["error: unrecognized subcommand 'api-bridge'\n"],
+            finishThrowing: FakeExit(remoteExitCode: 2))
+        do {
+            _ = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+            XCTFail("expected a throw")
+        } catch let error as TransportError {
+            guard case .herdrIncompatible(let host) = error else {
+                return XCTFail("expected .herdrIncompatible, got \(error)")
+            }
+            XCTAssertEqual(host, "box.example")
+        } catch {
+            XCTFail("raw \(error) escaped — the do/catch is gone or mis-scoped")
+        }
+    }
+
+    /// The sentinel path through the SAME throwing-stream wiring: absent herdr exits 127
+    /// but its sentinel wins, and it must be classified, not rethrown raw.
+    func testParseBridgeOutputSentinelRethrowsNotInstalled() async {
+        let stream = bridgeStream(
+            stderr: ["\(CitadelTransport.herdrNotInstalledSentinel)\n"],
+            finishThrowing: FakeExit(remoteExitCode: 127))
+        do {
+            _ = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+            XCTFail("expected a throw")
+        } catch let error as TransportError {
+            guard case .herdrNotInstalled = error else {
+                return XCTFail("expected .herdrNotInstalled, got \(error)")
+            }
+        } catch {
+            XCTFail("raw \(error) escaped — the do/catch is gone or mis-scoped")
+        }
+    }
+
+    /// A reply that arrived before a non-zero exit is RETURNED, not overridden by the
+    /// exit classification — guards the `lines.first` early-return / `hasRemainder` order.
+    func testParseBridgeOutputReturnsReplyBeforeNonZeroExit() async throws {
+        let stream = bridgeStream(
+            stdout: ["{\"ok\":true}\n"],
+            finishThrowing: FakeExit(remoteExitCode: 1))
+        let reply = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+        XCTAssertEqual(reply, "{\"ok\":true}")
+    }
+
+    /// A clean exit-0 close with no reply surfaces `.closedBeforeResponse`, not a hang.
+    func testParseBridgeOutputCleanCloseWithoutReply() async {
+        let stream = bridgeStream()
+        do {
+            _ = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+            XCTFail("expected a throw")
+        } catch let error as TransportError {
+            guard case .closedBeforeResponse = error else {
+                return XCTFail("expected .closedBeforeResponse, got \(error)")
+            }
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
     }
 }

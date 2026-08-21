@@ -891,6 +891,11 @@ struct TerminalHomeView: View {
     /// (`TransportError.herdrNotInstalled`). Drives the install-guidance branch in
     /// `errorView` instead of surfacing the raw stderr. Reset at the start of each load.
     @State private var herdrMissing = false
+    /// When `herdrMissing` was triggered because the host's herdr is present but too
+    /// old / not the fork (`TransportError.herdrIncompatible`) rather than absent.
+    /// Only swaps the guidance heading/subtitle; the fix (install/update the fork) is
+    /// the same, so it reuses the same recovery screen.
+    @State private var herdrIncompatibleBuild = false
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
@@ -1878,10 +1883,12 @@ struct TerminalHomeView: View {
             .font(.system(size: 34, weight: .regular))
             .foregroundStyle(Palette.waiting)
         VStack(spacing: 8) {
-            Text("herdr isn't installed here")
+            Text(herdrIncompatibleBuild ? "herdr here is too old" : "herdr isn't installed here")
                 .font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
                 .multilineTextAlignment(.center)
-            Text("Herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
+            Text(herdrIncompatibleBuild
+                 ? "Herdrup runs the herdr daemon on your machine over SSH. The herdr on this host can't run the app bridge — it's too old, or isn't the jerryfane/herdr fork. Update or install the fork, then reconnect."
+                 : "Herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
                 .font(Typography.app(14)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1934,6 +1941,7 @@ struct TerminalHomeView: View {
             rejectedFingerprint = nil
             trustFailed = false
             herdrMissing = false
+            herdrIncompatibleBuild = false
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
             // terminal lingers warm — but only a slot that was ONCE seen live and has now
             // vanished (never a still-booting spawn pane, which is absent by design while its
@@ -1947,12 +1955,20 @@ struct TerminalHomeView: View {
         } catch {
             let rejected: String?
             var notInstalled = false
+            var incompatibleBuild = false
             if let transportError = error as? TransportError {
                 if case .hostKeyRejected(_, let fingerprint) = transportError {
                     rejected = fingerprint
                 } else {
                     rejected = nil
                     if case .herdrNotInstalled = transportError { notInstalled = true }
+                    // herdr is present but can't run the app bridge (too old / not the
+                    // fork). Same recovery screen — the remedy is install/update the fork
+                    // — with a heading that fits (see `herdrInstallGuidance`).
+                    if case .herdrIncompatible = transportError {
+                        notInstalled = true
+                        incompatibleBuild = true
+                    }
                 }
             } else {
                 rejected = nil
@@ -1967,6 +1983,7 @@ struct TerminalHomeView: View {
                 // Only when this is the surfaced error do we drive the install-guidance
                 // branch; a no-herdr connect always has an empty list, so it surfaces here.
                 herdrMissing = notInstalled
+                herdrIncompatibleBuild = incompatibleBuild
             }
             // DROP a pending deep-link this failed load couldn't service, rather than leave it armed:
             // a push targets a just-now event, so firing it after some much-later successful load would
