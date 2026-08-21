@@ -46,6 +46,10 @@ struct GramView: View {
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
     @State private var draft: String = ""
+    /// Focus of the composer field. Bound so a successful send can resign it —
+    /// the composer is a multiline (`axis: .vertical`) field with no Return-to-send,
+    /// so without this the keyboard has no way to drop and it hides the tab bar.
+    @FocusState private var composerFocused: Bool
     /// True while dictating into the composer, so the field is disabled (typing can't be
     /// overwritten by the next partial) while the live transcript still appends.
     @State private var draftDictating = false
@@ -455,9 +459,13 @@ struct GramView: View {
 
     // MARK: - Content
 
-    @ViewBuilder
     private var content: some View {
-        if showingSaved { savedContent } else { inboxContent }
+        Group {
+            if showingSaved { savedContent } else { inboxContent }
+        }
+        // Let a drag on the message feed dismiss the keyboard too, so the composer
+        // never gets stuck covering the tab bar with no way out.
+        .scrollDismissesKeyboard(.interactively)
     }
 
     /// The Saved section: locally-kept copies of bookmarked messages. Rendered from the local
@@ -717,6 +725,7 @@ struct GramView: View {
                     .font(Typography.app(15))
                     .foregroundStyle(Palette.text)
                     .tint(Palette.text)
+                    .focused($composerFocused)
                     .lineLimit(1...5)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
@@ -936,6 +945,9 @@ struct GramView: View {
         // A file with no caption is fine; an empty text-only message is not.
         guard (!text.isEmpty || !files.isEmpty), !sending else { return }
         sending = true
+        // Drop the keyboard the moment the message is committed, so the composer
+        // stops covering the tab bar (the field has no Return-to-send to resign it).
+        composerFocused = false
         defer {
             sending = false
             uploading = false
