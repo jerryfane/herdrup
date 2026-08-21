@@ -1113,17 +1113,12 @@ struct TerminalHomeView: View {
         } detail: {
             ZStack {
                 Palette.groundMachine.ignoresSafeArea()
+                // Base layer: the switch renders Gram / Settings / Call and the agents
+                // placeholder. The terminal container is deliberately NOT in here — it is the
+                // always-mounted overlay below.
                 switch selectedTab {
                 case .agents:
-                    if frontID != nil {
-                        // The same keep-mounted terminal container as the phone, just placed in the
-                        // detail column instead of overlaid — the front pane holds the PTY lock exactly
-                        // as before, so none of that machinery changes.
-                        PaneKeepAliveContainer(
-                            client: client, slots: slots, frontID: frontID,
-                            onClose: { frontID = nil; Task { await load() } },
-                            onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
-                    } else {
+                    if frontID == nil {
                         detailPlaceholder("Select an agent", "square.grid.2x2")
                     }
                 case .gram:
@@ -1140,6 +1135,18 @@ struct TerminalHomeView: View {
                 case .call:
                     detailPlaceholder("Voice call is coming soon", "phone")
                 }
+                // Keep-mounted terminal container, hoisted ABOVE the `switch` so switching to
+                // Settings/Gram never removes it from the view tree. Previously it lived inside
+                // `case .agents`, so navigating away unmounted every pane and closed its
+                // pane.stream — which is what forced a full reconnect/reload on return. Now it
+                // mirrors the phone's sibling overlay (`:1297`): visible + interactive only when
+                // an agent pane is fronted, otherwise fully inert, and the panes stay warm.
+                PaneKeepAliveContainer(
+                    client: client, slots: slots, frontID: frontID,
+                    onClose: { frontID = nil; Task { await load() } },
+                    onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
+                    .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .agents && frontID != nil)
             }
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -1184,7 +1191,10 @@ struct TerminalHomeView: View {
     @ViewBuilder
     private var settingsIndex: some View {
         VStack(spacing: 4) {
-            ForEach(SettingsSection.allCases, id: \.self) { section in
+            // App & About first (owner request), then the config sections. Explicit order
+            // rather than `SettingsSection.allCases` so it's local to the sidebar and the
+            // enum's declaration order stays untouched.
+            ForEach([SettingsSection.about, .machines, .accounts, .notifications], id: \.self) { section in
                 Button {
                     settingsAnchor = section
                 } label: {
