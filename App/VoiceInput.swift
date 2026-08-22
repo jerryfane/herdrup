@@ -1,4 +1,5 @@
 import AVFoundation
+import HerdrKit
 import Speech
 import SwiftUI
 
@@ -26,11 +27,38 @@ final class SpeechDictator: ObservableObject {
 
     private let recognizer = SFSpeechRecognizer()  // the user's current locale
     private let engine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
+    /// The recognition request the audio tap feeds. Held in a lock-guarded box because
+    /// the tap runs on an audio thread and the request is SWAPPED on every segment roll
+    /// (see `rollSegment`) while the engine + tap keep running uninterrupted.
+    private let box = RequestBox()
     private var task: SFSpeechRecognitionTask?
-    /// Bumped for every session and on every stop/finalize. An in-flight recognition
-    /// callback captures its generation and no-ops if it no longer matches, so a stale
-    /// callback from a finished session can't touch a newer one.
+    /// Finalized segments so far this session. Keeps the exposed `transcript` MONOTONIC —
+    /// it never loses its head when the recognizer re-segments near its ceiling.
+    private var accumulator = TranscriptAccumulator()
+    /// The current segment's latest best transcription, not yet committed.
+    private var lastPartial = ""
+    /// A segment we rolled away from whose OWN final result has not landed yet: its last
+    /// partial is shown provisionally so the screen never flickers, then its full final (the
+    /// tail the old task keeps recognising after the swap) replaces it. Assumes one rolled
+    /// segment finalizes before the next ~50s roll — true given on-device finals arrive in
+    /// ~1s.
+    private var pending = ""
+    /// Generation of the segment whose text is in `pending`, so its own (non-active) final
+    /// commits exactly once and a rare pause-at-a-roll-boundary can't double-commit it.
+    private var pendingGen: Int?
+    /// Consecutive error-driven rolls with no successful result between them. Capped so a
+    /// PERSISTENT failure (asset evicted, dictation disabled mid-session) stops with a note
+    /// instead of churning new tasks forever.
+    private var errorRolls = 0
+    /// Rolls the recognition task over before `SFSpeechRecognizer`'s ~1-minute audio
+    /// ceiling, so it never reaches the window where it would drop earlier text.
+    private var rollTimer: Timer?
+    /// Seconds a single recognition task runs before we commit + restart it — under
+    /// Apple's ~60s ceiling with margin.
+    private let segmentSeconds: TimeInterval = 50
+    /// Bumped on every stop/finalize/roll. An in-flight recognition callback captures its
+    /// generation and no-ops if it no longer matches, so a stale callback from a retired
+    /// task can't touch a newer one.
     private var generation = 0
 
     var isRecording: Bool { state == .recording }
@@ -46,6 +74,11 @@ final class SpeechDictator: ObservableObject {
         // double-tap would otherwise install a SECOND tap on the input node (a crash) and
         // spawn a second recognition task.
         guard state != .requesting, state != .recording else { return }
+        accumulator.reset()
+        lastPartial = ""
+        pending = ""
+        pendingGen = nil
+        errorRolls = 0
         transcript = ""
         note = nil
         state = .requesting
@@ -107,49 +140,149 @@ final class SpeechDictator: ObservableObject {
         try session.setCategory(.record, mode: .measurement, options: .duckOthers)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
+        // The tap runs for the WHOLE dictation and feeds whatever request is current in
+        // the box; only the request + task are swapped on a segment roll, never the engine.
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        let box = self.box
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            box.append(buffer)
+        }
+        // Ready the first request BEFORE the engine runs, so the very first audio buffers
+        // have a request to go to (the box is otherwise nil for a beat and drops them).
+        state = .recording
+        startSegment(recognizer: recognizer)
+        engine.prepare()
+        try engine.start()
+
+        // Roll the recognition task over before SFSpeechRecognizer's ~1-minute ceiling.
+        // segmentSeconds keeps ~10s of margin under it; that margin is a heuristic — the
+        // pure TranscriptAccumulator tests can't cover the driver committing before a
+        // within-segment shrink, so it's tuned conservatively.
+        rollTimer = Timer.scheduledTimer(withTimeInterval: segmentSeconds, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rollSegment() }
+        }
+    }
+
+    /// Begin one recognition segment: a fresh request + task on the already-running engine.
+    /// The OUTGOING task is NOT cancelled — `box.set` ends its request so it delivers a full
+    /// FINAL result (the tail it was still recognising after the swap), which the callback
+    /// commits. Cancelling would discard that final and re-introduce the per-roll boundary
+    /// loss this avoids.
+    private func startSegment(recognizer: SFSpeechRecognizer) {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
-        self.request = request
+        box.set(request)   // ends the previous request (it finalizes), routes audio here
+        lastPartial = ""
 
         generation &+= 1
         let gen = generation
-
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak request] buffer, _ in
-            request?.append(buffer)
-        }
-        engine.prepare()
-        try engine.start()
-        state = .recording
-
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             Task { @MainActor in
-                // Ignore a callback that belongs to a session we've already torn down.
-                guard gen == self.generation, self.state == .recording else { return }
-                if let result { self.transcript = result.bestTranscription.formattedString }
-                if error != nil || (result?.isFinal ?? false) {
-                    self.generation &+= 1
-                    self.finishAudio()
-                    self.state = .idle
+                guard self.state == .recording else { return }
+                let isActive = (gen == self.generation)
+                if let result {
+                    self.errorRolls = 0          // a result means we're making progress
+                    let text = result.bestTranscription.formattedString
+                    if result.isFinal {
+                        if isActive {
+                            // Active segment finalized on a natural pause: commit it and keep
+                            // going (a pause no longer stops dictation).
+                            if let pg = self.pendingGen, pg != gen {
+                                self.accumulator.commit(self.pending)   // an earlier provisional
+                            }
+                            self.pending = ""; self.pendingGen = nil
+                            self.accumulator.commit(text)
+                            self.lastPartial = ""
+                            self.transcript = self.accumulator.committed
+                            self.startSegment(recognizer: recognizer)
+                        } else if self.pendingGen == gen {
+                            // The segment we rolled away from delivered its FULL final (incl.
+                            // the tail): commit the whole thing, replacing its provisional.
+                            self.accumulator.commit(text)
+                            self.pending = ""; self.pendingGen = nil
+                            self.refreshTranscript()
+                        }
+                        // a non-active final for an already-committed segment: ignore.
+                    } else if isActive {
+                        self.lastPartial = text
+                        self.refreshTranscript()
+                    }
+                    // Partials from a non-active (finalizing) segment are ignored.
+                } else if error != nil, isActive {
+                    // Roll on error (routinely the ceiling), but CAP consecutive error-rolls
+                    // so a persistent failure stops with feedback instead of churning forever.
+                    self.errorRolls += 1
+                    if self.errorRolls >= 3 {
+                        self.note = "Dictation stopped. Tap the mic to start again."
+                        self.stop()
+                    } else {
+                        self.rollSegment()
+                    }
                 }
             }
         }
     }
 
+    /// Roll to a fresh segment before the recognizer's ceiling. The current segment's text is
+    /// kept on screen as `pending` (so nothing flickers) and its task is left to FINALIZE;
+    /// its full final commits in the callback above and supersedes the provisional.
+    private func rollSegment() {
+        guard state == .recording, let recognizer else { return }
+        let rolledGen = generation
+        pending = [pending, lastPartial].filter { !$0.isEmpty }.joined(separator: " ")
+        pendingGen = rolledGen
+        lastPartial = ""
+        startSegment(recognizer: recognizer)   // box.set ends the rolled request -> it finalizes
+    }
+
+    /// Rebuild the displayed transcript: committed + the provisional rolled segment + the
+    /// active partial. Never shorter than `committed`.
+    private func refreshTranscript() {
+        let tail = [pending, lastPartial].filter { !$0.isEmpty }.joined(separator: " ")
+        transcript = accumulator.text(withPartial: tail)
+    }
+
     private func finishAudio() {
+        rollTimer?.invalidate()
+        rollTimer = nil
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
-        request?.endAudio()
+        // Keep everything on screen: fold the provisional rolled segment AND the last live
+        // partial into `committed` before tearing down (makes `transcript` self-consistent).
+        let tail = [pending, lastPartial].filter { !$0.isEmpty }.joined(separator: " ")
+        if !tail.isEmpty { accumulator.commit(tail) }
+        transcript = accumulator.committed
+        lastPartial = ""
+        pending = ""
+        pendingGen = nil
+        box.set(nil)   // ends the current request
         task?.cancel()
-        request = nil
         task = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func teardown() { finishAudio() }
+}
+
+/// Thread-safe holder for the current recognition request. The audio tap (an audio thread)
+/// appends buffers through this while the main actor SWAPS the request on each segment roll.
+/// A single `NSLock` around one reference is enough — append and set never contend for long.
+private final class RequestBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    /// Install a new request (or nil to clear); ends the one it replaces so its recognizer
+    /// finalizes rather than leaking the audio pipeline.
+    func set(_ r: SFSpeechAudioBufferRecognitionRequest?) {
+        lock.lock(); let old = request; request = r; lock.unlock()
+        old?.endAudio()
+    }
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock(); let r = request; lock.unlock()
+        r?.append(buffer)
+    }
 }
 
 /// A mic button that dictates into a bound text field. The recognized text is APPENDED
