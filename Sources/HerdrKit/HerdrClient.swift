@@ -68,6 +68,25 @@ public actor HerdrClient {
         try await call("accounts.list", EmptyParams(), as: AccountsListResult.self).accounts
     }
 
+    /// The running daemon's version/protocol plus any staged update the fleet build step pre-staged
+    /// (`server.staged_update`). Parameterless read; THROWS the server's `APIError` on a daemon too
+    /// old to know the method, so callers that want a quiet degrade use `try?` (mirrors
+    /// `accountsList`). `staged` is nil when nothing is staged.
+    public func stagedUpdate() async throws -> StagedUpdate {
+        try await call("server.staged_update", EmptyParams(), as: StagedUpdate.self)
+    }
+
+    /// Activate the staged build (`server.apply_staged_update`): the daemon swaps its binary and
+    /// re-execs via live-handoff, keeping agent panes alive. Because the daemon replaces ITSELF, the
+    /// single-shot command socket may return the `ok` ack OR drop mid-handoff (a thrown transport
+    /// error); callers treat a transport drop here as "restart in progress" and re-poll
+    /// `stagedUpdate()`. Distinct server errors surface as thrown `APIError`:
+    /// `apply_staged_update_failed` (handoff rolled back — the OLD build is still serving) and
+    /// `apply_staged_update_disk_stale` (new build running, but the on-disk path was not updated).
+    public func applyStagedUpdate() async throws {
+        _ = try await call("server.apply_staged_update", EmptyParams(), as: OkAck.self)
+    }
+
     /// The complete pane set, as a value that carries its own provenance.
     ///
     /// `SessionRecovery.observe` takes this rather than `[AgentInfo]` because an

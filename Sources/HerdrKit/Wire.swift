@@ -595,3 +595,43 @@ public struct PanePtySize: Decodable, Sendable, Equatable {
         case cols, rows, locked
     }
 }
+
+// MARK: - Server / staged self-update (server.staged_update / server.apply_staged_update)
+
+/// Result of `server.staged_update` (`type: "staged_update"`): the running daemon's version and
+/// protocol, plus the staged build when a build step has pre-staged a newer binary — `staged` is
+/// nil when nothing is staged. Mirrors `ResponseResult::StagedUpdate`
+/// (`src/api/schema/response.rs`); the internally-tagged `type` key is ignored on decode.
+///
+/// Note: the running daemon reports only a version string (no sha), and the version is static
+/// across commits, so "an update is available" is exactly `staged != nil` — the build step only
+/// writes a manifest for a genuinely newer build and the daemon clears it once applied.
+public struct StagedUpdate: Decodable, Sendable, Equatable {
+    public let runningVersion: String
+    public let runningProtocol: Int
+    public let staged: Staged?
+
+    /// The pre-staged build the daemon would activate on apply. `path` is intentionally not on the
+    /// wire (the daemon never exposes it), so it is absent here too.
+    public struct Staged: Decodable, Sendable, Equatable {
+        public let version: String
+        public let sha: String
+        public let builtAt: String
+        enum CodingKeys: String, CodingKey {
+            case version, sha
+            case builtAt = "built_at"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case staged
+        case runningVersion = "running_version"
+        case runningProtocol = "running_protocol"
+    }
+}
+
+/// Ack of a `server.apply_staged_update` that returned cleanly (`type: "ok"`). Decoded as an empty
+/// object (the `type` tag is ignored). The apply re-execs the daemon via live-handoff, so the
+/// one-shot command socket may instead DROP mid-apply — callers treat both a returned ack and a
+/// transport drop as "restart initiated" and then re-poll `stagedUpdate()`.
+struct OkAck: Decodable, Sendable {}
