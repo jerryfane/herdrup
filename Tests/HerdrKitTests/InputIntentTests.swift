@@ -9,6 +9,15 @@ private func makeAgent(pane: String, agent: String?, hasComposer: Bool) throws -
     return try JSONDecoder().decode(ResultEnvelope<AgentListResult>.self, from: Data(json.utf8)).result.agents[0]
 }
 
+private func makeAgentWithStatus(pane: String, agent: String?, status: String?, inputPending: Bool?) throws -> AgentInfo {
+    var fields = ["\"pane_id\":\"\(pane)\""]
+    if let agent { fields.append("\"agent\":\"\(agent)\"") }
+    if let status { fields.append("\"agent_status\":\"\(status)\"") }
+    if let inputPending { fields.append("\"input_pending\":\(inputPending)") }
+    let json = "{\"id\":\"x\",\"result\":{\"agents\":[{\(fields.joined(separator: ","))}]}}"
+    return try JSONDecoder().decode(ResultEnvelope<AgentListResult>.self, from: Data(json.utf8)).result.agents[0]
+}
+
 final class InputRouterTests: XCTestCase {
     let router = InputRouter()
 
@@ -32,6 +41,39 @@ final class InputRouterTests: XCTestCase {
     /// and re-opens the never-submitted bug, so this assertion KILLs that mutation.)
     func testNamedAgentWithoutComposerStillRoutesAsIntent() throws {
         XCTAssertEqual(router.mode(for: try makeAgent(pane: "p1", agent: "claude", hasComposer: false)), .intent)
+    }
+
+    /// A named agent showing a MENU (blocked / input_pending — a plan-approval or an
+    /// AskUserQuestion) must route as rawKeys: agent.prompt is rejected while blocked, so a
+    /// typed answer has to go via pane.send_text into the menu's free-text field. Mutation
+    /// guard: dropping the isAwaitingMenuInput check returns .intent here → the reply hits
+    /// agent.prompt → "agent is blocked" (the reported bug).
+    func testBlockedAgentRoutesAsRawKeysSoMenusAreAnswerable() throws {
+        let blocked = try makeAgentWithStatus(pane: "p1", agent: "claude", status: "blocked", inputPending: nil)
+        XCTAssertTrue(blocked.isAwaitingMenuInput)
+        XCTAssertEqual(router.mode(for: blocked), .rawKeys)
+        // A typed reply then plans to .text → pane.send_text (accepted while blocked).
+        XCTAssertEqual(
+            router.plan(action: .submitText("2"), pane: "p1", mode: router.mode(for: blocked)),
+            .text(pane: "p1", "2")
+        )
+        // input_pending without a "blocked" status also counts (enumerated-select menus).
+        let pending = try makeAgentWithStatus(pane: "p1", agent: "claude", status: "idle", inputPending: true)
+        XCTAssertEqual(router.mode(for: pending), .rawKeys)
+        // A working/idle agent with no menu still routes as intent (agent.prompt).
+        let working = try makeAgentWithStatus(pane: "p1", agent: "claude", status: "working", inputPending: false)
+        XCTAssertFalse(working.isAwaitingMenuInput)
+        XCTAssertEqual(router.mode(for: working), .intent)
+    }
+
+    func testAgentInfoDecodesInputPendingFields() throws {
+        let a = try makeAgentWithStatus(pane: "p1", agent: "claude", status: "blocked", inputPending: true)
+        XCTAssertEqual(a.inputPending, true)
+        XCTAssertEqual(a.agentStatus, "blocked")
+        // Absent on an older server → nil, still decodes.
+        let old = try makeAgent(pane: "p1", agent: "claude", hasComposer: true)
+        XCTAssertNil(old.inputPending)
+        XCTAssertFalse(old.isAwaitingMenuInput)
     }
 
     /// The pre-fill readiness gate stays STRICTER than routing on purpose: an

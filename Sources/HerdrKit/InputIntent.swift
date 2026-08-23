@@ -77,6 +77,13 @@ public struct InputRouter: Sendable {
     /// task warrants holding out for a confirmed composer.)
     public func mode(for agent: AgentInfo) -> InputMode {
         guard agent.agent != nil else { return .rawKeys }
+        // A named agent showing an interactive MENU (plan-approval / AskUserQuestion) is
+        // `blocked` / input_pending: `agent.prompt` is rejected there ("agent is blocked
+        // and requires interactive input"). Route input as raw keys instead — typed chars
+        // land in the menu's free-text field via `pane.send_text` (which the daemon accepts
+        // while blocked) and Enter/arrows navigate via the keycaps. When the menu clears,
+        // the agent goes back to `.intent`. See herdrup #157-follow-up / the answer-menus fix.
+        if agent.isAwaitingMenuInput { return .rawKeys }
         return .intent
     }
 
