@@ -985,6 +985,9 @@ struct TerminalHomeView: View {
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
     @State private var collapsed: Set<AgentGroup> = Set(AgentGroup.allCases.filter { $0.startsCollapsed })
+    /// The Terminals section starts collapsed like the idle agents — a compact header row
+    /// (TERMINALS · N) the reader expands on demand, so it never competes with the herd.
+    @State private var terminalsCollapsed = true
 
     /// The whole list derived from the current agents + census. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -1687,25 +1690,37 @@ struct TerminalHomeView: View {
     /// from the header's terminal button; long-press a row to close it.
     private var terminalsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("TERMINALS")
-                    .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                Rectangle().fill(Palette.hairline).frame(height: 1)
+            Button {
+                terminalsCollapsed.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    // Count shown when collapsed (so the tally is legible while shut);
+                    // expanded, the rows speak for themselves.
+                    Text(terminalsCollapsed
+                        ? "TERMINALS · \(terminalsStore.terminals.count)" : "TERMINALS")
+                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                    Image(systemName: terminalsCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                    Rectangle().fill(Palette.hairline).frame(height: 1)
+                }
             }
+            .buttonStyle(.plain)
             .padding(.horizontal, 16).padding(.top, 10)
 
-            ForEach(terminalsStore.terminals) { terminal in
-                Button {
-                    open(PaneSlot(paneID: terminal.paneID, title: terminal.label, agent: nil,
-                                  initialReply: "", siblings: []))
-                } label: {
-                    terminalCard(terminal)
-                }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    Button(role: .destructive) {
-                        Task { await deleteTerminal(terminal) }
-                    } label: { Label("Close terminal", systemImage: "xmark.circle") }
+            if !terminalsCollapsed {
+                ForEach(terminalsStore.terminals) { terminal in
+                    Button {
+                        open(PaneSlot(paneID: terminal.paneID, title: terminal.label, agent: nil,
+                                      initialReply: "", siblings: []))
+                    } label: {
+                        terminalCard(terminal)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            Task { await deleteTerminal(terminal) }
+                        } label: { Label("Close terminal", systemImage: "xmark.circle") }
+                    }
                 }
             }
         }
