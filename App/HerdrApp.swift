@@ -2918,8 +2918,11 @@ struct TerminalPaneContent: View {
     /// non-delivery.
     private static func promptFailureNote(for error: APIError) -> String {
         switch error.code {
-        case "agent_input_pending":
-            return "answer the on-screen prompt first (use the keys), then send"
+        case "agent_blocked", "agent_input_pending":
+            // The agent is showing a menu (plan-approval / question). Routing normally
+            // switches to raw keys when this is detected; if a send still races the
+            // status here, tell the reader they can type the answer or use the keycaps.
+            return "agent is asking — type your answer or use the keys, then Enter"
         case "agent_not_ready":
             return "agent not ready, try again"
         case "agent_prompt_not_received":
@@ -2959,7 +2962,10 @@ struct TerminalPaneContent: View {
         let sameNamedAgent = live.name != nil && live.name == agent?.name
         let priorWasIntent = agent.map { router.mode(for: $0) == .intent } ?? false
         let liveLostComposer = sameNamedAgent && router.mode(for: live) != .intent
-        if priorWasIntent && liveLostComposer { return }
+        // A genuine MENU/blocked state is NOT a transient composer hiccup — adopt it so
+        // the app can drive the menu with raw keys (answer a plan-approval / AskUserQuestion).
+        // Only hold the prior intent agent for a true composer blip (composer nil, not blocked).
+        if priorWasIntent && liveLostComposer && !live.isAwaitingMenuInput { return }
         agent = live
     }
 

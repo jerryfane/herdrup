@@ -76,6 +76,14 @@ public struct CompletedTurn: Decodable, Equatable, Sendable {
 public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let agent: String?
     public let agentStatus: String?
+    /// Set when the agent is showing an interactive prompt/menu that needs an
+    /// on-screen choice (a plan-approval or an AskUserQuestion) rather than a chat
+    /// prompt. `agent.prompt` is REJECTED while this is true (or `agentStatus ==
+    /// "blocked"`), so the app must drive the pane with raw keys / `pane.send_text`
+    /// instead. `inputPromptKind` is the menu kind ("select" / "confirm"). Decoded
+    /// leniently — absent on an older server.
+    public let inputPending: Bool?
+    public let inputPromptKind: String?
     public let name: String?
     public let paneID: String
     public let tabID: String?
@@ -112,6 +120,11 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
 
     public var isWorking: Bool { agentStatus == "working" }
 
+    /// The agent is showing an interactive menu / permission prompt (plan-approval or
+    /// AskUserQuestion) that must be answered on-screen. `agent.prompt` is refused in
+    /// this state, so the app routes input as raw keys / `pane.send_text` instead.
+    public var isAwaitingMenuInput: Bool { agentStatus == "blocked" || inputPending == true }
+
     /// A remote (federated) agent whose owning machine is currently unreachable.
     /// Its `agentStatus` is a stale last-known value, so the UI must render it as
     /// offline rather than as a live status. Unknown reachability strings (a newer
@@ -121,6 +134,8 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case agent, name, composer, revision, turn, cwd, focused, reachability
         case agentStatus = "agent_status"
+        case inputPending = "input_pending"
+        case inputPromptKind = "input_prompt_kind"
         case paneID = "pane_id"
         case tabID = "tab_id"
         case workspaceID = "workspace_id"
