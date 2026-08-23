@@ -975,6 +975,12 @@ struct TerminalHomeView: View {
     /// fragile "push while dismissing a cover" no longer applies — but the deferral is kept as
     /// cheap safety).
     @State private var pendingOpenSlot: PaneSlot?
+    /// The user's opened plain-shell terminals (a singleton, so it survives this view's
+    /// `.id(session)` remount). Shell panes never appear in `agent.list`, so the app tracks
+    /// them here to relist and reopen. See `SavedTerminalsStore`.
+    @ObservedObject private var terminalsStore = SavedTerminalsStore.shared
+    /// Re-entry guard while a `New Terminal` split is in flight (also dims the row).
+    @State private var creatingTerminal = false
     private static let maxLivePanes = 3
     // Only the quiet tail (idle) starts collapsed — the model forbids a
     // collapsed group from ever hiding something that wants attention.
@@ -1020,6 +1026,37 @@ struct TerminalHomeView: View {
         // open path (row tap, deep-link, spawn, swipe-paging) consistent.
         selectedTab = .agents
         frontID = slot.paneID
+    }
+
+    /// Open a fresh plain-shell terminal: `pane.split` with NO `agent.start` yields a booting
+    /// shell PTY (the same split the new-agent flow does, minus turning it into an agent).
+    /// Remember it (so it relists — a shell pane is absent from `agent.list` by construction)
+    /// and front it. The terminal drives the shell through the SAME pane-id path as any agent
+    /// pane: raw keystrokes + the control bar (see `TerminalPaneContent`, `InputRouter`).
+    private func createTerminal() async {
+        guard !creatingTerminal else { return }   // re-entry invariant, not just .disabled
+        creatingTerminal = true
+        defer { creatingTerminal = false }
+        do {
+            let paneID = try await client.splitPane(cwd: nil)
+            let terminal = terminalsStore.add(paneID: paneID)
+            open(PaneSlot(paneID: paneID, title: terminal.label, agent: nil,
+                          initialReply: "", siblings: []))
+        } catch let e {
+            // `\(e)` surfaces the APIError's "code: message" (CustomStringConvertible);
+            // `.localizedDescription` bridges to a useless generic NSError string.
+            error = "couldn't open a terminal: \(e)"
+        }
+    }
+
+    /// Close a terminal: end its shell pane server-side (best-effort — it may already have
+    /// exited), unmount any live slot, and forget it. Deleting is the user's intent, so a
+    /// close that fails (a gone pane) still forgets it rather than stranding a dead row.
+    private func deleteTerminal(_ terminal: SavedTerminal) async {
+        try? await client.closePane(paneID: terminal.paneID)
+        if frontID == terminal.paneID { frontID = nil }
+        slots.removeAll { $0.paneID == terminal.paneID }
+        terminalsStore.delete(terminal.id)
     }
 
     /// Front the pane a tapped push targeted (PushCenter.pendingPaneID), once the agent list has
@@ -1611,6 +1648,12 @@ struct TerminalHomeView: View {
             searchField   // pinned above the scroll, as the mockup/Termius have it
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    // Terminals lead the list. Hidden during an agent search (the search
+                    // field filters agents, not shell terminals), so a search view stays
+                    // focused on its matches.
+                    if search.isEmpty {
+                        terminalsSection
+                    }
                     if agents.isEmpty {
                         emptyLine("no agents")
                     } else if visibleSections.isEmpty {
@@ -1630,6 +1673,82 @@ struct TerminalHomeView: View {
     private func emptyLine(_ text: String) -> some View {
         Text(text).font(Typography.app(15)).foregroundStyle(Palette.textDim)
             .frame(maxWidth: .infinity).padding(.top, 44)
+    }
+
+    // MARK: terminals
+
+    /// The Terminals section: the user's opened shell panes (each reopens its live PTY) plus
+    /// a "New Terminal" row that splits a fresh shell. Always present so a terminal is one tap
+    /// away, even with no agents. Long-press a terminal to close it.
+    private var terminalsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("TERMINALS")
+                    .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+            }
+            .padding(.horizontal, 16).padding(.top, 10)
+
+            ForEach(terminalsStore.terminals) { terminal in
+                Button {
+                    open(PaneSlot(paneID: terminal.paneID, title: terminal.label, agent: nil,
+                                  initialReply: "", siblings: []))
+                } label: {
+                    terminalCard(terminal)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button(role: .destructive) {
+                        Task { await deleteTerminal(terminal) }
+                    } label: { Label("Close terminal", systemImage: "xmark.circle") }
+                }
+            }
+
+            Button {
+                Task { await createTerminal() }
+            } label: {
+                newTerminalRow
+            }
+            .buttonStyle(.plain)
+            .disabled(creatingTerminal)
+        }
+    }
+
+    private func terminalCard(_ terminal: SavedTerminal) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(Palette.surfaceRaised)
+                    .frame(width: 40, height: 40)
+                Image(systemName: "terminal")
+                    .font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.textDim)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(terminal.label).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
+                Text("shell").font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .contentShape(Rectangle())
+    }
+
+    private var newTerminalRow: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Palette.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .frame(width: 40, height: 40)
+                Image(systemName: creatingTerminal ? "ellipsis" : "plus")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
+            }
+            Text(creatingTerminal ? "Opening…" : "New Terminal")
+                .font(Typography.app(16, .semibold)).foregroundStyle(Palette.textDim)
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 
     private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
