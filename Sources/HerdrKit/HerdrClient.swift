@@ -600,6 +600,43 @@ public actor HerdrClient {
             .agent
     }
 
+    struct AgentRenameParams: Encodable {
+        let target: String
+        let name: String
+    }
+
+    /// Renames an agent (`agent.rename`): sets the agent's `name`, which becomes a
+    /// resolvable mention target daemon-side (`herdr agent read <name>` / another agent
+    /// prompting `<name>`). `target` is the pane id (or the current name). The server
+    /// enforces the name grammar `^[a-z][a-z0-9_-]{0,31}$`, so callers pass a name already
+    /// coerced by `AgentName.normalize`; it still THROWS `APIError` for a duplicate
+    /// (`agent_name_taken`) or an otherwise invalid name. Returns the updated agent.
+    @discardableResult
+    public func renameAgent(target: String, name: String) async throws -> AgentInfo {
+        try await call("agent.rename", AgentRenameParams(target: target, name: name),
+                       as: AgentInfoResult.self)
+            .agent
+    }
+
+    struct PaneRenameParams: Encodable {
+        let paneID: String
+        let label: String
+        enum CodingKeys: String, CodingKey {
+            case label
+            case paneID = "pane_id"
+        }
+    }
+
+    /// Renames a pane (`pane.rename`): sets the pane's manual `label`, which shows in
+    /// `pane.list` — so a plain terminal can be mentioned to an agent ("check the terminal
+    /// labelled <label>"; the agent lists panes, matches the label, then reads that pane).
+    /// Works on any pane, agent or not. The server trims the label. The returned pane is
+    /// ignored (callers keep the app-local label in sync separately).
+    public func renamePane(paneID: String, label: String) async throws {
+        _ = try await call("pane.rename", PaneRenameParams(paneID: paneID, label: label),
+                           as: PaneInfoResult.self)
+    }
+
     /// True when `pane` reports an agent WITH a composer — the observable proxy for
     /// "a prompt will land NOW". This is the STRICTER new-agent PRE-FILL gate
     /// (`InputRouter.isPromptable(for:)`), deliberately NOT the reply-routing gate
