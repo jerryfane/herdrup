@@ -3217,6 +3217,18 @@ struct SettingsView: View {
     /// into a dead end. Refreshed on appear and on foreground (after a Settings trip).
     @State private var notifyAuth: UNAuthorizationStatus = .notDetermined
     @Environment(\.scenePhase) private var scenePhase
+    /// The connected daemon's version + any staged self-update, from `server.staged_update`.
+    /// Fetched by this view (`.task` below) with `try?`, so a daemon too old to know the method
+    /// (or a transient failure) simply leaves it nil — the version line and update callout then
+    /// don't render, exactly the pre-fork/older-daemon degrade the notify + accounts rows use.
+    @State private var stagedUpdate: StagedUpdate?
+    /// The "Update & restart the daemon?" confirmation (the apply restarts the daemon in place).
+    @State private var showUpdateConfirm = false
+    /// True while `server.apply_staged_update` is in flight and we re-poll for the swap to land.
+    @State private var applyingUpdate = false
+    /// The apply outcome, shown in an alert (nil = no alert). Distinguishes a clean update, a
+    /// partial disk-stale warning, a rolled-back failure, and an unconfirmed "still restarting".
+    @State private var updateResult: String?
 
     var body: some View {
         Group {
@@ -3251,6 +3263,9 @@ struct SettingsView: View {
         // `try?` so an older daemon without `accounts.list` (or a transient failure)
         // just leaves the section empty rather than surfacing an error here.
         .task { accounts = (try? await client.accountsList()) ?? [] }
+        // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
+        // `server.staged_update` leaves it nil (version line + update callout simply absent).
+        .task { stagedUpdate = try? await client.stagedUpdate() }
         // "How to set up accounts" — a step-by-step guide for adding another
         // subscription on the box (accounts live there, not in the app).
         .sheet(isPresented: $showAccountsSetup) {
@@ -3315,6 +3330,32 @@ struct SettingsView: View {
                 set: { if !$0 { bulkResult = nil } }
             ),
             presenting: bulkResult
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { result in
+            Text(result)
+        }
+        // Update & restart: confirm (it restarts the daemon in place — agents keep running via
+        // live-handoff), then apply and re-poll for the swap to land.
+        .confirmationDialog(
+            "Update & restart the daemon?",
+            isPresented: $showUpdateConfirm
+        ) {
+            Button("Update & restart") { applyUpdate() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let staged = stagedUpdate?.staged {
+                Text("Swaps the daemon to build \(staged.sha) and restarts it in place. Your "
+                    + "agents keep running — their sessions are preserved across the restart.")
+            }
+        }
+        .alert(
+            "Daemon update",
+            isPresented: Binding(
+                get: { updateResult != nil },
+                set: { if !$0 { updateResult = nil } }
+            ),
+            presenting: updateResult
         ) { _ in
             Button("OK", role: .cancel) {}
         } message: { result in
@@ -3485,11 +3526,33 @@ struct SettingsView: View {
                 }
                 rowDivider
                 glanceMachinesRow
+                if daemonUpdateAvailable {
+                    rowDivider
+                    glanceUpdateRow
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
             .padding(.horizontal, 16).padding(.top, 10)
         }
+    }
+
+    /// A quiet shortcut into Machines when the daemon has a staged update — the section that owns
+    /// the "Update & restart" action is one tap away (mirrors `glanceExhaustedRow`).
+    private var glanceUpdateRow: some View {
+        NavigationLink(value: SettingsSection.machines) {
+            HStack(spacing: 10) {
+                Circle().fill(Palette.waiting).frame(width: 8, height: 8)
+                Text("Daemon update available")
+                    .font(Typography.app(14)).foregroundStyle(Palette.textDim).lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var glanceConnectionRow: some View {
@@ -3574,6 +3637,13 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var manageMachinesTrailing: some View {
+        if daemonUpdateAvailable {
+            Text("Update")
+                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.waiting)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Palette.waiting.opacity(0.12)))
+                .overlay(Capsule().stroke(Palette.waiting.opacity(0.5), lineWidth: 1))
+        }
         Text("\(agents.count) agent\(agents.count == 1 ? "" : "s")")
             .font(Typography.machine(12)).foregroundStyle(Palette.textDim)
         Circle().fill(machinesReachability.color).frame(width: 8, height: 8)
@@ -3689,17 +3759,118 @@ struct SettingsView: View {
     private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("CONNECTION")
-            HStack(spacing: 10) {
-                Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
-                Text(connected ? "Connected" : "Disconnected")
-                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
-                Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
+                    Text(connected ? "Connected" : "Disconnected")
+                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
+                    Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                // The connected daemon's own version (distinct from the app version in the footer).
+                // Only shown once `server.staged_update` has answered — absent on an older daemon.
+                if let running = stagedUpdate?.runningVersion {
+                    Text("herdr daemon \(running)")
+                        .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                }
             }
             .rowShell()
             .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
+            daemonUpdateCallout
         }
+    }
+
+    /// True when the connected daemon has a newer build staged and ready to activate.
+    private var daemonUpdateAvailable: Bool { stagedUpdate?.staged != nil }
+
+    /// Shown only when the daemon has a staged self-update: an icon chip + "Update available" + the
+    /// staged build's id/date, then an "Update & restart" action (a spinner replaces it while the
+    /// apply is in flight). Mirrors `notifyInfoRow`'s callout shape, in its own hairline card.
+    @ViewBuilder
+    private var daemonUpdateCallout: some View {
+        if let staged = stagedUpdate?.staged {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.waiting)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Palette.surfaceRaised))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Update available")
+                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
+                    Text("Build \(staged.sha) · staged \(String(staged.builtAt.prefix(10)))")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if applyingUpdate {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small).tint(Palette.textDim)
+                            Text("Updating & restarting…")
+                                .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
+                        }
+                        .padding(.top, 2)
+                    } else {
+                        Button("Update & restart") { showUpdateConfirm = true }
+                            .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
+                            .padding(.top, 2)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .rowShell()
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
+
+    /// Activate the staged build. The daemon swaps its binary and re-execs via live-handoff, so the
+    /// one-shot apply call may return the `ok` ack OR drop mid-handoff — both mean "restart under
+    /// way", so we then re-poll `stagedUpdate()` until the applied build clears its staged manifest.
+    /// A server `APIError` is a real verdict, not a dropped socket, and is surfaced distinctly:
+    /// `apply_staged_update_disk_stale` = running-new/disk-old (a warning); anything else = the
+    /// handoff rolled back and the OLD build is still serving.
+    private func applyUpdate() {
+        guard !applyingUpdate else { return }
+        applyingUpdate = true
+        Task {
+            do {
+                try await client.applyStagedUpdate()
+            } catch let apiError as APIError {
+                applyingUpdate = false
+                if apiError.code == "apply_staged_update_disk_stale" {
+                    updateResult = "Updated, with a warning: the new build is running, but the daemon "
+                        + "couldn't update its on-disk copy, so a full restart would fall back to the "
+                        + "old build until re-applied."
+                } else {
+                    updateResult = "Update failed: \(apiError). Your daemon is unchanged and still "
+                        + "running the current build."
+                }
+                if let refreshed = try? await client.stagedUpdate() { stagedUpdate = refreshed }
+                return
+            } catch {
+                // Transport dropped mid-handoff — expected: the daemon replaced itself before it
+                // could answer on the single-shot socket. Fall through to confirm by re-polling.
+            }
+            let confirmed = await confirmUpdateApplied()
+            applyingUpdate = false
+            // Only overwrite on a SUCCESSFUL read: a failed read here means the daemon is still
+            // mid-restart, and blanking the state would wrongly hide the banner. The next `.task`
+            // (on the view reappearing) re-fetches the true state once the daemon is back.
+            if let refreshed = try? await client.stagedUpdate() { stagedUpdate = refreshed }
+            updateResult = confirmed
+                ? "Updated. The daemon restarted on the new build; your agents kept running."
+                : "Update sent — the daemon may still be restarting. Reopen Settings in a moment to "
+                    + "confirm the new build."
+        }
+    }
+
+    /// Poll `stagedUpdate()` until the applied build has cleared its staged manifest (`staged ==
+    /// nil`), tolerating the brief window where the daemon is mid-handoff and the socket refuses.
+    private func confirmUpdateApplied() async -> Bool {
+        for _ in 0..<12 {   // ~12 × 2s = 24s, comfortably past a few-second handoff
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if let current = try? await client.stagedUpdate(), current.staged == nil { return true }
+        }
+        return false
     }
 
     /// The remote machines (federation peers) whose agents this home box lists —
