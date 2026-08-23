@@ -86,10 +86,12 @@ final class InputRouterTests: XCTestCase {
         ) else { return XCTFail("expected literal text") }
         XCTAssertFalse(sent.contains("\n"), "typed text must not carry a newline")
         XCTAssertFalse(sent.contains("\r"), "typed text must not carry a carriage return")
-        // Submitting is a separate, explicit key.
+        // Submitting is a separate, explicit key — and on a shell (no agent) it goes
+        // as a raw CR via pane.send_text, NOT agent.send_keys (which would be rejected
+        // agent_not_found). herdrup #157 follow-up.
         XCTAssertEqual(
             router.plan(action: .key("Enter"), pane: "p1", mode: .rawKeys),
-            .keys(pane: "p1", ["Enter"])
+            .rawText(pane: "p1", "\r")
         )
     }
 
@@ -133,10 +135,34 @@ final class InputRouterTests: XCTestCase {
         }
     }
 
-    func testNavigationKeysWorkInBothModes() {
-        for mode in [InputMode.intent, .rawKeys] {
-            XCTAssertEqual(router.plan(action: .key("Up"), pane: "p1", mode: mode), .keys(pane: "p1", ["Up"]))
-            XCTAssertEqual(router.plan(action: .key("Enter"), pane: "p1", mode: mode), .keys(pane: "p1", ["Enter"]))
+    /// A named agent takes keys through agent.send_keys (dialog navigation, server-verified).
+    func testNamedKeysUseSendKeysInIntentMode() {
+        XCTAssertEqual(router.plan(action: .key("Up"), pane: "p1", mode: .intent), .keys(pane: "p1", ["Up"]))
+        XCTAssertEqual(router.plan(action: .key("Enter"), pane: "p1", mode: .intent), .keys(pane: "p1", ["Enter"]))
+    }
+
+    /// A shell/TUI pane (no agent) takes keys as raw terminal bytes via pane.send_text —
+    /// agent.send_keys there is rejected agent_not_found (the shipped #157 bug).
+    func testNamedKeysBecomeRawBytesInRawKeysMode() {
+        XCTAssertEqual(router.plan(action: .key("Enter"), pane: "p1", mode: .rawKeys), .rawText(pane: "p1", "\r"))
+        XCTAssertEqual(router.plan(action: .key("Up"), pane: "p1", mode: .rawKeys), .rawText(pane: "p1", "\u{1b}[A"))
+        XCTAssertEqual(router.plan(action: .key("Escape"), pane: "p1", mode: .rawKeys), .rawText(pane: "p1", "\u{1b}"))
+        XCTAssertEqual(router.plan(action: .key("Tab"), pane: "p1", mode: .rawKeys), .rawText(pane: "p1", "\t"))
+        // No .keys plan is ever produced in rawKeys mode (that path needs an agent).
+        if case .keys = router.plan(action: .key("Enter"), pane: "p1", mode: .rawKeys) {
+            XCTFail("rawKeys must never route a key through agent.send_keys")
+        }
+    }
+
+    func testKeyBytesCoversEveryAllowedKeyAndRejectsOthers() {
+        for name in InputRouter.allowed {
+            XCTAssertNotNil(InputRouter.keyBytes(for: name), "no bytes for allowed key \(name)")
+        }
+        XCTAssertEqual(InputRouter.keyBytes(for: "enter"), "\r", "name-matching is case-insensitive")
+        XCTAssertNil(InputRouter.keyBytes(for: "F13"))
+        // An unsupported key is refused in rawKeys too, not silently dropped.
+        guard case .refused = router.plan(action: .key("F13"), pane: "p1", mode: .rawKeys) else {
+            return XCTFail("unsupported key in rawKeys should be refused")
         }
     }
 

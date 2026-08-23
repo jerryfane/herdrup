@@ -1605,7 +1605,12 @@ struct TerminalHomeView: View {
                     .frame(height: 15)
             }
             Spacer()
-            circleButton("plus") { activeCover = .newAgent }
+            HStack(spacing: 8) {
+                // Open a plain shell terminal — a small icon so agents stay the priority
+                // (the re-entry guard in createTerminal absorbs an eager double-tap).
+                circleButton("terminal") { Task { await createTerminal() } }
+                circleButton("plus") { activeCover = .newAgent }
+            }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
@@ -1648,12 +1653,6 @@ struct TerminalHomeView: View {
             searchField   // pinned above the scroll, as the mockup/Termius have it
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    // Terminals lead the list. Hidden during an agent search (the search
-                    // field filters agents, not shell terminals), so a search view stays
-                    // focused on its matches.
-                    if search.isEmpty {
-                        terminalsSection
-                    }
                     if agents.isEmpty {
                         emptyLine("no agents")
                     } else if visibleSections.isEmpty {
@@ -1664,6 +1663,12 @@ struct TerminalHomeView: View {
                         ForEach(visibleSections, id: \.group) { section in
                             sectionView(section.group, section.rows)
                         }
+                    }
+                    // Terminals sit BELOW the herd and only when you have some — agents
+                    // are the priority. Open one from the header's terminal button.
+                    // Hidden during an agent search (that filters agents, not shells).
+                    if search.isEmpty && !terminalsStore.terminals.isEmpty {
+                        terminalsSection
                     }
                 }
             }
@@ -1677,9 +1682,9 @@ struct TerminalHomeView: View {
 
     // MARK: terminals
 
-    /// The Terminals section: the user's opened shell panes (each reopens its live PTY) plus
-    /// a "New Terminal" row that splits a fresh shell. Always present so a terminal is one tap
-    /// away, even with no agents. Long-press a terminal to close it.
+    /// The Terminals section: the user's opened shell panes (each reopens its live PTY). Shown
+    /// below the agents and only when non-empty, so agents stay the priority. Open a new one
+    /// from the header's terminal button; long-press a row to close it.
     private var terminalsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -1703,14 +1708,6 @@ struct TerminalHomeView: View {
                     } label: { Label("Close terminal", systemImage: "xmark.circle") }
                 }
             }
-
-            Button {
-                Task { await createTerminal() }
-            } label: {
-                newTerminalRow
-            }
-            .buttonStyle(.plain)
-            .disabled(creatingTerminal)
         }
     }
 
@@ -1729,23 +1726,6 @@ struct TerminalHomeView: View {
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
-        }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .contentShape(Rectangle())
-    }
-
-    private var newTerminalRow: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Palette.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    .frame(width: 40, height: 40)
-                Image(systemName: creatingTerminal ? "ellipsis" : "plus")
-                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.textDim)
-            }
-            Text(creatingTerminal ? "Opening…" : "New Terminal")
-                .font(Typography.app(16, .semibold)).foregroundStyle(Palette.textDim)
-            Spacer()
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .contentShape(Rectangle())
