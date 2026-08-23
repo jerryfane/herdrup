@@ -136,11 +136,49 @@ public struct InputRouter: Sendable {
             guard !seq.isEmpty else { return .refused(reason: "empty sequence") }
             return .rawText(pane: pane, seq)
 
-        case (.key(let k), _):
+        case (.key(let k), .rawKeys):
+            // A shell / TUI pane has no agent, so `agent.send_keys` (the `.keys`
+            // path) would be rejected `agent_not_found`. Deliver the key as its raw
+            // terminal byte sequence via `pane.send_text` instead — the same path
+            // the `^C` / Shift+Tab caps already use — so Return, arrows, esc, etc.
+            // reach the PTY. See herdrup #157 follow-up.
+            guard let bytes = Self.keyBytes(for: k) else {
+                return .refused(reason: "unsupported key \(k)")
+            }
+            return .rawText(pane: pane, bytes)
+
+        case (.key(let k), .intent):
+            // A named agent takes keys through `agent.send_keys` (dialog navigation),
+            // which the server verifies against the live pane.
             guard let canonical = Self.canonicalKey(k) else {
                 return .refused(reason: "unsupported key \(k)")
             }
             return .keys(pane: pane, [canonical])
+        }
+    }
+
+    /// The terminal byte sequence for an allowed named key, or nil if the name is
+    /// not one we send. Used to deliver a keycap to a pane with no agent (a shell /
+    /// TUI) as raw bytes via `pane.send_text`, since `agent.send_keys` needs an
+    /// agent. Enter is CR (`\r`) — the PTY line discipline turns it into a submit —
+    /// and the cursor/nav keys use the standard xterm sequences.
+    static func keyBytes(for raw: String) -> String? {
+        guard let canonical = canonicalKey(raw) else { return nil }
+        switch canonical {
+        case "Enter": return "\r"
+        case "Escape": return "\u{1b}"
+        case "Tab": return "\t"
+        case "Backspace": return "\u{7f}"
+        case "Space": return " "
+        case "Up": return "\u{1b}[A"
+        case "Down": return "\u{1b}[B"
+        case "Right": return "\u{1b}[C"
+        case "Left": return "\u{1b}[D"
+        case "Home": return "\u{1b}[H"
+        case "End": return "\u{1b}[F"
+        case "PageUp": return "\u{1b}[5~"
+        case "PageDown": return "\u{1b}[6~"
+        default: return nil
         }
     }
 
