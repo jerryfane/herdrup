@@ -912,6 +912,20 @@ struct TerminalHomeView: View {
         let account: CredentialAccount
     }
     @State private var swapCandidate: PendingSwap?
+    /// A pending rename (nil = no sheet). An agent sets its daemon `name` (a resolvable mention
+    /// target — `herdr agent read <name>`); a terminal sets its pane `label` (shown in
+    /// `herdr pane list`) plus the app-local row label. Identifiable so it drives a `.sheet(item:)`.
+    private enum RenameTarget: Identifiable {
+        case agent(AgentRow)
+        case terminal(SavedTerminal)
+        var id: String {
+            switch self {
+            case .agent(let row): return "agent:\(row.info.paneID)"
+            case .terminal(let terminal): return "terminal:\(terminal.id.uuidString)"
+            }
+        }
+    }
+    @State private var renameTarget: RenameTarget?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -1589,6 +1603,59 @@ struct TerminalHomeView: View {
                     "Switches \(cand.row.title) to \(cand.account.label) and restarts it. This interrupts its current turn. The session is reopened with --resume on the new subscription."
                 )
             }
+            .sheet(item: $renameTarget) { target in
+                renameSheet(for: target)
+            }
+        }
+    }
+
+    /// The rename form for an agent or a terminal. Agent names are coerced to the server grammar
+    /// (`AgentName.normalize`) and set daemon-side (`agent.rename`) so they resolve as mention
+    /// targets; the list refreshes via `load()`. Terminal names are free-form and dual-written —
+    /// `pane.rename` (daemon label, visible in `herdr pane list`) plus the app-local row label.
+    @ViewBuilder
+    private func renameSheet(for target: RenameTarget) -> some View {
+        switch target {
+        case .agent(let row):
+            RenameSheet(
+                title: "Rename agent",
+                fieldLabel: "AGENT NAME",
+                placeholder: "e.g. planner",
+                current: row.info.name ?? "",
+                footnote: "Lowercase letters, digits, - and _. Another agent can then read this one by name.",
+                normalize: AgentName.normalize
+            ) { newName in
+                let paneID = row.info.paneID
+                let title = row.title
+                Task {
+                    do {
+                        try await client.renameAgent(target: paneID, name: newName)
+                        await load()
+                    } catch let e {
+                        error = "couldn't rename \(title): \(e)"
+                    }
+                }
+            }
+        case .terminal(let terminal):
+            RenameSheet(
+                title: "Rename terminal",
+                fieldLabel: "TERMINAL NAME",
+                placeholder: "e.g. build logs",
+                current: terminal.label,
+                footnote: "Shows in herdr pane list, so you can tell an agent to check this terminal by name.",
+                normalize: { $0 }
+            ) { newLabel in
+                let paneID = terminal.paneID
+                let id = terminal.id
+                Task {
+                    do {
+                        try await client.renamePane(paneID: paneID, label: newLabel)
+                        terminalsStore.rename(id, to: newLabel)
+                    } catch let e {
+                        error = "couldn't rename terminal: \(e)"
+                    }
+                }
+            }
         }
     }
 
@@ -1717,6 +1784,11 @@ struct TerminalHomeView: View {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
+                        // Rename = set the pane's daemon `label` (shown in `herdr pane list`) so you
+                        // can tell an agent to check this terminal by name, + the app-local row label.
+                        Button {
+                            renameTarget = .terminal(terminal)
+                        } label: { Label("Rename", systemImage: "pencil") }
                         Button(role: .destructive) {
                             Task { await deleteTerminal(terminal) }
                         } label: { Label("Close terminal", systemImage: "xmark.circle") }
@@ -1797,6 +1869,11 @@ struct TerminalHomeView: View {
                                 }
                             }
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
+                        // Rename = set the agent's daemon `name`, which becomes a resolvable
+                        // mention target (another agent can `herdr agent read <name>`).
+                        Button {
+                            renameTarget = .agent(row)
+                        } label: { Label("Rename", systemImage: "pencil") }
                         // Restart = close the agent's session and reopen it with
                         // --resume in place (keeps the pane). It interrupts a busy
                         // agent's turn, so it routes through a confirmation.
@@ -4584,6 +4661,84 @@ struct SettingsView: View {
         copied = true
         // Revert the confirmation so a second copy gives feedback.
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); copied = false }
+    }
+}
+
+/// A single-field rename form (agent name or terminal label), styled like `SavePromptSheet`.
+/// `normalize` coerces the input to the target's grammar — identity for a free-form terminal label,
+/// `AgentName.normalize` for an agent. It applies to the TRIMMED input, so what's shown as "saved as"
+/// is exactly what's sent. The preview line appears only when normalization changes the input (the
+/// agent case), so the user isn't surprised by "Build Logs" → "build-logs". Owns its own field state.
+struct RenameSheet: View {
+    let title: String
+    let fieldLabel: String
+    let placeholder: String
+    let current: String
+    let footnote: String
+    let normalize: (String) -> String
+    var onSave: (String) -> Void
+
+    @State private var value: String
+    @Environment(\.dismiss) private var dismiss
+
+    init(title: String, fieldLabel: String, placeholder: String, current: String, footnote: String,
+         normalize: @escaping (String) -> String, onSave: @escaping (String) -> Void) {
+        self.title = title
+        self.fieldLabel = fieldLabel
+        self.placeholder = placeholder
+        self.current = current
+        self.footnote = footnote
+        self.normalize = normalize
+        self.onSave = onSave
+        _value = State(initialValue: current)
+    }
+
+    private var trimmed: String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var effective: String { normalize(trimmed) }
+    private var canSave: Bool { !trimmed.isEmpty && !effective.isEmpty }
+    private var showPreview: Bool { canSave && effective != trimmed }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(fieldLabel).font(Typography.microLabel).foregroundStyle(Palette.textFaint)
+                            .padding(.leading, 4)
+                        TextField(placeholder, text: $value)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .font(Typography.app(15)).foregroundStyle(Palette.text)
+                            .padding(.horizontal, 16).padding(.vertical, 14)
+                            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                        if showPreview {
+                            Text("Will be saved as \(effective)")
+                                .font(Typography.machine(12)).foregroundStyle(Palette.textDim)
+                                .padding(.leading, 4)
+                        }
+                        Text(footnote).font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 4).padding(.top, 2)
+                        Button {
+                            onSave(effective); dismiss()
+                        } label: {
+                            Text("Save").font(Typography.app(16, .semibold)).foregroundStyle(Palette.ground)
+                                .frame(maxWidth: .infinity).padding(.vertical, 14)
+                                .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
+                        }
+                        .disabled(!canSave).opacity(canSave ? 1 : 0.5).padding(.top, 6)
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(Palette.textDim)
+                }
+            }
+        }
     }
 }
 
