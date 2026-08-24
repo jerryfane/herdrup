@@ -234,6 +234,7 @@ struct RootView: View {
                 client: client,
                 onDisconnect: { disconnect() },
                 host: credentials.host,
+                hostKey: HostKey.canonical(host: credentials.host, port: credentials.port),
                 onReconnect: { reconnect() },
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
@@ -864,6 +865,9 @@ struct TerminalHomeView: View {
     let client: HerdrClient
     var onDisconnect: () -> Void
     var host: String = ""   // shown in the Settings sheet's connection row
+    /// Canonical `host:port` key that scopes saved terminals to THIS connection (a terminal is a pane
+    /// on one daemon). Empty only in the DEBUG mock, which has no real terminals.
+    var hostKey: String = ""
     var onReconnect: () -> Void = {}
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
@@ -1056,7 +1060,7 @@ struct TerminalHomeView: View {
         defer { creatingTerminal = false }
         do {
             let paneID = try await client.splitPane(cwd: nil)
-            let terminal = terminalsStore.add(paneID: paneID)
+            let terminal = terminalsStore.add(paneID: paneID, host: hostKey)
             open(PaneSlot(paneID: paneID, title: terminal.label, agent: nil,
                           initialReply: "", siblings: []))
         } catch let e {
@@ -1073,7 +1077,7 @@ struct TerminalHomeView: View {
         try? await client.closePane(paneID: terminal.paneID)
         if frontID == terminal.paneID { frontID = nil }
         slots.removeAll { $0.paneID == terminal.paneID }
-        terminalsStore.delete(terminal.id)
+        terminalsStore.delete(terminal.id, host: hostKey)
     }
 
     /// Front the pane a tapped push targeted (PushCenter.pendingPaneID), once the agent list has
@@ -1442,6 +1446,12 @@ struct TerminalHomeView: View {
             guard await client.probeFork() == .notFork else { return }
             if activeCover == nil { showForkNotice = true } else { pendingForkNotice = true }
         }
+        // One-time: fold any pre-per-host (global) terminal list into THIS host on first connect, so
+        // the owner keeps their named terminals on their main box. Idempotent — a no-op after the
+        // first migration and when there's nothing legacy pending.
+        .task(id: hostKey) {
+            if !hostKey.isEmpty { terminalsStore.migrateLegacyIfNeeded(host: hostKey) }
+        }
         // First launch: show the gestures tutorial once — but NOT over a pending push
         // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
         // the pane, wasting the one-shot). Burn the seen-flag ONLY when we present.
@@ -1650,7 +1660,7 @@ struct TerminalHomeView: View {
                 Task {
                     do {
                         try await client.renamePane(paneID: paneID, label: newLabel)
-                        terminalsStore.rename(id, to: newLabel)
+                        terminalsStore.rename(id, to: newLabel, host: hostKey)
                     } catch let e {
                         error = "couldn't rename terminal: \(e)"
                     }
@@ -1737,7 +1747,7 @@ struct TerminalHomeView: View {
                     // Terminals sit BELOW the herd and only when you have some — agents
                     // are the priority. Open one from the header's terminal button.
                     // Hidden during an agent search (that filters agents, not shells).
-                    if search.isEmpty && !terminalsStore.terminals.isEmpty {
+                    if search.isEmpty && !terminalsStore.terminals(host: hostKey).isEmpty {
                         terminalsSection
                     }
                 }
@@ -1764,7 +1774,7 @@ struct TerminalHomeView: View {
                     // Count shown when collapsed (so the tally is legible while shut);
                     // expanded, the rows speak for themselves.
                     Text(terminalsCollapsed
-                        ? "TERMINALS · \(terminalsStore.terminals.count)" : "TERMINALS")
+                        ? "TERMINALS · \(terminalsStore.terminals(host: hostKey).count)" : "TERMINALS")
                         .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
                     Image(systemName: terminalsCollapsed ? "chevron.right" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
@@ -1775,7 +1785,7 @@ struct TerminalHomeView: View {
             .padding(.horizontal, 16).padding(.top, 10)
 
             if !terminalsCollapsed {
-                ForEach(terminalsStore.terminals) { terminal in
+                ForEach(terminalsStore.terminals(host: hostKey)) { terminal in
                     Button {
                         open(PaneSlot(paneID: terminal.paneID, title: terminal.label, agent: nil,
                                       initialReply: "", siblings: []))
