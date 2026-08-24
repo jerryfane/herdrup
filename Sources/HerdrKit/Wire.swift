@@ -603,12 +603,14 @@ public struct PanePtySize: Decodable, Sendable, Equatable {
 /// nil when nothing is staged. Mirrors `ResponseResult::StagedUpdate`
 /// (`src/api/schema/response.rs`); the internally-tagged `type` key is ignored on decode.
 ///
-/// Note: the running daemon reports only a version string (no sha), and the version is static
-/// across commits, so "an update is available" is exactly `staged != nil` — the build step only
-/// writes a manifest for a genuinely newer build and the daemon clears it once applied.
+/// The version string is static across commits (`0.8.0`), so `runningSha` — the running binary's
+/// short git commit — is what actually identifies the build. An update is available when a build is
+/// staged whose `sha` differs from `runningSha` (see `updateAvailable`). `runningSha` is nil on an
+/// older daemon that predates the sha-reporting change.
 public struct StagedUpdate: Decodable, Sendable, Equatable {
     public let runningVersion: String
     public let runningProtocol: Int
+    public let runningSha: String?
     public let staged: Staged?
 
     /// The pre-staged build the daemon would activate on apply. `path` is intentionally not on the
@@ -623,10 +625,20 @@ public struct StagedUpdate: Decodable, Sendable, Equatable {
         }
     }
 
+    /// True when a staged build exists that differs from what's running. When the daemon reports its
+    /// commit (`runningSha`), require the shas to differ so a stale/equal manifest never shows a
+    /// phantom update; on an older daemon (no `runningSha`) fall back to "a build is staged".
+    public var updateAvailable: Bool {
+        guard let staged else { return false }
+        guard let runningSha else { return true }
+        return staged.sha != runningSha
+    }
+
     enum CodingKeys: String, CodingKey {
         case staged
         case runningVersion = "running_version"
         case runningProtocol = "running_protocol"
+        case runningSha = "running_sha"
     }
 }
 
