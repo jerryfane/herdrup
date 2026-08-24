@@ -645,8 +645,17 @@ struct NewAgentView: View {
     @State private var task: String
     @State private var starting = false
     @State private var errorMessage: String?
+    /// The harnesses actually installed on the connected machine (`agent.kinds`), fetched on appear.
+    /// Empty until loaded, or on a daemon too old to report them — then the static fallback is used.
+    @State private var installedKinds: [String] = []
+    /// The remote folder browser sheet (`fs.list_dir`).
+    @State private var showFolderBrowser = false
 
+    /// Static fallback kinds for a daemon that can't report installed harnesses.
     private static let kinds = ["claude", "codex", "gemini"]
+
+    /// The kinds the picker offers: the installed harnesses, or the static list on an older daemon.
+    private var menuKinds: [String] { installedKinds.isEmpty ? Self.kinds : installedKinds }
 
     init(client: HerdrClient,
          onStarted: @escaping (_ paneID: String, _ name: String, _ task: String) -> Void = { _, _, _ in },
@@ -714,6 +723,21 @@ struct NewAgentView: View {
         // drains, then fires on an unrelated sheet close). Block interactive dismissal
         // mid-spawn — the same invariant the Cancel button's .disabled(starting) holds.
         .interactiveDismissDisabled(starting)
+        // Fetch the machine's installed harnesses so the picker offers only those. `try?` degrades to
+        // the static list on an older daemon (no agent.kinds). Keep the selection valid.
+        .task {
+            let kinds = (try? await client.agentKinds())?.filter { $0.installed }.map(\.kind) ?? []
+            if !kinds.isEmpty {
+                installedKinds = kinds
+                if !kinds.contains(kind) { kind = kinds.first ?? kind }
+            }
+        }
+        // The remote folder browser (fs.list_dir). On pick, fill the folder field.
+        .sheet(isPresented: $showFolderBrowser) {
+            FolderBrowser(client: client, initialPath: trimmedFolder.isEmpty ? nil : trimmedFolder) { picked in
+                folder = picked
+            }
+        }
     }
 
     private var header: some View {
@@ -741,12 +765,18 @@ struct NewAgentView: View {
 
     private var folderRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("Folder").font(Typography.app(15)).foregroundStyle(Palette.textDim)
                 TextField("/root/project", text: $folder)
                     .multilineTextAlignment(.trailing)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(Typography.machine(15)).foregroundStyle(Palette.text)
+                // Browse the machine's folders instead of typing (fs.list_dir). Manual entry stays.
+                Button { showFolderBrowser = true } label: {
+                    Image(systemName: "folder").font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+                .accessibilityLabel("Browse folders")
             }
             .rowShell()
             if !folderValid {
@@ -762,7 +792,7 @@ struct NewAgentView: View {
             Text("Agent").font(Typography.app(15)).foregroundStyle(Palette.textDim)
             Spacer()
             Menu {
-                ForEach(Self.kinds, id: \.self) { k in Button(k) { kind = k } }
+                ForEach(menuKinds, id: \.self) { k in Button(k) { kind = k } }
             } label: {
                 HStack(spacing: 6) {
                     Text(kind).font(Typography.machine(15)).foregroundStyle(Palette.text)
@@ -856,6 +886,133 @@ struct NewAgentView: View {
                 }
             }
         }
+    }
+}
+
+/// A remote folder browser over `fs.list_dir`, for choosing an agent's working directory. Lists the
+/// current directory's SUBFOLDERS (files are hidden — a cwd is a folder), tap to descend, ".." to go
+/// up, "Use this folder" to pick the resolved path. Degrades with a clear message on a daemon that
+/// lacks the method — the caller's manual path field stays available.
+struct FolderBrowser: View {
+    let client: HerdrClient
+    let initialPath: String?
+    let onPick: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var path = ""
+    @State private var dirs: [String] = []
+    @State private var loading = true
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    Text(path.isEmpty ? "…" : path)
+                        .font(Typography.machine(13)).foregroundStyle(Palette.textDim)
+                        .lineLimit(1).truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                    Divider().overlay(Palette.hairlineQuiet)
+                    content
+                    Button { onPick(path); dismiss() } label: {
+                        Text("Use this folder").font(Typography.app(16, .semibold)).foregroundStyle(Palette.ground)
+                            .frame(maxWidth: .infinity).padding(.vertical, 14)
+                            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.text))
+                    }
+                    .disabled(loading || error != nil || path.isEmpty)
+                    .opacity((loading || error != nil || path.isEmpty) ? 0.5 : 1)
+                    .padding(16)
+                }
+            }
+            .navigationTitle("Choose folder")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(Palette.textDim)
+                }
+            }
+            .task { await load(initialPath) }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if loading {
+            VStack { ProgressView().tint(Palette.textDim) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity).padding(.top, 40)
+        } else if let error {
+            VStack(spacing: 8) {
+                Text(error).font(Typography.app(13)).foregroundStyle(Palette.died).multilineTextAlignment(.center)
+                Text("Type a path in the folder field instead.")
+                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding(24)
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
+                    if path != "/" {
+                        folderRow(icon: "arrow.up", label: "..") { Task { await load(parent(of: path)) } }
+                        divider
+                    }
+                    ForEach(dirs, id: \.self) { name in
+                        folderRow(icon: "folder", label: name) { Task { await load(join(path, name)) } }
+                        if name != dirs.last { divider }
+                    }
+                    if dirs.isEmpty {
+                        Text("No subfolders here").font(Typography.app(13)).foregroundStyle(Palette.textFaint)
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    }
+                }
+            }
+        }
+    }
+
+    private func folderRow(icon: String, label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.textDim).frame(width: 22)
+                Text(label).font(Typography.machine(15)).foregroundStyle(Palette.text).lineLimit(1)
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 13).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 16)
+    }
+
+    private func load(_ target: String?) async {
+        loading = true
+        error = nil
+        do {
+            let listing = try await client.listDir(path: target)
+            path = listing.path
+            dirs = listing.entries.filter(\.isDir).map(\.name)
+        } catch let apiError as APIError {
+            // `self.error` — a bare `catch` binds an implicit `error`, so unqualified would shadow.
+            self.error = "Couldn't open that folder (\(apiError.code))."
+        } catch {
+            self.error = "Folder browsing needs the herdr fork updated on this machine."
+        }
+        loading = false
+    }
+
+    /// The parent path, staying absolute (root's parent is root).
+    private func parent(of p: String) -> String {
+        let trimmed = (p != "/" && p.hasSuffix("/")) ? String(p.dropLast()) : p
+        let up = (trimmed as NSString).deletingLastPathComponent
+        return up.isEmpty ? "/" : up
+    }
+
+    private func join(_ base: String, _ name: String) -> String {
+        base == "/" ? "/" + name : base + "/" + name
     }
 }
 

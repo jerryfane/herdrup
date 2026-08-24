@@ -647,3 +647,31 @@ public struct StagedUpdate: Decodable, Sendable, Equatable {
 /// one-shot command socket may instead DROP mid-apply — callers treat both a returned ack and a
 /// transport drop as "restart initiated" and then re-poll `stagedUpdate()`.
 struct OkAck: Decodable, Sendable {}
+
+// MARK: - Folder browsing + agent kinds (fs.list_dir / agent.kinds)
+
+/// Result of `fs.list_dir` (`type: "dir_list"`): the resolved absolute `path` and its entries. The
+/// daemon returns directories first then case-insensitive by name; the app uses `path` to compute a
+/// parent for "up". Mirrors `ResponseResult::DirList`.
+public struct DirListing: Decodable, Sendable, Equatable {
+    public let path: String
+    public let entries: [Entry]
+
+    public struct Entry: Decodable, Sendable, Equatable, Identifiable {
+        public let name: String
+        public let isDir: Bool
+        public var id: String { name }
+        enum CodingKeys: String, CodingKey {
+            case name
+            case isDir = "is_dir"
+        }
+    }
+}
+
+/// One known agent kind and whether its harness binary is installed on the connected machine
+/// (`agent.kinds`). The new-agent picker offers only `installed` kinds.
+public struct AgentKind: Decodable, Sendable, Equatable, Identifiable {
+    public let kind: String
+    public let installed: Bool
+    public var id: String { kind }
+}
