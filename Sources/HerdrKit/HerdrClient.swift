@@ -87,6 +87,36 @@ public actor HerdrClient {
         _ = try await call("server.apply_staged_update", EmptyParams(), as: OkAck.self)
     }
 
+    struct FsListDirParams: Encodable {
+        let path: String?
+        enum CodingKeys: String, CodingKey { case path }
+        // Omit `path` when nil so the daemon defaults to $HOME (rather than sending null).
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(path, forKey: .path)
+        }
+    }
+
+    /// List one directory on the connected machine (`fs.list_dir`), for the new-agent folder browser.
+    /// `path` nil → the daemon's `$HOME`; a leading `~` expands there. Returns the resolved absolute
+    /// path + entries (dirs first). THROWS `APIError` (`not_a_directory`) for a non-directory, and on
+    /// a daemon too old to know the method — callers browsing folders use `try?` to degrade to manual
+    /// path entry.
+    public func listDir(path: String?) async throws -> DirListing {
+        try await call("fs.list_dir", FsListDirParams(path: path), as: DirListing.self)
+    }
+
+    struct AgentKindsResult: Decodable {
+        let kinds: [AgentKind]
+    }
+
+    /// The known agent kinds and whether each harness is installed on the connected machine
+    /// (`agent.kinds`). The new-agent picker offers only the installed ones. THROWS on an older daemon
+    /// lacking the method, so callers `try?`-degrade to a static kind list.
+    public func agentKinds() async throws -> [AgentKind] {
+        try await call("agent.kinds", EmptyParams(), as: AgentKindsResult.self).kinds
+    }
+
     /// The complete pane set, as a value that carries its own provenance.
     ///
     /// `SessionRecovery.observe` takes this rather than `[AgentInfo]` because an
