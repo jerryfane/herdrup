@@ -88,7 +88,7 @@ final class SpeechDictator: ObservableObject {
             guard self.state == .requesting else { return }
             guard granted else {
                 self.state = .denied
-                self.note = "To dictate, enable Microphone and Speech Recognition for Herdrup in Settings."
+                self.note = "To dictate, enable Microphone and Speech Recognition for herdrup in Settings."
                 return
             }
             do {

@@ -1,8 +1,8 @@
-# Herdrup
+# herdrup
 
 **Answer your AI coding agents from your phone.**
 
-Herdrup is an iOS client for [herdr](https://github.com/jerryfane/herdr) — a calm status
+herdrup is an iOS client for [herdr](https://github.com/jerryfane/herdr) — a calm status
 board for the coding agents running on your machine, with a real terminal one tap behind each.
 When an agent needs you, you see it at a glance and can reply from anywhere.
 
@@ -23,7 +23,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
 
 ## Requirements
 
-Herdrup is a client — it talks to a **herdr** daemon running on your own machine over SSH (nothing is
+herdrup is a client — it talks to a **herdr** daemon running on your own machine over SSH (nothing is
 public; it rides your own network). You need the fork that adds the gram / push / live-terminal APIs:
 [**jerryfane/herdr**](https://github.com/jerryfane/herdr). The app tells you if it's talking to a
 daemon that doesn't have them.
