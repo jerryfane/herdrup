@@ -995,9 +995,10 @@ struct FolderBrowser: View {
             path = listing.path
             dirs = listing.entries.filter(\.isDir).map(\.name)
         } catch let apiError as APIError {
-            error = "Couldn't open that folder (\(apiError.code))."
+            // `self.error` — a bare `catch` binds an implicit `error`, so unqualified would shadow.
+            self.error = "Couldn't open that folder (\(apiError.code))."
         } catch {
-            error = "Folder browsing needs the herdr fork updated on this machine."
+            self.error = "Folder browsing needs the herdr fork updated on this machine."
         }
         loading = false
     }
