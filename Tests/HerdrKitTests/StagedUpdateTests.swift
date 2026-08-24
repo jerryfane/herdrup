@@ -62,4 +62,39 @@ final class StagedUpdateTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: ["type": "ok"])
         XCTAssertNoThrow(try JSONDecoder().decode(OkAck.self, from: data))
     }
+
+    /// `running_sha` decodes to `runningSha` — the field that actually identifies the build (version
+    /// is static). Omitted on an older daemon → nil.
+    func testDecodesRunningSha() throws {
+        let withSha = try decodeStaged([
+            "type": "staged_update", "running_version": "0.8.0", "running_protocol": 20,
+            "running_sha": "b3e34990",
+        ])
+        XCTAssertEqual(withSha.runningSha, "b3e34990")
+        let without = try decodeStaged([
+            "type": "staged_update", "running_version": "0.8.0", "running_protocol": 20,
+        ])
+        XCTAssertNil(without.runningSha, "an older daemon omits running_sha")
+    }
+
+    /// `updateAvailable` is the button gate: true only when a staged build differs from what's
+    /// running. Nothing staged → false; a staged sha equal to running → false (no phantom); a
+    /// different staged sha → true; and with no running_sha (older daemon) it falls back to
+    /// "a build is staged".
+    func testUpdateAvailableComparesShas() throws {
+        func make(runningSha: String?, stagedSha: String?) throws -> StagedUpdate {
+            var obj: [String: Any] = [
+                "type": "staged_update", "running_version": "0.8.0", "running_protocol": 20,
+            ]
+            if let runningSha { obj["running_sha"] = runningSha }
+            if let stagedSha {
+                obj["staged"] = ["version": "0.8.0", "sha": stagedSha, "built_at": "2026-08-24T00:00:00Z"]
+            }
+            return try decodeStaged(obj)
+        }
+        XCTAssertFalse(try make(runningSha: "aaa", stagedSha: nil).updateAvailable, "nothing staged → false")
+        XCTAssertFalse(try make(runningSha: "aaa", stagedSha: "aaa").updateAvailable, "same sha → false (no phantom)")
+        XCTAssertTrue(try make(runningSha: "aaa", stagedSha: "bbb").updateAvailable, "different sha → true")
+        XCTAssertTrue(try make(runningSha: nil, stagedSha: "bbb").updateAvailable, "no running_sha → fall back to staged-present")
+    }
 }

@@ -3845,10 +3845,13 @@ struct SettingsView: View {
                         .lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
                 }
-                // The connected daemon's own version (distinct from the app version in the footer).
-                // Only shown once `server.staged_update` has answered — absent on an older daemon.
+                // The connected daemon's own version + commit (distinct from the app version in the
+                // footer). Only shown once `server.staged_update` has answered — absent on an older
+                // daemon. The version is static across commits, so the sha is what identifies the
+                // build; a daemon too old to report it shows just the version.
                 if let running = stagedUpdate?.runningVersion {
-                    Text("herdr daemon \(running)")
+                    Text(stagedUpdate?.runningSha.map { "herdr daemon \(running) · \($0)" }
+                        ?? "herdr daemon \(running)")
                         .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
                 }
             }
@@ -3858,8 +3861,10 @@ struct SettingsView: View {
         }
     }
 
-    /// True when the connected daemon has a newer build staged and ready to activate.
-    private var daemonUpdateAvailable: Bool { stagedUpdate?.staged != nil }
+    /// True when the connected daemon has a newer build staged and ready to activate — a staged
+    /// build whose sha differs from what's running (HerdrKit's `updateAvailable`), so a stale/equal
+    /// manifest never shows a phantom update.
+    private var daemonUpdateAvailable: Bool { stagedUpdate?.updateAvailable ?? false }
 
     /// Shown only when the daemon has a staged self-update: an icon chip + "Update available" + the
     /// staged build's id/date, then an "Update & restart" action (a spinner replaces it while the
