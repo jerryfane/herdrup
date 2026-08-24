@@ -1417,7 +1417,7 @@ struct TerminalHomeView: View {
             // App & About first (owner request), then the config sections. Explicit order
             // rather than `SettingsSection.allCases` so it's local to the sidebar and the
             // enum's declaration order stays untouched.
-            ForEach([SettingsSection.about, .machines, .accounts, .notifications], id: \.self) { section in
+            ForEach([SettingsSection.about, .machines, .accounts, .notifications, .appearance], id: \.self) { section in
                 Button {
                     settingsAnchor = section
                 } label: {
@@ -3293,7 +3293,7 @@ struct TerminalPaneContent: View {
 /// sections (Trouble / Help / Support / About) — rendered INLINE on the iPhone
 /// index, and as a single "App & About" detail on the iPad split.
 enum SettingsSection: Hashable, CaseIterable {
-    case machines, accounts, notifications, about
+    case machines, accounts, notifications, about, appearance
 
     var label: String {
         switch self {
@@ -3301,6 +3301,7 @@ enum SettingsSection: Hashable, CaseIterable {
         case .accounts:      return "Accounts"
         case .notifications: return "Notifications"
         case .about:         return "App & About"
+        case .appearance:    return "Text size"
         }
     }
 
@@ -3310,6 +3311,7 @@ enum SettingsSection: Hashable, CaseIterable {
         case .accounts:      return "key.horizontal"
         case .notifications: return "bell"
         case .about:         return "info.circle"
+        case .appearance:    return "textformat.size"
         }
     }
 }
@@ -3671,6 +3673,15 @@ struct SettingsView: View {
         case .accounts:      accountsDetail(showBack: showBack)
         case .notifications: notificationsDetail(showBack: showBack)
         case .about:         aboutDetail(showBack: showBack)
+        case .appearance:    appearanceDetail(showBack: showBack)
+        }
+    }
+
+    /// iPad/Mac "Text size": the same control the iPhone index shows inline, given its
+    /// own split-view detail so the setting is reachable on regular-width layouts.
+    private func appearanceDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Text size", subtitle: "App & terminal text", showBack: showBack) {
+            appearanceControls
         }
     }
 
@@ -4564,41 +4575,92 @@ struct SettingsView: View {
 
     /// The UI text-size multiplier (same UserDefaults key RootView applies to
     /// `Typography.scale`). Writing it here re-renders the whole app at the new
-    /// size — the terminal is unaffected (it has its own font control).
+    /// size — the terminal is unaffected (it has its own font control below).
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
-    /// "Text size" — scales all app chrome (agents, settings, menus). Especially
-    /// useful on iPad/Mac. Mirrors the terminal's A−/Reset/A+ control style.
+    /// The terminal font size (points), the same app-wide pref the per-agent ⋯ menu
+    /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
+    /// applies the new size in place via its own `@AppStorage` observer).
+    @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+
+    /// "Text size" section for the iPhone index: a heading over the shared controls.
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("TEXT SIZE")
+            appearanceControls
+        }
+    }
+
+    /// The two text-size controls — app chrome scale + terminal font — shared by the
+    /// iPhone inline `appearanceSection` and the iPad/Mac `appearanceDetail`. Both live
+    /// here so the setting reads the same on every layout.
+    @ViewBuilder
+    private var appearanceControls: some View {
+        // App chrome (Typography.scale), 90–140%.
+        textSizeControl(
+            caption: "App text — lists, menus & settings",
+            value: "\(Int((uiFontScale * 100).rounded()))%",
+            preview: { Text("The quick brown fox").font(Typography.app(15)) },
+            canDecrease: uiFontScale > 0.9, onDecrease: { stepFontScale(-0.1) },
+            canReset: uiFontScale != 1.0, onReset: { uiFontScale = 1.0 },
+            canIncrease: uiFontScale < 1.4, onIncrease: { stepFontScale(0.1) }
+        )
+        // Terminal font (terminal.fontSize), 9–24 pt.
+        textSizeControl(
+            caption: "Terminal text — agent output",
+            value: "\(String(format: "%g", terminalFontSize)) pt",
+            preview: { Text("~ $ herdr").font(Typography.machine(15)) },
+            canDecrease: terminalFontSize > 9, onDecrease: { stepTerminalFont(-1) },
+            canReset: terminalFontSize != 12.5, onReset: { terminalFontSize = 12.5 },
+            canIncrease: terminalFontSize < 24, onIncrease: { stepTerminalFont(1) }
+        )
+    }
+
+    /// One labelled text-size control: a caption, a preview + current value, and the
+    /// A−/Reset/A+ button row — the card style the appearance section has always used.
+    private func textSizeControl<P: View>(
+        caption: String,
+        value: String,
+        @ViewBuilder preview: () -> P,
+        canDecrease: Bool, onDecrease: @escaping () -> Void,
+        canReset: Bool, onReset: @escaping () -> Void,
+        canIncrease: Bool, onIncrease: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(caption)
+                .font(Typography.app(12, .semibold)).foregroundStyle(Palette.textFaint)
             VStack(spacing: 0) {
                 HStack {
-                    Text("The quick brown fox")
-                        .font(Typography.app(15)).foregroundStyle(Palette.text).lineLimit(1)
+                    preview().foregroundStyle(Palette.text).lineLimit(1)
                     Spacer(minLength: 8)
-                    Text("\(Int((uiFontScale * 100).rounded()))%")
+                    Text(value)
                         .font(Typography.machine(13, .bold)).foregroundStyle(Palette.textDim)
                 }
                 .padding(.horizontal, 16).padding(.vertical, 14)
                 rowDivider
                 HStack(spacing: 10) {
-                    textSizeButton("A\u{2212}", enabled: uiFontScale > 0.9) { stepFontScale(-0.1) }
-                    textSizeButton("Reset", enabled: uiFontScale != 1.0) { uiFontScale = 1.0 }
-                    textSizeButton("A+", enabled: uiFontScale < 1.4) { stepFontScale(0.1) }
+                    textSizeButton("A\u{2212}", enabled: canDecrease, onDecrease)
+                    textSizeButton("Reset", enabled: canReset, onReset)
+                    textSizeButton("A+", enabled: canIncrease, onIncrease)
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
-            .padding(.horizontal, 16).padding(.top, 10)
         }
+        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     /// Step the UI scale by `delta`, rounded to 0.1 and clamped to [0.9, 1.4].
     private func stepFontScale(_ delta: Double) {
         let next = ((uiFontScale + delta) * 10).rounded() / 10
         uiFontScale = min(1.4, max(0.9, next))
+    }
+
+    /// Step the terminal font by `delta` points, clamped to [9, 24] — matches the
+    /// per-agent ⋯ menu and ⌘± controls.
+    private func stepTerminalFont(_ delta: Double) {
+        terminalFontSize = min(24, max(9, terminalFontSize + delta))
     }
 
     private func textSizeButton(_ title: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
