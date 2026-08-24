@@ -2245,8 +2245,8 @@ struct TerminalHomeView: View {
                 .font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
                 .multilineTextAlignment(.center)
             Text(herdrIncompatibleBuild
-                 ? "Herdrup runs the herdr daemon on your machine over SSH. The herdr on this host can't run the app bridge. It's too old, or isn't the jerryfane/herdr fork. Update or install the fork, then reconnect."
-                 : "Herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
+                 ? "herdrup runs the herdr daemon on your machine over SSH. The herdr on this host can't run the app bridge. It's too old, or isn't the jerryfane/herdr fork. Update or install the fork, then reconnect."
+                 : "herdrup runs the herdr daemon on your machine over SSH. It isn't installed yet. Install the jerryfane/herdr fork, then reconnect.")
                 .font(Typography.app(14)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -4517,7 +4517,7 @@ struct SettingsView: View {
     private var notifyAuthBody: String {
         switch notifyRowState {
         case .denied:
-            return "Herdrup can't send these alerts until you allow notifications in iOS Settings."
+            return "herdrup can't send these alerts until you allow notifications in iOS Settings."
         case .needAllow:
             return "Allow notifications so these alerts can reach you when an agent needs you or a gram arrives."
         case .ok:

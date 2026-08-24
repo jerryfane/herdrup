@@ -123,10 +123,12 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        # Marketed name is Herdrup (App Store / TestFlight); the home-screen label
-        # matches it. The in-app title (ConnectView) reads "herdrup" in the design's
-        # lowercase treatment.
-        CFBundleDisplayName: Herdrup
+        # The name is "herdrup" — all lowercase, everywhere: home-screen label, App
+        # Store / TestFlight, and the in-app title (ConnectView) + version footer.
+        # CFBundleName is set explicitly too (it otherwise resolves to the target
+        # name "Herdr" — the daemon's name, not the app's).
+        CFBundleDisplayName: herdrup
+        CFBundleName: herdrup
         # Names the asset-catalog icon set for the runtime. actool also injects
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
@@ -137,8 +139,8 @@ targets:
         # Voice input (#89): the mic button by the Gram composer and terminal reply bar
         # dictates on-device. Both strings are required or the app crashes the first time
         # it requests the permission.
-        NSMicrophoneUsageDescription: Herdrup uses the microphone only while you hold a dictation session, to turn your speech into text in the message field. Audio is transcribed on-device and never leaves your phone.
-        NSSpeechRecognitionUsageDescription: Herdrup transcribes your dictation into text on-device, so you can talk instead of type. Your speech is not sent anywhere.
+        NSMicrophoneUsageDescription: herdrup uses the microphone only while you hold a dictation session, to turn your speech into text in the message field. Audio is transcribed on-device and never leaves your phone.
+        NSSpeechRecognitionUsageDescription: herdrup transcribes your dictation into text on-device, so you can talk instead of type. Your speech is not sent anywhere.
         # Export compliance: herdr uses ONLY standard, published encryption (AES/SSH
         # via a standard library — no proprietary or custom cryptography), which
         # QUALIFIES FOR THE STANDARD MASS-MARKET EXEMPTION (EAR Category 5 Part 2). So
@@ -271,7 +273,7 @@ targets:
     info:
       path: HerdrWidgets/Info.plist
       properties:
-        CFBundleDisplayName: Herdrup
+        CFBundleDisplayName: herdrup
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:

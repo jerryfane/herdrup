@@ -68,7 +68,7 @@ struct GesturesHelpView: View {
                 Text("Gestures")
                     .font(Typography.app(20, .semibold))
                     .foregroundStyle(Palette.text)
-                Text("How to move around Herdr")
+                Text("How to move around herdrup")
                     .font(Typography.app(12))
                     .foregroundStyle(Palette.textFaint)
             }
