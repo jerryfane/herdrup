@@ -119,6 +119,9 @@ struct GramView: View {
     @State private var openFileTask: Task<Void, Never>?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
+    /// A Gram file downloaded and staged for export through the system document
+    /// picker, so the owner saves it to a real, user-chosen location.
+    @State private var exportFile: ExportFile?
     /// Ids the server has confirmed deleted, kept as tombstones so an in-flight poll
     /// (whose snapshot predates the delete) cannot resurrect the row for a few
     /// seconds. Cleared once the server's own snapshot also omits the id.
@@ -246,6 +249,19 @@ struct GramView: View {
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
         .quickLookPreview($previewURL)
+        // Explicit "Save to Files…" (from a file chip's context menu): export through
+        // the system document picker so the file lands where the owner picks — the real
+        // Finder ~/Documents / ~/Downloads on Mac, the Files picker on iPhone/iPad.
+        // QuickLook's own "Save to Files" resolves to the hidden app-sandbox container
+        // on the Designed-for-iPad Mac build, so saves there appear to vanish.
+        .sheet(item: $exportFile) { export in
+            FileExportPicker(url: export.url) {
+                // asCopy already copied it to the chosen location; drop our temp.
+                try? FileManager.default.removeItem(at: export.dir)
+                exportFile = nil
+            }
+            .ignoresSafeArea()
+        }
         // Received HTML/SVG opens in a dedicated in-app viewer (JavaScript off, all
         // network blocked) rather than QuickLook, which rendered these blank (#92).
         // Done dismisses; Share still lets the owner save the raw file.
@@ -497,6 +513,7 @@ struct GramView: View {
                             saved: s,
                             isDownloadingFile: downloadingFileFor == s.id,
                             onOpenFile: { openFile(id: s.id) },
+                            onSaveFile: { saveFile(id: s.id) },
                             onUnsave: { savedGrams.remove(s.id) }
                         )
                     }
@@ -558,6 +575,7 @@ struct GramView: View {
                             isDownloadingFile: downloadingFileFor == message.id,
                             isSaved: savedGrams.isSaved(message.id),
                             onOpenFile: { openFile(id: message.id) },
+                            onSaveFile: { saveFile(id: message.id) },
                             onToggleSave: { savedGrams.toggle(message) },
                             onDelete: { delete(message) }
                         )
@@ -1226,6 +1244,34 @@ struct GramView: View {
         }
     }
 
+    /// Download a file and hand it to the system document-export picker, which saves it
+    /// to a real, user-chosen location (Finder ~/Documents / ~/Downloads on Mac, Files
+    /// on iOS). Unlike QuickLook's "Save to Files", this does not land in the hidden
+    /// app-sandbox container on Mac, so the saved file is where the owner expects it.
+    private func saveFile(id: String) {
+        guard downloadingFileFor == nil else { return }
+        downloadingFileFor = id
+        Task {
+            defer { downloadingFileFor = nil }
+            do {
+                let (name, _, data) = try await client.gramGetFile(id: id)
+                if Task.isCancelled { return }
+                // A per-export temp dir so the file keeps its real name (the picker uses
+                // the file's own name) without colliding with the preview temp file.
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let fileURL = dir.appendingPathComponent(Self.safeTempFileName(name))
+                try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+                exportFile = ExportFile(url: fileURL, dir: dir)
+            } catch let error as APIError {
+                sendError = "Couldn't save the file: \(error.message)"
+            } catch {
+                sendError = "Couldn't save the file."
+            }
+        }
+    }
+
     /// Reduce a server-supplied file name to a safe single path component for the
     /// temp directory: strip any directory parts and reject `.`/`..`.
     private static func safeTempFileName(_ name: String) -> String {
@@ -1328,11 +1374,45 @@ struct GramView: View {
 
 /// One message row. Agent->owner shows the sender's identity chip; owner->agent
 /// shows the recipient and the claim state of a queued item.
+/// A Gram file staged for export, plus the temp dir holding it (removed once the
+/// export picker finishes copying it to the chosen location).
+private struct ExportFile: Identifiable {
+    let id = UUID()
+    let url: URL
+    let dir: URL
+}
+
+/// Wraps `UIDocumentPickerViewController(forExporting:asCopy:)` so a downloaded Gram
+/// file saves to a real, user-chosen location — the Finder save panel (real
+/// ~/Documents / ~/Downloads) on Mac, the Files picker on iPhone/iPad. QuickLook's
+/// built-in "Save to Files" maps "Documents" to the hidden app-sandbox container on
+/// the Designed-for-iPad Mac build, which is why saved files seem to disappear.
+private struct FileExportPicker: UIViewControllerRepresentable {
+    let url: URL
+    let onFinish: () -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        picker.delegate = context.coordinator
+        return picker
+    }
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(onFinish: onFinish) }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onFinish: () -> Void
+        init(onFinish: @escaping () -> Void) { self.onFinish = onFinish }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { onFinish() }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { onFinish() }
+    }
+}
+
 private struct GramRow: View {
     let message: GramMessage
     var isDownloadingFile: Bool
     var isSaved: Bool
     var onOpenFile: () -> Void
+    var onSaveFile: () -> Void
     var onToggleSave: () -> Void
     var onDelete: () -> Void
 
@@ -1435,6 +1515,10 @@ private struct GramRow: View {
         }
         .buttonStyle(.plain)
         .disabled(isDownloadingFile)
+        .contextMenu {
+            Button { onOpenFile() } label: { Label("Open", systemImage: "eye") }
+            Button { onSaveFile() } label: { Label("Save to Files…", systemImage: "square.and.arrow.down") }
+        }
         .padding(.top, 2)
     }
 
