@@ -105,6 +105,7 @@ struct SavedGramRow: View {
     let saved: SavedGram
     var isDownloadingFile: Bool
     var onOpenFile: () -> Void
+    var onSaveFile: () -> Void
     var onUnsave: () -> Void
 
     var body: some View {
@@ -169,6 +170,10 @@ struct SavedGramRow: View {
         }
         .buttonStyle(.plain)
         .disabled(isDownloadingFile)
+        .contextMenu {
+            Button { onOpenFile() } label: { Label("Open", systemImage: "eye") }
+            Button { onSaveFile() } label: { Label("Save to Files…", systemImage: "square.and.arrow.down") }
+        }
         .padding(.top, 2)
     }
 
