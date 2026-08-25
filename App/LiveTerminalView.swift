@@ -226,6 +226,16 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Guards the one-time scrollback-cap raise + history prepend to the FIRST reset only.
         private var didSeedOnce = false
 
+        /// Strips terminal graphics escape strings (kitty APC, high-volume DCS) from the raw PTY
+        /// bytes before they reach SwiftTerm, which crash-loops on them (#170). Stateful — a graphics
+        /// string spans stream chunks — so it is carried across `.data`/`.reset` feeds and reset at
+        /// each keyframe. Only stream bytes go through it; app-generated notices are already safe.
+        private var graphicsFilter = TerminalGraphicsFilter()
+        private func feedFiltered(_ data: Data, into view: TerminalView) {
+            let clean = graphicsFilter.filter([UInt8](data)[...])
+            if !clean.isEmpty { view.feed(byteArray: clean[...]) }
+        }
+
         /// Auto-reconnect. `reconnectAttempts` drives capped exponential backoff (reset once a
         /// fresh stream delivers a real `.reset`, i.e. it genuinely re-established). `lastStreamActivity`
         /// feeds the heartbeat watchdog: the server pings every 20s (`PING_INTERVAL`), so a long
@@ -731,6 +741,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
                     reconnectAttempts = 0   // a full keyframe = the stream genuinely (re)established
+                    graphicsFilter.reset()  // fresh screen: abandon any graphics string split before this keyframe
                     let firstReset = !didSeedOnce
                     if firstReset {
                         didSeedOnce = true
@@ -756,7 +767,8 @@ struct LiveTerminalView: UIViewRepresentable {
                         // erase can't tint the rows the seed does not repaint.
                         let history = await backfillTask?.value ?? nil
                         if let history, !history.isEmpty, !stopped {
-                            view.feed(byteArray: history[...])
+                            let cleanHistory = graphicsFilter.filter(history[...])   // backfill can carry graphics too
+                            if !cleanHistory.isEmpty { view.feed(byteArray: cleanHistory[...]) }
                             view.feed(byteArray: [UInt8]("\u{1b}[0m".utf8)[...])
                         }
                     }
@@ -764,9 +776,9 @@ struct LiveTerminalView: UIViewRepresentable {
                     // then paint the full-screen seed. `lagged` resets seed identically (the server
                     // already collapsed the backlog into this keyframe).
                     view.feed(byteArray: Self.clearSequence[...])
-                    if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    if !data.isEmpty { feedFiltered(data, into: view) }
                 case .data(_, _, let data):
-                    if !data.isEmpty { view.feed(byteArray: [UInt8](data)[...]) }
+                    if !data.isEmpty { feedFiltered(data, into: view) }
                 case .resize(_, _, let cols, let rows):
                     resizeEmulator(cols: cols, rows: rows, in: view)
                 case .ping:
