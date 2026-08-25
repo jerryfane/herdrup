@@ -1306,6 +1306,7 @@ struct TerminalHomeView: View {
     /// those sections). Reuses the SAME views + terminal machinery as the phone layout — only the
     /// arrangement differs. iPhone / narrow width keeps the tab-bar-with-terminal-over layout.
     private var iPadLayout: some View {
+        agentActions(
         NavigationSplitView(columnVisibility: $columnVisibility) {
             ZStack {
                 Palette.ground.ignoresSafeArea()
@@ -1383,6 +1384,7 @@ struct TerminalHomeView: View {
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
         }
+        )
     }
 
     /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
@@ -1687,29 +1689,14 @@ struct TerminalHomeView: View {
     /// spinner / error). It carries the connect lifecycle — load, fork-probe, the
     /// first-run gestures tutorial, and the push deep-link hooks. Terminal is not a
     /// tab; it fronts a keep-mounted pane over the whole TabView.
-    private var agentsTab: some View {
-        NavigationStack {
-            ZStack {
-                Palette.ground.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    header
-                    if let error {
-                        errorView(error)
-                    } else if loading && agents.isEmpty {
-                        // Spinner ONLY on a genuine first load (or after reconnect clears
-                        // `agents`). A re-entry with data in hand refreshes silently rather
-                        // than blanking the still-valid list to a spinner.
-                        Spacer(); ProgressView().tint(Palette.textDim); Spacer()
-                    } else {
-                        agentList
-                    }
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            // Hide the tab bar while a terminal is fronted so the pane is truly
-            // full-screen (the pane overlay covers it too; this animates it away and
-            // guards against the bar drawing over the overlay on some iOS versions).
-            .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
+    /// The per-agent action presenters — the Restart / Swap-subscription confirmation dialogs and the
+    /// Rename sheet — applied to BOTH `agentsTab` (iPhone) and `iPadLayout` (iPad/Mac). The shared
+    /// `agentList` context menus set `restartCandidate` / `swapCandidate` / `renameTarget`; these
+    /// presenters used to live only on the iPhone tab, so on iPad and Mac the menu actions set state
+    /// nothing observed and rename/restart/swap were silent no-ops.
+    @ViewBuilder
+    private func agentActions<Content: View>(_ content: Content) -> some View {
+        content
             .confirmationDialog(
                 "Restart agent?",
                 isPresented: Binding(
@@ -1726,10 +1713,6 @@ struct TerminalHomeView: View {
                             try await client.restartAgent(target: target)
                             await load()
                         } catch let e {
-                            // Interpolate the APIError directly ("code: message",
-                            // via CustomStringConvertible) — `.localizedDescription`
-                            // bridges through NSError to a useless generic string,
-                            // hiding the daemon's `no_resumable_session`.
                             error = "couldn't restart \(title): \(e)"
                         }
                     }
@@ -1757,9 +1740,6 @@ struct TerminalHomeView: View {
                             try await client.restartAgent(target: target, account: accountID)
                             await load()
                         } catch let e {
-                            // `\(e)` surfaces the APIError's "code: message"
-                            // (CustomStringConvertible); `.localizedDescription`
-                            // would bridge to a useless generic NSError string.
                             error = "couldn't swap \(title): \(e)"
                         }
                     }
@@ -1773,7 +1753,34 @@ struct TerminalHomeView: View {
             .sheet(item: $renameTarget) { target in
                 renameSheet(for: target)
             }
+    }
+
+    private var agentsTab: some View {
+        agentActions(
+            NavigationStack {
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    header
+                    if let error {
+                        errorView(error)
+                    } else if loading && agents.isEmpty {
+                        // Spinner ONLY on a genuine first load (or after reconnect clears
+                        // `agents`). A re-entry with data in hand refreshes silently rather
+                        // than blanking the still-valid list to a spinner.
+                        Spacer(); ProgressView().tint(Palette.textDim); Spacer()
+                    } else {
+                        agentList
+                    }
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            // Hide the tab bar while a terminal is fronted so the pane is truly
+            // full-screen (the pane overlay covers it too; this animates it away and
+            // guards against the bar drawing over the overlay on some iOS versions).
+            .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
         }
+        )
     }
 
     /// The rename form for an agent or a terminal. Agent names are coerced to the server grammar
