@@ -40,6 +40,22 @@ struct FederationSetupView: View {
     endpoint = "ssh://user@mac-studio"
     """
 
+    /// The whole guide as a paste-ready instruction for an agent — built from the SAME config snippet
+    /// shown above so the on-screen steps and the copied text can never drift. Handed to
+    /// `CopyForAgentButton`; the owner pastes it to an agent to have the machine added for them.
+    static let agentPrompt = """
+    Add another machine to my herd so its agents show up in the herdr app, and walk me through each step as you do it.
+
+    1. Install the jerryfane/herdr fork on the machine — it has the api-bridge my home box connects through (official herdr does not).
+    2. Put it on my network: join it to my Tailscale tailnet (or any address my home box can reach) and authorize my home box's SSH key on it.
+    3. Add it as a peer in ~/.config/herdr/config.toml:
+    \(Self.configSnippet)
+    4. Apply it with no restart:
+    herdr server reload-config
+
+    First ask me the machine's alias and its ssh user@host (Tailscale IP or name), then carry it out and tell me the exact steps and commands you ran.
+    """
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -149,8 +165,9 @@ struct FederationSetupView: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
-            // Primary action: send them to the fork's install instructions (step 1),
-            // reusing the one shared install link the fork notice uses.
+            CopyForAgentButton(prompt: Self.agentPrompt)
+            // Send them to the fork's install instructions (step 1), reusing the one
+            // shared install link the fork notice uses.
             InstallInstructionsLink()
             Button(action: onClose) {
                 Text("Got it")
