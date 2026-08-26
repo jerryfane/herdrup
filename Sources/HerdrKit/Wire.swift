@@ -73,6 +73,16 @@ public struct CompletedTurn: Decodable, Equatable, Sendable {
     }
 }
 
+/// The `archived { at, by, reason }` provenance the daemon surfaces on an archived
+/// agent in `agent.list` (issue #173). Its PRESENCE on an `AgentInfo` is the
+/// load-bearing "this agent is archived" signal; absent means active. Decoded
+/// leniently (at/by optional) so a partial record never fails the whole list.
+public struct AgentArchivedInfo: Decodable, Equatable, Sendable {
+    public let at: String?
+    public let by: String?
+    public let reason: String?
+}
+
 public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let agent: String?
     public let agentStatus: String?
@@ -110,8 +120,15 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let machineID: String?
     public let reachability: String?
     public let lastKnownStatus: String?
+    /// Present only for an archived agent (issue #173). Its presence is the
+    /// load-bearing "is archived" signal; absent means active. Decoded leniently,
+    /// so an older/non-archiving server is unaffected.
+    public let archived: AgentArchivedInfo?
 
     public var id: String { paneID }
+
+    /// This agent has been archived (its pane released, session preserved).
+    public var isArchived: Bool { archived != nil }
 
     /// Human label for a pane, preferring the agent's assigned name.
     public var displayName: String {
@@ -132,7 +149,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public var isUnreachable: Bool { reachability == "unreachable" }
 
     enum CodingKeys: String, CodingKey {
-        case agent, name, composer, revision, turn, cwd, focused, reachability
+        case agent, name, composer, revision, turn, cwd, focused, reachability, archived
         case agentStatus = "agent_status"
         case inputPending = "input_pending"
         case inputPromptKind = "input_prompt_kind"

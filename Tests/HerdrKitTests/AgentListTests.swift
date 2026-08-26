@@ -9,14 +9,49 @@ final class AgentListTests: XCTestCase {
     /// path the wire does. Constructing it in memory would let a test pass while
     /// the JSON key was wrong.
     private func agent(
-        pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil
+        pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
+        archivedBy: String? = nil, archivedAt: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
+        if let archivedBy {
+            obj["archived"] = ["at": archivedAt ?? "2026-08-26T18:00:00Z", "by": archivedBy]
+        }
         let data = try JSONSerialization.data(withJSONObject: obj)
         return try JSONDecoder().decode(AgentInfo.self, from: data)
+    }
+
+    // MARK: - archived agents (issue #173)
+
+    /// The `archived` block decodes through the wire path and drives `isArchived`.
+    /// An agent with no block is active. Building the JSON keeps the keys honest.
+    func testArchivedBlockDecodesAndDrivesIsArchived() throws {
+        let archived = try agent(pane: "p1", status: "idle", name: "huurjacht",
+                                 archivedBy: "jerry", archivedAt: "2026-08-26T18:00:00Z")
+        XCTAssertTrue(archived.isArchived)
+        XCTAssertEqual(archived.archived?.by, "jerry")
+        XCTAssertEqual(archived.archived?.at, "2026-08-26T18:00:00Z")
+        let active = try agent(pane: "p2", status: "idle")
+        XCTAssertFalse(active.isArchived)
+        XCTAssertNil(active.archived)
+    }
+
+    /// Archived agents are pulled OUT of the live status sections and collected in
+    /// `archived` (most-recently-archived first), and never counted toward needsYou.
+    func testArchivedAgentsPartitionOutOfLiveSections() throws {
+        let list = AgentList(agents: [
+            try agent(pane: "p1", status: "blocked"),                                  // live, needsYou
+            try agent(pane: "p2", status: "idle", name: "old", archivedBy: "a", archivedAt: "2026-08-26T10:00:00Z"),
+            try agent(pane: "p3", status: "idle", name: "new", archivedBy: "b", archivedAt: "2026-08-26T20:00:00Z"),
+        ])
+        // Live sections/rows exclude the two archived agents.
+        XCTAssertEqual(list.rows.map(\.info.paneID), ["p1"])
+        XCTAssertFalse(list.rows.contains { $0.info.isArchived })
+        XCTAssertEqual(list.needsYouCount, 1)
+        // Archived collected separately, most-recently-archived first.
+        XCTAssertEqual(list.archived.map(\.info.paneID), ["p3", "p2"])
     }
 
     /// Within a group, order is most-recently-active first (largest

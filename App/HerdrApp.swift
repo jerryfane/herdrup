@@ -1163,6 +1163,9 @@ struct TerminalHomeView: View {
     /// The Terminals section starts collapsed like the idle agents — a compact header row
     /// (TERMINALS · N) the reader expands on demand, so it never competes with the herd.
     @State private var terminalsCollapsed = true
+    /// The Archived section (issue #173) starts collapsed too — archived agents are
+    /// the least-active thing on screen, so they stay tucked behind an ARCHIVED · N row.
+    @State private var archivedCollapsed = true
 
     /// The whole list derived from the current agents + census. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -1908,6 +1911,11 @@ struct TerminalHomeView: View {
                             sectionView(section.group, section.rows)
                         }
                     }
+                    // Archived agents sit below the live herd (above terminals) and only
+                    // when there are some. Hidden during a search (that filters live agents).
+                    if search.isEmpty && !fullList.archived.isEmpty {
+                        archivedSection
+                    }
                     // Terminals sit BELOW the herd and only when you have some — agents
                     // are the priority. Open one from the header's terminal button.
                     // Hidden during an agent search (that filters agents, not shells).
@@ -1970,6 +1978,94 @@ struct TerminalHomeView: View {
                 }
             }
         }
+    }
+
+    // MARK: archived
+
+    /// The Archived section (issue #173): agents whose pane was released but whose
+    /// session the daemon preserved, so they can be resumed. Collapsed by default and
+    /// pinned at the bottom (below agents, above terminals) — an archived agent needs
+    /// nothing from you. Structurally mirrors `terminalsSection`. Long-press a row to
+    /// Unarchive (resume it into a fresh pane). Archived rows are NOT tappable to a
+    /// terminal — there is no live pane to open.
+    private var archivedSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                archivedCollapsed.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(archivedCollapsed
+                        ? "ARCHIVED · \(fullList.archived.count)" : "ARCHIVED")
+                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                    Image(systemName: archivedCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                    Rectangle().fill(Palette.hairline).frame(height: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16).padding(.top, 10)
+
+            if !archivedCollapsed {
+                ForEach(fullList.archived) { row in
+                    archivedCard(row)
+                        .contextMenu {
+                            // Unarchive = resume the preserved session into a fresh pane,
+                            // restoring the agent's identity. Target by name (or terminal id)
+                            // since the pane id no longer resolves once archived.
+                            Button {
+                                Task {
+                                    do {
+                                        try await client.unarchiveAgent(target: unarchiveTarget(row.info))
+                                        await load()
+                                    } catch let e {
+                                        error = "couldn't unarchive \(row.title): \(e)"
+                                    }
+                                }
+                            } label: { Label("Unarchive", systemImage: "arrow.uturn.up") }
+                        }
+                }
+            }
+        }
+    }
+
+    /// The unarchive target: an archived agent's pane id is released, so resolve it by
+    /// name, falling back to the terminal id, then pane id.
+    private func unarchiveTarget(_ info: AgentInfo) -> String {
+        info.name ?? info.terminalID ?? info.paneID
+    }
+
+    /// A dimmed agent card for the Archived section: same shape as `card`, an archive
+    /// glyph instead of the live status badge, and provenance ("archived by X · reason")
+    /// as the subtitle.
+    private func archivedCard(_ row: AgentRow) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
+                    .frame(width: 40, height: 40).opacity(0.5)
+                Image(systemName: "archivebox.fill")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.textDim)
+                Text(archivedSubtitle(row.info))
+                    .font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+        }
+        .padding(12)
+        .background(Palette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    /// "archived by X · reason" from the `archived` provenance block; degrades to
+    /// "archived" when the daemon didn't record a `by`.
+    private func archivedSubtitle(_ info: AgentInfo) -> String {
+        let by = (info.archived?.by).map { "archived by \($0)" } ?? "archived"
+        if let reason = info.archived?.reason, !reason.isEmpty { return "\(by) · \(reason)" }
+        return by
     }
 
     private func terminalCard(_ terminal: SavedTerminal) -> some View {
@@ -2076,6 +2172,21 @@ struct TerminalHomeView: View {
                                 }
                             } label: { Label("Swap subscription", systemImage: "arrow.left.arrow.right") }
                         }
+                        // Archive = release the pane but PRESERVE the session so it can be
+                        // resumed later (`agent.archive`, issue #173). Reversible via the
+                        // Archived section's Unarchive, so it fires directly (no confirm).
+                        // The daemon REJECTS archiving a mid-turn agent unless forced, so a
+                        // working agent surfaces that error rather than being torn off a turn.
+                        Button {
+                            Task {
+                                do {
+                                    try await client.archiveAgent(target: row.info.paneID)
+                                    await load()
+                                } catch let e {
+                                    error = "couldn't archive \(row.title): \(e)"
+                                }
+                            }
+                        } label: { Label("Archive", systemImage: "archivebox") }
                     }
                 }
             }
@@ -5207,7 +5318,8 @@ struct MockTransport: HerdrTransport {
       {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold"},
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
       {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
-      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"}
+      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
+      {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
     ]}}
     """#
 
