@@ -51,6 +51,23 @@ struct AccountsSetupView: View {
     config_dir = "/root/.codex-work"
     """
 
+    /// The whole guide as a paste-ready instruction for an agent — built from the SAME command snippets
+    /// shown above so the on-screen steps and the copied text can never drift. Handed to
+    /// `CopyForAgentButton`; the owner pastes it to an agent to have the setup done for them.
+    static let agentPrompt = """
+    Set up another subscription (account) on my herdr home box so it shows up in the herdr app, and walk me through each step as you do it.
+
+    1. Make a config-home folder for the account (one folder per account keeps their logins separate), e.g. ~/.codex-work or ~/.claude-2.
+    2. Log in pointed at that folder — this writes the login into the folder, not the default one:
+    \(Self.loginSnippet)
+    3. Register it in ~/.config/herdr/config.toml with an [[accounts]] block:
+    \(Self.configSnippet)
+    4. Apply it with no restart:
+    herdr server reload-config
+
+    First ask me which harness (codex / claude / kimi) and what label I want, then carry it out and tell me the exact steps and commands you ran.
+    """
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -139,12 +156,15 @@ struct AccountsSetupView: View {
     }
 
     private var footer: some View {
-        Button(action: onClose) {
-            Text("Got it")
-                .font(Typography.app(15, .semibold))
-                .foregroundStyle(Palette.textDim)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
+        VStack(spacing: 8) {
+            CopyForAgentButton(prompt: Self.agentPrompt)
+            Button(action: onClose) {
+                Text("Got it")
+                    .font(Typography.app(15, .semibold))
+                    .foregroundStyle(Palette.textDim)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
