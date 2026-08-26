@@ -157,6 +157,12 @@ public struct AgentList: Equatable, Sendable {
     /// omitted; the screen renders no heading for a section with nothing in it.
     public let sections: [(group: AgentGroup, rows: [AgentRow])]
 
+    /// Archived agents (issue #173), kept OUT of the live status sections and out
+    /// of `rows`/`needsYouCount`/`isQuiet` entirely — an archived agent needs
+    /// nothing from you. Rendered in the screen's own collapsed "Archived" section,
+    /// most-recently-archived first.
+    public let archived: [AgentRow]
+
     /// What the top of the screen says. Counts only positively-blocked agents —
     /// an unrecognised status is surfaced by its own section, and inflating this
     /// number with maybes would make the one number on the screen untrustworthy.
@@ -174,7 +180,9 @@ public struct AgentList: Equatable, Sendable {
         !rows.contains { $0.group == .needsYou || $0.group == .unrecognised }
     }
 
-    public static func == (a: AgentList, b: AgentList) -> Bool { a.rows == b.rows }
+    public static func == (a: AgentList, b: AgentList) -> Bool {
+        a.rows == b.rows && a.archived == b.archived
+    }
 
     /// Builds the list from an `agent.list` response.
     ///
@@ -184,7 +192,15 @@ public struct AgentList: Equatable, Sendable {
     /// reading, since inferring death from missing evidence would mark every
     /// agent stopped the moment a census failed to arrive.
     public init(agents: [AgentInfo], livePaneIDs: Set<String>? = nil) {
-        let rows = agents.map { info in
+        // Archived agents are pulled out first: they never appear in a live status
+        // section and never count toward "needs you" / quiet. A released pane is not
+        // "live", so they carry isLive = false; their own section renders them.
+        let archivedInfos = agents.filter { $0.isArchived }
+        let liveInfos = agents.filter { !$0.isArchived }
+        self.archived = archivedInfos
+            .map { AgentRow(info: $0, isLive: false) }
+            .sorted { ($0.info.archived?.at ?? "") > ($1.info.archived?.at ?? "") }
+        let rows = liveInfos.map { info in
             AgentRow(info: info, isLive: livePaneIDs.map { $0.contains(info.paneID) } ?? true)
         }
         // Group order first (the screen's primary signal — "does anything need me").

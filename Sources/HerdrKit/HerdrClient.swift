@@ -648,6 +648,64 @@ public actor HerdrClient {
             .agent
     }
 
+    /// `agent.archive` params. `reason`/`force` are OMITTED when nil/false so a plain
+    /// archive sends `{ target }` and matches the server's optional/skip-if-none.
+    struct AgentArchiveParams: Encodable {
+        let target: String
+        let reason: String?
+        let force: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case target, reason, force
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(target, forKey: .target)
+            try container.encodeIfPresent(reason, forKey: .reason)
+            if force { try container.encode(true, forKey: .force) }
+        }
+    }
+
+    /// Archives an agent (`agent.archive`, issue #173): the daemon releases its pane
+    /// but preserves the session ref so `agent.unarchive` can resume it later. `target`
+    /// is the pane id (or agent name). The server REJECTS archiving an agent that is
+    /// mid-turn unless `force` — that surfaces as an `APIError` the caller shows.
+    /// Returns the archived agent (its `archived` block now set).
+    @discardableResult
+    public func archiveAgent(target: String, reason: String? = nil, force: Bool = false) async throws -> AgentInfo {
+        try await call("agent.archive", AgentArchiveParams(target: target, reason: reason, force: force),
+                       as: AgentInfoResult.self)
+            .agent
+    }
+
+    /// `agent.unarchive` params. `fresh` (start a clean agent instead of resuming the
+    /// preserved session) is OMITTED when false.
+    struct AgentUnarchiveParams: Encodable {
+        let target: String
+        let fresh: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case target, fresh
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(target, forKey: .target)
+            if fresh { try container.encode(true, forKey: .fresh) }
+        }
+    }
+
+    /// Unarchives an agent (`agent.unarchive`, issue #173): resumes the preserved
+    /// session into a fresh pane, restoring the agent's terminal identity. `target` is
+    /// the archived agent's name or terminal id. Returns the resumed agent.
+    @discardableResult
+    public func unarchiveAgent(target: String, fresh: Bool = false) async throws -> AgentInfo {
+        try await call("agent.unarchive", AgentUnarchiveParams(target: target, fresh: fresh),
+                       as: AgentInfoResult.self)
+            .agent
+    }
+
     struct PaneRenameParams: Encodable {
         let paneID: String
         let label: String

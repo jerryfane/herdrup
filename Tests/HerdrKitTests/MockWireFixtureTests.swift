@@ -39,7 +39,8 @@ final class MockWireFixtureTests: XCTestCase {
     func testMockAgentListDecodesRealisticStatuses() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let agents = try await client.agentList()
-        XCTAssertEqual(agents.count, 8, "mock agent.list did not decode to 8 agents")
+        XCTAssertEqual(agents.count, 9, "mock agent.list did not decode to 9 agents (8 live + 1 archived)")
+        XCTAssertEqual(agents.filter { $0.isArchived }.count, 1, "one fixture agent carries an archived block")
         XCTAssertEqual(agents.first?.paneID, "w1:p1")
         XCTAssertEqual(agents.first?.displayName, "jarvis",
                        "the card headlines the assigned name; fixtures must carry distinct names")
@@ -77,6 +78,11 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(counts[.working], 1)
         XCTAssertEqual(counts[.idle], 4, "the done agent should fold into idle, making IDLE · 4")
         XCTAssertEqual(list.needsYouCount, 2, "header would show the wrong 'N need you'")
+        // The archived fixture agent is partitioned OUT of the live sections (which still
+        // sum to 8) and into its own collapsed section.
+        XCTAssertEqual(list.rows.count, 8, "archived agents must not inflate the live rows")
+        XCTAssertEqual(list.archived.count, 1, "the archived fixture agent lands in the Archived section")
+        XCTAssertEqual(list.archived.first?.info.name, "huurjacht")
 
         // STOPPED must come from liveness: w2:p1 is the excluded pane, and its
         // status string is a quiet 'idle' — so if it shows as stopped, that is
@@ -411,7 +417,8 @@ enum MockWireFixtures {
       {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold"},
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
       {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
-      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"}
+      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
+      {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
     ]}}
     """#
 
