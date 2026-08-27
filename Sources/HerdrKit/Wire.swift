@@ -157,6 +157,18 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// load-bearing "is archived" signal; absent means active. Decoded leniently,
     /// so an older/non-archiving server is unaffected.
     public let archived: AgentArchivedInfo?
+    /// Account routing: which credential/config-home account this agent runs under
+    /// (`account`), the directory that account resolves to (`accountConfigDir`, a PATH,
+    /// never a credential), and whether the recorded account is missing from the
+    /// server's registry (`accountUnresolved`).
+    ///
+    /// Reported because an agent silently coming back on the WRONG account is what a
+    /// person experiences as hours of lost history — the work is intact, in another
+    /// account's transcript. Decoded leniently: all absent on an older server, which
+    /// reads as "this server does not report routing", not as an error.
+    public let account: String?
+    public let accountConfigDir: String?
+    public let accountUnresolved: Bool?
 
     /// Stable list identity. A LIVE agent is keyed on its pane id, which is unique
     /// and stable while it runs. An ARCHIVED agent has NO pane — the server empties
@@ -197,8 +209,16 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// server) read as reachable — the safe default is "not offline".
     public var isUnreachable: Bool { reachability == "unreachable" }
 
+    /// This agent's recorded account is gone from the server's registry, so it will
+    /// REFUSE to resume rather than come back on the default account and append to the
+    /// wrong transcript. An error state a person must act on (re-register the account),
+    /// not a transient. Absent on an older server reads as false — the safe default is
+    /// "nothing is wrong", since such a server reports no routing at all.
+    public var hasUnresolvedAccount: Bool { accountUnresolved == true }
+
     enum CodingKeys: String, CodingKey {
         case agent, name, composer, revision, turn, cwd, focused, reachability, archived
+        case account
         case agentStatus = "agent_status"
         case inputPending = "input_pending"
         case inputPromptKind = "input_prompt_kind"
@@ -214,6 +234,8 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case lastCompletedTurn = "last_completed_turn"
         case machineID = "machine_id"
         case lastKnownStatus = "last_known_status"
+        case accountConfigDir = "account_config_dir"
+        case accountUnresolved = "account_unresolved"
     }
 }
 

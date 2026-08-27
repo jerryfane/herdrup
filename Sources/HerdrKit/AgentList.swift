@@ -276,6 +276,18 @@ public func usageResetLabel(resetsAt: String?, now: Date = Date()) -> String? {
     return formatter.string(from: reset)
 }
 
+/// The account name to show on an agent row: the account's human label when the id
+/// resolves in the roster, otherwise the raw id.
+///
+/// Falls back to the ID rather than to nil ON PURPOSE. The whole reason routing is
+/// surfaced is that an agent on an unexpected account used to be invisible; showing
+/// nothing because the roster has not loaded (or no longer holds that id) would restore
+/// exactly the silence being fixed. A raw id is worse-looking and still true.
+public func accountDisplayLabel(accountID: String?, accounts: [CredentialAccount]) -> String? {
+    guard let accountID, !accountID.isEmpty else { return nil }
+    return accounts.first { $0.id == accountID }?.label ?? accountID
+}
+
 /// The single instant "how long has it been in this state" is measured from, for BOTH
 /// the list card's badge and the terminal header's live timer.
 ///

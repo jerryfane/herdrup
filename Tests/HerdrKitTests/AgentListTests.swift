@@ -196,6 +196,77 @@ final class AgentListTests: XCTestCase {
         }
     }
 
+    // MARK: - account routing
+
+    /// The agent reports which account it runs under, and an account that no longer
+    /// resolves reads as an error state.
+    ///
+    /// This is the fact whose ABSENCE cost the fleet ~2 hours of apparent history: the
+    /// pane count was right and the API said ok while eleven agents wrote to the wrong
+    /// account's transcript, and the only evidence lived in each child's /proc. Building
+    /// the JSON here keeps the keys honest — a wrong CodingKey fails this test.
+    func testAccountRoutingDecodesAndFlagsAnUnresolvedAccount() throws {
+        let routed = try JSONDecoder().decode(
+            AgentInfo.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "pane_id": "w1:p1",
+                "agent_status": "working",
+                "account": "claudecrazy",
+                "account_config_dir": "/root/.claude-9",
+            ]))
+        XCTAssertEqual(routed.account, "claudecrazy")
+        XCTAssertEqual(routed.accountConfigDir, "/root/.claude-9")
+        XCTAssertFalse(routed.hasUnresolvedAccount)
+
+        // The account was removed from the registry: the agent will REFUSE to resume
+        // rather than come back on the default account, so this must surface.
+        let orphaned = try JSONDecoder().decode(
+            AgentInfo.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "pane_id": "w1:p2",
+                "agent_status": "idle",
+                "account": "retired",
+                "account_unresolved": true,
+            ]))
+        XCTAssertEqual(orphaned.account, "retired")
+        XCTAssertNil(orphaned.accountConfigDir, "a missing account resolves to no config-home")
+        XCTAssertTrue(orphaned.hasUnresolvedAccount)
+    }
+
+    /// An older daemon reports no routing at all. That must read as "nothing is wrong",
+    /// not as an unresolved account — otherwise upgrading the app before the daemon
+    /// would paint every agent with an error badge.
+    func testAgentFromAnOlderDaemonReportsNoRoutingAndNoError() throws {
+        let old = try agent(pane: "p1", status: "working")
+        XCTAssertNil(old.account)
+        XCTAssertNil(old.accountConfigDir)
+        XCTAssertFalse(
+            old.hasUnresolvedAccount,
+            "absent routing means the server does not report it, never that it is broken")
+    }
+
+    /// The label shown on a row: the account's human name when the roster knows the id,
+    /// the raw id when it does not — never nothing, because showing nothing restores the
+    /// exact silence this feature exists to remove.
+    func testAccountDisplayLabelPrefersTheRosterLabelAndFallsBackToTheID() {
+        let roster = [
+            try? JSONDecoder().decode(
+                CredentialAccount.self,
+                from: JSONSerialization.data(withJSONObject: [
+                    "id": "claudecrazy", "kind": "claude", "label": "ClaudeCrazy", "active": true,
+                ])),
+        ].compactMap { $0 }
+        XCTAssertEqual(roster.count, 1, "precondition: the roster decoded")
+
+        XCTAssertEqual(
+            accountDisplayLabel(accountID: "claudecrazy", accounts: roster), "ClaudeCrazy")
+        XCTAssertEqual(
+            accountDisplayLabel(accountID: "not-in-roster", accounts: roster), "not-in-roster",
+            "an unknown id still shows, because hiding it hides the routing")
+        XCTAssertNil(accountDisplayLabel(accountID: nil, accounts: roster))
+        XCTAssertNil(accountDisplayLabel(accountID: "", accounts: roster))
+    }
+
     // MARK: - the three ways of not knowing
 
     /// AXIS: absent, indefinite and unrecognised are three different situations
