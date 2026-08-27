@@ -8,8 +8,28 @@
 name: CI
 
 on:
-  push:
-    branches-ignore: [main]
+  # PULL REQUESTS, NOT EVERY PUSH.
+  #
+  # This job is a full Xcode build plus an XCUITest — ~17 minutes on a macOS runner,
+  # which GitHub bills at roughly ten times the Linux rate. On `push` it fired for every
+  # commit on every non-main branch, including work-in-progress pushes to branches that
+  # never became a PR: 120 runs across 85 distinct branches, 35 of them repeat builds of a
+  # branch that had already been built. That was ~71% of the account's entire monthly
+  # GitHub bill, and it hit the spending limit, which took CI down for every private repo.
+  #
+  # The `concurrency` block below already cancels a superseded run, and it works — but it
+  # can only help while the previous build is still running. Pushes minutes apart on a
+  # 17-minute build never overlap, so each one cost a full build. Building per PR instead
+  # of per push is what removes those.
+  #
+  # `main` is not branch-protected, so no required status check depends on the old push
+  # trigger. `workflow_dispatch` stays for deliberate one-off runs.
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - "LICENSE"
   workflow_dispatch:
 
 concurrency:
