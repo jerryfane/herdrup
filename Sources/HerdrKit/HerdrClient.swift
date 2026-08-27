@@ -96,6 +96,22 @@ public actor HerdrClient {
             .accounts
     }
 
+    struct AccountsRemoveParams: Encodable {
+        let id: String
+    }
+
+    /// Unregister an account (`accounts.remove`): the daemon drops its `[[accounts]]`
+    /// block from config.toml and reloads, returning the refreshed list. Does NOT delete
+    /// the account's config-home or credentials — the entry can be re-added later. THROWS
+    /// the server's `APIError` on an older daemon that lacks the method.
+    @discardableResult
+    public func accountsRemove(id: String) async throws -> [CredentialAccount] {
+        try await call("accounts.remove",
+                       AccountsRemoveParams(id: id),
+                       as: AccountsListResult.self)
+            .accounts
+    }
+
     /// The running daemon's version/protocol plus any staged update the fleet build step pre-staged
     /// (`server.staged_update`). Parameterless read; THROWS the server's `APIError` on a daemon too
     /// old to know the method, so callers that want a quiet degrade use `try?` (mirrors

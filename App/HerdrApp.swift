@@ -3578,6 +3578,8 @@ struct SettingsView: View {
     @State private var showAddAccount = false
     /// The account staged for a log-out confirmation (nil = none).
     @State private var logoutAccount: CredentialAccount?
+    /// The account staged for a remove-from-list confirmation (nil = none).
+    @State private var removeAccount: CredentialAccount?
     /// The result summary of the last bulk swap ("Moved 3 of 4 …"), shown in an
     /// alert. nil = no alert.
     @State private var bulkResult: String?
@@ -3867,6 +3869,32 @@ struct SettingsView: View {
                     Text("This clears \(account.label)'s saved credentials on your box. "
                         + "You can sign back in from here anytime.")
                 }
+                .confirmationDialog(
+                    removeAccount.map { "Remove \($0.label)?" } ?? "",
+                    isPresented: Binding(
+                        get: { removeAccount != nil },
+                        set: { if !$0 { removeAccount = nil } }
+                    ),
+                    titleVisibility: .visible,
+                    presenting: removeAccount
+                ) { account in
+                    Button("Remove", role: .destructive) {
+                        Task { await performRemove(account) }
+                    }
+                } message: { account in
+                    Text("This removes \(account.label) from the accounts list. "
+                        + "Its saved credentials stay on your box, so you can add it back later.")
+                }
+        }
+    }
+
+    /// Remove an account from the list (`accounts.remove`): the daemon drops it from
+    /// config.toml and returns the refreshed list. Credentials are left in place.
+    private func performRemove(_ account: CredentialAccount) async {
+        do {
+            accounts = try await client.accountsRemove(id: account.id)
+        } catch {
+            bulkResult = "Couldn't remove \(account.label): \(error)"
         }
     }
 
@@ -4451,6 +4479,13 @@ struct SettingsView: View {
                                         logoutAccount = account
                                     } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
                                 }
+                                // Remove the account from the list entirely (any kind) —
+                                // drops it from config.toml; the config-home + creds stay,
+                                // so it can be re-added. For clearing out junk/duplicate
+                                // entries.
+                                Button(role: .destructive) {
+                                    removeAccount = account
+                                } label: { Label("Remove account", systemImage: "trash") }
                             }
                         if index < accounts.count - 1 { rowDivider }
                     }
