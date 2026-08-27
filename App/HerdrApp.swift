@@ -2851,10 +2851,24 @@ struct TerminalPaneContent: View {
         .background(Palette.surface)
     }
 
-    /// When the agent entered its current status — approximated by the last completed
-    /// turn (for idle, when it finished; for working, ≈ the current turn's start). Nil
-    /// when there is no completed turn yet, which hides the timer.
-    private var statusSinceMs: Int64? { agent?.lastCompletedTurn?.completedUnixMs }
+    /// When the agent entered its current status — the SAME anchor the list card's
+    /// time-in-state badge uses (`status_since_unix_ms`, daemon #173), so the two
+    /// screens cannot disagree about one fact.
+    ///
+    /// This used to read `lastCompletedTurn.completedUnixMs` and call it an
+    /// approximation of the current turn's start. For an IDLE agent that happens to be
+    /// exact — it went idle precisely when its last turn completed — which is why idle
+    /// always matched and the bug hid. For a WORKING agent it is the moment the
+    /// PREVIOUS turn finished, so the header over-counted by the entire idle gap before
+    /// the current turn began. The real field existed all along; the header was never
+    /// repointed at it when the list badge was.
+    ///
+    /// The completed-turn value stays as the fallback for a daemon too old to report
+    /// `status_since` — a slightly-off timer beats no timer.
+    private var statusSinceMs: Int64? {
+        statusAnchorUnixMs(statusSinceUnixMs: agent?.statusSinceUnixMs,
+                           lastCompletedUnixMs: agent?.lastCompletedTurn?.completedUnixMs)
+    }
 
     /// Compact elapsed-time label: "45s", "1m 20s", "12m", "1h 5m". Seconds show only
     /// for the first ten minutes, where they read as motion; past that the minute (then

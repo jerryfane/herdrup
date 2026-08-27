@@ -213,6 +213,13 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
+        /// Set when the SERVER permanently refused this pane (e.g. `pane_not_found`),
+        /// as opposed to the stream dropping. A dropped stream deserves the reconnect
+        /// loop; a refusal does not — the pane will never come back, so retrying just
+        /// spins "connection lost; reconnecting…" forever with nothing behind it. Any
+        /// path that could restart the stream (the backoff task, the heartbeat
+        /// watchdog) honours this exactly like `sawExited`.
+        private var paneGone = false
         /// Set in `stop()` so a LATE async `sizeChanged` callback (SwiftTerm
         /// dispatches them asynchronously) cannot start a NEW `lock:true` resize
         /// AFTER we've released geometry ownership — which would re-pin the pane and
@@ -644,6 +651,13 @@ struct LiveTerminalView: UIViewRepresentable {
         private func start() {
             streamTask?.cancel()
             sawExited = false
+            // Cleared with `sawExited`, and for the same reason: a refusal is permanent for
+            // the pane it was about, not for this coordinator. `start()` is only ever reached
+            // deliberately once `paneGone` is set — the reconnect task is gated on it — so
+            // arriving here means a manual refresh or a different pane, and both deserve a
+            // real attempt. Leaving it latched would turn one dead pane into a view that can
+            // never show any pane again.
+            paneGone = false
             lastStreamActivity = Date()
             streamRunID &+= 1
             let myRun = streamRunID
@@ -674,7 +688,7 @@ struct LiveTerminalView: UIViewRepresentable {
             watchdogTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)   // poll every 5s
-                    guard let self, !self.stopped, !self.sawExited else { return }
+                    guard let self, !self.stopped, !self.sawExited, !self.paneGone else { return }
                     if Date().timeIntervalSince(self.lastStreamActivity) > Self.streamStuckTimeout {
                         self.scheduleReconnect("no response for \(Int(Self.streamStuckTimeout))s")
                         return   // scheduleReconnect → start() re-arms a fresh watchdog
@@ -713,7 +727,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// or a real process `exited`; at most one restart in flight.
         @MainActor
         private func scheduleReconnect(_ reason: String) {
-            guard !stopped, !sawExited, reconnectTask == nil else { return }
+            guard !stopped, !sawExited, !paneGone, reconnectTask == nil else { return }
             reconnectAttempts += 1
             let capped = min(20.0, 0.5 * pow(2.0, Double(max(0, reconnectAttempts - 1))))  // 0.5,1,2,4,8,16,20
             let delay = capped * Double.random(in: 0.6...1.0)                               // full-ish jitter
@@ -791,6 +805,17 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
+        /// The user-facing notice for an error the server will keep giving, or nil when the
+        /// failure is transient and the reconnect loop should run.
+        ///
+        /// Delegates the decision to `HerdrKit.permanentStreamRefusal` so the rule is unit
+        /// tested away from the view. Kept as a thin seam here because `streamEnded` is
+        /// `@MainActor` and view-bound.
+        static func permanentRefusalNotice(_ error: Error?) -> String? {
+            guard let apiError = error as? APIError else { return nil }
+            return permanentStreamRefusal(code: apiError.code)
+        }
+
         @MainActor
         private func streamEnded(_ error: Error?, run: Int) {
             // Only the CURRENT stream's end may reconnect. A superseded task (cancelled by a
@@ -802,6 +827,17 @@ struct LiveTerminalView: UIViewRepresentable {
             // torn-down view must not reconnect either.
             if sawExited { return }
             guard !stopped, view != nil else { return }
+            // A PERMANENT server refusal is not a dropped connection. Reconnecting cannot
+            // change the answer, so retrying only spins "reconnecting…" forever over a pane
+            // that will never be served. Say so once and stop.
+            if let notice = Self.permanentRefusalNotice(error) {
+                paneGone = true
+                if let view {
+                    let line = "\r\n\u{1b}[2m\(notice)\u{1b}[0m\r\n"
+                    view.feed(byteArray: [UInt8](line.utf8)[...])
+                }
+                return
+            }
             // Otherwise the feed died while the process may still be live — auto-restart with backoff
             // rather than stranding a dead terminal behind a manual refresh.
             scheduleReconnect(error == nil ? "connection closed" : "connection lost")

@@ -103,7 +103,7 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
     public let status: AgentStatus
     public let group: AgentGroup
 
-    public var id: String { info.paneID }
+    public var id: String { info.id }
     public var title: String { info.displayName }
 
     /// Whether the pane still exists. A row for a pane herdr no longer lists is
@@ -230,6 +230,25 @@ public struct AgentList: Equatable, Sendable {
 /// + one letter ("5m" / "2h" / "3d"). `nil` when the daemon reported no
 /// `status_since` (older server, or not yet transitioned) or the timestamp is in the
 /// future (clock skew) — the card then shows no badge rather than a wrong one.
+/// The single instant "how long has it been in this state" is measured from, for BOTH
+/// the list card's badge and the terminal header's live timer.
+///
+/// There is one right answer — `status_since_unix_ms`, the moment the agent entered its
+/// current state — and two screens that must not disagree about it. They did: the header
+/// measured from `last_completed_turn.completed_unix_ms` instead. For an IDLE agent those
+/// are the same instant (it went idle exactly when its turn completed), which is why idle
+/// always matched and the mismatch stayed hidden. For a WORKING agent the completed-turn
+/// stamp is the moment the PREVIOUS turn ended, so the header over-counted by the whole
+/// idle gap before the current turn began.
+///
+/// The completed-turn value survives only as the fallback for a daemon too old to report
+/// `status_since` — an approximate timer beats none, and on those servers both screens
+/// still agree because both land here.
+public func statusAnchorUnixMs(statusSinceUnixMs: UInt64?, lastCompletedUnixMs: Int64?) -> Int64? {
+    if let since = statusSinceUnixMs { return Int64(since) }
+    return lastCompletedUnixMs
+}
+
 public func compactTimeInState(sinceUnixMs: UInt64?, nowUnixMs: UInt64) -> String? {
     guard let since = sinceUnixMs, nowUnixMs >= since else { return nil }
     let seconds = (nowUnixMs - since) / 1000

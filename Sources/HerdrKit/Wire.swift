@@ -25,6 +25,35 @@ struct ErrorEnvelope: Decodable {
     let error: APIError
 }
 
+/// Whether a failed pane stream was PERMANENTLY refused by the server — and if so, what
+/// to tell the user. Returns nil for anything transient, which the caller must keep
+/// retrying.
+///
+/// A dropped socket and a refusal both arrive at the client as "the stream ended with an
+/// error", but they need opposite handling. The reconnect loop is right for a drop and
+/// actively harmful for a refusal: the server's answer will not change, so the terminal
+/// sits on "connection lost; reconnecting…" forever with nothing behind it. That is the
+/// shape a real daemon bug took — it advertised a pane in `agent.list`/`pane.list` that
+/// `pane.stream` then refused, and the app spun instead of saying so.
+///
+/// Only codes that CANNOT become true by waiting belong here. `pane_not_found` is
+/// permanent for a given pane id: pane ids are not reused, so a pane that is gone stays
+/// gone, and a fresh id means a fresh stream. `invalid_request` means this server does
+/// not speak the method — retrying the same call against the same daemon cannot help.
+/// Everything else (transport failures, timeouts, a server restarting) stays transient
+/// by default, because misclassifying a transient error as permanent strands a terminal
+/// that would have recovered on its own.
+public func permanentStreamRefusal(code: String) -> String? {
+    switch code {
+    case "pane_not_found":
+        return "this pane no longer exists on the server; not reconnecting"
+    case "invalid_request":
+        return "this server does not support live terminals; not reconnecting"
+    default:
+        return nil
+    }
+}
+
 struct ResultEnvelope<R: Decodable>: Decodable {
     let id: String?
     let result: R
@@ -129,7 +158,23 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// so an older/non-archiving server is unaffected.
     public let archived: AgentArchivedInfo?
 
-    public var id: String { paneID }
+    /// Stable list identity. A LIVE agent is keyed on its pane id, which is unique
+    /// and stable while it runs. An ARCHIVED agent has NO pane — the server empties
+    /// `pane_id` because the pane is genuinely released (herdr src/app/agents.rs
+    /// `archived_agent_info`) — so keying on it collapsed EVERY archived row onto the
+    /// same `""` identity, and SwiftUI rendered them all as whichever one sorted
+    /// first. That is the duplicate-name bug: the archived section sorts
+    /// most-recently-archived first, so every row wore the last-archived name, and
+    /// walked to the next name as each was unarchived.
+    ///
+    /// `terminal_id` is the durable handle: always non-empty, unique, and preserved
+    /// across archive/unarchive (the server rehydrates the same terminal id on
+    /// resume). It is also what `agent.unarchive` accepts as a target. `name` is the
+    /// last resort — it can be nil for an unnamed agent, so it cannot lead.
+    public var id: String {
+        if !paneID.isEmpty { return paneID }
+        return terminalID ?? name ?? paneID
+    }
 
     /// This agent has been archived (its pane released, session preserved).
     public var isArchived: Bool { archived != nil }
