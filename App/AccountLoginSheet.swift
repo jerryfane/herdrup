@@ -122,7 +122,7 @@ struct AccountLoginSheet: View {
             let pane = try await client.splitPane(cwd: nil)
             paneID = pane
             try await client.sendText(pane: pane, text: cmd)
-            try await client.sendKeys(pane: pane, keys: ["Enter"])
+            try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
             status = "Getting your sign-in link…"
             scrapeTask = Task { await scrapeLoop(pane: pane) }
         } catch {
@@ -162,7 +162,7 @@ struct AccountLoginSheet: View {
         guard !value.isEmpty else { return }
         do {
             try await client.sendText(pane: pane, text: value)
-            try await client.sendKeys(pane: pane, keys: ["Enter"])
+            try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
             code = ""
             status = "Submitting… hang on."
         } catch {
