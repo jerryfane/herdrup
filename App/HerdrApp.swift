@@ -3572,6 +3572,10 @@ struct SettingsView: View {
     /// no dialog). Set from an account row's long-press menu; the confirm fans the
     /// per-agent swap out over every same-kind agent.
     @State private var bulkSwapTarget: CredentialAccount?
+    /// The account whose in-app sign-in sheet is open (nil = closed).
+    @State private var loginAccount: CredentialAccount?
+    /// The account staged for a log-out confirmation (nil = none).
+    @State private var logoutAccount: CredentialAccount?
     /// The result summary of the last bulk swap ("Moved 3 of 4 …"), shown in an
     /// alert. nil = no alert.
     @State private var bulkResult: String?
@@ -3827,6 +3831,45 @@ struct SettingsView: View {
         detailScaffold(title: "Accounts", subtitle: accountsHeaderSubtitle,
                        subtitleTint: accountsHeaderTint, showBack: showBack) {
             accountsSection
+                .sheet(item: $loginAccount) { account in
+                    AccountLoginSheet(client: client, account: account) {
+                        Task { accounts = (try? await client.accountsList()) ?? [] }
+                    }
+                }
+                .confirmationDialog(
+                    logoutAccount.map { "Log out \($0.label)?" } ?? "",
+                    isPresented: Binding(
+                        get: { logoutAccount != nil },
+                        set: { if !$0 { logoutAccount = nil } }
+                    ),
+                    titleVisibility: .visible,
+                    presenting: logoutAccount
+                ) { account in
+                    Button("Log out", role: .destructive) {
+                        Task { await performLogout(account) }
+                    }
+                } message: { account in
+                    Text("This clears \(account.label)'s saved credentials on your box. "
+                        + "You can sign back in from here anytime.")
+                }
+        }
+    }
+
+    /// Log an account out by running claude's own `auth logout` in a short-lived pane
+    /// pinned to the account's config-home (token cleared), then refresh the list.
+    private func performLogout(_ account: CredentialAccount) async {
+        guard let configDir = account.configDir,
+              let cmd = claudeLogoutCommand(kind: account.kind, configDir: configDir)
+        else { return }
+        do {
+            let pane = try await client.splitPane(cwd: nil)
+            try await client.sendText(pane: pane, text: cmd)
+            try await client.sendKeys(pane: pane, keys: ["Enter"])
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            accounts = (try? await client.accountsList()) ?? accounts
+            try? await client.closePane(paneID: pane)
+        } catch let err {
+            bulkResult = "Couldn't log out \(account.label): \(err)"
         }
     }
 
@@ -4381,6 +4424,17 @@ struct SettingsView: View {
                                         Label("Use for all \(account.kind.capitalized) agents",
                                               systemImage: "arrow.left.arrow.right")
                                     }
+                                }
+                                // Sign in / out of the account from the app — runs
+                                // claude's own auth flow pinned to this account's
+                                // config-home (claude only for now; needs config_dir).
+                                if account.kind == "claude", account.configDir != nil {
+                                    Button {
+                                        loginAccount = account
+                                    } label: { Label("Log in", systemImage: "person.crop.circle.badge.plus") }
+                                    Button(role: .destructive) {
+                                        logoutAccount = account
+                                    } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
                                 }
                             }
                         if index < accounts.count - 1 { rowDivider }
