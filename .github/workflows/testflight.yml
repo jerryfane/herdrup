@@ -113,28 +113,6 @@ jobs:
               || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" HerdrWidgets/Info.plist
             echo "widget CFBundleVersion is now $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' HerdrWidgets/Info.plist)"
           fi
-          # READ THE SHORT VERSION BACK OUT OF THE GENERATED PLIST, and fail here rather
-          # than 90 seconds into an altool upload. project.yml can SAY anything; what
-          # decides the upload is what xcodegen actually wrote. This exact gap shipped
-          # bundles as "1.0" while project.yml said "0.1" for months, invisible until
-          # Apple closed the 1.0 train (90186) and every upload began failing.
-          APP_SHORT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/Info.plist)
-          echo "app CFBundleShortVersionString is $APP_SHORT"
-          if [ -z "$APP_SHORT" ]; then
-            echo "::error::App/Info.plist has no CFBundleShortVersionString"; exit 1
-          fi
-          # An unsubstituted build setting means xcodegen did not resolve it.
-          case "$APP_SHORT" in
-            *'$('*) echo "::error::CFBundleShortVersionString is unsubstituted: $APP_SHORT"; exit 1 ;;
-          esac
-          if [ -f HerdrWidgets/Info.plist ]; then
-            WIDGET_SHORT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' HerdrWidgets/Info.plist)
-            echo "widget CFBundleShortVersionString is $WIDGET_SHORT"
-            if [ "$APP_SHORT" != "$WIDGET_SHORT" ]; then
-              echo "::error::app ($APP_SHORT) and widget ($WIDGET_SHORT) CFBundleShortVersionString must match"
-              exit 1
-            fi
-          fi
 
       - name: Import signing certificate (throwaway keychain)
         # Signing material lives ONLY in a throwaway keychain deleted in the always()
@@ -249,6 +227,25 @@ jobs:
           xcodebuild -exportArchive -archivePath /tmp/Herdr.xcarchive \
             -exportOptionsPlist /tmp/ExportOptions.plist \
             -exportPath /tmp/export
+
+      - name: Check the archived bundle version
+        # Reads the ARCHIVED product, after Xcode has substituted $(MARKETING_VERSION)
+        # — xcodegen writes the literal variable into the source plist, so checking that
+        # file proves nothing about what ships. Fails here rather than 90 seconds into an
+        # altool upload, on the exact shape that closed the 1.0 train: a shipped bundle
+        # version that is not what project.yml says it is.
+        run: |
+          APP=$(find /tmp/Herdr.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -type d | head -1)
+          if [ -z "$APP" ]; then echo "::error::no .app in the archive"; exit 1; fi
+          BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
+          EXPECTED=$(grep -m1 'MARKETING_VERSION:' project.yml | sed 's/.*MARKETING_VERSION:[[:space:]]*//' | tr -d '" ')
+          echo "archived CFBundleShortVersionString=$BUILT  expected=$EXPECTED"
+          case "$BUILT" in
+            *'$('*) echo "::error::CFBundleShortVersionString did not substitute: $BUILT"; exit 1 ;;
+          esac
+          if [ -z "$BUILT" ] || [ "$BUILT" != "$EXPECTED" ]; then
+            echo "::error::archived version ($BUILT) does not match project.yml ($EXPECTED)"; exit 1
+          fi
 
       - name: Upload to TestFlight
         # The App Store Connect API key already exists (issuer + key id + .p8). altool
