@@ -80,6 +80,35 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      - name: Check the generated bundle version
+        # RUNS ON EVERY PR, deliberately, and not only in the TestFlight lane. The bug
+        # this catches was invisible for months precisely because nothing read the
+        # GENERATED plist: project.yml said MARKETING_VERSION 0.1, a workflow comment
+        # asserted the bundle carried 0.1, and xcodegen was actually writing its own
+        # default "1.0" because nothing set CFBundleShortVersionString. It surfaced only
+        # when Apple closed the 1.0 train (altool 90186) and every upload began failing.
+        #
+        # A version that cannot ship is a release-blocking defect, so it belongs at PR
+        # time rather than at the moment someone tries to release.
+        run: |
+          APP_SHORT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/Info.plist)
+          echo "app CFBundleShortVersionString is $APP_SHORT"
+          if [ -z "$APP_SHORT" ]; then
+            echo "::error::App/Info.plist has no CFBundleShortVersionString"; exit 1
+          fi
+          # An unsubstituted build setting means xcodegen did not resolve it.
+          case "$APP_SHORT" in
+            *'$('*) echo "::error::CFBundleShortVersionString is unsubstituted: $APP_SHORT"; exit 1 ;;
+          esac
+          if [ -f HerdrWidgets/Info.plist ]; then
+            WIDGET_SHORT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' HerdrWidgets/Info.plist)
+            echo "widget CFBundleShortVersionString is $WIDGET_SHORT"
+            if [ "$APP_SHORT" != "$WIDGET_SHORT" ]; then
+              echo "::error::app ($APP_SHORT) and widget ($WIDGET_SHORT) CFBundleShortVersionString must match"
+              exit 1
+            fi
+          fi
+
       - name: Pick a simulator destination
         run: |
           DEST=$(xcrun simctl list devices available | grep -oE 'iPhone [0-9]+' | sort -V | tail -1)
