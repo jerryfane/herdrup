@@ -99,3 +99,21 @@ public func claudeLoginOutcome(from text: String) -> ClaudeLoginOutcome {
     if failure.contains(where: haystack.contains) { return .failed }
     return .pending
 }
+
+/// Whether an account's identity going from `baseline` to `current` confirms a sign-in.
+///
+/// The sheet cannot read success off the terminal: `claude auth login --claudeai` is an
+/// interactive TUI, so the phrases it used to match never appear and real sign-ins were
+/// reported as failures. The daemon reads each account's identity out of its config-home
+/// instead, and a logged-out config-home reports none — so ABSENT -> PRESENT is the
+/// signal.
+///
+/// A re-sign-in to an account that already has an identity is deliberately NOT
+/// confirmable this way: the same email is simply rewritten, so there is nothing to
+/// observe. Returning false there means the sheet says it could not confirm — which is
+/// honest — rather than claiming a success it never saw.
+public func signInConfirmed(baseline: String?, current: String?) -> Bool {
+    guard let current, !current.isEmpty else { return false }
+    guard let baseline, !baseline.isEmpty else { return true }
+    return baseline != current
+}

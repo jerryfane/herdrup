@@ -67,6 +67,41 @@ final class LoginOutcomeAndArchiveAttributionTests: XCTestCase {
                        "a retry judged on fresh output only must not inherit the old failure")
     }
 
+    // MARK: - sign-in confirmation (the probe, not the terminal text)
+
+    /// A fresh account has no identity until a login lands, so absent -> present is a
+    /// confirmed sign-in. This is the case that was broken: real sign-ins wrote
+    /// credentials while the sheet reported "no response", because success was being
+    /// matched against terminal phrases that an interactive TUI never prints.
+    func testAbsentToPresentIdentityConfirmsSignIn() {
+        XCTAssertTrue(signInConfirmed(baseline: nil, current: "jerry@example.com"))
+        XCTAssertTrue(signInConfirmed(baseline: "", current: "jerry@example.com"),
+                      "an empty baseline is as absent as nil")
+    }
+
+    /// Nothing yet is not success. Asserting this direction matters more than the other:
+    /// a false positive would close the sheet and tell the user they are signed in when
+    /// they are not.
+    func testNoIdentityIsNotASignIn() {
+        XCTAssertFalse(signInConfirmed(baseline: nil, current: nil))
+        XCTAssertFalse(signInConfirmed(baseline: nil, current: ""))
+        XCTAssertFalse(signInConfirmed(baseline: "jerry@example.com", current: nil),
+                       "losing an identity is not a sign-in")
+    }
+
+    /// Switching an account to a DIFFERENT identity is a real sign-in and must confirm.
+    func testChangingIdentityConfirmsSignIn() {
+        XCTAssertTrue(signInConfirmed(baseline: "old@example.com", current: "new@example.com"))
+    }
+
+    /// Re-signing in as the SAME identity is deliberately not confirmable — the email is
+    /// rewritten with the same value, so there is nothing to observe. The sheet then says
+    /// it could not confirm, which is honest; claiming success here would be inventing an
+    /// observation.
+    func testSameIdentityIsNotTreatedAsAFreshSignIn() {
+        XCTAssertFalse(signInConfirmed(baseline: "jerry@example.com", current: "jerry@example.com"))
+    }
+
     // MARK: - archive attribution
 
     private final class CapturingTransport: HerdrTransport, @unchecked Sendable {

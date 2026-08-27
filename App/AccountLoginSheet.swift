@@ -36,16 +36,35 @@ struct AccountLoginSheet: View {
     @State private var submitBaseline: String = ""
     /// Briefly shown after the link is copied, so the tap has a visible result.
     @State private var copied = false
+    /// The account's email as the daemon reported it BEFORE this attempt started.
+    /// Sign-in is confirmed by this going from absent to present — see `pollSignedIn`.
+    @State private var baselineEmail: String??
+    /// The identity actually signed in, shown on success. Worth surfacing: an OAuth
+    /// page approves whoever the BROWSER is signed in as, so a "new" account can end
+    /// up holding the same person as an existing one. Naming it makes that obvious
+    /// immediately instead of days later in the accounts list.
+    @State private var signedInEmail: String?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if signedIn {
-                        Label("Signed in to \(account.label)", systemImage: "checkmark.circle.fill")
-                            .font(Typography.app(17, .semibold))
-                            .foregroundStyle(.green)
-                            .padding(.top, 24)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Signed in to \(account.label)", systemImage: "checkmark.circle.fill")
+                                .font(Typography.app(17, .semibold))
+                                .foregroundStyle(.green)
+                            if let signedInEmail {
+                                // Name the identity. The OAuth page approves whoever the
+                                // BROWSER is signed in as, so a "new" account can quietly
+                                // end up holding an existing one's person.
+                                Text(signedInEmail)
+                                    .font(Typography.machine(12))
+                                    .foregroundStyle(Palette.textDim)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .padding(.top, 24)
                     } else if let url = signInURL {
                         stepCard(number: "1", title: "Open the sign-in page") {
                             Button { openURL(url) } label: {
@@ -165,6 +184,8 @@ struct AccountLoginSheet: View {
         submitting = false
         submitBaseline = ""
         copied = false
+        baselineEmail = nil
+        signedInEmail = nil
         code = ""
         status = "Starting sign-in…"
         do {
@@ -194,27 +215,66 @@ struct AccountLoginSheet: View {
                         status = "Open the link, approve, then paste the code below."
                     }
                 }
-                switch claudeLoginOutcome(from: text) {
-                case .signedIn:
-                    signedIn = true
+                // FAILURE is still read from the pane, and only from output produced
+                // after the submission (see `submitBaseline`) — the harness does print
+                // its rejections.
+                if submitting, claudeLoginOutcome(from: outputSinceSubmit(text)) == .failed {
                     submitting = false
-                    status = "Signed in."
-                    // Show the confirmation long enough to read as an outcome, then close
-                    // and hand the user back to Accounts (refreshed by `finish`).
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    if !Task.isCancelled { finish() }
+                    status = "That code didn't work — check it and try again."
+                }
+                // If the harness DOES print a success line (the setup-token path can),
+                // use it only to poll immediately rather than to declare success. The
+                // probe below stays the sole authority on whether an identity landed;
+                // this just saves a tick.
+                if claudeLoginOutcome(from: text) == .signedIn, await pollSignedIn() {
                     return
-                case .failed, .pending:
-                    // Success is judged on the whole buffer; FAILURE only on what arrived
-                    // after the submission (see `submitBaseline`).
-                    if submitting, claudeLoginOutcome(from: outputSinceSubmit(text)) == .failed {
-                        submitting = false
-                        status = "That code didn't work — check it and try again."
-                    }
                 }
             }
+            // SUCCESS is NOT read from the pane.
+            //
+            // It used to be, by matching phrases like "login successful" in the
+            // terminal text — and it silently never fired, because
+            // `claude auth login --claudeai` is an INTERACTIVE TUI that renders a
+            // screen instead of printing those lines. Real sign-ins completed and
+            // wrote credentials while this sheet sat there and then claimed "no
+            // response", which is the worst possible way to be wrong: it reports
+            // failure over something that worked.
+            //
+            // The daemon already reads each account's identity out of its config-home,
+            // so ask IT. Verified against the live box: a logged-out config-home
+            // reports no email (whether or not it has a `.claude.json`), and one gets
+            // set the moment a login lands. That makes absent -> present an
+            // authoritative signal with no phrase matching and no extra pane.
+            if await pollSignedIn() { return }
             try? await Task.sleep(nanoseconds: 4_000_000_000)
         }
+    }
+
+    /// Asks the daemon whether this account's identity has appeared yet. Returns true
+    /// when sign-in is confirmed (and closes the sheet).
+    ///
+    /// Only an absent -> present transition counts. Re-signing in to an account that
+    /// ALREADY has an identity cannot be confirmed this way — the email is rewritten
+    /// with the same value — so that case falls through to the timeout rather than
+    /// claiming a success it did not observe.
+    private func pollSignedIn() async -> Bool {
+        guard let accounts = try? await client.accountsList(),
+              let mine = accounts.first(where: { $0.id == account.id })
+        else { return false }
+        if baselineEmail == nil { baselineEmail = .some(mine.email) }
+        let before = baselineEmail ?? nil
+        guard signInConfirmed(baseline: before, current: mine.email), let now = mine.email
+        else { return false }
+
+        signedIn = true
+        signedInEmail = now
+        submitting = false
+        status = "Signed in as \(now)."
+        // Long enough to read as an outcome — and long enough to notice WHICH identity
+        // it was — then hand the user back to a refreshed Accounts list.
+        try? await Task.sleep(nanoseconds: 1_600_000_000)
+        if !Task.isCancelled { finish() }
+        return true
     }
 
     private func sendCode() async {
@@ -260,7 +320,7 @@ struct AccountLoginSheet: View {
             guard !Task.isCancelled, submitting, !signedIn else { return }
             submitting = false
             if code.isEmpty { code = submitted }
-            status = "No response yet — check the code and try again."
+            status = "Couldn't confirm the sign-in. Check Accounts — it may have worked."
         }
     }
 
