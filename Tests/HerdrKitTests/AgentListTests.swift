@@ -10,17 +10,32 @@ final class AgentListTests: XCTestCase {
     /// the JSON key was wrong.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        archivedBy: String? = nil, archivedAt: String? = nil
+        archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
+        if let terminalID { obj["terminal_id"] = terminalID }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
         if let archivedBy {
             obj["archived"] = ["at": archivedAt ?? "2026-08-26T18:00:00Z", "by": archivedBy]
         }
         let data = try JSONSerialization.data(withJSONObject: obj)
         return try JSONDecoder().decode(AgentInfo.self, from: data)
+    }
+
+    /// An ARCHIVED agent exactly as the server emits one: `pane_id` EMPTY, because the
+    /// pane is genuinely released, with `terminal_id` carrying the durable identity.
+    ///
+    /// This shape is the whole point. The original archived fixtures gave each archived
+    /// agent its own non-empty pane id — a state the server never produces — so every
+    /// row had a distinct id and the identity collision these tests now guard was
+    /// unreachable. The fixture, not the assertion, was the bug.
+    private func archivedAgent(
+        terminalID: String, name: String?, at: String, by: String = "jerry"
+    ) throws -> AgentInfo {
+        try agent(pane: "", status: "idle", name: name,
+                  archivedBy: by, archivedAt: at, terminalID: terminalID)
     }
 
     // MARK: - archived agents (issue #173)
@@ -43,15 +58,58 @@ final class AgentListTests: XCTestCase {
     func testArchivedAgentsPartitionOutOfLiveSections() throws {
         let list = AgentList(agents: [
             try agent(pane: "p1", status: "blocked"),                                  // live, needsYou
-            try agent(pane: "p2", status: "idle", name: "old", archivedBy: "a", archivedAt: "2026-08-26T10:00:00Z"),
-            try agent(pane: "p3", status: "idle", name: "new", archivedBy: "b", archivedAt: "2026-08-26T20:00:00Z"),
+            try archivedAgent(terminalID: "term-old", name: "old", at: "2026-08-26T10:00:00Z"),
+            try archivedAgent(terminalID: "term-new", name: "new", at: "2026-08-26T20:00:00Z"),
         ])
         // Live sections/rows exclude the two archived agents.
         XCTAssertEqual(list.rows.map(\.info.paneID), ["p1"])
         XCTAssertFalse(list.rows.contains { $0.info.isArchived })
         XCTAssertEqual(list.needsYouCount, 1)
         // Archived collected separately, most-recently-archived first.
-        XCTAssertEqual(list.archived.map(\.info.paneID), ["p3", "p2"])
+        XCTAssertEqual(list.archived.map(\.title), ["new", "old"])
+    }
+
+    /// EVERY archived row must carry a DISTINCT, non-empty list identity.
+    ///
+    /// The server empties `pane_id` on archive (the pane is released), so keying rows on
+    /// it collapsed every archived row onto `""`. SwiftUI then rendered them all as
+    /// whichever sorted first — and because the section sorts most-recently-archived
+    /// first, every row wore the LAST-archived name, then walked to the next name as
+    /// each was unarchived. Three archived agents with three names is the minimum that
+    /// can tell "distinct" from "all the same".
+    func testArchivedRowsKeepDistinctIdentitiesDespiteEmptyPaneIDs() throws {
+        let list = AgentList(agents: [
+            try archivedAgent(terminalID: "term-a", name: "among-friends", at: "2026-08-27T08:40:38Z"),
+            try archivedAgent(terminalID: "term-b", name: "trend-scout",   at: "2026-08-27T08:40:34Z"),
+            try archivedAgent(terminalID: "term-c", name: "aste-screener", at: "2026-08-27T08:40:30Z"),
+        ])
+        XCTAssertEqual(list.archived.count, 3)
+        // The premise: the server really did give us no pane ids.
+        XCTAssertTrue(list.archived.allSatisfy { $0.info.paneID.isEmpty },
+                      "fixture must model the server: an archived agent has NO pane id")
+        // The guard: ids are unique and none is empty.
+        let ids = list.archived.map(\.id)
+        XCTAssertFalse(ids.contains(""), "an archived row must not fall back to an empty id")
+        XCTAssertEqual(Set(ids).count, 3, "archived rows collapsed onto \(Set(ids).count) identities: \(ids)")
+        // The symptom: each row renders its OWN name, not the first row's.
+        XCTAssertEqual(list.archived.map(\.title), ["among-friends", "trend-scout", "aste-screener"])
+    }
+
+    /// A LIVE row's identity is unchanged — still its pane id. The archived fix must not
+    /// re-key live rows, or every live row's SwiftUI identity churns on upgrade.
+    func testLiveRowIdentityIsStillThePaneID() throws {
+        let live = try agent(pane: "w1:p7", status: "working", name: "vetrina", terminalID: "term-live")
+        XCTAssertEqual(AgentRow(info: live).id, "w1:p7")
+    }
+
+    /// An archived agent with NO name still gets a distinct identity from its terminal
+    /// id — name cannot lead the fallback, because it is optional.
+    func testUnnamedArchivedRowsStillGetDistinctIdentities() throws {
+        let list = AgentList(agents: [
+            try archivedAgent(terminalID: "term-a", name: nil, at: "2026-08-27T08:00:00Z"),
+            try archivedAgent(terminalID: "term-b", name: nil, at: "2026-08-27T07:00:00Z"),
+        ])
+        XCTAssertEqual(Set(list.archived.map(\.id)).count, 2)
     }
 
     // MARK: - time-in-state badge (issue #173)
@@ -389,5 +447,83 @@ final class AgentListTests: XCTestCase {
         XCTAssertTrue(list.isQuiet)
         XCTAssertEqual(list.needsYouCount, 0)
         XCTAssertTrue(list.sections.isEmpty)
+    }
+
+    // MARK: - one timing anchor for the list badge and the terminal header
+
+    /// A WORKING agent's timer must measure from when it STARTED WORKING, not from when
+    /// its previous turn finished. Those differ by the idle gap between turns, which is
+    /// exactly the amount the terminal header used to over-count while the list card was
+    /// right.
+    ///
+    /// The two stamps are deliberately far apart (a 10-minute idle gap): if the anchor
+    /// ever reverts to the completed-turn stamp, this reads 10 minutes too old and fails
+    /// loudly rather than drifting by a plausible-looking second.
+    func testWorkingAgentMeasuresFromStatusSinceNotTheLastCompletedTurn() {
+        let lastTurnEnded: Int64 = 1_000_000_000_000          // previous turn finished
+        let startedWorking: UInt64 = 1_000_000_600_000        // 10 minutes later
+        let anchor = statusAnchorUnixMs(statusSinceUnixMs: startedWorking,
+                                        lastCompletedUnixMs: lastTurnEnded)
+        XCTAssertEqual(anchor, Int64(startedWorking))
+        XCTAssertNotEqual(anchor, lastTurnEnded,
+                          "the header measured from the PREVIOUS turn's end — the 10m idle gap is counted as work")
+    }
+
+    /// The list badge and the terminal header must derive from the SAME instant. This is
+    /// the property the bug violated; asserting each screen separately would not catch
+    /// two screens that are individually defensible and mutually inconsistent.
+    func testListBadgeAndTerminalHeaderShareOneAnchor() {
+        let info = (statusSince: UInt64(1_000_000_600_000), lastCompleted: Int64(1_000_000_000_000))
+        let headerAnchor = statusAnchorUnixMs(statusSinceUnixMs: info.statusSince,
+                                              lastCompletedUnixMs: info.lastCompleted)
+        // The badge reads status_since directly; the header must land on the same value.
+        XCTAssertEqual(headerAnchor.map(UInt64.init), info.statusSince)
+        // And therefore both render the same elapsed label at the same "now".
+        let now: UInt64 = 1_000_000_900_000        // 5 minutes after work started
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: info.statusSince, nowUnixMs: now), "5m")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: headerAnchor.map(UInt64.init), nowUnixMs: now), "5m")
+    }
+
+    /// An IDLE agent is the case that always matched — both stamps are the same instant.
+    /// Keeping it asserted proves the fix did not achieve agreement by breaking the case
+    /// that already worked.
+    func testIdleAgentAnchorIsUnchanged() {
+        let wentIdle: Int64 = 1_000_000_000_000
+        XCTAssertEqual(statusAnchorUnixMs(statusSinceUnixMs: UInt64(wentIdle),
+                                          lastCompletedUnixMs: wentIdle),
+                       wentIdle)
+    }
+
+    /// An older daemon reports no `status_since`; the completed-turn stamp remains the
+    /// fallback so the timer degrades instead of vanishing.
+    func testFallsBackToLastCompletedTurnOnAnOlderDaemon() {
+        XCTAssertEqual(statusAnchorUnixMs(statusSinceUnixMs: nil, lastCompletedUnixMs: 42), 42)
+        XCTAssertNil(statusAnchorUnixMs(statusSinceUnixMs: nil, lastCompletedUnixMs: nil))
+    }
+
+    // MARK: - permanent stream refusal (never spin on an answer that cannot change)
+
+    /// A refusal the server will repeat must END the stream, and a transient failure must
+    /// NOT — otherwise the terminal either spins forever on a dead pane or gives up on one
+    /// that would have recovered. Both directions are asserted: a rule that only ever said
+    /// "permanent" would pass a one-sided test while stranding every recoverable terminal.
+    func testPermanentRefusalsStopTheRetryLoopAndTransientOnesDoNot() {
+        // Permanent: the pane is gone, and pane ids are not reused.
+        XCTAssertNotNil(permanentStreamRefusal(code: "pane_not_found"))
+        // Permanent: this daemon does not speak the method.
+        XCTAssertNotNil(permanentStreamRefusal(code: "invalid_request"))
+        // Transient — every one of these can succeed on a retry, so none may be
+        // classified permanent.
+        for code in ["internal_error", "busy", "timeout", "unavailable", "agent_working", ""] {
+            XCTAssertNil(permanentStreamRefusal(code: code),
+                         "'\(code)' was treated as permanent; a recoverable stream would be stranded")
+        }
+    }
+
+    /// The notice is what the user reads instead of an endless "reconnecting…", so it must
+    /// actually say the retrying stopped.
+    func testPermanentRefusalNoticeSaysItIsNotReconnecting() {
+        let notice = permanentStreamRefusal(code: "pane_not_found")
+        XCTAssertEqual(notice?.contains("not reconnecting"), true)
     }
 }
