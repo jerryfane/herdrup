@@ -68,6 +68,34 @@ public actor HerdrClient {
         try await call("accounts.list", EmptyParams(), as: AccountsListResult.self).accounts
     }
 
+    struct AccountsCreateParams: Encodable {
+        let kind: String
+        let label: String
+        let configDir: String?
+        enum CodingKeys: String, CodingKey {
+            case kind, label
+            case configDir = "config_dir"
+        }
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(kind, forKey: .kind)
+            try container.encode(label, forKey: .label)
+            try container.encodeIfPresent(configDir, forKey: .configDir)
+        }
+    }
+
+    /// Register a NEW credential account (`accounts.create`): the daemon derives a
+    /// fresh config-home + id, creates the dir, appends it to config.toml, reloads, and
+    /// returns the refreshed list. Only non-secret metadata is written — the caller then
+    /// drives login into the new account's config-home. Returns the refreshed accounts.
+    @discardableResult
+    public func accountsCreate(kind: String, label: String, configDir: String? = nil) async throws -> [CredentialAccount] {
+        try await call("accounts.create",
+                       AccountsCreateParams(kind: kind, label: label, configDir: configDir),
+                       as: AccountsListResult.self)
+            .accounts
+    }
+
     /// The running daemon's version/protocol plus any staged update the fleet build step pre-staged
     /// (`server.staged_update`). Parameterless read; THROWS the server's `APIError` on a daemon too
     /// old to know the method, so callers that want a quiet degrade use `try?` (mirrors
