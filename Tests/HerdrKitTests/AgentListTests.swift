@@ -54,6 +54,36 @@ final class AgentListTests: XCTestCase {
         XCTAssertEqual(list.archived.map(\.info.paneID), ["p3", "p2"])
     }
 
+    // MARK: - time-in-state badge (issue #173)
+
+    func testCompactTimeInStateFormatsMinutesHoursDaysNeverSeconds() {
+        let now: UInt64 = 1_000_000_000_000
+        // No stamp / future stamp (clock skew) → no badge, never a wrong one.
+        XCTAssertNil(compactTimeInState(sinceUnixMs: nil, nowUnixMs: now))
+        XCTAssertNil(compactTimeInState(sinceUnixMs: now + 5_000, nowUnixMs: now))
+        // Minutes under an hour (seconds floor into minutes, never shown).
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now, nowUnixMs: now), "0m")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 45_000, nowUnixMs: now), "0m")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 60_000, nowUnixMs: now), "1m")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 59 * 60_000, nowUnixMs: now), "59m")
+        // Hours under a day.
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 3_600_000, nowUnixMs: now), "1h")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 23 * 3_600_000, nowUnixMs: now), "23h")
+        // Days.
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 86_400_000, nowUnixMs: now), "1d")
+        XCTAssertEqual(compactTimeInState(sinceUnixMs: now - 3 * 86_400_000, nowUnixMs: now), "3d")
+    }
+
+    func testStatusSinceUnixMsDecodesFromWire() throws {
+        let absent = try agent(pane: "p1", status: "working")
+        XCTAssertNil(absent.statusSinceUnixMs)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "pane_id": "p2", "agent_status": "working", "status_since_unix_ms": 123_456_789,
+        ])
+        let present = try JSONDecoder().decode(AgentInfo.self, from: data)
+        XCTAssertEqual(present.statusSinceUnixMs, 123_456_789)
+    }
+
     /// Within a group, order is most-recently-active first (largest
     /// completed_unix_ms), then agents with no completed turn, with paneID as the
     /// stable final tiebreak. paneIDs are chosen so recency — not paneID — decides.

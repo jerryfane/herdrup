@@ -224,3 +224,16 @@ public struct AgentList: Equatable, Sendable {
         }
     }
 }
+
+/// Compact "time in current state" label for the agent card badge (#173): minutes
+/// under an hour, hours under a day, else days — never seconds, always a few digits
+/// + one letter ("5m" / "2h" / "3d"). `nil` when the daemon reported no
+/// `status_since` (older server, or not yet transitioned) or the timestamp is in the
+/// future (clock skew) — the card then shows no badge rather than a wrong one.
+public func compactTimeInState(sinceUnixMs: UInt64?, nowUnixMs: UInt64) -> String? {
+    guard let since = sinceUnixMs, nowUnixMs >= since else { return nil }
+    let seconds = (nowUnixMs - since) / 1000
+    if seconds < 3600 { return "\(seconds / 60)m" }      // 0m … 59m (never seconds)
+    if seconds < 86_400 { return "\(seconds / 3600)h" }  // 1h … 23h
+    return "\(seconds / 86_400)d"                         // 1d …
+}
