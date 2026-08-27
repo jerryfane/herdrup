@@ -554,9 +554,36 @@ public actor HerdrClient {
         let keys: [String]
     }
 
-    /// Sends named keys (e.g. "Enter", "Escape", "Up") for dialog navigation.
+    /// Sends named keys (e.g. "Enter", "Escape", "Up") to an AGENT pane, for dialog
+    /// navigation and turn control.
+    ///
+    /// Goes through `agent.send_keys`, which does agent-specific work `pane.send_keys`
+    /// does not: it refuses a pane whose running process is not the expected agent, and
+    /// records a turn abort for keys that interrupt one. Use it only where the pane
+    /// really hosts an agent — the server rejects anything else with `agent_not_found`.
+    /// For a plain shell pane use `sendPaneKeys`.
     public func sendKeys(pane: String, keys: [String]) async throws {
         _ = try await call("agent.send_keys", SendKeysParams(target: pane, keys: keys), as: JSONNull.self)
+    }
+
+    struct PaneSendKeysParams: Encodable {
+        let paneID: String
+        let keys: [String]
+        enum CodingKeys: String, CodingKey {
+            case keys
+            case paneID = "pane_id"
+        }
+    }
+
+    /// Sends named keys to ANY pane, agent or not.
+    ///
+    /// The counterpart to `sendKeys` for panes that host a plain shell — the sign-in and
+    /// sign-out flows split a fresh shell and need to press Enter in it. Those flows used
+    /// `sendKeys`, and every one of them failed: `agent.send_keys` resolves a pane id only
+    /// when that pane is an agent terminal, so a bare shell came back as
+    /// `agent target <pane> not found`.
+    public func sendPaneKeys(pane: String, keys: [String]) async throws {
+        _ = try await call("pane.send_keys", PaneSendKeysParams(paneID: pane, keys: keys), as: JSONNull.self)
     }
 
     // MARK: - Spawning agents

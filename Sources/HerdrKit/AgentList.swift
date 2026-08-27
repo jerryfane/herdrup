@@ -230,6 +230,52 @@ public struct AgentList: Equatable, Sendable {
 /// + one letter ("5m" / "2h" / "3d"). `nil` when the daemon reported no
 /// `status_since` (older server, or not yet transitioned) or the timestamp is in the
 /// future (clock skew) — the card then shows no badge rather than a wrong one.
+/// Parses `UsageWindow.resetsAt` into an instant. Handles BOTH shapes the server sends.
+///
+/// The field is documented server-side as an "opaque string; may be an epoch or
+/// timestamp", and the daemon really does send epoch seconds as a string
+/// (`"1787831400"`). The app parsed ISO-8601 only, so every real account's reset failed
+/// to parse and the usage meter silently dropped the reset token — the feature looked
+/// unimplemented rather than broken. The mock fixture used ISO, so previews and tests
+/// agreed with each other and not with the server.
+///
+/// All-digits is read as epoch seconds; anything else is tried as ISO-8601. Returns nil
+/// when absent or unparseable, so the caller shows NO token rather than a wrong one.
+public func parseResetInstant(_ raw: String?) -> Date? {
+    guard let raw else { return nil }
+    let trimmed = raw.trimmingCharacters(in: .whitespaces)
+    if trimmed.isEmpty { return nil }
+    if trimmed.allSatisfy(\.isNumber), let epoch = TimeInterval(trimmed) {
+        return Date(timeIntervalSince1970: epoch)
+    }
+    return isoResetParser.date(from: trimmed)
+}
+
+private let isoResetParser: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// The reset token shown beside a usage bar: how much is left when the reset is near,
+/// the calendar date when it is not.
+///
+/// Chosen by the HORIZON, not by the window's name: the daemon labels windows `5h`,
+/// `weekly`, `7d` and could add more, so keying off the text would leave new labels
+/// unformatted. Under an hour reports minutes, because a window resetting in 45 minutes
+/// must not read "0h left".
+public func usageResetLabel(resetsAt: String?, now: Date = Date()) -> String? {
+    guard let reset = parseResetInstant(resetsAt) else { return nil }
+    let seconds = reset.timeIntervalSince(now)
+    // Already past (or clock skew): the window has reset, so promise nothing.
+    guard seconds > 0 else { return nil }
+    if seconds < 3600 { return "\(Int(seconds / 60))m left" }
+    if seconds < 86_400 { return "\(Int(seconds / 3600))h left" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d"
+    return formatter.string(from: reset)
+}
+
 /// The single instant "how long has it been in this state" is measured from, for BOTH
 /// the list card's badge and the terminal header's live timer.
 ///

@@ -3921,7 +3921,7 @@ struct SettingsView: View {
         do {
             let pane = try await client.splitPane(cwd: nil)
             try await client.sendText(pane: pane, text: cmd)
-            try await client.sendKeys(pane: pane, keys: ["Enter"])
+            try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             accounts = (try? await client.accountsList()) ?? accounts
             try? await client.closePane(paneID: pane)
@@ -4626,29 +4626,24 @@ struct SettingsView: View {
         }
     }
 
-    /// "NN% · <label>" plus a compact reset token when present, e.g. "42% · 5h · 18:00".
+    /// "NN% · <label>" plus a compact reset token when present, e.g. "42% · 5h · 2h left"
+    /// or "68% · weekly · Aug 31".
     private func usageMeterLabel(_ window: UsageWindow, percent: Double) -> String {
         var text = "\(Int(percent.rounded()))% · \(window.label)"
         if let hint = resetHint(window.resetsAt) { text += " · \(hint)" }
         return text
     }
 
-    /// A compact reset hint from an ISO-8601 instant (`UsageWindow.resetsAt`): the time
-    /// when it falls today, else the weekday. Nil when absent or unparseable — the meter
-    /// then simply shows no reset token.
-    private func resetHint(_ iso: String?) -> String? {
-        guard let iso, let date = Self.isoResetParser.date(from: iso) else { return nil }
-        let formatter = DateFormatter()
-        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE"
-        return formatter.string(from: date)
+    /// The reset token for a usage window: "2h left" when the reset is near, "Aug 31"
+    /// when it is further out. Nil when absent or unparseable, so the meter shows no
+    /// token rather than a wrong one.
+    ///
+    /// Both the parsing and the wording live in `HerdrKit.usageResetLabel` so they can be
+    /// tested without a view. This previously parsed ISO-8601 inline and produced nothing
+    /// at all against a live server, which sends epoch seconds.
+    private func resetHint(_ raw: String?) -> String? {
+        usageResetLabel(resetsAt: raw)
     }
-
-    /// Shared parser for `resetsAt` (e.g. "2026-08-20T18:00:00Z").
-    private static let isoResetParser: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
 
     /// Usage colour by headroom: comfortable green, amber as it tightens, red at the
     /// cap. The same meaning-carrying palette as the agent status badges.
@@ -5471,7 +5466,7 @@ struct MockTransport: HerdrTransport {
     /// tests, where it is machine-checked to decode. If you change one, change both.
     static let accountsList = #"""
     {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"email":"work@example.com","usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2026-08-20T18:00:00Z","status":"ok"},{"label":"weekly","used_percent":68,"status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
+      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"email":"work@example.com","usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2000000000","status":"ok"},{"label":"weekly","used_percent":68,"resets_at":"2030-01-15T18:00:00Z","status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
       {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"email":"personal@example.com","usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
       {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"email":"team@example.com","usage":{"tier":"Plus"}},
       {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}

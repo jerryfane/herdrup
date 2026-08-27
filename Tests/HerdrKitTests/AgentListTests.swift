@@ -501,6 +501,56 @@ final class AgentListTests: XCTestCase {
         XCTAssertNil(statusAnchorUnixMs(statusSinceUnixMs: nil, lastCompletedUnixMs: nil))
     }
 
+    // MARK: - usage reset token (epoch AND iso; near vs far)
+
+    /// The server sends epoch seconds AS A STRING. The app parsed ISO-8601 only, so every
+    /// real account's reset failed to parse and the meter silently showed no token — the
+    /// feature looked unbuilt rather than broken. These are the exact values a live daemon
+    /// returned, so the test fails if the epoch path is ever dropped again.
+    func testResetInstantParsesEpochSecondsAsWellAsISO() {
+        // Real values read off the running daemon.
+        XCTAssertEqual(parseResetInstant("1787831400"),
+                       Date(timeIntervalSince1970: 1_787_831_400))
+        XCTAssertEqual(parseResetInstant("1788217200"),
+                       Date(timeIntervalSince1970: 1_788_217_200))
+        // The documented alternative shape still works.
+        XCTAssertNotNil(parseResetInstant("2026-08-20T18:00:00Z"))
+        // Absent or junk yields nil, so the meter shows nothing rather than a wrong time.
+        XCTAssertNil(parseResetInstant(nil))
+        XCTAssertNil(parseResetInstant(""))
+        XCTAssertNil(parseResetInstant("   "))
+        XCTAssertNil(parseResetInstant("not-a-date"))
+    }
+
+    /// A near reset reads as remaining time, a far one as a date. Driven by the HORIZON,
+    /// not the window's label, so a daemon that invents a new label still formats.
+    func testUsageResetLabelUsesTimeLeftWhenNearAndADateWhenFar() {
+        let now = Date(timeIntervalSince1970: 1_787_824_200)   // 2h before the 5h reset
+        // 5h window, 2h out.
+        XCTAssertEqual(usageResetLabel(resetsAt: "1787831400", now: now), "2h left")
+        // Weekly window, days out — a date, not "109h left".
+        let weekly = usageResetLabel(resetsAt: "1788217200", now: now)
+        XCTAssertNotNil(weekly)
+        XCTAssertFalse(weekly?.contains("left") ?? true,
+                       "a reset days away must read as a date, not remaining hours: \(weekly ?? "nil")")
+    }
+
+    /// Under an hour must report MINUTES. Reporting hours would render "0h left" for a
+    /// window resetting in 45 minutes — the one moment the number matters most.
+    func testUsageResetLabelReportsMinutesUnderAnHour() {
+        let reset: TimeInterval = 1_787_831_400
+        let now = Date(timeIntervalSince1970: reset - 45 * 60)
+        XCTAssertEqual(usageResetLabel(resetsAt: String(Int(reset)), now: now), "45m left")
+    }
+
+    /// A window whose reset has already passed promises nothing, rather than counting
+    /// down into negative time or claiming "0m left" forever.
+    func testUsageResetLabelIsNilOncePassed() {
+        let reset: TimeInterval = 1_787_831_400
+        XCTAssertNil(usageResetLabel(resetsAt: String(Int(reset)),
+                                     now: Date(timeIntervalSince1970: reset + 60)))
+    }
+
     // MARK: - permanent stream refusal (never spin on an answer that cannot change)
 
     /// A refusal the server will repeat must END the stream, and a transient failure must
