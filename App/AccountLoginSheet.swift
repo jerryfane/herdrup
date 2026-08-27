@@ -1,12 +1,12 @@
 import SwiftUI
 import HerdrKit
 
-/// In-app claude account sign-in (issue #173 follow-up). Opens a pane pointed at the
-/// account's config-home running `claude auth login` (or `setup-token`), shows its
-/// live terminal, scrapes the OAuth URL for a one-tap "Open sign-in page", and lets
-/// the user paste the code back. The command ALWAYS clears the global
-/// CLAUDE_CODE_OAUTH_TOKEN and pins CLAUDE_CONFIG_DIR (see `claudeLoginCommand`), so
-/// credentials land in THIS account only — never a global token.
+/// In-app claude account sign-in (issue #173 follow-up), clean stepped flow — NO raw
+/// terminal. It runs `claude auth login` (or setup-token) in a BACKGROUND pane pinned to
+/// the account's config-home, scrapes the OAuth URL, and shows it as a tap-to-open card;
+/// the user approves in the browser and pastes the code back. The command always clears
+/// the global CLAUDE_CODE_OAUTH_TOKEN and pins CLAUDE_CONFIG_DIR (see `claudeLoginCommand`),
+/// so credentials land in THIS account only.
 struct AccountLoginSheet: View {
     let client: HerdrClient
     let account: CredentialAccount
@@ -19,94 +19,120 @@ struct AccountLoginSheet: View {
     @State private var paneID: String?
     @State private var signInURL: URL?
     @State private var code: String = ""
-    @State private var phase: String = "Pick a method, then Start."
-    @State private var running = false
+    @State private var status: String = "Starting sign-in…"
+    @State private var signedIn = false
     @State private var scrapeTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Method", selection: $method) {
-                    ForEach(ClaudeLoginMethod.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .disabled(running)
-
-                Group {
-                    if let pane = paneID {
-                        LiveTerminalView(client: client, paneID: pane)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if signedIn {
+                        Label("Signed in to \(account.label)", systemImage: "checkmark.circle.fill")
+                            .font(Typography.app(17, .semibold))
+                            .foregroundStyle(.green)
+                            .padding(.top, 24)
+                    } else if let url = signInURL {
+                        stepCard(number: "1", title: "Open the sign-in page") {
+                            Button { openURL(url) } label: {
+                                Label("Open sign-in page", systemImage: "safari")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Text(url.absoluteString)
+                                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                                .lineLimit(2).textSelection(.enabled)
+                        }
+                        stepCard(number: "2", title: "Paste the code you get back") {
+                            TextField("Code or URL from the browser", text: $code, axis: .vertical)
+                                .textFieldStyle(.roundedBorder)
+                                .lineLimit(1...3)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            Button("Sign in") { Task { await sendCode() } }
+                                .buttonStyle(.borderedProminent)
+                                .frame(maxWidth: .infinity)
+                                .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
                     } else {
-                        RoundedRectangle(cornerRadius: 10).fill(Palette.surfaceRaised)
-                            .overlay(Text("The sign-in terminal appears here.")
-                                .font(Typography.app(13)).foregroundStyle(Palette.textFaint))
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text(status).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                        }
+                        .padding(.top, 36)
+                    }
+
+                    if !signedIn {
+                        Text(status).font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        Button(method == .oauth ? "Use a setup token instead" : "Use browser sign-in instead") {
+                            method = method == .oauth ? .setupToken : .oauth
+                            Task { await start() }
+                        }
+                        .font(Typography.app(13)).foregroundStyle(Palette.brand)
                     }
                 }
-                .frame(minHeight: 200)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.hairline, lineWidth: 1))
-
-                if let url = signInURL {
-                    Button { openURL(url) } label: {
-                        Label("Open sign-in page", systemImage: "safari").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-
-                HStack(spacing: 8) {
-                    TextField("Paste the code / URL from the browser", text: $code, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...3)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    Button("Send") { Task { await sendCode() } }
-                        .buttonStyle(.bordered)
-                        .disabled(code.isEmpty || paneID == nil)
-                }
-
-                Text(phase).font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: 0)
+                .padding(16)
             }
-            .padding(16)
             .navigationTitle("Sign in · \(account.label)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { finish() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(running ? "Restart" : "Start") { Task { await start() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(signedIn ? "Done" : "Cancel") { finish() }
                 }
             }
+            .task { await start() }
         }
+    }
+
+    @ViewBuilder
+    private func stepCard<Content: View>(
+        number: String, title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(number)
+                    .font(Typography.app(13, .bold)).foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Palette.brand))
+                Text(title).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Palette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
     }
 
     private func start() async {
         guard let configDir = account.configDir,
               let cmd = claudeLoginCommand(kind: account.kind, configDir: configDir, method: method)
         else {
-            phase = "Sign-in isn't supported for \(account.kind) accounts yet."
+            status = "Sign-in isn't supported for \(account.kind) accounts yet."
             return
         }
         scrapeTask?.cancel()
-        if let old = paneID { try? await client.closePane(paneID: old) }
+        if let old = paneID { try? await client.closePane(paneID: old); paneID = nil }
         signInURL = nil
-        running = true
-        phase = "Starting sign-in…"
+        signedIn = false
+        code = ""
+        status = "Starting sign-in…"
         do {
             let pane = try await client.splitPane(cwd: nil)
             paneID = pane
             try await client.sendText(pane: pane, text: cmd)
             try await client.sendKeys(pane: pane, keys: ["Enter"])
-            phase = "Waiting for the sign-in link…"
+            status = "Getting your sign-in link…"
             scrapeTask = Task { await scrapeLoop(pane: pane) }
         } catch {
-            phase = "Couldn't start sign-in: \(error)"
-            running = false
+            status = "Couldn't start sign-in: \(error)"
         }
     }
 
     private func scrapeLoop(pane: String) async {
         let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        for _ in 0..<120 {  // ~10 min at 5s
+        for _ in 0..<150 {  // ~10 min at 4s
             if Task.isCancelled { return }
             if let read = try? await client.read(pane: pane, source: .recentUnwrapped, format: .text) {
                 let text = read.text
@@ -116,17 +142,17 @@ struct AccountLoginSheet: View {
                         .compactMap({ $0.url })
                         .first(where: { $0.scheme == "https" }) {
                         signInURL = url
-                        phase = "Open the link, approve, then paste the code below."
+                        status = "Open the link, approve, then paste the code below."
                     }
                 }
                 if text.range(of: "logged in", options: .caseInsensitive) != nil
                     || text.range(of: "login successful", options: .caseInsensitive) != nil {
-                    phase = "Signed in — you can close this."
-                    running = false
+                    signedIn = true
+                    status = "Signed in."
                     return
                 }
             }
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
         }
     }
 
@@ -138,9 +164,9 @@ struct AccountLoginSheet: View {
             try await client.sendText(pane: pane, text: value)
             try await client.sendKeys(pane: pane, keys: ["Enter"])
             code = ""
-            phase = "Submitted — watch the terminal above."
+            status = "Submitting… hang on."
         } catch {
-            phase = "Couldn't send the code: \(error)"
+            status = "Couldn't send the code: \(error)"
         }
     }
 
