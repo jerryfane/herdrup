@@ -193,7 +193,17 @@ public struct CredentialAccount: Decodable, Equatable, Sendable, Identifiable {
     /// The account's login email, when the daemon can derive it. Optional → an
     /// older daemon that omits it decodes to nil. Identity only, never a secret.
     public let email: String?
+    /// The account's config-home directory (daemon exposes it on accounts.list),
+    /// e.g. `/root/.claude-2`. A non-secret path, never a credential. Optional → an
+    /// older daemon that omits it decodes to nil. The in-app login/logout points
+    /// `CLAUDE_CONFIG_DIR` at it so the flow targets the right account.
+    public let configDir: String?
     public let usage: AccountUsage?
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, label, active, email, usage
+        case configDir = "config_dir"
+    }
 }
 
 /// One rate-limit window for an account (a 5-hour or weekly bucket, etc.).
