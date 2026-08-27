@@ -2180,7 +2180,15 @@ struct TerminalHomeView: View {
                         Button {
                             Task {
                                 do {
-                                    try await client.archiveAgent(target: row.info.paneID)
+                                    // Attributed on purpose. Without `by`/`reason` the
+                                    // daemon records `by: "api"` and no reason — the same
+                                    // shape it writes for a pane that merely died, so a
+                                    // deliberate archive would be indistinguishable from
+                                    // bookkeeping to anything reading the record later.
+                                    try await client.archiveAgent(
+                                        target: row.info.paneID,
+                                        reason: HerdrKit.appArchiveReason,
+                                        by: HerdrKit.appArchiveActor)
                                     await load()
                                 } catch let e {
                                     error = "couldn't archive \(row.title): \(e)"

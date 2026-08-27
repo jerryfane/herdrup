@@ -719,21 +719,23 @@ public actor HerdrClient {
             .agent
     }
 
-    /// `agent.archive` params. `reason`/`force` are OMITTED when nil/false so a plain
+    /// `agent.archive` params. `reason`/`by`/`force` are OMITTED when nil/false so a plain
     /// archive sends `{ target }` and matches the server's optional/skip-if-none.
     struct AgentArchiveParams: Encodable {
         let target: String
         let reason: String?
+        let by: String?
         let force: Bool
 
         enum CodingKeys: String, CodingKey {
-            case target, reason, force
+            case target, reason, by, force
         }
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(target, forKey: .target)
             try container.encodeIfPresent(reason, forKey: .reason)
+            try container.encodeIfPresent(by, forKey: .by)
             if force { try container.encode(true, forKey: .force) }
         }
     }
@@ -743,9 +745,20 @@ public actor HerdrClient {
     /// is the pane id (or agent name). The server REJECTS archiving an agent that is
     /// mid-turn unless `force` — that surfaces as an `APIError` the caller shows.
     /// Returns the archived agent (its `archived` block now set).
+    ///
+    /// PASS `by` AND `reason`. They are optional on the wire, and omitting them is not
+    /// neutral: the daemon then records `by: "api"` with no reason, which is exactly what
+    /// it records for bookkeeping on a pane that merely died. An archive that does not say
+    /// who did it or why is indistinguishable from one nobody decided — a real ambiguity
+    /// downstream, where tooling reads the `archived` block as evidence a seat is gone.
+    /// Both are `encodeIfPresent`, so a caller that passes neither still sends the exact
+    /// bytes it did before.
     @discardableResult
-    public func archiveAgent(target: String, reason: String? = nil, force: Bool = false) async throws -> AgentInfo {
-        try await call("agent.archive", AgentArchiveParams(target: target, reason: reason, force: force),
+    public func archiveAgent(
+        target: String, reason: String? = nil, by: String? = nil, force: Bool = false
+    ) async throws -> AgentInfo {
+        try await call("agent.archive",
+                       AgentArchiveParams(target: target, reason: reason, by: by, force: force),
                        as: AgentInfoResult.self)
             .agent
     }
@@ -992,6 +1005,20 @@ public actor HerdrClient {
         return try await call("pane.set_pty_size", params, as: PanePtySize.self)
     }
 }
+
+/// Who the app reports as the actor when it archives an agent, and why.
+///
+/// Constants, not free text, for two readers. A person sees
+/// "archived by herdrup · user action" on the archived row. Fleet tooling that treats the
+/// `archived` block as evidence a seat is gone can match these EXACTLY to tell a deliberate
+/// archive from bookkeeping on a dead pane — a distinction that was previously impossible,
+/// because the app sent neither field and the daemon's `by: "api"` default is what a
+/// reasonless archive looks like too.
+///
+/// `by` names the actor; `reason` says it was deliberate. Neither repeats the other, since
+/// the row renders them joined.
+public let appArchiveActor = "herdrup"
+public let appArchiveReason = "user action"
 
 /// Decodes any JSON value, for calls whose result body the client ignores.
 struct JSONNull: Decodable {

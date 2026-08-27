@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit    // UIPasteboard (tap the sign-in link to copy it)
 import HerdrKit
 
 /// In-app claude account sign-in (issue #173 follow-up), clean stepped flow — NO raw
@@ -22,6 +23,19 @@ struct AccountLoginSheet: View {
     @State private var status: String = "Starting sign-in…"
     @State private var signedIn = false
     @State private var scrapeTask: Task<Void, Never>?
+    /// A code has been submitted and we are waiting on the harness. While true the input is
+    /// replaced by a spinner — so it MUST be cleared on failure too, or a mistyped code
+    /// leaves the user on a spinner with no way to retry.
+    @State private var submitting = false
+    /// The pane text as it stood when the last code was submitted.
+    ///
+    /// Failure is judged ONLY on output produced after this point. The pane buffer is
+    /// cumulative, so a rejected first attempt leaves "invalid code" sitting in it forever
+    /// — and a retry would then be failed instantly by the previous attempt's message, no
+    /// matter how good the new code is.
+    @State private var submitBaseline: String = ""
+    /// Briefly shown after the link is copied, so the tap has a visible result.
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -39,20 +53,52 @@ struct AccountLoginSheet: View {
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
-                            Text(url.absoluteString)
-                                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
-                                .lineLimit(2).textSelection(.enabled)
+                            // Tap the URL itself to copy it — for signing in on another
+                            // device, or when the in-app browser hand-off is not wanted.
+                            // Clipboard WRITE only (same as CopyForAgentButton); a
+                            // programmatic READ is what drew the App Store 2.1a rejection.
+                            Button {
+                                UIPasteboard.general.string = url.absoluteString
+                                copied = true
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                    copied = false
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                        .font(.system(size: 10))
+                                    Text(copied ? "Copied" : url.absoluteString)
+                                        .font(Typography.machine(11))
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                }
+                                .foregroundStyle(copied ? Palette.done : Palette.textFaint)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(Text(copied ? "Sign-in link copied" : "Copy sign-in link"))
                         }
                         stepCard(number: "2", title: "Paste the code you get back") {
-                            TextField("Code or URL from the browser", text: $code, axis: .vertical)
-                                .textFieldStyle(.roundedBorder)
-                                .lineLimit(1...3)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                            Button("Sign in") { Task { await sendCode() } }
-                                .buttonStyle(.borderedProminent)
-                                .frame(maxWidth: .infinity)
-                                .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+                            if submitting {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("Signing you in…")
+                                        .font(Typography.app(14)).foregroundStyle(Palette.textDim)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 6)
+                            } else {
+                                TextField("Code or URL from the browser", text: $code, axis: .vertical)
+                                    .textFieldStyle(.roundedBorder)
+                                    .lineLimit(1...3)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                Button("Sign in") { Task { await sendCode() } }
+                                    .buttonStyle(.borderedProminent)
+                                    .frame(maxWidth: .infinity)
+                                    .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+                            }
                         }
                     } else {
                         HStack(spacing: 10) {
@@ -116,6 +162,9 @@ struct AccountLoginSheet: View {
         if let old = paneID { try? await client.closePane(paneID: old); paneID = nil }
         signInURL = nil
         signedIn = false
+        submitting = false
+        submitBaseline = ""
+        copied = false
         code = ""
         status = "Starting sign-in…"
         do {
@@ -145,11 +194,23 @@ struct AccountLoginSheet: View {
                         status = "Open the link, approve, then paste the code below."
                     }
                 }
-                if text.range(of: "logged in", options: .caseInsensitive) != nil
-                    || text.range(of: "login successful", options: .caseInsensitive) != nil {
+                switch claudeLoginOutcome(from: text) {
+                case .signedIn:
                     signedIn = true
+                    submitting = false
                     status = "Signed in."
+                    // Show the confirmation long enough to read as an outcome, then close
+                    // and hand the user back to Accounts (refreshed by `finish`).
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    if !Task.isCancelled { finish() }
                     return
+                case .failed, .pending:
+                    // Success is judged on the whole buffer; FAILURE only on what arrived
+                    // after the submission (see `submitBaseline`).
+                    if submitting, claudeLoginOutcome(from: outputSinceSubmit(text)) == .failed {
+                        submitting = false
+                        status = "That code didn't work — check it and try again."
+                    }
                 }
             }
             try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -160,13 +221,46 @@ struct AccountLoginSheet: View {
         guard let pane = paneID else { return }
         let value = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        // Freeze what the pane already said, so the previous attempt's rejection cannot
+        // fail this one before it is even answered.
+        submitBaseline = (try? await client.read(pane: pane, source: .recentUnwrapped, format: .text))?.text ?? ""
+        submitting = true
+        status = "Signing you in…"
         do {
             try await client.sendText(pane: pane, text: value)
             try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
-            code = ""
-            status = "Submitting… hang on."
+            armSubmitTimeout(for: value)
         } catch {
+            // Never leave the spinner up on a send that did not happen.
+            submitting = false
             status = "Couldn't send the code: \(error)"
+        }
+    }
+
+    /// Bounds the wait that the spinner hides the input behind.
+    ///
+    /// Success and explicit failure both arrive via the scrape loop, but neither is
+    /// guaranteed: the harness can print something we do not recognise, or nothing at all.
+    /// Without this the input would never come back and the sign-in could not be retried —
+    /// the spinner would simply be the last thing that ever happened. On expiry the typed
+    /// code is restored rather than discarded, so a long token does not have to be pasted
+    /// again.
+    /// The pane output produced since the last submission. Falls back to the whole buffer
+    /// when the baseline is no longer a prefix — the rolling window scrolled past it —
+    /// which at worst costs one extra retry prompt rather than a stuck spinner.
+    private func outputSinceSubmit(_ text: String) -> String {
+        guard !submitBaseline.isEmpty else { return text }
+        guard text.hasPrefix(submitBaseline) else { return text }
+        return String(text.dropFirst(submitBaseline.count))
+    }
+
+    private func armSubmitTimeout(for submitted: String) {
+        Task {
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            guard !Task.isCancelled, submitting, !signedIn else { return }
+            submitting = false
+            if code.isEmpty { code = submitted }
+            status = "No response yet — check the code and try again."
         }
     }
 
