@@ -2153,12 +2153,14 @@ struct TerminalHomeView: View {
                         // Swap = restart the agent onto a DIFFERENT credential account
                         // of the same kind (an agent runs only on its own kind's
                         // subscriptions). Shown only when the daemon reported at least
-                        // one same-kind account; we can't tell which one it's on now,
-                        // so the list may include the current account. Picking an
-                        // account does NOT fire immediately — it stages a confirmation
-                        // (swapCandidate), because a swap is a full turn-interrupting
-                        // restart, and even swapping to the current account restarts
-                        // (interrupts) the agent rather than being a no-op.
+                        // one same-kind account. The list still INCLUDES the account the
+                        // agent is already on — swapping to it is a legitimate way to
+                        // restart — but that one is now marked, because the daemon reports
+                        // the current account (`account`) and the menu no longer has to
+                        // guess. Picking an account does NOT fire immediately: it stages a
+                        // confirmation (swapCandidate), because a swap is a full
+                        // turn-interrupting restart, and even swapping to the current
+                        // account restarts (interrupts) the agent rather than being a no-op.
                         let swapTargets = accounts.filter { $0.kind == row.info.agent }
                         if !swapTargets.isEmpty {
                             Menu {
@@ -2166,8 +2168,14 @@ struct TerminalHomeView: View {
                                     Button {
                                         swapCandidate = PendingSwap(row: row, account: acct)
                                     } label: {
-                                        Label(acct.label + (acct.active ? "" : " (exhausted)"),
-                                              systemImage: "person.crop.circle")
+                                        Label(
+                                            acct.label
+                                                + (acct.id == row.info.account ? " (current)" : "")
+                                                + (acct.active ? "" : " (exhausted)"),
+                                            systemImage: acct.id == row.info.account
+                                                ? "person.crop.circle.fill"
+                                                : "person.crop.circle"
+                                        )
                                     }
                                 }
                             } label: { Label("Swap subscription", systemImage: "arrow.left.arrow.right") }
@@ -2213,6 +2221,18 @@ struct TerminalHomeView: View {
                 Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
                 Text(subtitle(row.info))
                     .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
+                // Which account this agent is actually on. Shown only when the daemon
+                // reports one, so an older server or a default-account agent renders
+                // exactly as before rather than gaining an empty line.
+                if let account = accountDisplayLabel(
+                    accountID: row.info.account,
+                    accounts: accounts
+                ) {
+                    Text(account)
+                        .font(Typography.machine(11))
+                        .foregroundStyle(row.info.hasUnresolvedAccount ? Palette.died : Palette.textFaint)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             // How long the agent has been in its current state ("5m/2h/3d"), derived
@@ -2227,6 +2247,17 @@ struct TerminalHomeView: View {
                     .font(Typography.machine(11))
                     .foregroundStyle(Palette.textFaint)
                     .monospacedDigit()
+            }
+            // The recorded account is gone from the registry, so this agent REFUSES to
+            // resume rather than come back on the default account and write to the wrong
+            // transcript. A person has to re-register the account, so it is a pill with
+            // text, not a colour cue: shape and colour, never colour alone.
+            if row.info.hasUnresolvedAccount {
+                Text("no account")
+                    .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Palette.died.opacity(0.12)))
+                    .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
             }
             // A remote agent whose machine is unreachable has a stale status, so
             // it reads as offline rather than showing a misleading live badge.
@@ -5452,8 +5483,8 @@ struct MockTransport: HerdrTransport {
       {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"},
       {"pane_id":"w1:p2","name":"vetrina","agent":"codex","agent_status":"blocked","cwd":"/root/vetrina","terminal_title_stripped":"overwrite config.ts?"},
       {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","cwd":"/root/trend-scout","terminal_title_stripped":"exited, code 1"},
-      {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs"},
-      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold"},
+      {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs","account":"claudecrazy","account_config_dir":"/root/.claude-9"},
+      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold","account":"retired-account","account_unresolved":true},
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
       {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
       {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
