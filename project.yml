@@ -123,6 +123,13 @@ targets:
     info:
       path: App/Info.plist
       properties:
+        # MUST be set explicitly. Without it xcodegen writes its own default of "1.0"
+        # into the generated plist, MARKETING_VERSION is never consulted, and the
+        # setting silently does nothing. That is not hypothetical: builds shipped as
+        # 1.0 while this file said 0.1, and it only surfaced when Apple closed the 1.0
+        # train after 1.0 was approved (altool 90186/90062) and every upload started
+        # failing. Both targets must carry the SAME value or the upload is rejected.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         # The name is "herdrup" — all lowercase, everywhere: home-screen label, App
         # Store / TestFlight, and the in-app title (ConnectView) + version footer.
         # CFBundleName is set explicitly too (it otherwise resolves to the target
@@ -183,7 +190,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
-        MARKETING_VERSION: "0.1"
+        MARKETING_VERSION: "1.0.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
@@ -274,12 +281,15 @@ targets:
       path: HerdrWidgets/Info.plist
       properties:
         CFBundleDisplayName: herdrup
+        # Must MATCH the app target's, or the App Store rejects the upload. Same
+        # reason as the app's: without this, xcodegen writes a default "1.0".
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.widgets
-        MARKETING_VERSION: "0.1"
+        MARKETING_VERSION: "1.0.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
