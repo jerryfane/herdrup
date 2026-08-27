@@ -108,6 +108,10 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// refresh possible: poll the cheap list, fetch a screen only when one moves.
     public let revision: Int?
     public let stateChangeSeq: UInt64?
+    /// Wall-clock ms when the agent entered its CURRENT status (daemon #173). `nil`
+    /// until the first transition / on an older server. The card derives a compact
+    /// "5m/2h/3d" time-in-state badge from `now - this`.
+    public let statusSinceUnixMs: UInt64?
     public let turn: Int?
     public let turnEpoch: UInt64?
     public let lastCompletedTurn: CompletedTurn?
@@ -160,6 +164,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case terminalTitleStripped = "terminal_title_stripped"
         case interactiveReady = "interactive_ready"
         case stateChangeSeq = "state_change_seq"
+        case statusSinceUnixMs = "status_since_unix_ms"
         case turnEpoch = "turn_epoch"
         case lastCompletedTurn = "last_completed_turn"
         case machineID = "machine_id"

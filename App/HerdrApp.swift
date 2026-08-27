@@ -2207,6 +2207,19 @@ struct TerminalHomeView: View {
                     .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
             }
             Spacer(minLength: 8)
+            // How long the agent has been in its current state ("5m/2h/3d"), derived
+            // from the daemon's status_since (#173). Absent on an older server / before
+            // the first transition — then no badge, never a wrong one. Recomputed each
+            // 5s agent-list refresh, which re-renders this card.
+            if let age = compactTimeInState(
+                sinceUnixMs: row.info.statusSinceUnixMs,
+                nowUnixMs: UInt64(Date().timeIntervalSince1970 * 1000)
+            ) {
+                Text(age)
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .monospacedDigit()
+            }
             // A remote agent whose machine is unreachable has a stale status, so
             // it reads as offline rather than showing a misleading live badge.
             if row.info.isUnreachable {
