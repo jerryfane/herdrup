@@ -3574,6 +3574,8 @@ struct SettingsView: View {
     @State private var bulkSwapTarget: CredentialAccount?
     /// The account whose in-app sign-in sheet is open (nil = closed).
     @State private var loginAccount: CredentialAccount?
+    /// Whether the "Add account" sheet is open.
+    @State private var showAddAccount = false
     /// The account staged for a log-out confirmation (nil = none).
     @State private var logoutAccount: CredentialAccount?
     /// The result summary of the last bulk swap ("Moved 3 of 4 …"), shown in an
@@ -3834,6 +3836,19 @@ struct SettingsView: View {
                 .sheet(item: $loginAccount) { account in
                     AccountLoginSheet(client: client, account: account) {
                         Task { accounts = (try? await client.accountsList()) ?? [] }
+                    }
+                }
+                .sheet(isPresented: $showAddAccount) {
+                    AddAccountSheet(client: client) { refreshed, created in
+                        accounts = refreshed
+                        // Chain into sign-in for the new account once the add sheet
+                        // has dismissed (sequential sheets on the same anchor).
+                        if let created {
+                            Task {
+                                try? await Task.sleep(nanoseconds: 400_000_000)
+                                loginAccount = created
+                            }
+                        }
                     }
                 }
                 .confirmationDialog(
@@ -4444,8 +4459,12 @@ struct SettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
                 .padding(.horizontal, 16).padding(.top, 10)
             }
-            richActionRow("How to set up accounts", systemImage: "plus.circle",
-                          subtitle: "Add another subscription on your box") {
+            richActionRow("Add account", systemImage: "plus.circle",
+                          subtitle: "Register a new subscription, then sign in") {
+                showAddAccount = true
+            }
+            richActionRow("How to set up accounts", systemImage: "questionmark.circle",
+                          subtitle: "Manual setup on your box") {
                 showAccountsSetup = true
             }
         }
