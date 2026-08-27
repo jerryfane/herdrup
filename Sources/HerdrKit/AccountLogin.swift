@@ -52,3 +52,50 @@ public func claudeAuthStatusCommand(kind: String, configDir: String) -> String? 
     guard kind == "claude" else { return nil }
     return "env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=\(shellQuoteSingle(configDir)) claude auth status"
 }
+
+/// What the sign-in pane's output says about the attempt so far.
+public enum ClaudeLoginOutcome: Equatable, Sendable {
+    /// The harness reported a completed sign-in.
+    case signedIn
+    /// The harness rejected what was submitted — retry, do not keep waiting.
+    case failed
+    /// Nothing conclusive yet.
+    case pending
+}
+
+/// Classifies the sign-in pane's recent output.
+///
+/// This exists because the UI hides the input box while it waits. Waiting on a success
+/// signal alone would strand the user on a spinner the moment a code is mistyped, so a
+/// FAILURE signal is a first-class outcome that hands the input back.
+///
+/// Matching is deliberately narrow. The pane carries the whole terminal tail, including a
+/// shell prompt and whatever the user typed, so loose matching on a bare word like "error"
+/// would end the flow on unrelated noise — which is worse than waiting, because it discards
+/// a sign-in that was actually working. Success is checked FIRST: output that reports a
+/// completed login while also containing an earlier failed attempt is a success.
+public func claudeLoginOutcome(from text: String) -> ClaudeLoginOutcome {
+    let haystack = text.lowercased()
+    let success = [
+        "logged in",
+        "login successful",
+        "successfully logged in",
+        "authentication successful",
+    ]
+    if success.contains(where: haystack.contains) { return .signedIn }
+    let failure = [
+        "invalid code",
+        "invalid token",
+        "authentication failed",
+        "login failed",
+        // Qualified on purpose: a bare "expired" also matches benign copy like
+        // "your token expires in 30 days", which would hand the input back mid-flight
+        // on a sign-in that was working.
+        "code expired",
+        "token expired",
+        "session expired",
+        "try again",
+    ]
+    if failure.contains(where: haystack.contains) { return .failed }
+    return .pending
+}
