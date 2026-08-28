@@ -105,19 +105,24 @@ final class QRScannerController: UIViewController, AVCaptureMetadataOutputObject
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input)
-        else { return onUnavailable?(.noCamera) }
+        else {
+            onUnavailable?(.noCamera)
+            return
+        }
         session.addInput(input)
 
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else {
-            return onUnavailable?(.cameraFailed("no metadata output"))
+            onUnavailable?(.cameraFailed("no metadata output"))
+            return
         }
         session.addOutput(output)
         output.setMetadataObjectsDelegate(self, queue: .main)
         // Set AFTER adding the output: available types are empty until then, so setting
         // it earlier silently yields a session that detects nothing.
         guard output.availableMetadataObjectTypes.contains(.qr) else {
-            return onUnavailable?(.cameraFailed("QR codes not supported here"))
+            onUnavailable?(.cameraFailed("QR codes not supported here"))
+            return
         }
         output.metadataObjectTypes = [.qr]
 
