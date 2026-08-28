@@ -195,6 +195,12 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Run on Apple Silicon Macs as a "Designed for iPad" app (install on macOS).
+        # The unchanged iOS binary runs under the Mac's iOS runtime — no Catalyst
+        # recompile. The pane.input.stream typing path works (idiom is .pad on Mac);
+        # Live Activities / Dynamic Island are iOS-only and simply no-op on Mac. The
+        # HerdrWidgets extension stays iOS-only (Live Activities are not on macOS).
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
         # APNs entitlement (App/Herdr.entitlements): aps-environment = $(APS_ENVIRONMENT), resolved
         # per-config below (development for Debug, production for Release/Distribution). The App ID has
         # the Push capability and the "Herdrup App Store" profile was re-minted WITH Push, so the device
