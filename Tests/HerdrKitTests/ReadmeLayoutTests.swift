@@ -66,9 +66,18 @@ final class ReadmeLayoutTests: XCTestCase {
         // dispatch before shipping it.
         //
         // The block is a bare code fence, so decoration is not expected and
-        // rejecting it is correct. Two shapes are legal and nothing else is:
+        // rejecting it is correct. Three shapes are legal and nothing else is:
         //     <name>.swift        a file under Sources/HerdrKit
         //     Sources/<name>/     a source directory
+        //     Tests/<name>/       a test directory
+        //
+        // `Tests/` was added because the README legitimately names
+        // `Tests/HerdrKitTests/` and the grammar had no way to express it, so the
+        // guard failed closed on a row that was CORRECT. That is the right failure
+        // mode — it is why this was noticed at all — but the fix belongs in the
+        // grammar, not in the README: the row points at something real, which is
+        // the exact property this test exists to protect. The prefix list is
+        // explicit rather than "any directory" so an unknown shape still fails.
         var named: [String] = []
         var unparsed: [String] = []
         for line in block.split(separator: "\n") {
@@ -78,9 +87,13 @@ final class ReadmeLayoutTests: XCTestCase {
             let isFile = token.hasSuffix(".swift")
                 && token.dropLast(6).allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
                 && !token.dropLast(6).isEmpty
-            let isDir = token.hasPrefix("Sources/") && token.hasSuffix("/")
-                && token.dropFirst(8).dropLast().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-                && !token.dropFirst(8).dropLast().isEmpty
+            let dirPrefix = ["Sources/", "Tests/"].first { token.hasPrefix($0) }
+            let isDir: Bool = {
+                guard let dirPrefix, token.hasSuffix("/") else { return false }
+                let name = token.dropFirst(dirPrefix.count).dropLast()
+                return !name.isEmpty
+                    && name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+            }()
             if isFile { named.append("Sources/HerdrKit/" + token) }
             else if isDir { named.append(String(token.dropLast())) }
             else { unparsed.append(text) }
