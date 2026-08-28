@@ -101,6 +101,34 @@ jobs:
             -clonedSourcePackagesDirPath SourcePackages \
             CODE_SIGNING_ALLOWED=NO
 
+      - name: Check the built bundle version
+        # READS THE BUILT PRODUCT, not the generated source plist. That distinction is
+        # the whole point: xcodegen writes the literal "$(MARKETING_VERSION)" into
+        # App/Info.plist and Xcode substitutes it during the build, so a source-plist
+        # check reports an unsubstituted variable and proves nothing about what ships.
+        # An earlier version of this step made exactly that mistake.
+        #
+        # The bug this exists for was invisible for months: nothing set
+        # CFBundleShortVersionString, so xcodegen wrote its own default "1.0" while
+        # project.yml said MARKETING_VERSION 0.1, and it surfaced only when Apple closed
+        # the 1.0 train (altool 90186) and every upload started failing. Comparing the
+        # BUILT value against project.yml proves the setting actually reaches the bundle.
+        run: |
+          APP=$(find .build-dd/Build/Products -name '*.app' -maxdepth 3 -type d | head -1)
+          if [ -z "$APP" ]; then echo "::error::no built .app found under .build-dd"; exit 1; fi
+          echo "built app: $APP"
+          BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
+          EXPECTED=$(grep -m1 'MARKETING_VERSION:' project.yml | sed 's/.*MARKETING_VERSION:[[:space:]]*//' | tr -d '" ')
+          echo "built CFBundleShortVersionString=$BUILT  project.yml MARKETING_VERSION=$EXPECTED"
+          if [ -z "$BUILT" ]; then echo "::error::built app has no CFBundleShortVersionString"; exit 1; fi
+          case "$BUILT" in
+            *'$('*) echo "::error::CFBundleShortVersionString did not substitute: $BUILT"; exit 1 ;;
+          esac
+          if [ "$BUILT" != "$EXPECTED" ]; then
+            echo "::error::built version ($BUILT) does not match project.yml MARKETING_VERSION ($EXPECTED) — the setting is not reaching the bundle"
+            exit 1
+          fi
+
       - name: Run UI scroll-test (the gesture receipt)
         # Runs only if the HerdrUITests target exists in the generated project.
         run: |
