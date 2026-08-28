@@ -68,13 +68,13 @@ public struct PairingCoordinator {
     private let store: HostStore
     private let pinner: HostKeyPinner
     /// Injectable so tests drive the real socket protocol against a stub daemon.
-    private let redeem: (Pairing.Payload, String, String) throws -> Void
+    private let redeem: (Pairing.Payload, String, String) async throws -> Void
 
     public init(
         store: HostStore,
         pinner: HostKeyPinner,
-        redeem: @escaping (Pairing.Payload, String, String) throws -> Void = {
-            try Pairing.redeem(payload: $0, publicKeyLine: $1, deviceLabel: $2)
+        redeem: @escaping (Pairing.Payload, String, String) async throws -> Void = {
+            try await Pairing.redeem(payload: $0, publicKeyLine: $1, deviceLabel: $2)
         }
     ) {
         self.store = store
@@ -87,12 +87,18 @@ public struct PairingCoordinator {
     /// - Parameter deviceLabel: shown in the machine's `authorized_keys` so a person can
     ///   recognise and revoke this device later. A device name, not a secret.
     /// - Returns: the nickname the host was saved under.
+    /// ASYNC, and the reason is not style. The redemption is a blocking socket round
+    /// trip, so it must leave the caller's actor — but the store and the pinner must NOT.
+    /// `store.addPairedHost` mutates an `@Published` property, and SwiftUI forbids that
+    /// off the main actor. Awaiting only the socket keeps steps 1 and 3 on the caller's
+    /// actor while step 2 goes wide, instead of detaching the whole thing and mutating
+    /// observable state from a background thread.
     @discardableResult
     public func completePairing(
         payload: Pairing.Payload,
         deviceLabel: String,
         nickname: String? = nil
-    ) throws -> String {
+    ) async throws -> String {
         // 1. Pin BEFORE touching the other machine.
         guard let fingerprint = payload.hostKeyFingerprint else {
             throw Failure.noHostKeyToPin
@@ -106,7 +112,7 @@ public struct PairingCoordinator {
         //    Keychain below; it is never sent and never written anywhere else.
         let key = PairingKey(comment: deviceLabel)
         do {
-            try redeem(payload, key.authorizedKeysLine, deviceLabel)
+            try await redeem(payload, key.authorizedKeysLine, deviceLabel)
         } catch let error as Pairing.Error {
             throw Failure.pairing(error)
         }

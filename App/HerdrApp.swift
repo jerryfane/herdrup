@@ -451,12 +451,29 @@ struct RootView: View {
 /// The connect screen: a manager of saved machines. Tap a host to connect (one tap);
 /// "Add host" and hold-to-Edit open the HostEditor sheet. Constructing the transport
 /// does not connect — the first request does — so this never blocks on the network.
+/// Setup facts shown on more than one screen.
+///
+/// One definition, because the first-run screen and the post-failure guidance must not
+/// drift apart — a reader who follows one and then the other has to be given the same
+/// command both times.
+enum HerdrSetup {
+    /// Installs the fork on the machine: clone, build, install to `~/.local/bin`.
+    /// `install -D` creates the parent directory, so no separate `mkdir` is needed.
+    static let installCommand =
+        "git clone https://github.com/jerryfane/herdr && cd herdr && "
+        + "cargo build --release && "
+        + "install -D -m 0755 target/release/herdr ~/.local/bin/herdr"
+}
+
 struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
 
     @ObservedObject private var savedHosts = SavedHostsStore.shared
     /// The add/edit sheet target; nil = closed.
     @State private var editorTarget: HostEditorTarget?
+    /// The scan-to-connect sheet (#126) — the path that needs no key, no host address and
+    /// no knowledge of what a daemon is.
+    @State private var showingPairing = false
 
     var body: some View {
         ZStack {
@@ -471,6 +488,11 @@ struct ConnectView: View {
                     } else {
                         savedHostsSection
                     }
+                    // Scanning is the PRIMARY action and manual entry the fallback, not
+                    // the other way round. The manual path asks for a host address, a
+                    // username and an ed25519 private key — three things a new user does
+                    // not have and cannot be expected to produce from this screen.
+                    scanButton
                     addHostButton
                     captions
                 }
@@ -487,6 +509,28 @@ struct ConnectView: View {
                 onConnect(creds)
             }
         }
+        .sheet(isPresented: $showingPairing) {
+            PairingSheet(store: savedHosts) { nickname in
+                // Connect straight into what was just paired: the point of scanning is
+                // that nothing else is asked for.
+                if let paired = savedHosts.hosts.first(where: { $0.nickname == nickname }) {
+                    tapSavedHost(paired)
+                }
+            }
+        }
+    }
+
+    private var scanButton: some View {
+        Button { showingPairing = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "qrcode.viewfinder").font(.system(size: 16, weight: .semibold))
+                Text("Scan pairing code").font(Typography.app(16, .semibold))
+            }
+            .foregroundStyle(Palette.ground)
+            .frame(maxWidth: .infinity).padding(.vertical, 15)
+            .background(Palette.text).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
     }
 
     // Centered identity header: the app logo (the Lamb), the name, one line of intent.
@@ -512,15 +556,44 @@ struct ConnectView: View {
         .padding(.bottom, 8)
     }
 
+    /// The first screen a new user ever sees, and the one that blocked one.
+    ///
+    /// What it said before: "Add a machine to connect over your Tailscale network." That
+    /// assumed the reader already knew herdr runs on a computer, that a daemon has to be
+    /// installed there, and what Tailscale is — the word "herdr" did not appear anywhere
+    /// on this screen, and the page that DOES explain it was unreachable until after a
+    /// successful SSH login, i.e. visible only to people who had already solved it.
+    ///
+    /// So it now says what the app is, and gives the one command that starts everything.
     private var emptyState: some View {
-        VStack(spacing: 6) {
-            Text("No saved machines yet")
+        VStack(spacing: 12) {
+            Text("herdrup controls coding agents running on your computer.")
                 .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
-            Text("Add a machine to connect over your Tailscale network.")
+                .multilineTextAlignment(.center)
+            Text("It needs herdr installed there first. On your computer, run:")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .multilineTextAlignment(.center)
+
+            VStack(spacing: 8) {
+                monoCard(HerdrSetup.installCommand)
+                Text("then").font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                monoCard("herdr pair")
+            }
+
+            Text("Scan the code it prints and you're connected — no keys to copy.")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 16)
+    }
+
+    private func monoCard(_ text: String) -> some View {
+        Text(text)
+            .font(Typography.machine(13)).foregroundStyle(Palette.text)
+            .textSelection(.enabled)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var addHostButton: some View {
@@ -2395,13 +2468,13 @@ struct TerminalHomeView: View {
         Spacer()
     }
 
-    /// The one-liner that installs the fork on the remote machine, condensed from
-    /// the onboarding doc's happy path (clone, build, install to `~/.local/bin`).
-    /// `install -D` creates the parent dir, so no separate `mkdir` step is needed.
-    private static let herdrInstallCommand =
-        "git clone https://github.com/jerryfane/herdr && cd herdr && "
-        + "cargo build --release && "
-        + "install -D -m 0755 target/release/herdr ~/.local/bin/herdr"
+    /// The install one-liner, kept where BOTH screens that show it can reach it.
+    ///
+    /// It used to be `private static` on this view alone, which is why the first-run
+    /// screen could not show it: the only place explaining how to install herdr was
+    /// `herdrInstallGuidance`, reachable only AFTER a successful SSH login — visible
+    /// solely to people who had already solved the problem it explains.
+    private static var herdrInstallCommand: String { HerdrSetup.installCommand }
 
     /// Shown in place of the raw stderr when the connect failed because herdr is not
     /// installed (`herdrMissing`). Mirrors `ForkNoticeView`'s language and reuses the
