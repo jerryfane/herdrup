@@ -37,6 +37,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # THE 369 HerdrKit TESTS, WHICH UNTIL NOW RAN NOWHERE (herdrup#189).
+  #
+  # ci.yml built the app and ran the XCUITest and never invoked `swift test`, so every
+  # test under Tests/HerdrKitTests was written, maintained and executed by nothing —
+  # including the wire-protocol tests, which are the ones where silence is expensive: a
+  # wrong CodingKey decodes as nil rather than throwing, so the app quietly loses a field
+  # instead of failing. A failing test also sat unnoticed on main because of this.
+  #
+  # It needs no macOS runner. HerdrKit is pure Swift with no UI framework, so it builds
+  # and tests on Linux in about 40 seconds — the cheapest job in the repo, on the runner
+  # class that is free for public repositories.
+  herdrkit:
+    name: HerdrKit (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
   build-and-uitest:
     runs-on: macos-latest
     timeout-minutes: 45
