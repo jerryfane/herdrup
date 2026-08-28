@@ -166,11 +166,17 @@ extension Color {
 /// meaning (the working blue); the motion says "live" without claiming a duration.
 struct TurningRing: View {
     var color: Color
+    /// Sized like `PulsingDot.diameter`: the defaults are the inline badge size, so the
+    /// agent-list call site is unchanged. The sign-in flow's "starting" composition asks
+    /// for a larger ring (30/2) because it is the only thing on the screen, and the same
+    /// ring inline (13/1.6) while a code is in flight.
+    var diameter: CGFloat = 13
+    var lineWidth: CGFloat = 1.6
     @State private var spin = false
     var body: some View {
         Circle().trim(from: 0, to: 0.72)
-            .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
-            .frame(width: 13, height: 13)
+            .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            .frame(width: diameter, height: diameter)
             .rotationEffect(.degrees(spin ? 360 : 0))
             .onAppear {
                 withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }

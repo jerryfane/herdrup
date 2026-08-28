@@ -3892,6 +3892,10 @@ struct SettingsView: View {
                     AccountLoginSheet(client: client, account: account) {
                         Task { accounts = (try? await client.accountsList()) ?? [] }
                     }
+                    // The chrome every other sheet in the app gets and this one did not:
+                    // full height with a grabber, so swipe-down closes it.
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
                 }
                 .sheet(isPresented: $showAddAccount) {
                     AddAccountSheet(client: client) { refreshed, created in
@@ -3905,6 +3909,8 @@ struct SettingsView: View {
                             }
                         }
                     }
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
                 }
                 .confirmationDialog(
                     logoutAccount.map { "Log out \($0.label)?" } ?? "",
