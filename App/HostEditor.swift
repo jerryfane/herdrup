@@ -38,6 +38,14 @@ struct HostEditor: View {
     @State private var password = ""
     @State private var error: String?
     @State private var keyError: String?
+    /// "Choose key file…" — the path that works everywhere, including the Mac build where
+    /// `PasteButton` is inert.
+    @State private var showingKeyImporter = false
+    /// Last-resort manual entry. Off by default because it is the one route that puts the
+    /// key on screen; a person who opens it has chosen that, which an ambient screenshot
+    /// has not.
+    @State private var showingManualEntry = false
+    @State private var manualKey = ""
 
     private let editing: SavedHost?
 
@@ -230,11 +238,33 @@ struct HostEditor: View {
                     Text("Copy your ed25519 private key (PEM) to the clipboard, then paste it here. It is stored in the Keychain (device-only) and sent over the SSH connection; it is never displayed, so it can't appear in a screenshot.")
                         .font(Typography.app(13)).foregroundStyle(Palette.textDim)
 
+                    // FILE FIRST, and deliberately so. herdrup runs on macOS as a
+                    // "Designed for iPad" app (SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD),
+                    // where the PasteButton below is inert — the Mac pasteboard does not
+                    // surface a matching payload type to the iOS compatibility layer, so
+                    // the control stays disabled and there is NOTHING ELSE on this sheet.
+                    // A Mac user was therefore hard-blocked from adding a host at all.
+                    //
+                    // The file path also happens to be the natural one on a Mac: the key
+                    // is already at ~/.ssh/id_ed25519, and reading it renders nothing.
+                    Button { showingKeyImporter = true } label: {
+                        Label("Choose key file…", systemImage: "folder")
+                            .font(Typography.app(16, .semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 15)
+                            .background(Palette.text).foregroundStyle(Palette.ground)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+
+                    caption("Your key is usually at ~/.ssh/id_ed25519. That folder is "
+                            + "hidden — in the file picker press ⇧⌘. to show hidden files, "
+                            + "or ⇧⌘G and type the path.", color: Palette.textFaint)
+
                     // System PasteButton, NOT a programmatic UIPasteboard read: the tap
                     // itself is the paste consent, so it never shows the "Allow Paste"
                     // permission prompt (which was the iPad App Review failure) and still
                     // hands us the key WITHOUT rendering it. Auto-disables when the
-                    // clipboard holds no text.
+                    // clipboard holds no text — which on the Mac build is always.
                     PasteButton(payloadType: String.self) { items in
                         // The action can run off the main actor; hop before touching @State.
                         Task { @MainActor in ingestKey(items.first) }
@@ -244,6 +274,31 @@ struct HostEditor: View {
                     .buttonBorderShape(.roundedRectangle(radius: 12))
                     .controlSize(.large)
                     .frame(maxWidth: .infinity)
+
+                    // Last resort, and the only route that shows the key. Pasting into a
+                    // field the user focused is their own action, so it triggers no
+                    // "Allow Paste" prompt — the thing that got this app rejected was a
+                    // PROGRAMMATIC pasteboard read, not a user pressing Cmd-V.
+                    if showingManualEntry {
+                        TextEditor(text: $manualKey)
+                            .font(Typography.machine(12))
+                            .frame(height: 120)
+                            .scrollContentBackground(.hidden)
+                            .background(Palette.surface)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        Button("Use this key") {
+                            ingestKey(manualKey)
+                            // Drop the visible copy the moment it is accepted.
+                            if keyError == nil { manualKey = ""; showingManualEntry = false }
+                        }
+                        .font(Typography.app(15)).foregroundStyle(Palette.text)
+                        .disabled(manualKey.isEmpty)
+                    } else {
+                        Button("Paste it manually instead") { showingManualEntry = true }
+                            .font(Typography.app(14)).foregroundStyle(Palette.textDim)
+                    }
 
                     if !keyPEM.isEmpty {
                         HStack(spacing: 8) {
@@ -262,10 +317,49 @@ struct HostEditor: View {
                 .padding(20)
             }
             .navigationTitle("Private key")
+            .fileImporter(
+                isPresented: $showingKeyImporter,
+                allowedContentTypes: [.item],  // an SSH key has no UTType and no extension
+                allowsMultipleSelection: false
+            ) { result in
+                importKeyFile(result)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showingKeySheet = false }.foregroundStyle(Palette.textDim)
                 }
+            }
+        }
+    }
+
+    /// Read a private key the user picked in the file browser.
+    ///
+    /// This is the path that unblocks macOS, where `PasteButton` never enables. The file
+    /// is read and discarded — nothing is copied into the app's container, and the key is
+    /// not rendered.
+    private func importKeyFile(_ result: Result<[URL], Swift.Error>) {
+        switch result {
+        case .failure(let err):
+            keyError = "Couldn't open that file: \(err.localizedDescription)"
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            // A file picked outside the sandbox is security-scoped; without this the read
+            // fails with a permission error that reads like a missing file.
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                // A public key is the easy mistake to make here (id_ed25519.pub sits right
+                // next to the private one and sorts adjacent in the picker), and the
+                // generic "expected a PEM block" message would not explain it.
+                if text.hasPrefix("ssh-") || url.pathExtension == "pub" {
+                    keyError = "That's the PUBLIC key. Pick the file WITHOUT the .pub "
+                        + "ending — usually id_ed25519."
+                    return
+                }
+                ingestKey(text)
+            } catch {
+                keyError = "Couldn't read that file: \(error.localizedDescription)"
             }
         }
     }
@@ -276,12 +370,16 @@ struct HostEditor: View {
     /// triggers the system paste-permission prompt (the iPad App Review failure); the
     /// PasteButton delivers the string instead.
     private func ingestKey(_ raw: String?) {
+        // Source-agnostic wording: this is reached from the file picker, the PasteButton
+        // and the manual field, so a message naming the clipboard would be wrong on two
+        // of the three.
         guard let s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else {
-            keyError = "Nothing to paste. Copy your private key to the clipboard first."
+            keyError = "That was empty. Choose your private key file, or paste the key."
             return
         }
         guard s.contains("PRIVATE KEY") else {
-            keyError = "That doesn't look like a private key (expected a PEM block)."
+            keyError = "That doesn't look like a private key. It should start with "
+                + "-----BEGIN OPENSSH PRIVATE KEY-----."
             return
         }
         keyPEM = s
