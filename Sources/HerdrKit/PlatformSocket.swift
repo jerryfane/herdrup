@@ -32,3 +32,27 @@ public func platformBind(
     return Glibc.bind(fd, addr, len)
 #endif
 }
+
+/// `connect(2)`, reached unambiguously.
+///
+/// Same reason as `platformBind`: the bare name can resolve to something else at a call
+/// site (XCTestCase exposes members that shadow C symbols), so the module is named here
+/// once rather than at every use.
+public func platformConnect(
+    _ fd: Int32, _ addr: UnsafePointer<sockaddr>, _ len: socklen_t
+) -> Int32 {
+#if canImport(Darwin)
+    return Darwin.connect(fd, addr, len)
+#else
+    return Glibc.connect(fd, addr, len)
+#endif
+}
+
+/// `close(2)`, reached unambiguously.
+public func platformClose(_ fd: Int32) {
+#if canImport(Darwin)
+    _ = Darwin.close(fd)
+#else
+    _ = Glibc.close(fd)
+#endif
+}
