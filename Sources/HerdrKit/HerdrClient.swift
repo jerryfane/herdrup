@@ -614,8 +614,14 @@ public actor HerdrClient {
     /// the working directory the new pane (and the agent started in it) runs in —
     /// the "folder" of the new-agent form; nil follows the split pane's cwd.
     /// No target pane is sent, so the server splits whatever is focused.
-    public func splitPane(cwd: String?, direction: SplitDirection = .down) async throws -> String {
-        let params = PaneSplitParams(direction: direction.rawValue, cwd: cwd, focus: true)
+    ///
+    /// `focus` defaults to true, which is right for a pane the user ASKED for and is
+    /// about to look at. Pass false for a BACKGROUND pane the app drives on the user's
+    /// behalf — sign-in and log-out run a command in a pane the user never sees, and
+    /// focusing it yanks the box's focus away from whatever they were actually doing.
+    public func splitPane(cwd: String?, direction: SplitDirection = .down,
+                          focus: Bool = true) async throws -> String {
+        let params = PaneSplitParams(direction: direction.rawValue, cwd: cwd, focus: focus)
         return try await call("pane.split", params, as: PaneInfoResult.self).pane.paneID
     }
 

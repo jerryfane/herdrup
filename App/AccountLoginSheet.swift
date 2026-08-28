@@ -85,6 +85,11 @@ struct AccountLoginSheet: View {
             }
         }
         .task { await start() }
+        // THE ONLY PATH EVERY DISMISSAL TAKES. `finish()` covers the ✕ and a confirmed
+        // success, but a SWIPE-DOWN calls neither — and that left a live
+        // `claude auth login` pane running on the box, which the user could later
+        // stumble onto in the terminal tab with no idea where it came from.
+        .onDisappear { cleanupPane() }
         .onReceive(tick) { _ in
             // Only the two waiting boards show an elapsed count.
             if phase == .starting || phase == .submitting { waitedSeconds += 1 }
@@ -598,7 +603,8 @@ struct AccountLoginSheet: View {
         status = "Starting sign-in…"
         phase = .starting
         do {
-            let pane = try await client.splitPane(cwd: nil)
+            // Background: the user never sees this pane, so it must not take focus.
+            let pane = try await client.splitPane(cwd: nil, focus: false)
             paneID = pane
             try await client.sendText(pane: pane, text: cmd)
             try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
@@ -742,10 +748,18 @@ struct AccountLoginSheet: View {
     }
 
     private func finish() {
-        scrapeTask?.cancel()
-        let pane = paneID
+        // Pane teardown belongs to `cleanupPane` via `.onDisappear`, so there is ONE
+        // owner rather than two paths that must each remember. `dismiss()` triggers it.
         onFinished()
         dismiss()
-        Task { if let pane { try? await client.closePane(paneID: pane) } }
+    }
+
+    /// Cancel the scrape and close the background pane. Idempotent: it clears `paneID`
+    /// first, so being called twice (finish → dismiss → onDisappear) closes once.
+    private func cleanupPane() {
+        scrapeTask?.cancel()
+        guard let pane = paneID else { return }
+        paneID = nil
+        Task { try? await client.closePane(paneID: pane) }
     }
 }
