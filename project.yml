@@ -148,6 +148,11 @@ targets:
         # it requests the permission.
         NSMicrophoneUsageDescription: herdrup uses the microphone only while you hold a dictation session, to turn your speech into text in the message field. Audio is transcribed on-device and never leaves your phone.
         NSSpeechRecognitionUsageDescription: herdrup transcribes your dictation into text on-device, so you can talk instead of type. Your speech is not sent anywhere.
+        # QR pairing (#126): the camera reads the code `herdr pair` prints on the
+        # machine. REQUIRED — like the two strings above, the app crashes the first
+        # time it asks for the permission if this is missing, and the crash would land
+        # on the very first screen a new user reaches.
+        NSCameraUsageDescription: herdrup uses the camera only to scan the pairing code your computer displays, so it can connect without you typing anything. No photos or video are recorded.
         # Export compliance: herdr uses ONLY standard, published encryption (AES/SSH
         # via a standard library — no proprietary or custom cryptography), which
         # QUALIFIES FOR THE STANDARD MASS-MARKET EXEMPTION (EAR Category 5 Part 2). So
