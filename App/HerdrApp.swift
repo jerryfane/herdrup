@@ -3964,7 +3964,8 @@ struct SettingsView: View {
               let cmd = claudeLogoutCommand(kind: account.kind, configDir: configDir)
         else { return }
         do {
-            let pane = try await client.splitPane(cwd: nil)
+            // Same as sign-in: a short-lived background pane the user never sees.
+            let pane = try await client.splitPane(cwd: nil, focus: false)
             try await client.sendText(pane: pane, text: cmd)
             try await client.sendPaneKeys(pane: pane, keys: ["Enter"])
             try? await Task.sleep(nanoseconds: 2_500_000_000)
