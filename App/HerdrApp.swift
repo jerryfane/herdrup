@@ -298,6 +298,8 @@ struct RootView: View {
     private func mockView(_ mode: ScreenshotMock) -> some View {
         let mockClient = HerdrClient(transport: MockTransport())
         switch mode {
+        case .onboarding:
+            ConnectView { _ in }
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
@@ -457,12 +459,18 @@ struct RootView: View {
 /// drift apart — a reader who follows one and then the other has to be given the same
 /// command both times.
 enum HerdrSetup {
-    /// Installs the fork on the machine: clone, build, install to `~/.local/bin`.
-    /// `install -D` creates the parent directory, so no separate `mkdir` is needed.
+    /// Installs the fork on the machine.
+    ///
+    /// ONE LINE ON PURPOSE. This was four chained commands that wrapped onto four
+    /// lines in the first-run card — a wall of text as the very first thing a new
+    /// user is asked to do. The script selects the matching prebuilt fork release,
+    /// verifies its SHA-256 checksum, and installs it under `~/.local/bin`, so the
+    /// reader does not need a source checkout, Rust, Cargo, or Zig.
+    ///
+    /// It points at the FORK, not `herdr.dev/install.sh`: upstream's installer
+    /// produces a herdr with no `api-bridge`, which this app cannot drive.
     static let installCommand =
-        "git clone https://github.com/jerryfane/herdr && cd herdr && "
-        + "cargo build --release && "
-        + "install -D -m 0755 target/release/herdr ~/.local/bin/herdr"
+        "curl -fsSL https://herdrup.themartian.app/install.sh | sh"
 }
 
 struct ConnectView: View {
@@ -474,6 +482,8 @@ struct ConnectView: View {
     /// The scan-to-connect sheet (#126) — the path that needs no key, no host address and
     /// no knowledge of what a daemon is.
     @State private var showingPairing = false
+    /// Which command was just copied, so the card can confirm it. Nil = none.
+    @State private var copiedCommand: String?
 
     var body: some View {
         ZStack {
@@ -580,20 +590,51 @@ struct ConnectView: View {
                 monoCard("herdr pair")
             }
 
-            Text("Scan the code it prints and you're connected — no keys to copy.")
+            Text("Scan the code it prints and you're connected. No keys to copy.")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 16)
     }
 
+    /// A command the reader is meant to run on their computer — and can now COPY.
+    ///
+    /// It looked tappable and did nothing, which is worse than looking inert: the
+    /// obvious gesture on a command you are being told to run somewhere else is to
+    /// copy it, and this screen is a phone showing a command for a laptop, so
+    /// copy-then-paste is the whole point.
+    ///
+    /// Clipboard WRITE only (`UIPasteboard.general.string`), the same pattern as
+    /// `CopyForAgentButton` — a programmatic READ is what triggers the system paste
+    /// prompt that failed App Review under 2.1a.
     private func monoCard(_ text: String) -> some View {
-        Text(text)
-            .font(Typography.machine(13)).foregroundStyle(Palette.text)
-            .textSelection(.enabled)
+        Button {
+            UIPasteboard.general.string = text
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            copiedCommand = text
+            // Revert the label rather than leaving a permanent "Copied", which would
+            // stop telling the truth the moment the clipboard changed.
+            Task {
+                try? await Task.sleep(nanoseconds: 1_600_000_000)
+                if copiedCommand == text { copiedCommand = nil }
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Text(text)
+                    .font(Typography.machine(13)).foregroundStyle(Palette.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                Image(systemName: copiedCommand == text ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(copiedCommand == text ? Palette.done : Palette.textFaint)
+                    .padding(.top, 2)
+            }
             .padding(.horizontal, 14).padding(.vertical, 10)
             .frame(maxWidth: .infinity)
             .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(copiedCommand == text ? "Copied" : "Copy command: \(text)"))
     }
 
     private var addHostButton: some View {
@@ -5497,13 +5538,14 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
+    case onboarding, list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
         guard env != nil || arg else { return nil }
         switch env {
+        case "onboarding": return .onboarding
         case "pane": return .pane
         case "settings": return .settings
         case "newagent": return .newAgent
