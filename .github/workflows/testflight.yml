@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
     # EVERY signing secret lives in this ENVIRONMENT (scoped to main + v* tags), not
     # at repo level: a workflow pushed to a feature branch then cannot reach the
