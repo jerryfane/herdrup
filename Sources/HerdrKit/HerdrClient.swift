@@ -68,6 +68,12 @@ public actor HerdrClient {
         try await call("accounts.list", EmptyParams(), as: AccountsListResult.self).accounts
     }
 
+    /// Feature flags from the daemon's `ping` result. `nil` capabilities means an
+    /// older daemon; callers treat every new feature as unsupported in that case.
+    public func serverCapabilities() async throws -> ServerCapabilities? {
+        try await call("ping", EmptyParams(), as: PingResult.self).capabilities
+    }
+
     struct AccountsCreateParams: Encodable {
         let kind: String
         let label: String
@@ -705,6 +711,68 @@ public actor HerdrClient {
         try await call("agent.restart", AgentRestartParams(target: target, account: account),
                        as: AgentInfoResult.self)
             .agent
+    }
+
+    /// Wire payload shared by the explicit prepare and confirm calls. False
+    /// `confirm` and nil optionals are omitted so the prepare request stays the
+    /// minimal `{ target, to, account? }` contract.
+    struct AgentTransferSessionParams: Encodable {
+        let target: String
+        let to: AgentSessionTransferHarness
+        let account: String?
+        let transferID: String?
+        let confirm: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case target, to, account, confirm
+            case transferID = "transfer_id"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(target, forKey: .target)
+            try container.encode(to, forKey: .to)
+            try container.encodeIfPresent(account, forKey: .account)
+            try container.encodeIfPresent(transferID, forKey: .transferID)
+            if confirm { try container.encode(true, forKey: .confirm) }
+        }
+    }
+
+    /// Stage and verify a native destination transcript while the source harness
+    /// remains live. The returned agent carries `sessionTransfer`; the caller must
+    /// review its counts before making the separate confirmation call.
+    @discardableResult
+    public func prepareAgentSessionTransfer(
+        target: String,
+        to harness: AgentSessionTransferHarness,
+        account: String? = nil
+    ) async throws -> AgentInfo {
+        try await call(
+            "agent.transfer_session",
+            AgentTransferSessionParams(
+                target: target, to: harness, account: account,
+                transferID: nil, confirm: false),
+            as: AgentInfoResult.self
+        ).agent
+    }
+
+    /// Confirm one exact prepared transfer. Herdr first returns the durable
+    /// `verifyingCutover` phase while the source stays live, then owns cutover and
+    /// rollback; this call never silently prepares a replacement transaction.
+    @discardableResult
+    public func confirmAgentSessionTransfer(
+        target: String,
+        to harness: AgentSessionTransferHarness,
+        account: String? = nil,
+        transferID: String
+    ) async throws -> AgentInfo {
+        try await call(
+            "agent.transfer_session",
+            AgentTransferSessionParams(
+                target: target, to: harness, account: account,
+                transferID: transferID, confirm: true),
+            as: AgentInfoResult.self
+        ).agent
     }
 
     struct AgentRenameParams: Encodable {

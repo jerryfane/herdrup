@@ -112,6 +112,108 @@ public struct AgentArchivedInfo: Decodable, Equatable, Sendable {
     public let reason: String?
 }
 
+/// The two harnesses whose native transcript formats Herdr can translate.
+public enum AgentSessionTransferHarness: String, Codable, Equatable, Sendable {
+    case claude, codex
+
+    public var displayName: String { self == .claude ? "Claude Code" : "Codex" }
+}
+
+/// The durable two-phase transfer state reported on `AgentInfo.sessionTransfer`.
+public enum AgentSessionTransferPhase: Decodable, Equatable, Sendable {
+    case preparing
+    case ready
+    case verifyingCutover
+    case launchingTarget
+    case awaitingTarget
+    case completed
+    case rollingBack
+    case rolledBack
+    case failed
+    case unrecognised(String)
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "preparing": self = .preparing
+        case "ready": self = .ready
+        case "verifying_cutover": self = .verifyingCutover
+        case "launching_target": self = .launchingTarget
+        case "awaiting_target": self = .awaitingTarget
+        case "completed": self = .completed
+        case "rolling_back": self = .rollingBack
+        case "rolled_back": self = .rolledBack
+        case "failed": self = .failed
+        default: self = .unrecognised(value)
+        }
+    }
+
+    public var isTerminal: Bool {
+        switch self {
+        case .completed, .rolledBack, .failed, .unrecognised: return true
+        default: return false
+        }
+    }
+}
+
+/// Records intentionally omitted from the visible-message transcript. These are
+/// counts, not silent loss: the confirmation UI names every category before cutover.
+public struct AgentSessionTransferOmissions: Decodable, Equatable, Sendable {
+    public let toolRecords: UInt64
+    public let reasoningRecords: UInt64
+    public let systemRecords: UInt64
+    public let attachmentRecords: UInt64
+    public let metadataRecords: UInt64
+    public let unsupportedBlocks: UInt64
+    public let sidechainRecords: UInt64
+
+    public var total: UInt64 {
+        toolRecords + reasoningRecords + systemRecords + attachmentRecords
+            + metadataRecords + unsupportedBlocks + sidechainRecords
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case toolRecords = "tool_records"
+        case reasoningRecords = "reasoning_records"
+        case systemRecords = "system_records"
+        case attachmentRecords = "attachment_records"
+        case metadataRecords = "metadata_records"
+        case unsupportedBlocks = "unsupported_blocks"
+        case sidechainRecords = "sidechain_records"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        toolRecords = try c.decodeIfPresent(UInt64.self, forKey: .toolRecords) ?? 0
+        reasoningRecords = try c.decodeIfPresent(UInt64.self, forKey: .reasoningRecords) ?? 0
+        systemRecords = try c.decodeIfPresent(UInt64.self, forKey: .systemRecords) ?? 0
+        attachmentRecords = try c.decodeIfPresent(UInt64.self, forKey: .attachmentRecords) ?? 0
+        metadataRecords = try c.decodeIfPresent(UInt64.self, forKey: .metadataRecords) ?? 0
+        unsupportedBlocks = try c.decodeIfPresent(UInt64.self, forKey: .unsupportedBlocks) ?? 0
+        sidechainRecords = try c.decodeIfPresent(UInt64.self, forKey: .sidechainRecords) ?? 0
+    }
+}
+
+/// Reviewable transfer facts retained on the logical agent throughout prepare,
+/// cutover, rollback, and completion. `targetAccount` is deliberately echoed so
+/// reopening a prepared sheet never has to guess which account confirmation needs.
+public struct AgentSessionTransferInfo: Decodable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let source: AgentSessionTransferHarness
+    public let target: AgentSessionTransferHarness
+    public let targetAccount: String?
+    public let phase: AgentSessionTransferPhase
+    public let messageCount: UInt64
+    public let omissions: AgentSessionTransferOmissions
+    public let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, source, target, phase, omissions, error
+        case targetAccount = "target_account"
+        case messageCount = "message_count"
+    }
+}
+
 public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let agent: String?
     public let agentStatus: String?
@@ -169,6 +271,9 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let account: String?
     public let accountConfigDir: String?
     public let accountUnresolved: Bool?
+    /// Present while a Claude Code/Codex transfer is staged or launching, and
+    /// retained with its final outcome. Absent on older daemons.
+    public let sessionTransfer: AgentSessionTransferInfo?
 
     /// Stable list identity. A LIVE agent is keyed on its pane id, which is unique
     /// and stable while it runs. An ARCHIVED agent has NO pane — the server empties
@@ -236,6 +341,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case lastKnownStatus = "last_known_status"
         case accountConfigDir = "account_config_dir"
         case accountUnresolved = "account_unresolved"
+        case sessionTransfer = "session_transfer"
     }
 }
 
@@ -696,6 +802,41 @@ public struct PanePtySize: Decodable, Sendable, Equatable {
 }
 
 // MARK: - Server / staged self-update (server.staged_update / server.apply_staged_update)
+
+/// Feature flags returned by `ping`. Missing fields decode false so a newer app
+/// talking to an older daemon simply hides unsupported controls.
+public struct ServerCapabilities: Decodable, Equatable, Sendable {
+    public let liveHandoff: Bool
+    public let detachedServerDaemon: Bool
+    public let paneInputStream: Bool
+    public let agentSessionTransfer: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case liveHandoff = "live_handoff"
+        case detachedServerDaemon = "detached_server_daemon"
+        case paneInputStream = "pane_input_stream"
+        case agentSessionTransfer = "agent_session_transfer"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        liveHandoff = try c.decodeIfPresent(Bool.self, forKey: .liveHandoff) ?? false
+        detachedServerDaemon = try c.decodeIfPresent(Bool.self, forKey: .detachedServerDaemon) ?? false
+        paneInputStream = try c.decodeIfPresent(Bool.self, forKey: .paneInputStream) ?? false
+        agentSessionTransfer = try c.decodeIfPresent(Bool.self, forKey: .agentSessionTransfer) ?? false
+    }
+}
+
+struct PingResult: Decodable {
+    let version: String
+    let protocolVersion: Int
+    let capabilities: ServerCapabilities?
+
+    enum CodingKeys: String, CodingKey {
+        case version, capabilities
+        case protocolVersion = "protocol"
+    }
+}
 
 /// Result of `server.staged_update` (`type: "staged_update"`): the running daemon's version and
 /// protocol, plus the staged build when a build step has pre-staged a newer binary — `staged` is

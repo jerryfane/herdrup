@@ -1146,6 +1146,17 @@ struct TerminalHomeView: View {
         let account: CredentialAccount
     }
     @State private var swapCandidate: PendingSwap?
+    /// Capability-gated Claude Code <-> Codex transfer. Unlike a subscription
+    /// swap, this stages a translated native session and requires review before
+    /// the source runtime is interrupted.
+    private struct PendingHarnessTransfer: Identifiable {
+        let row: AgentRow
+        let target: AgentSessionTransferHarness
+        var id: String { "\(row.info.paneID):\(target.rawValue)" }
+    }
+    @State private var transferCandidate: PendingHarnessTransfer?
+    @State private var sessionTransferSupported = false
+    @State private var checkedSessionTransferCapability = false
     /// A pending rename (nil = no sheet). An agent sets its daemon `name` (a resolvable mention
     /// target — `herdr agent read <name>`); a terminal sets its pane `label` (shown in
     /// `herdr pane list`) plus the app-local row label. Identifiable so it drives a `.sheet(item:)`.
@@ -1829,6 +1840,18 @@ struct TerminalHomeView: View {
             .sheet(item: $renameTarget) { target in
                 renameSheet(for: target)
             }
+            .sheet(item: $transferCandidate) { candidate in
+                AgentSessionTransferSheet(
+                    client: client,
+                    agent: candidate.row.info,
+                    title: candidate.row.title,
+                    target: candidate.target,
+                    accounts: accounts,
+                    onRefresh: { Task { await load() } }
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
     }
 
     private var agentsTab: some View {
@@ -2161,6 +2184,21 @@ struct TerminalHomeView: View {
         .contentShape(Rectangle())
     }
 
+    /// Reopen a durable transaction from its recorded target even while the row's
+    /// detected agent is nil or already changed. Without a transaction, only exact
+    /// native harness kinds participate; guessing would offer a transfer the server
+    /// must refuse.
+    private func sessionTransferTarget(for info: AgentInfo) -> AgentSessionTransferHarness? {
+        if let activeOrRecordedTransfer = info.sessionTransfer {
+            return activeOrRecordedTransfer.target
+        }
+        switch info.agent?.lowercased() {
+        case "claude": return .codex
+        case "codex": return .claude
+        default: return nil
+        }
+    }
+
     private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
         // An active search overrides collapse — a match inside IDLE must not stay
         // hidden behind a shut section the user did not open.
@@ -2223,6 +2261,20 @@ struct TerminalHomeView: View {
                         Button {
                             restartCandidate = row
                         } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
+                        // Harness transfer is deliberately not a restart shortcut. It
+                        // first builds and verifies a native destination transcript,
+                        // then opens a review sheet whose explicit confirm performs the
+                        // cutover. Local-only: the server denies filesystem-authority
+                        // transfer requests over federation.
+                        if row.info.machineID == nil,
+                           (sessionTransferSupported || row.info.sessionTransfer != nil),
+                           let target = sessionTransferTarget(for: row.info) {
+                            Button {
+                                transferCandidate = PendingHarnessTransfer(row: row, target: target)
+                            } label: {
+                                Label("Switch to \(target.displayName)", systemImage: "arrow.left.arrow.right")
+                            }
+                        }
                         // Swap = restart the agent onto a DIFFERENT credential account
                         // of the same kind (an agent runs only on its own kind's
                         // subscriptions). Shown only when the daemon reported at least
@@ -2538,6 +2590,20 @@ struct TerminalHomeView: View {
             // failure — or an older daemon without `accounts.list` — keeps the
             // last-good list rather than blanking the submenu mid-session.
             if let fetchedAccounts = try? await client.accountsList() { accounts = fetchedAccounts }
+            // Ping once per connected HomeView to feature-detect the transactional
+            // transfer API. Missing capabilities on an older daemon are a successful
+            // negative result; a transport error is retried on the next load.
+            if !checkedSessionTransferCapability {
+                do {
+                    let capabilities = try await client.serverCapabilities()
+                    sessionTransferSupported = capabilities?.agentSessionTransfer == true
+                    checkedSessionTransferCapability = true
+                } catch {
+                    // Keep the control hidden and retry on a later refresh. Existing
+                    // transfer state still makes the menu visible so a Ready/rollback
+                    // transaction can always be reopened.
+                }
+            }
             error = nil
             rejectedFingerprint = nil
             trustFailed = false
