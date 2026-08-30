@@ -301,6 +301,27 @@ public struct AgentRosterRefreshState: Equatable, Sendable {
     }
 }
 
+/// Monotonic latest-request gate for async roster refreshes.
+///
+/// `@MainActor` serializes state access, but it does not stop two `load()` calls
+/// from interleaving at an `await`. Each load captures the token returned by
+/// `begin()`, and may publish only while `accepts(_:)` remains true. Therefore an
+/// older request that resumes after a newer one can never roll the roster back.
+public struct AgentRosterLoadGate: Equatable, Sendable {
+    private var latestToken: UInt64 = 0
+
+    public init() {}
+
+    public mutating func begin() -> UInt64 {
+        latestToken &+= 1
+        return latestToken
+    }
+
+    public func accepts(_ token: UInt64) -> Bool {
+        token == latestToken
+    }
+}
+
 /// Compact "time in current state" label for the agent card badge (#173): minutes
 /// under an hour, hours under a day, else days — never seconds, always a few digits
 /// + one letter ("5m" / "2h" / "3d"). `nil` when the daemon reported no

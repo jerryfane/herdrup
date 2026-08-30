@@ -205,6 +205,12 @@ struct RootView: View {
     /// so all app chrome scales; the terminal has its own font control.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
+    #if DEBUG
+    /// One stable driver instance for the whole stress-test process. Recreating it
+    /// during a SwiftUI body evaluation would reset its call and gesture counters.
+    private static let rosterStressDriver = RosterStressDriver()
+    #endif
+
     var body: some View {
         // Apply the user's text-size multiplier before the tree renders. Do NOT
         // key the content on it (`.id()`) — that would change identity and reset
@@ -313,7 +319,7 @@ struct RootView: View {
             // The short poll interval is DEBUG-only and turns several production poll
             // boundaries into a bounded simulator receipt.
             TerminalHomeView(
-                client: HerdrClient(transport: MockTransport(rosterDriver: RosterStressDriver())),
+                client: HerdrClient(transport: MockTransport(rosterDriver: Self.rosterStressDriver)),
                 onDisconnect: {},
                 onTrustHostKey: { _ in false },
                 agentListPollIntervalNanoseconds: 50_000_000
@@ -1192,6 +1198,15 @@ private final class AgentRosterPendingBuffer {
     var snapshot: AgentRosterSnapshot?
 }
 
+/// Non-observable generation storage for overlapping async roster loads. Advancing
+/// this gate every poll must not itself invalidate the SwiftUI tree.
+private final class AgentRosterLoadGateBuffer {
+    private var gate = AgentRosterLoadGate()
+
+    func begin() -> UInt64 { gate.begin() }
+    func accepts(_ token: UInt64) -> Bool { gate.accepts(token) }
+}
+
 /// Lists the agents on the host; tapping one opens its pane. A failed load is
 /// recoverable (retry, or disconnect back to the connect form).
 struct TerminalHomeView: View {
@@ -1214,7 +1229,6 @@ struct TerminalHomeView: View {
     /// so one UI test crosses many refresh boundaries without becoming a minute-long
     /// wall-clock test.
     var agentListPollIntervalNanoseconds: UInt64 = 5_000_000_000
-
     /// Agents, account labels, and the already-sorted list are published as one value.
     /// An unchanged fetch leaves this `@State` untouched. Scroll-time fetches go into
     /// the non-observable buffer above, so even recording a pending result cannot ask
@@ -1222,6 +1236,7 @@ struct TerminalHomeView: View {
     @State private var displayedRoster = AgentRosterSnapshot()
     @State private var agentListIsScrolling = false
     @State private var pendingRoster = AgentRosterPendingBuffer()
+    @State private var rosterLoadGate = AgentRosterLoadGateBuffer()
     private var agents: [AgentInfo] { displayedRoster.agents }
     private var accounts: [CredentialAccount] { displayedRoster.accounts }
     @State private var error: String?
@@ -2172,6 +2187,26 @@ struct TerminalHomeView: View {
         if next.isScrolling != agentListIsScrolling { agentListIsScrolling = next.isScrolling }
     }
 
+    /// Publish one internally-consistent roster, or coalesce it into the
+    /// non-observable scroll-time buffer. Equality gating inside the pure state
+    /// transform means an unchanged response performs no SwiftUI state write.
+    @MainActor
+    private func receiveRoster(agents: [AgentInfo], accounts: [CredentialAccount]) {
+        let snapshot = AgentRosterSnapshot(
+            agents: agents,
+            accounts: accounts,
+            livePaneIDs: livePaneIDs
+        )
+        let current = AgentRosterRefreshState(
+            displayed: displayedRoster,
+            pending: pendingRoster.snapshot,
+            isScrolling: agentListIsScrolling
+        )
+        let next = current.receiving(snapshot)
+        pendingRoster.snapshot = next.pending
+        if next.displayed != displayedRoster { displayedRoster = next.displayed }
+    }
+
     private func emptyLine(_ text: String) -> some View {
         Text(text).font(Typography.app(15)).foregroundStyle(Palette.textDim)
             .frame(maxWidth: .infinity).padding(.top, 44)
@@ -2730,55 +2765,33 @@ struct TerminalHomeView: View {
 
     @MainActor
     private func load() async {
+        // Main-actor isolation prevents simultaneous mutation, not out-of-order
+        // completion across awaits. Only the most recently STARTED load may publish.
+        let loadToken = rosterLoadGate.begin()
         // Spinner ONLY when there is nothing to show yet (genuine first load, or after a
         // reconnect cleared `agents` via `.id(session)`). A re-entry with a populated list
         // refreshes silently — stale-while-revalidate — instead of blanking to a spinner.
         if agents.isEmpty { loading = true }
-        defer { loading = false }
+        defer {
+            if rosterLoadGate.accepts(loadToken) { loading = false }
+        }
         do {
             let fetched = try await client.agentList()
-            // Refresh the account roster for the swap submenu. Best-effort and
-            // stale-preserving: a transient failure, or an older daemon without
-            // `accounts.list`, keeps the freshest successful value. `latest` includes
-            // a pending scroll-time snapshot, so a later failure cannot roll it back.
-            let latestRoster = pendingRoster.snapshot ?? displayedRoster
-            let fetchedAccounts = (try? await client.accountsList()) ?? latestRoster.accounts
-            let snapshot = AgentRosterSnapshot(
-                agents: fetched,
-                accounts: fetchedAccounts,
-                livePaneIDs: livePaneIDs
-            )
-            let currentRoster = AgentRosterRefreshState(
-                displayed: displayedRoster,
-                pending: pendingRoster.snapshot,
-                isScrolling: agentListIsScrolling
-            )
-            let nextRoster = currentRoster.receiving(snapshot)
-            // `pendingRoster` is a non-observable reference. Updating it while the
-            // scroll is moving records freshness without causing a SwiftUI render.
-            pendingRoster.snapshot = nextRoster.pending
-            if nextRoster.displayed != displayedRoster {
-                displayedRoster = nextRoster.displayed
-            }
-            // Ping once per connected HomeView to feature-detect the transactional
-            // transfer API. Missing capabilities on an older daemon are a successful
-            // negative result; a transport error is retried on the next load.
-            if !checkedSessionTransferCapability {
-                do {
-                    let capabilities = try await client.serverCapabilities()
-                    sessionTransferSupported = capabilities?.agentSessionTransfer == true
-                    checkedSessionTransferCapability = true
-                } catch {
-                    // Keep the control hidden and retry on a later refresh. Existing
-                    // transfer state still makes the menu visible so a Ready/rollback
-                    // transaction can always be reopened.
-                }
-            }
+            guard rosterLoadGate.accepts(loadToken) else { return }
+
+            // Agent state is the latency-sensitive payload. Publish it immediately
+            // with the freshest account roster already in memory; never make visible
+            // statuses wait behind the best-effort accounts.list request. A later
+            // account response causes a second publication only when account data
+            // actually changed, because receiveRoster is equality-gated.
+            let latestAccounts = (pendingRoster.snapshot ?? displayedRoster).accounts
+            receiveRoster(agents: fetched, accounts: latestAccounts)
             error = nil
             rejectedFingerprint = nil
             trustFailed = false
             herdrMissing = false
             herdrIncompatibleBuild = false
+            loading = false
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
             // terminal lingers warm — but only a slot that was ONCE seen live and has now
             // vanished (never a still-booting spawn pane, which is absent by design while its
@@ -2789,7 +2802,38 @@ struct TerminalHomeView: View {
             slots.removeAll { $0.paneID != frontID && everLive.contains($0.paneID) && !live.contains($0.paneID) }
             applyDeepLink(afterLoad: true)   // agents + roster loaded — front any pending push target
             openGramIfPending()              // a cold-launch gram tap opens the Gram page once loaded
+
+            // Refresh account labels independently. A transient failure, or an older
+            // daemon without accounts.list, keeps the freshest successful value. The
+            // post-await generation check prevents a stalled older load from replacing
+            // either the visible or pending snapshot after a newer load completes.
+            if let fetchedAccounts = try? await client.accountsList() {
+                guard rosterLoadGate.accepts(loadToken) else { return }
+                receiveRoster(agents: fetched, accounts: fetchedAccounts)
+            } else {
+                guard rosterLoadGate.accepts(loadToken) else { return }
+            }
+
+            // Ping once per connected HomeView to feature-detect the transactional
+            // transfer API. Missing capabilities on an older daemon are a successful
+            // negative result; a transport error is retried on the next load.
+            if !checkedSessionTransferCapability {
+                do {
+                    let capabilities = try await client.serverCapabilities()
+                    guard rosterLoadGate.accepts(loadToken) else { return }
+                    sessionTransferSupported = capabilities?.agentSessionTransfer == true
+                    checkedSessionTransferCapability = true
+                } catch {
+                    guard rosterLoadGate.accepts(loadToken) else { return }
+                    // Keep the control hidden and retry on a later refresh. Existing
+                    // transfer state still makes the menu visible so a Ready/rollback
+                    // transaction can always be reopened.
+                }
+            }
         } catch {
+            // A stale failure must not replace a newer success, clear its deep link,
+            // or turn a recovered connection back into an error screen.
+            guard rosterLoadGate.accepts(loadToken) else { return }
             let rejected: String?
             var notInstalled = false
             var incompatibleBuild = false
@@ -5726,7 +5770,9 @@ struct MockTransport: HerdrTransport {
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
         if requestLine.contains("accounts.list") { return Self.accountsList }
-        if requestLine.contains("agent.list") { return rosterDriver?.nextAgentList() ?? Self.agentList }
+        if requestLine.contains("agent.list") {
+            return rosterDriver?.nextAgentList() ?? Self.agentList
+        }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") { return Self.gramList }
         if requestLine.contains("gram.post") { return Self.gramPosted }
@@ -5888,25 +5934,23 @@ struct MockTransport: HerdrTransport {
     }
 }
 
-/// Produces a changing, valid `agent.list` response for long enough that the UI test
-/// must scroll across many refresh boundaries. It intentionally changes status groups,
-/// row counts, and recency ordering. After the stress phase it settles on a roster with
-/// one distinctive row, giving the test an end-to-end catch-up assertion.
+/// Produces a continuously changing `agent.list` response while the UI test scrolls.
+/// Status groups, row count, and recency ordering keep changing every 50 ms, so proving
+/// that fixed top and bottom markers both enter the viewport is a real gesture receipt
+/// under the refresh workload rather than an eventual-polling proxy.
 final class RosterStressDriver: @unchecked Sendable {
     private let lock = NSLock()
     private var callCount = 0
 
     func nextAgentList() -> String {
-        lock.lock()
-        callCount += 1
-        let call = callCount
-        lock.unlock()
-
-        let settled = call > 100
+        let call = lock.withLock {
+            callCount += 1
+            return callCount
+        }
         let phase = call % 2
-        let count = settled ? 80 : (phase == 0 ? 80 : 82)
+        let count = phase == 0 ? 80 : 82
         var agents: [[String: Any]] = (0..<count).map { index in
-            let statusIndex = settled ? index % 3 : (index + phase) % 3
+            let statusIndex = (index + phase) % 3
             let status = ["blocked", "working", "idle"][statusIndex]
             return [
                 "pane_id": String(format: "stress:p%03d", index),
@@ -5919,19 +5963,26 @@ final class RosterStressDriver: @unchecked Sendable {
                 "last_completed_turn": ["completed_unix_ms": 2_000_000_000_000 - index - phase],
             ]
         }
-        if settled {
-            agents.insert([
-                "pane_id": "stress:final",
-                "name": "roster-refresh-final",
-                "agent": "claude",
-                "agent_status": "blocked",
-                "cwd": "/root/stress",
-                "terminal_title_stripped": "latest deferred roster applied",
-                "account": "acc-claude-1",
-                "last_completed_turn": ["completed_unix_ms": 2_000_000_000_001],
-            ], at: 0)
-        }
-
+        agents.append([
+            "pane_id": "stress:top",
+            "name": "scroll-top-marker",
+            "agent": "claude",
+            "agent_status": "blocked",
+            "cwd": "/root/stress",
+            "terminal_title_stripped": "must move off screen",
+            "last_completed_turn": ["completed_unix_ms": 2_000_000_000_002],
+        ])
+        agents.append([
+            "pane_id": "stress:bottom",
+            "name": "scroll-bottom-marker",
+            "agent": "claude",
+            // The Idle section starts collapsed. Keep this marker at the bottom of
+            // the expanded Working section so the UI test can prove displacement.
+            "agent_status": "working",
+            "cwd": "/root/stress",
+            "terminal_title_stripped": "must become visible",
+            "last_completed_turn": ["completed_unix_ms": 1],
+        ])
         let payload: [String: Any] = [
             "id": "mock",
             "result": ["type": "agent_list", "agents": agents],

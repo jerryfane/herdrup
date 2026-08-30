@@ -96,4 +96,23 @@ final class AgentRosterRefreshStateTests: XCTestCase {
         XCTAssertEqual(roster.agentList.rows.map(\.group), [.stopped, .working])
         XCTAssertEqual(roster.agentList.rows.first?.info.paneID, "w1:p2")
     }
+
+    func testStaleLoadCannotClearANewerPendingRoster() throws {
+        let old = try snapshot(status: "working", name: "old")
+        let new = try snapshot(status: "blocked", name: "new")
+        var gate = AgentRosterLoadGate()
+        let stalledRequest = gate.begin()
+        let newerRequest = gate.begin()
+        var state = AgentRosterRefreshState(displayed: old).settingScrolling(true)
+
+        if gate.accepts(newerRequest) { state = state.receiving(new) }
+        // The stalled request carries the scroll-start snapshot. Without the gate,
+        // receiving(old) would clear the newer pending value because old == displayed.
+        if gate.accepts(stalledRequest) { state = state.receiving(old) }
+
+        XCTAssertEqual(state.pending, new)
+        XCTAssertEqual(state.settingScrolling(false).displayed, new)
+        XCTAssertFalse(gate.accepts(stalledRequest))
+        XCTAssertTrue(gate.accepts(newerRequest))
+    }
 }
