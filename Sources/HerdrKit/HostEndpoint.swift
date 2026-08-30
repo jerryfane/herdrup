@@ -48,6 +48,46 @@ public struct HostEndpoint: Equatable, Sendable {
         return HostEndpoint(host: s, port: 22)
     }
 
+    /// Whether this destination is a Tailscale address, and therefore unreachable
+    /// from a device that is not on the same tailnet.
+    ///
+    /// This exists to CLASSIFY A FAILURE, not to gate a connection: a phone off the
+    /// tailnet cannot route here at all, so retrying is futile in a way that an
+    /// ordinary unreachable host is not (a LAN box may simply be rebooting). See
+    /// `SessionRecovery.giveUpAfterFailures`.
+    ///
+    /// Address-range matching on purpose — no interface probing, so it needs no
+    /// permissions and cannot be wrong about what the app is actually dialing.
+    public var isTailnetAddress: Bool {
+        Self.isCarrierGradeNAT(host) || Self.isMagicDNSName(host)
+    }
+
+    /// Tailscale hands out `100.64.0.0/10`. A /10, NOT a /8: `100.63.x.x` and
+    /// `100.128.x.x` are ordinary public addresses and must not be swept up, or a
+    /// real host on the public internet would stop retrying after three failures.
+    private static func isCarrierGradeNAT(_ host: String) -> Bool {
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return false }
+        // Every octet must read exactly as a number, so "100.64.0.0.evil.com" and
+        // "100.0x40.0.0" cannot pass as addresses.
+        var values: [UInt16] = []
+        for octet in octets {
+            guard !octet.isEmpty, octet.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = UInt16(octet), value <= 255 else { return false }
+            values.append(value)
+        }
+        return values[0] == 100 && (64...127).contains(values[1])
+    }
+
+    /// MagicDNS names end in `.ts.net`. The leading dot is load-bearing: without it
+    /// `notts.net` matches, and requiring a non-empty label before it keeps a bare
+    /// `ts.net` out.
+    private static func isMagicDNSName(_ host: String) -> Bool {
+        let name = host.lowercased()
+        let suffix = ".ts.net"
+        return name.hasSuffix(suffix) && name.count > suffix.count
+    }
+
     private static func validPort(_ s: Substring) -> UInt16? {
         // ASCII digits only: UInt16("+22") parses to 22 and UInt16 accepts other
         // sign/format oddities, so require the text to read exactly as a number.

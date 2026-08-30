@@ -22,6 +22,22 @@ import NIOCore
 /// per-request handshake — closing issue #25). Conforms to the two-method
 /// `HerdrTransport` seam; `SessionRecovery`/`RecoveryExecutor` sit above it
 /// unchanged.
+/// Lets exactly one racer resume a continuation. Resuming a continuation twice is
+/// undefined behaviour rather than a catchable error, so the guard has to be
+/// atomic — a plain Bool read-then-write is a race in exactly the interleaving
+/// this exists to prevent.
+final class FirstPastThePost: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 public actor CitadelTransport: HerdrTransport {
     private let credentials: SSHCredentials
     private let hostKeyValidator: SSHHostKeyValidator
@@ -43,9 +59,19 @@ public actor CitadelTransport: HerdrTransport {
     ///   - hostKeyValidator: the raw Citadel validator, for callers that need
     ///     full control (e.g. `.acceptAnything()` in an isolated live test).
     ///     Prefer the `hostKeyPolicy` initializer, whose default pins.
-    public init(credentials: SSHCredentials, hostKeyValidator: SSHHostKeyValidator) {
+    /// This transport's connect budget. Injectable so the timeout can be TESTED
+    /// against a black-hole address in milliseconds instead of being asserted from
+    /// reading the code — a 15s test is one nobody runs.
+    let connectTimeoutNanoseconds: UInt64
+
+    public init(
+        credentials: SSHCredentials,
+        hostKeyValidator: SSHHostKeyValidator,
+        connectTimeoutNanoseconds: UInt64 = CitadelTransport.defaultConnectTimeoutNanoseconds
+    ) {
         self.credentials = credentials
         self.hostKeyValidator = hostKeyValidator
+        self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
     }
 
     /// Pins the host key on first contact and hard-stops on change (TOFU),
@@ -59,7 +85,12 @@ public actor CitadelTransport: HerdrTransport {
     /// key). It does NOT persist across app launches — for cross-launch TOFU a
     /// shipping client passes its own `HostKeyPolicy` here that pins against
     /// persistent (e.g. Keychain) storage; `PinStore` is in-memory only.
-    public init(credentials: SSHCredentials, hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy()) {
+    public init(
+        credentials: SSHCredentials,
+        hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(),
+        connectTimeoutNanoseconds: UInt64 = CitadelTransport.defaultConnectTimeoutNanoseconds
+    ) {
+        self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
         self.credentials = credentials
         self.hostKeyValidator = .custom(PinningHostKeyValidator(
             host: credentials.host, port: credentials.port, policy: hostKeyPolicy))
@@ -126,14 +157,65 @@ public actor CitadelTransport: HerdrTransport {
         // A client that resolves after a concurrent close() is reaped by the
         // generation check in connectedClient() (the only publisher of `self.client`),
         // so no cancellation handling is needed here.
-        do {
-            return try await SSHClient.connect(
-                host: credentials.host,
-                port: Int(credentials.port),
+        // RACE THE HANDSHAKE AGAINST A CLOCK. Without this an unroutable address —
+        // a Tailscale host reached from a device that is not on the tailnet — hangs
+        // at the TCP layer until the OS gives up (~75s on iOS). That is not
+        // experienced as a failure; it is experienced as an endless spinner, with
+        // nothing on screen to act on. A budget converts silence into an error the
+        // UI can show.
+        //
+        // NOT a task group, and the reason is measured: a group awaits its children
+        // at scope exit, and `SSHClient.connect` does not observe cancellation
+        // promptly — so a group-based race returned only when the LOSING connect
+        // finally gave up on its own (30s against a 0.3s budget, caught by
+        // `testConnectFailsWithinTheBudgetAgainstABlackHoleAddress`). The winner
+        // must be able to return while the loser unwinds unobserved.
+        let host = credentials.host
+        let port = Int(credentials.port)
+        let validator = hostKeyValidator
+        let budget = connectTimeoutNanoseconds
+        let work = Task<SSHClient, Error> {
+            try await SSHClient.connect(
+                host: host,
+                port: port,
                 authenticationMethod: method,
-                hostKeyValidator: hostKeyValidator,
+                hostKeyValidator: validator,
                 reconnect: .never
             )
+        }
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                // Exactly one of the two branches may resume the continuation;
+                // resuming twice is undefined behaviour, not a recoverable error.
+                let settled = FirstPastThePost()
+                Task {
+                    do {
+                        let client = try await work.value
+                        if settled.claim() {
+                            continuation.resume(returning: client)
+                        } else {
+                            // The clock already won and the caller has its error.
+                            // Close this rather than leaking a live session nobody
+                            // holds a reference to.
+                            try? await client.close()
+                        }
+                    } catch {
+                        if settled.claim() { continuation.resume(throwing: error) }
+                    }
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: budget)
+                    guard settled.claim() else { return }
+                    work.cancel()
+                    continuation.resume(throwing: TransportError.connectTimedOut(
+                        host: host,
+                        // credentials.host is already the bare host (the port is a
+                        // separate field), so classify it directly rather than
+                        // re-parsing a string that was never joined.
+                        onTailnet: HostEndpoint(host: host, port: 22).isTailnetAddress
+                    ))
+                }
+            }
         } catch SSHClientError.unsupportedPasswordAuthentication {
             // The server offers no password auth (e.g. `PasswordAuthentication no`).
             throw TransportError.passwordAuthUnsupported(host: credentials.host)
@@ -152,6 +234,15 @@ public actor CitadelTransport: HerdrTransport {
     /// `agent.prompt` / `pane.send_text`, which is refused rather than failing at
     /// execve with no bridge to report it.
     static let maxCommandBytes = 120_000
+
+    /// Default budget for a connect, handshake included.
+    ///
+    /// Well above a real handshake — even a slow cellular link completes in a
+    /// second or two — and far below the OS's own ~75s give-up on an unroutable
+    /// address. The gap between those two numbers is the whole point: 15s is long
+    /// enough that no working connection is cut off, short enough that a broken
+    /// one says so while the user is still looking at it.
+    public static let defaultConnectTimeoutNanoseconds: UInt64 = 15 * 1_000_000_000
 
     /// The request, base64-encoded. Kept separate from the command so the
     /// encoding contract can be tested without the shell wrapper around it.

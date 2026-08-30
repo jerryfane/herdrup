@@ -3,6 +3,56 @@ import XCTest
 
 final class HostEndpointTests: XCTestCase {
 
+    // MARK: - recognising a tailnet destination
+
+    /// AXIS: the /10 BOUNDARIES. Tailscale uses 100.64.0.0/10, not 100.0.0.0/8 —
+    /// so 100.63.x.x and 100.128.x.x are ordinary public addresses. Getting this
+    /// wrong makes a real internet host stop retrying after three failures, which
+    /// is a worse bug than the spinner this fix removes.
+    func testCarrierGradeNATRangeBoundaries() {
+        for inside in ["100.64.0.0", "100.64.1.2", "100.100.50.7", "100.127.255.255"] {
+            XCTAssertEqual(HostEndpoint.parse(inside)?.isTailnetAddress, true, "\(inside) is in 100.64.0.0/10")
+        }
+        for outside in ["100.63.255.255", "100.128.0.0", "100.0.0.1", "100.255.255.255"] {
+            XCTAssertEqual(HostEndpoint.parse(outside)?.isTailnetAddress, false, "\(outside) is outside the /10")
+        }
+    }
+
+    /// AXIS: ordinary private and public addresses are never tailnet.
+    func testOrdinaryAddressesAreNotTailnet() {
+        for host in ["10.0.0.1", "192.168.1.10", "172.16.0.1", "8.8.8.8", "127.0.0.1"] {
+            XCTAssertEqual(HostEndpoint.parse(host)?.isTailnetAddress, false, host)
+        }
+    }
+
+    /// AXIS: a port must not change the verdict — the classifier reads the parsed
+    /// host, so "100.64.0.1:2222" is the same destination as "100.64.0.1".
+    func testPortDoesNotAffectTheVerdict() {
+        XCTAssertEqual(HostEndpoint.parse("100.64.0.1:2222")?.isTailnetAddress, true)
+        XCTAssertEqual(HostEndpoint.parse("192.168.1.1:2222")?.isTailnetAddress, false)
+    }
+
+    /// AXIS: MagicDNS names, and the two near-misses. The leading dot is what
+    /// separates "box.ts.net" from "notts.net"; requiring a label before it keeps
+    /// a bare "ts.net" out; and a suffix check (not a substring one) is what stops
+    /// an attacker-controlled "ts.net.evil.com" from reading as a tailnet host.
+    func testMagicDNSNamesAndTheirNearMisses() {
+        for name in ["box.ts.net", "mac.tail-scale.ts.net", "BOX.TS.NET"] {
+            XCTAssertEqual(HostEndpoint.parse(name)?.isTailnetAddress, true, name)
+        }
+        for name in ["notts.net", "ts.net", "ts.net.evil.com", "example.com", "tsxnet"] {
+            XCTAssertEqual(HostEndpoint.parse(name)?.isTailnetAddress, false, name)
+        }
+    }
+
+    /// AXIS: a dotted string that is not four numeric octets is a NAME, and must
+    /// be judged as one — "100.64.0.0.evil.com" must not pass as an address.
+    func testAddressLookalikesAreNotTreatedAsAddresses() {
+        XCTAssertEqual(HostEndpoint.parse("100.64.0.0.evil.com")?.isTailnetAddress, false)
+        XCTAssertEqual(HostEndpoint.parse("100.64.0")?.isTailnetAddress, false)
+        XCTAssertEqual(HostEndpoint.parse("100.999.0.1")?.isTailnetAddress, false)
+    }
+
     // MARK: - the valid shapes
 
     func testPlainHostDefaultsTo22() {
