@@ -6,6 +6,86 @@ import Citadel
 
 final class CitadelTransportTests: XCTestCase {
 
+    // MARK: - connect budget (the endless-spinner fix)
+
+    /// AXIS: the two wordings are genuinely different, and only the tailnet one
+    /// names Tailscale.
+    ///
+    /// The generic branch must NOT mention Tailscale: on an ordinary host the
+    /// cause is unknown, and guessing sends the user to fix something that is not
+    /// broken. Asserting the absence is the half that keeps that honest.
+    func testTimeoutMessageNamesTailscaleOnlyWhenTheHostIsOnATailnet() {
+        let tailnet = TransportError.connectTimedOut(host: "box.ts.net", onTailnet: true).description
+        XCTAssertTrue(tailnet.contains("Tailscale"), "the remedy must be named: \(tailnet)")
+        XCTAssertTrue(tailnet.contains("box.ts.net"), "the host must be named: \(tailnet)")
+
+        let generic = TransportError.connectTimedOut(host: "nas.local", onTailnet: false).description
+        XCTAssertFalse(generic.contains("Tailscale"),
+                       "an ordinary host must not be blamed on Tailscale: \(generic)")
+        XCTAssertTrue(generic.contains("nas.local"), "the host must be named: \(generic)")
+    }
+
+    /// AXIS: the budget is REAL — a connect to an address that swallows packets
+    /// fails within it instead of hanging.
+    ///
+    /// This is the actual regression. Before the budget there was no error at all:
+    /// the OS sat on the socket for ~75s, which the user experienced as an endless
+    /// spinner with nothing to act on.
+    ///
+    /// Gated on an INDEPENDENT probe (a raw socket, not the transport) that the
+    /// address really does black-hole here — matching the LiveEnvironment
+    /// convention. Where it fails fast instead, there is no hang to bound and the
+    /// test would be asserting something the environment cannot produce.
+    func testConnectFailsWithinTheBudgetAgainstABlackHoleAddress() async throws {
+        let host = "100.64.0.1"   // CGNAT, and a tailnet address: exercises both halves
+        try XCTSkipUnless(Self.blackHoles(host: host),
+                          "\(host) does not black-hole in this environment; nothing to bound")
+
+        let creds = SSHCredentials(
+            host: host, port: 22, username: "nobody", password: "nobody", remoteSocketPath: "")
+        let transport = CitadelTransport(
+            credentials: creds,
+            hostKeyPolicy: PinningHostKeyPolicy(),
+            connectTimeoutNanoseconds: 300_000_000   // 0.3s, so the test is fast
+        )
+
+        let started = Date()
+        do {
+            _ = try await transport.roundTrip("{\"id\":\"x\",\"method\":\"server.ping\",\"params\":{}}")
+            XCTFail("a black-hole address must not connect")
+        } catch let error as TransportError {
+            guard case .connectTimedOut(let h, let onTailnet) = error else {
+                return XCTFail("expected connectTimedOut, got \(error)")
+            }
+            XCTAssertEqual(h, host)
+            XCTAssertTrue(onTailnet, "100.64.0.1 is inside 100.64.0.0/10")
+        }
+        // The bound is the point: without the budget this is ~75 seconds.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10,
+                          "the connect budget did not bound the wait")
+    }
+
+    /// Independent of the transport: does a raw TCP connect to this address hang?
+    private static func blackHoles(host: String) -> Bool {
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(22).bigEndian
+        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var tv = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        // Connected, or refused/unreachable outright -> not a black hole.
+        // Timed out (EINPROGRESS/EAGAIN/ETIMEDOUT) -> packets are being swallowed.
+        return rc != 0 && (errno == ETIMEDOUT || errno == EINPROGRESS || errno == EAGAIN)
+    }
+
     // MARK: - LineAccumulator (byte-accurate line decoding)
 
     /// AXIS: a multi-byte UTF-8 scalar split across two stdout chunks is
