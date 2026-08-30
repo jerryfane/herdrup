@@ -16,8 +16,10 @@ final class AgentRosterScrollTests: XCTestCase {
 
         let scroll = app.scrollViews["agent-roster-scroll"]
         XCTAssertTrue(scroll.waitForExistence(timeout: 5), "agent roster scroll view did not appear")
-        let topMarker = app.staticTexts["scroll-top-marker"]
-        let bottomMarker = app.staticTexts["scroll-bottom-marker"]
+        // Query the actual row Buttons. Their Text children exist in the accessibility
+        // tree but are not independently hittable because the parent owns the gesture.
+        let topMarker = app.buttons["agent-row-stress:top"]
+        let bottomMarker = app.buttons["agent-row-stress:bottom"]
         XCTAssertTrue(topMarker.waitForExistence(timeout: 5), "stress roster did not load")
         XCTAssertTrue(topMarker.isHittable, "top marker did not begin in the visible viewport")
 

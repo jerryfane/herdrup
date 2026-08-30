@@ -2417,6 +2417,9 @@ struct TerminalHomeView: View {
                         card(row)
                     }
                     .buttonStyle(.plain)
+                    // Bind UI receipts to the tappable row, not a Text child whose
+                    // `isHittable` is false because the parent Button owns the hit.
+                    .accessibilityIdentifier("agent-row-\(row.info.paneID)")
                     // Long-press an agent → quick actions. Stop = close the pane
                     // (`pane.close`, the only stop RPC — its inverse is start), then reload;
                     // disclose a failure rather than swallowing it (file convention).
