@@ -308,6 +308,16 @@ struct RootView: View {
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
+        case .rosterStress:
+            // Many rows move between sections while the UI test continuously scrolls.
+            // The short poll interval is DEBUG-only and turns several production poll
+            // boundaries into a bounded simulator receipt.
+            TerminalHomeView(
+                client: HerdrClient(transport: MockTransport(rosterDriver: RosterStressDriver())),
+                onDisconnect: {},
+                onTrustHostKey: { _ in false },
+                agentListPollIntervalNanoseconds: 50_000_000
+            )
         case .pane:
             NavigationStack {
                 TerminalPaneContent(client: mockClient, paneID: "w1:p1", title: "jarvis",
@@ -1175,6 +1185,13 @@ struct FolderBrowser: View {
     }
 }
 
+/// Non-observable storage for a roster fetched while the list is scrolling.
+/// Mutating this reference deliberately does NOT invalidate SwiftUI. Only promoting
+/// its value into `displayedRoster` when scrolling becomes idle redraws the list.
+private final class AgentRosterPendingBuffer {
+    var snapshot: AgentRosterSnapshot?
+}
+
 /// Lists the agents on the host; tapping one opens its pane. A failed load is
 /// recoverable (retry, or disconnect back to the connect form).
 struct TerminalHomeView: View {
@@ -1192,17 +1209,21 @@ struct TerminalHomeView: View {
     /// stopped section has something to show.
     var livePaneIDs: Set<String>? = nil
 
-    /// How often the connected agent list is re-fetched to stay live. agent.list is
-    /// a small JSON query (unlike a screen fetch), so a 5s floor is cheap even over a
-    /// forwarded SSH connection while keeping the list, header, and Live Activity in
-    /// step with the herd without a reconnect.
-    private static let agentListPollInterval: UInt64 = 5_000_000_000
+    /// How often the connected agent list is re-fetched to stay live. Five seconds is
+    /// the production default. The DEBUG scroll-stress harness injects a shorter value
+    /// so one UI test crosses many refresh boundaries without becoming a minute-long
+    /// wall-clock test.
+    var agentListPollIntervalNanoseconds: UInt64 = 5_000_000_000
 
-    @State private var agents: [AgentInfo] = []
-    /// The credential accounts (subscriptions), for the per-agent "Swap subscription"
-    /// submenu. Refreshed alongside `agents` in `load()`; a stale list is fine (the
-    /// worst case is offering a swap that no-ops or fails loudly, never a wrong swap).
-    @State private var accounts: [CredentialAccount] = []
+    /// Agents, account labels, and the already-sorted list are published as one value.
+    /// An unchanged fetch leaves this `@State` untouched. Scroll-time fetches go into
+    /// the non-observable buffer above, so even recording a pending result cannot ask
+    /// SwiftUI to lay the moving list out again.
+    @State private var displayedRoster = AgentRosterSnapshot()
+    @State private var agentListIsScrolling = false
+    @State private var pendingRoster = AgentRosterPendingBuffer()
+    private var agents: [AgentInfo] { displayedRoster.agents }
+    private var accounts: [CredentialAccount] { displayedRoster.accounts }
     @State private var error: String?
     @State private var loading = true
     @State private var rejectedFingerprint: String?
@@ -1337,10 +1358,10 @@ struct TerminalHomeView: View {
     /// the least-active thing on screen, so they stay tucked behind an ARCHIVED · N row.
     @State private var archivedCollapsed = true
 
-    /// The whole list derived from the current agents + census. The grouping,
+    /// The whole list derived once when the displayed roster changes. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
-    /// HerdrKit's tested `AgentList`, not here.
-    private var fullList: AgentList { AgentList(agents: agents, livePaneIDs: livePaneIDs) }
+    /// HerdrKit's tested `AgentList`, not in SwiftUI's render path.
+    private var fullList: AgentList { displayedRoster.agentList }
 
     /// The ordered LIVE agents a pushed pane can page through with a horizontal swipe.
     /// DELIBERATELY the full sorted live list (`AgentList.rows`, needs-you first), NOT the
@@ -1415,7 +1436,11 @@ struct TerminalHomeView: View {
     /// gone (the pane then shows its exited state). Consumes the target so it fires once.
     private func applyDeepLink(afterLoad: Bool = false) {
         guard let paneID = push.pendingPaneID else { return }
-        let info = agents.first { $0.paneID == paneID }
+        // A refresh completed during momentum scrolling may be buffered rather than
+        // displayed. An explicit push should still resolve against that newest data;
+        // reading it here does not publish or relayout the roster under the gesture.
+        let sourceRoster = afterLoad ? (pendingRoster.snapshot ?? displayedRoster) : displayedRoster
+        let info = sourceRoster.agents.first { $0.paneID == paneID }
         // On the onChange path (not post-load), only open once the target RESOLVES against the roster.
         // If it doesn't — an empty roster (first load) OR a stale one (agent spawned from the desktop
         // since the last refresh) — opening now would give a bare paneID title AND a sibling list that
@@ -1428,8 +1453,9 @@ struct TerminalHomeView: View {
             return
         }
         push.pendingPaneID = nil
+        let siblings = sourceRoster.agentList.rows.filter(\.isLive).map(\.info)
         open(PaneSlot(paneID: paneID, title: info?.displayName ?? paneID, agent: info,
-                      initialReply: "", siblings: orderedSiblings))
+                      initialReply: "", siblings: siblings))
     }
 
     /// A tapped gram push selects the Gram tab. Like `applyDeepLink`, it is consumed on
@@ -1746,7 +1772,7 @@ struct TerminalHomeView: View {
         .task {
             await load()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: Self.agentListPollInterval)
+                try? await Task.sleep(nanoseconds: agentListPollIntervalNanoseconds)
                 await load()
             }
         }
@@ -2080,33 +2106,70 @@ struct TerminalHomeView: View {
     private var agentList: some View {
         VStack(spacing: 0) {
             searchField   // pinned above the scroll, as the mockup/Termius have it
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if agents.isEmpty {
-                        emptyLine("no agents")
-                    } else if visibleSections.isEmpty {
-                        // Agents exist but the search matched none — say so, rather
-                        // than leave a blank scroll that reads as "no agents".
-                        emptyLine("no matches")
-                    } else {
-                        ForEach(visibleSections, id: \.group) { section in
-                            sectionView(section.group, section.rows)
-                        }
+            agentRosterScroll
+        }
+    }
+
+    /// macOS runs this iOS target through UIKit's Designed-for-iPad compatibility
+    /// runtime. Mutating a lazy stack's sections during momentum scrolling could pin
+    /// SwiftUI's main thread. A normal stack is the reliable choice for this small
+    /// roster, and the scroll-phase hook keeps genuine row moves off the active gesture.
+    @ViewBuilder
+    private var agentRosterScroll: some View {
+        if #available(iOS 18.0, *) {
+            agentRosterScrollContent
+                .onScrollPhaseChange { _, phase in
+                    setAgentListScrolling(phase != .idle)
+                }
+        } else {
+            // iOS 17 has no scroll-phase API. Equality gating and the non-lazy stack
+            // still remove the unconditional refresh/layout churn there.
+            agentRosterScrollContent
+        }
+    }
+
+    private var agentRosterScrollContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if agents.isEmpty {
+                    emptyLine("no agents")
+                } else if visibleSections.isEmpty {
+                    // Agents exist but the search matched none — say so, rather
+                    // than leave a blank scroll that reads as "no agents".
+                    emptyLine("no matches")
+                } else {
+                    ForEach(visibleSections, id: \.group) { section in
+                        sectionView(section.group, section.rows)
                     }
-                    // Archived agents sit below the live herd (above terminals) and only
-                    // when there are some. Hidden during a search (that filters live agents).
-                    if search.isEmpty && !fullList.archived.isEmpty {
-                        archivedSection
-                    }
-                    // Terminals sit BELOW the herd and only when you have some — agents
-                    // are the priority. Open one from the header's terminal button.
-                    // Hidden during an agent search (that filters agents, not shells).
-                    if search.isEmpty && !terminalsStore.terminals(host: hostKey).isEmpty {
-                        terminalsSection
-                    }
+                }
+                // Archived agents sit below the live herd (above terminals) and only
+                // when there are some. Hidden during a search (that filters live agents).
+                if search.isEmpty && !fullList.archived.isEmpty {
+                    archivedSection
+                }
+                // Terminals sit BELOW the herd and only when you have some — agents
+                // are the priority. Open one from the header's terminal button.
+                // Hidden during an agent search (that filters agents, not shells).
+                if search.isEmpty && !terminalsStore.terminals(host: hostKey).isEmpty {
+                    terminalsSection
                 }
             }
         }
+        .accessibilityIdentifier("agent-roster-scroll")
+    }
+
+    @MainActor
+    private func setAgentListScrolling(_ scrolling: Bool) {
+        let current = AgentRosterRefreshState(
+            displayed: displayedRoster,
+            pending: pendingRoster.snapshot,
+            isScrolling: agentListIsScrolling
+        )
+        let next = current.settingScrolling(scrolling)
+        guard next != current else { return }
+        pendingRoster.snapshot = next.pending
+        if next.displayed != displayedRoster { displayedRoster = next.displayed }
+        if next.isScrolling != agentListIsScrolling { agentListIsScrolling = next.isScrolling }
     }
 
     private func emptyLine(_ text: String) -> some View {
@@ -2289,9 +2352,9 @@ struct TerminalHomeView: View {
         // An active search overrides collapse — a match inside IDLE must not stay
         // hidden behind a shut section the user did not open.
         let isCollapsed = search.isEmpty && collapsed.contains(group)
-        // Compute the paging list ONCE here, not inside the per-row NavigationLink closure
-        // (which SwiftUI evaluates eagerly for every row) — orderedSiblings rebuilds and
-        // re-sorts the whole AgentList on each access.
+        // Compute the paging list once per section, not inside the per-row button closure
+        // (which SwiftUI evaluates eagerly for every row). `orderedSiblings` now filters
+        // the cached roster list and performs no sorting.
         let siblings = orderedSiblings
         return VStack(alignment: .leading, spacing: 6) {
             Button {
@@ -2448,16 +2511,20 @@ struct TerminalHomeView: View {
             Spacer(minLength: 8)
             // How long the agent has been in its current state ("5m/2h/3d"), derived
             // from the daemon's status_since (#173). Absent on an older server / before
-            // the first transition — then no badge, never a wrong one. Recomputed each
-            // 5s agent-list refresh, which re-renders this card.
-            if let age = compactTimeInState(
-                sinceUnixMs: row.info.statusSinceUnixMs,
-                nowUnixMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            ) {
-                Text(age)
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .monospacedDigit()
+            // the first transition — then no badge, never a wrong one. A local minute
+            // timeline keeps it current even when an identical roster refresh is a no-op.
+            if let sinceUnixMs = row.info.statusSinceUnixMs {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    if let age = compactTimeInState(
+                        sinceUnixMs: sinceUnixMs,
+                        nowUnixMs: UInt64(context.date.timeIntervalSince1970 * 1000)
+                    ) {
+                        Text(age)
+                            .font(Typography.machine(11))
+                            .foregroundStyle(Palette.textFaint)
+                            .monospacedDigit()
+                    }
+                }
             }
             // The recorded account is gone from the registry, so this agent REFUSES to
             // resume rather than come back on the default account and write to the wrong
@@ -2670,12 +2737,29 @@ struct TerminalHomeView: View {
         defer { loading = false }
         do {
             let fetched = try await client.agentList()
-            agents = fetched
             // Refresh the account roster for the swap submenu. Best-effort and
-            // stale-preserving: only overwrite on a successful fetch, so a transient
-            // failure — or an older daemon without `accounts.list` — keeps the
-            // last-good list rather than blanking the submenu mid-session.
-            if let fetchedAccounts = try? await client.accountsList() { accounts = fetchedAccounts }
+            // stale-preserving: a transient failure, or an older daemon without
+            // `accounts.list`, keeps the freshest successful value. `latest` includes
+            // a pending scroll-time snapshot, so a later failure cannot roll it back.
+            let latestRoster = pendingRoster.snapshot ?? displayedRoster
+            let fetchedAccounts = (try? await client.accountsList()) ?? latestRoster.accounts
+            let snapshot = AgentRosterSnapshot(
+                agents: fetched,
+                accounts: fetchedAccounts,
+                livePaneIDs: livePaneIDs
+            )
+            let currentRoster = AgentRosterRefreshState(
+                displayed: displayedRoster,
+                pending: pendingRoster.snapshot,
+                isScrolling: agentListIsScrolling
+            )
+            let nextRoster = currentRoster.receiving(snapshot)
+            // `pendingRoster` is a non-observable reference. Updating it while the
+            // scroll is moving records freshness without causing a SwiftUI render.
+            pendingRoster.snapshot = nextRoster.pending
+            if nextRoster.displayed != displayedRoster {
+                displayedRoster = nextRoster.displayed
+            }
             // Ping once per connected HomeView to feature-detect the transactional
             // transfer API. Missing capabilities on an older daemon are a successful
             // negative result; a transport error is retried on the next load.
@@ -5583,7 +5667,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -5592,6 +5676,7 @@ enum ScreenshotMock {
         switch env {
         case "onboarding": return .onboarding
         case "pairing-guidance": return .pairingGuidance
+        case "rosterstress": return .rosterStress
         case "pane": return .pane
         case "settings": return .settings
         case "newagent": return .newAgent
@@ -5633,13 +5718,15 @@ struct MockTransport: HerdrTransport {
     /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
     /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
     var backfill = false
+    /// Stateful agent-list source for the refresh-during-scroll regression receipt.
+    var rosterDriver: RosterStressDriver?
 
     func roundTrip(_ requestLine: String) async throws -> String {
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
         if requestLine.contains("accounts.list") { return Self.accountsList }
-        if requestLine.contains("agent.list") { return Self.agentList }
+        if requestLine.contains("agent.list") { return rosterDriver?.nextAgentList() ?? Self.agentList }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") { return Self.gramList }
         if requestLine.contains("gram.post") { return Self.gramPosted }
@@ -5798,6 +5885,62 @@ struct MockTransport: HerdrTransport {
     static func pagingAgent(kind: String, pane: String) -> AgentInfo {
         try! JSONDecoder().decode(AgentInfo.self, from: Data(
             #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
+    }
+}
+
+/// Produces a changing, valid `agent.list` response for long enough that the UI test
+/// must scroll across many refresh boundaries. It intentionally changes status groups,
+/// row counts, and recency ordering. After the stress phase it settles on a roster with
+/// one distinctive row, giving the test an end-to-end catch-up assertion.
+final class RosterStressDriver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+
+    func nextAgentList() -> String {
+        lock.lock()
+        callCount += 1
+        let call = callCount
+        lock.unlock()
+
+        let settled = call > 100
+        let phase = call % 2
+        let count = settled ? 80 : (phase == 0 ? 80 : 82)
+        var agents: [[String: Any]] = (0..<count).map { index in
+            let statusIndex = settled ? index % 3 : (index + phase) % 3
+            let status = ["blocked", "working", "idle"][statusIndex]
+            return [
+                "pane_id": String(format: "stress:p%03d", index),
+                "name": String(format: "stress-agent-%03d", index),
+                "agent": "claude",
+                "agent_status": status,
+                "cwd": "/root/stress",
+                "terminal_title_stripped": "refreshing roster while scrolling",
+                "account": "acc-claude-1",
+                "last_completed_turn": ["completed_unix_ms": 2_000_000_000_000 - index - phase],
+            ]
+        }
+        if settled {
+            agents.insert([
+                "pane_id": "stress:final",
+                "name": "roster-refresh-final",
+                "agent": "claude",
+                "agent_status": "blocked",
+                "cwd": "/root/stress",
+                "terminal_title_stripped": "latest deferred roster applied",
+                "account": "acc-claude-1",
+                "last_completed_turn": ["completed_unix_ms": 2_000_000_000_001],
+            ], at: 0)
+        }
+
+        let payload: [String: Any] = [
+            "id": "mock",
+            "result": ["type": "agent_list", "agents": agents],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return MockTransport.agentList
+        }
+        return text
     }
 }
 
