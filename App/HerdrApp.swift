@@ -2828,53 +2828,6 @@ struct TerminalHomeView: View {
             let latestAccounts = (pendingRoster.snapshot ?? displayedRoster).accounts
             receiveRoster(agents: fetched, accounts: latestAccounts)
 
-            // BOTH SIDES KEPT. #200 added the load gate and the immediate agent
-            // publish above; main (#201) added the accounts refresh and the OMP
-            // capability probe below. They are different concerns in one block, and
-            // dropping either would fail silently — the gate's absence only shows up
-            // as a stale roster under load, and the probe's absence only as a missing
-            // transfer control on an OMP daemon.
-            //
-            // The accounts result goes through `receiveRoster` rather than assigning
-            // `accounts` directly, so it keeps #200's equality gating: an unchanged
-            // account list performs no SwiftUI state write, which is the whole point
-            // of the gate it would otherwise bypass.
-            if let fetchedAccounts = try? await client.accountsList() {
-                guard rosterLoadGate.accepts(loadToken) else { return }
-                receiveRoster(agents: fetched, accounts: fetchedAccounts)
-            }
-            // Ping once per connected HomeView to feature-detect the transactional
-            // transfer API. Missing capabilities on an older daemon are a successful
-            // negative result; a transport error is retried on the next load.
-            if !checkedSessionTransferCapability {
-                do {
-                    let capabilities = try await client.serverCapabilities()
-                    sessionTransferSupported = capabilities?.agentSessionTransfer == true
-                    if sessionTransferSupported {
-                        if let advertised = capabilities?.agentSessionTransferHarnesses {
-                            sessionTransferHarnesses = Set(advertised.filter { harness in
-                                switch harness {
-                                case .claude, .codex, .omp:
-                                    return true
-                                case .unrecognised:
-                                    return false
-                                }
-                            })
-                        } else {
-                            // Older transfer-capable daemons predate the explicit
-                            // list and support exactly Claude Code and Codex.
-                            sessionTransferHarnesses = [.claude, .codex]
-                        }
-                    } else {
-                        sessionTransferHarnesses = []
-                    }
-                    checkedSessionTransferCapability = true
-                } catch {
-                    // Keep the control hidden and retry on a later refresh. Existing
-                    // transfer state still makes the menu visible so a Ready/rollback
-                    // transaction can always be reopened.
-                }
-            }
             error = nil
             rejectedFingerprint = nil
             trustFailed = false
@@ -2911,6 +2864,33 @@ struct TerminalHomeView: View {
                     let capabilities = try await client.serverCapabilities()
                     guard rosterLoadGate.accepts(loadToken) else { return }
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
+                    // PARSED HERE, IN THE SAME BLOCK THAT MARKS THE CHECK DONE.
+                    //
+                    // My first conflict resolution kept BOTH this gated probe and the
+                    // one main added, so a transient failure of the first left
+                    // `sessionTransferHarnesses` empty while the second set
+                    // `checkedSessionTransferCapability` and suppressed any retry — an
+                    // OMP-capable daemon would then offer NO transfer target for the
+                    // lifetime of this HomeView. Consolidated to one probe, and
+                    // populating the set and setting the flag are now inseparable.
+                    if sessionTransferSupported {
+                        if let advertised = capabilities?.agentSessionTransferHarnesses {
+                            sessionTransferHarnesses = Set(advertised.filter { harness in
+                                switch harness {
+                                case .claude, .codex, .omp:
+                                    return true
+                                case .unrecognised:
+                                    return false
+                                }
+                            })
+                        } else {
+                            // Older transfer-capable daemons predate the explicit list
+                            // and support exactly Claude Code and Codex.
+                            sessionTransferHarnesses = [.claude, .codex]
+                        }
+                    } else {
+                        sessionTransferHarnesses = []
+                    }
                     checkedSessionTransferCapability = true
                 } catch {
                     guard rosterLoadGate.accepts(loadToken) else { return }
