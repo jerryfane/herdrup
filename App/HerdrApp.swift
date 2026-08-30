@@ -300,6 +300,11 @@ struct RootView: View {
         switch mode {
         case .onboarding:
             ConnectView { _ in }
+        case .pairingGuidance:
+            ZStack {
+                Palette.ground.ignoresSafeArea()
+                PairingCommandGuidance().padding(24)
+            }
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
@@ -471,6 +476,14 @@ enum HerdrSetup {
     /// produces a herdr with no `api-bridge`, which this app cannot drive.
     static let installCommand =
         "curl -fsSL https://herdrup.themartian.app/install.sh | sh"
+    static let pairCommand = "herdr pair"
+    static let openQRCommand = "herdr pair --open"
+    static let saveQRCommand = "herdr pair --qr-file ~/Desktop/herdr-pair.svg"
+
+    static let tailscalePrerequisite =
+        "Tailscale is connected on this iPhone and your computer."
+    static let sshPrerequisite =
+        "SSH is enabled on the computer. On Mac, turn on Remote Login."
 }
 
 struct ConnectView: View {
@@ -580,14 +593,31 @@ struct ConnectView: View {
             Text("herdrup controls coding agents running on your computer.")
                 .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
                 .multilineTextAlignment(.center)
-            Text("It needs herdr installed there first. On your computer, run:")
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("BEFORE PAIRING")
+                    .font(Typography.microLabel).tracking(1.1)
+                    .foregroundStyle(Palette.textFaint)
+                prerequisiteRow(
+                    HerdrSetup.tailscalePrerequisite,
+                    systemImage: "network",
+                    identifier: "pairing-prerequisite-tailscale")
+                prerequisiteRow(
+                    HerdrSetup.sshPrerequisite,
+                    systemImage: "lock.open",
+                    identifier: "pairing-prerequisite-ssh")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+
+            Text("Then, on your computer, run:")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
 
             VStack(spacing: 8) {
                 monoCard(HerdrSetup.installCommand)
                 Text("then").font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                monoCard("herdr pair")
+                monoCard(HerdrSetup.pairCommand)
             }
 
             Text("Scan the code it prints and you're connected. No keys to copy.")
@@ -595,6 +625,21 @@ struct ConnectView: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 16)
+    }
+
+    private func prerequisiteRow(_ text: String, systemImage: String, identifier: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.textFaint)
+                .frame(width: 15)
+            Text(text)
+                .font(Typography.app(12.5))
+                .foregroundStyle(Palette.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 
     /// A command the reader is meant to run on their computer — and can now COPY.
@@ -5538,7 +5583,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
+    case onboarding, pairingGuidance, list, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -5546,6 +5591,7 @@ enum ScreenshotMock {
         guard env != nil || arg else { return nil }
         switch env {
         case "onboarding": return .onboarding
+        case "pairing-guidance": return .pairingGuidance
         case "pane": return .pane
         case "settings": return .settings
         case "newagent": return .newAgent
