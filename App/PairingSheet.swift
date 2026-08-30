@@ -112,19 +112,8 @@ struct PairingSheet: View {
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .padding(.horizontal, 20)
 
-            VStack(spacing: 8) {
-                Text("On your computer, run").font(Typography.app(13))
-                    .foregroundStyle(Palette.textDim)
-                Text("herdr pair").font(Typography.machine(16, .semibold))
-                    .foregroundStyle(Palette.text)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Palette.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                Text("then point the camera at the code it prints.")
-                    .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-            }
-            .multilineTextAlignment(.center)
-            .padding(20)
+            PairingCommandGuidance()
+                .padding(20)
         }
     }
 
@@ -192,5 +181,42 @@ struct PairingSheet: View {
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+/// The command help below the camera, split out so the exact first-run guidance has a
+/// deterministic UI-test surface without requiring camera hardware in CI.
+struct PairingCommandGuidance: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("On your computer, run")
+                .font(Typography.app(13))
+                .foregroundStyle(Palette.textDim)
+            Text(HerdrSetup.pairCommand)
+                .font(Typography.machine(16, .semibold))
+                .foregroundStyle(Palette.text)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(Palette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            Text("then point the camera at the code it prints.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+
+            VStack(spacing: 3) {
+                Text("QR looks distorted? Open a clean version with")
+                Text(HerdrSetup.openQRCommand)
+                    .font(Typography.machine(12, .medium))
+                    .foregroundStyle(Palette.text)
+                Text("Or save an SVG with")
+                    .padding(.top, 2)
+                Text(HerdrSetup.saveQRCommand)
+                    .font(Typography.machine(11, .medium))
+                    .foregroundStyle(Palette.text)
+            }
+            .font(Typography.app(11.5))
+            .foregroundStyle(Palette.textFaint)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("pairing-qr-fallback")
+        }
+        .multilineTextAlignment(.center)
     }
 }
