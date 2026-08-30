@@ -127,6 +127,15 @@ public enum TransportError: Error, CustomStringConvertible {
     /// The server rejected the credentials — a wrong password, or a key it would
     /// not accept.
     case authenticationFailed(host: String)
+    /// The connection did not complete within the budget. `onTailnet` is true when
+    /// the destination is a Tailscale address, which makes the cause almost certain
+    /// and the remedy specific — so it gets its own sentence rather than a generic
+    /// "couldn't connect".
+    ///
+    /// Without a budget this failure had no error at all: an unroutable address
+    /// hangs at the TCP layer until the OS gives up (~75s on iOS), which the user
+    /// experiences as an endless spinner rather than as a failure.
+    case connectTimedOut(host: String, onTailnet: Bool)
 
     public var description: String {
         switch self {
@@ -149,6 +158,15 @@ public enum TransportError: Error, CustomStringConvertible {
             return "\(h) does not offer password authentication; use a key instead"
         case .authenticationFailed(let h):
             return "authentication to \(h) failed. Check the password or key"
+        case .connectTimedOut(let h, let onTailnet):
+            // The tailnet wording names the remedy, because on a Tailscale address
+            // "not on the tailnet" is overwhelmingly the cause and the user can fix
+            // it in one step. The generic wording deliberately does NOT guess.
+            return onTailnet
+                ? "\(h) is on Tailscale. Your device needs to be on the same tailnet — "
+                    + "open Tailscale and connect, then try again."
+                : "couldn't reach \(h) in time. It may be offline, or on a network "
+                    + "this device cannot see."
         }
     }
 }
