@@ -48,10 +48,37 @@ final class AgentRosterScrollTests: XCTestCase {
         //
         // Only the ASSUMPTION that the roster holds still is relaxed. The three
         // receipts below — top leaves, bottom arrives, top returns — are unchanged.
-        XCTAssertTrue(
-            topMarker.waitForHittable(timeout: rosterSettleTimeout),
-            "top marker did not become hittable in the visible viewport within \(rosterSettleTimeout)s"
+        // DIAGNOSTIC, DELIBERATELY WIDE. 1.0s — twenty of the mock's 50ms poll cycles —
+        // was not enough on the runner, and that is the interesting result: either the
+        // settle is merely slower than the cadence suggests, or the top row never
+        // becomes reachable at all, which would mean the roster is genuinely
+        // unresponsive under a load that rewrites every row twenty times a second.
+        //
+        // Those need different answers — a larger bound versus a real finding about the
+        // fix — and raising the number to get green would destroy the evidence that
+        // tells them apart. So this measures instead of asserting: it reports WHEN
+        // hittability arrived, or that it never did within a bound far past any
+        // plausible settle, and names what else was reachable at that moment.
+        let topSettle = topMarker.timeToHittable(timeout: 10.0)
+        let bottomReachable = bottomMarker.waitForHittable(timeout: 0.5)
+        XCTAssertNotNil(
+            topSettle,
+            "top marker NEVER became hittable within 10s. bottom marker hittable at that "
+                + "point: \(bottomReachable). scroll view exists: \(scroll.exists). "
+                + "If bottom is reachable and top is not, the roster is scrolled away "
+                + "from the top rather than frozen; if neither is reachable, the roster "
+                + "is not responding to layout at all."
         )
+        if let topSettle {
+            XCTAssertLessThan(
+                topSettle,
+                rosterSettleTimeout,
+                "top marker became hittable only after \(topSettle)s, beyond the \(rosterSettleTimeout)s "
+                    + "budget derived from the 50ms reorder cadence. The roster settles, "
+                    + "but far slower than the cadence implies — the bound is wrong, or "
+                    + "the settle is."
+            )
+        }
 
         for _ in 0..<18 {
             scroll.swipeUp()
@@ -98,6 +125,22 @@ final class AgentRosterScrollTests: XCTestCase {
 /// rule out. A bounded wait on existence would be green against a roster that never
 /// becomes reachable at all.
 extension XCUIElement {
+
+    /// How long until this element became hittable, or nil if it never did.
+    ///
+    /// Returns the measurement rather than a verdict, so a failure can say WHICH of
+    /// "slower than expected" and "never" happened. Those need different fixes and an
+    /// assertion collapses them into the same red.
+    func timeToHittable(timeout: TimeInterval) -> TimeInterval? {
+        let started = Date()
+        let deadline = started.addingTimeInterval(timeout)
+        repeat {
+            if isHittable { return Date().timeIntervalSince(started) }
+            _ = XCTWaiter.wait(for: [XCTestExpectation(description: "settle")], timeout: 0.1)
+        } while Date() < deadline
+        return isHittable ? Date().timeIntervalSince(started) : nil
+    }
+
     func waitForHittable(timeout: TimeInterval) -> Bool {
         waitForHittability(timeout: timeout, expected: true)
     }
