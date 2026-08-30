@@ -1232,16 +1232,20 @@ struct TerminalHomeView: View {
         let account: CredentialAccount
     }
     @State private var swapCandidate: PendingSwap?
-    /// Capability-gated Claude Code <-> Codex transfer. Unlike a subscription
+    /// Capability-gated native harness transfer. Unlike a subscription
     /// swap, this stages a translated native session and requires review before
     /// the source runtime is interrupted.
     private struct PendingHarnessTransfer: Identifiable {
         let row: AgentRow
+        let source: AgentSessionTransferHarness
         let target: AgentSessionTransferHarness
-        var id: String { "\(row.info.paneID):\(target.rawValue)" }
+        var id: String {
+            "\(row.info.paneID):\(source.rawValue):\(target.rawValue)"
+        }
     }
     @State private var transferCandidate: PendingHarnessTransfer?
     @State private var sessionTransferSupported = false
+    @State private var sessionTransferHarnesses: Set<AgentSessionTransferHarness> = []
     @State private var checkedSessionTransferCapability = false
     /// A pending rename (nil = no sheet). An agent sets its daemon `name` (a resolvable mention
     /// target — `herdr agent read <name>`); a terminal sets its pane `label` (shown in
@@ -1931,6 +1935,7 @@ struct TerminalHomeView: View {
                     client: client,
                     agent: candidate.row.info,
                     title: candidate.row.title,
+                    source: candidate.source,
                     target: candidate.target,
                     accounts: accounts,
                     onRefresh: { Task { await load() } }
@@ -2274,14 +2279,28 @@ struct TerminalHomeView: View {
     /// detected agent is nil or already changed. Without a transaction, only exact
     /// native harness kinds participate; guessing would offer a transfer the server
     /// must refuse.
-    private func sessionTransferTarget(for info: AgentInfo) -> AgentSessionTransferHarness? {
-        if let activeOrRecordedTransfer = info.sessionTransfer {
-            return activeOrRecordedTransfer.target
+    private func sessionTransferSource(for info: AgentInfo) -> AgentSessionTransferHarness? {
+        if let activeTransfer = info.sessionTransfer,
+           !activeTransfer.phase.isConclusive {
+            return activeTransfer.source
         }
         switch info.agent?.lowercased() {
-        case "claude": return .codex
-        case "codex": return .claude
+        case "claude": return .claude
+        case "codex": return .codex
+        case "omp": return .omp
         default: return nil
+        }
+    }
+
+    private func sessionTransferTargets(for info: AgentInfo) -> [AgentSessionTransferHarness] {
+        if let activeTransfer = info.sessionTransfer,
+           !activeTransfer.phase.isConclusive {
+            return [activeTransfer.target]
+        }
+        guard let source = sessionTransferSource(for: info),
+              sessionTransferHarnesses.contains(source) else { return [] }
+        return [AgentSessionTransferHarness.claude, .codex, .omp].filter {
+            $0 != source && sessionTransferHarnesses.contains($0)
         }
     }
 
@@ -2352,13 +2371,32 @@ struct TerminalHomeView: View {
                         // then opens a review sheet whose explicit confirm performs the
                         // cutover. Local-only: the server denies filesystem-authority
                         // transfer requests over federation.
+                        let transferTargets = sessionTransferTargets(for: row.info)
+                        let hasActiveTransfer = row.info.sessionTransfer
+                            .map { !$0.phase.isConclusive } ?? false
                         if row.info.machineID == nil,
-                           (sessionTransferSupported || row.info.sessionTransfer != nil),
-                           let target = sessionTransferTarget(for: row.info) {
-                            Button {
-                                transferCandidate = PendingHarnessTransfer(row: row, target: target)
+                           (sessionTransferSupported || hasActiveTransfer),
+                           let source = sessionTransferSource(for: row.info),
+                           !transferTargets.isEmpty {
+                            Menu {
+                                ForEach(transferTargets, id: \.rawValue) { target in
+                                    Button {
+                                        transferCandidate = PendingHarnessTransfer(
+                                            row: row,
+                                            source: source,
+                                            target: target
+                                        )
+                                    } label: {
+                                        Label(target.displayName, systemImage: "arrow.right")
+                                    }
+                                }
                             } label: {
-                                Label("Switch to \(target.displayName)", systemImage: "arrow.left.arrow.right")
+                                Label(
+                                    transferTargets.count == 1
+                                        ? "Switch to \(transferTargets[0].displayName)"
+                                        : "Switch harness",
+                                    systemImage: "arrow.left.arrow.right"
+                                )
                             }
                         }
                         // Swap = restart the agent onto a DIFFERENT credential account
@@ -2683,6 +2721,24 @@ struct TerminalHomeView: View {
                 do {
                     let capabilities = try await client.serverCapabilities()
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
+                    if sessionTransferSupported {
+                        if let advertised = capabilities?.agentSessionTransferHarnesses {
+                            sessionTransferHarnesses = Set(advertised.filter { harness in
+                                switch harness {
+                                case .claude, .codex, .omp:
+                                    return true
+                                case .unrecognised:
+                                    return false
+                                }
+                            })
+                        } else {
+                            // Older transfer-capable daemons predate the explicit
+                            // list and support exactly Claude Code and Codex.
+                            sessionTransferHarnesses = [.claude, .codex]
+                        }
+                    } else {
+                        sessionTransferHarnesses = []
+                    }
                     checkedSessionTransferCapability = true
                 } catch {
                     // Keep the control hidden and retry on a later refresh. Existing

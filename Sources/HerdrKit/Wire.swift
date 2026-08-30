@@ -112,11 +112,47 @@ public struct AgentArchivedInfo: Decodable, Equatable, Sendable {
     public let reason: String?
 }
 
-/// The two harnesses whose native transcript formats Herdr can translate.
-public enum AgentSessionTransferHarness: String, Codable, Equatable, Sendable {
-    case claude, codex
+/// A native harness whose visible transcript Herdr can translate. Unknown
+/// values remain decodable so a newer daemon cannot break the entire agent list
+/// on an older app.
+public enum AgentSessionTransferHarness: Codable, Hashable, Sendable {
+    case claude
+    case codex
+    case omp
+    case unrecognised(String)
 
-    public var displayName: String { self == .claude ? "Claude Code" : "Codex" }
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "claude": self = .claude
+        case "codex": self = .codex
+        case "omp": self = .omp
+        default: self = .unrecognised(value)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .claude: "claude"
+        case .codex: "codex"
+        case .omp: "omp"
+        case .unrecognised(let value): value
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .claude: "Claude Code"
+        case .codex: "Codex"
+        case .omp: "Oh My Pi"
+        case .unrecognised(let value): value
+        }
+    }
 }
 
 /// The durable two-phase transfer state reported on `AgentInfo.sessionTransfer`.
@@ -151,6 +187,16 @@ public enum AgentSessionTransferPhase: Decodable, Equatable, Sendable {
     public var isTerminal: Bool {
         switch self {
         case .completed, .rolledBack, .failed, .unrecognised: return true
+        default: return false
+        }
+    }
+
+    /// A known final state after which starting a new transfer is safe. An
+    /// unknown phase stops polling, but remains durable and visible because an
+    /// older app cannot prove that the transaction has finished.
+    public var isConclusive: Bool {
+        switch self {
+        case .completed, .rolledBack, .failed: return true
         default: return false
         }
     }
@@ -810,12 +856,17 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let detachedServerDaemon: Bool
     public let paneInputStream: Bool
     public let agentSessionTransfer: Bool
+    /// Nil means the daemon predates explicit harness advertisement and uses
+    /// the legacy Claude/Codex pair. An explicit list, including an empty or
+    /// future-only one, must not be replaced with that fallback.
+    public let agentSessionTransferHarnesses: [AgentSessionTransferHarness]?
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
         case detachedServerDaemon = "detached_server_daemon"
         case paneInputStream = "pane_input_stream"
         case agentSessionTransfer = "agent_session_transfer"
+        case agentSessionTransferHarnesses = "agent_session_transfer_harnesses"
     }
 
     public init(from decoder: Decoder) throws {
@@ -824,6 +875,10 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         detachedServerDaemon = try c.decodeIfPresent(Bool.self, forKey: .detachedServerDaemon) ?? false
         paneInputStream = try c.decodeIfPresent(Bool.self, forKey: .paneInputStream) ?? false
         agentSessionTransfer = try c.decodeIfPresent(Bool.self, forKey: .agentSessionTransfer) ?? false
+        agentSessionTransferHarnesses = try c.decodeIfPresent(
+            [AgentSessionTransferHarness].self,
+            forKey: .agentSessionTransferHarnesses
+        )
     }
 }
 

@@ -10,7 +10,7 @@ final class SessionTransferTests: XCTestCase {
         func roundTrip(_ requestLine: String) async throws -> String {
             requests.append(requestLine)
             if requestLine.contains(#""method":"ping""#) {
-                return #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true,"agent_session_transfer":true}}}"#
+                return #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true,"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","codex","omp"]}}}"#
             }
             return SessionTransferTests.transferResponse(phase: transferPhase)
         }
@@ -44,12 +44,25 @@ final class SessionTransferTests: XCTestCase {
         XCTAssertEqual(enabled?.agentSessionTransfer, true)
         XCTAssertEqual(enabled?.liveHandoff, true)
         XCTAssertEqual(enabled?.paneInputStream, false)
+        XCTAssertEqual(enabled?.agentSessionTransferHarnesses, [.claude, .codex, .omp])
 
         let old = FixedTransport(response:
             #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true}}}"#)
         let oldCapabilities = try await HerdrClient(transport: old).serverCapabilities()
         XCTAssertEqual(oldCapabilities?.agentSessionTransfer, false,
                        "an older daemon must hide the switch instead of advertising a call it cannot serve")
+        XCTAssertNil(oldCapabilities?.agentSessionTransferHarnesses)
+    }
+
+    func testPrepareEncodesOmpAsANativeTransferTarget() async throws {
+        let transport = CapturingTransport()
+        _ = try await HerdrClient(transport: transport)
+            .prepareAgentSessionTransfer(target: "jarvis", to: .omp, account: "omp-main")
+
+        let request = try requestObject(try XCTUnwrap(transport.requests.last))
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["to"] as? String, "omp")
+        XCTAssertEqual(params["account"] as? String, "omp-main")
     }
 
     func testPrepareEncodesOnlyStageFieldsAndDecodesReviewFacts() async throws {
@@ -110,7 +123,28 @@ final class SessionTransferTests: XCTestCase {
         XCTAssertEqual(transfer.phase, .unrecognised("verifying_future_state"))
         XCTAssertTrue(transfer.phase.isTerminal,
                       "a state this app cannot interpret must stop polling and demand attention")
+        XCTAssertFalse(transfer.phase.isConclusive,
+                       "an unknown durable state must remain visible instead of permitting a new transfer")
         XCTAssertEqual(transfer.omissions.total, 0)
+    }
+
+    func testUnknownHarnessDoesNotBreakAgentListDecoding() async throws {
+        let transport = FixedTransport(response:
+            #"{"id":"x","result":{"agents":[{"pane_id":"w1:p1","agent":"future","agent_status":"idle","session_transfer":{"id":"transfer-3","source":"omp","target":"future-harness","phase":"completed","message_count":1,"omissions":{}}}]}}"#)
+        let agents = try await HerdrClient(transport: transport).agentList()
+        let transfer = try XCTUnwrap(agents.first?.sessionTransfer)
+        XCTAssertEqual(transfer.source, .omp)
+        XCTAssertEqual(transfer.target, .unrecognised("future-harness"))
+    }
+
+    func testUnknownAdvertisedHarnessDoesNotBreakCapabilityDecoding() async throws {
+        let transport = FixedTransport(response:
+            #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","omp","future-harness"]}}}"#)
+        let capabilities = try await HerdrClient(transport: transport).serverCapabilities()
+        XCTAssertEqual(
+            capabilities?.agentSessionTransferHarnesses,
+            [.claude, .omp, .unrecognised("future-harness")]
+        )
     }
 
     func testTransferRejectionRemainsARealAPIError() async throws {

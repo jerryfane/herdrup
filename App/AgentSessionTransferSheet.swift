@@ -1,7 +1,7 @@
 import HerdrKit
 import SwiftUI
 
-/// Two-phase Claude Code <-> Codex transfer. Preparing is non-destructive: Herdr
+/// Two-phase native harness transfer. Preparing is non-destructive: Herdr
 /// builds and rereads the destination transcript while this agent stays live. The
 /// user sees the exact visible-message and omission counts before confirmation.
 struct AgentSessionTransferSheet: View {
@@ -12,6 +12,7 @@ struct AgentSessionTransferSheet: View {
     let onRefresh: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var source: AgentSessionTransferHarness
     @State private var target: AgentSessionTransferHarness
     @State private var selectedAccountID: String
     @State private var transfer: AgentSessionTransferInfo?
@@ -23,6 +24,7 @@ struct AgentSessionTransferSheet: View {
         client: HerdrClient,
         agent: AgentInfo,
         title: String,
+        source: AgentSessionTransferHarness,
         target: AgentSessionTransferHarness,
         accounts: [CredentialAccount],
         onRefresh: @escaping () -> Void
@@ -34,17 +36,16 @@ struct AgentSessionTransferSheet: View {
         self.onRefresh = onRefresh
 
         let existing = agent.sessionTransfer.flatMap { info -> AgentSessionTransferInfo? in
-            guard info.target == target else { return nil }
+            guard !info.phase.isConclusive,
+                  info.source == source,
+                  info.target == target else { return nil }
             return info
         }
+        _source = State(initialValue: source)
         _target = State(initialValue: target)
         _transfer = State(initialValue: existing)
         _selectedAccountID = State(initialValue: existing?.targetAccount ?? "")
         _sourceStatus = State(initialValue: agent.agentStatus)
-    }
-
-    private var source: AgentSessionTransferHarness {
-        target == .codex ? .claude : .codex
     }
 
     private var targetAccounts: [CredentialAccount] {
@@ -426,6 +427,10 @@ struct AgentSessionTransferSheet: View {
             return "Herdr is waiting for Claude Code's official integration to report the exact staged session. A mismatch restores \(source.displayName)."
         case .codex:
             return "Herdr is binding the exact Codex resume session and PID, then rereading the native target JSONL. The JSONL is the proof; the short observation window is not. Codex's later official report must still match."
+        case .omp:
+            return "Herdr is binding the exact OMP session path, active leaf, and PID, then rereading the native target tree. The transcript is the proof; the short observation window is not."
+        case .unrecognised(let harness):
+            return "Herdr cannot verify the unrecognised target harness \(harness)."
         }
     }
 
@@ -435,12 +440,17 @@ struct AgentSessionTransferSheet: View {
             return "The target did not take verified ownership. Herdr is reopening the original Claude Code session and waiting for its official session report."
         case .codex:
             return "The target did not take verified ownership. Herdr is reopening the exact original Codex session and verifying its native JSONL against that session's PID."
+        case .omp:
+            return "The target did not take verified ownership. Herdr is reopening the exact original OMP session path and verifying its active leaf and native tree against that session's PID."
+        case .unrecognised(let harness):
+            return "The target did not take verified ownership. Herdr cannot automatically verify rollback for the unrecognised source harness \(harness)."
         }
     }
 
     @MainActor
     private func beginReverseTransfer() {
         guard let current = transfer, current.phase == .completed else { return }
+        source = current.target
         target = current.source
         selectedAccountID = ""
         transfer = nil
@@ -472,8 +482,7 @@ struct AgentSessionTransferSheet: View {
             guard let info = updated.sessionTransfer else {
                 throw TransferSheetError.missingState
             }
-            transfer = info
-            selectedAccountID = info.targetAccount ?? ""
+            synchronizeTransfer(info, agentStatus: updated.agentStatus)
             await pollTransfer(id: info.id)
         } catch {
             let transportError = displayError(error)
@@ -506,7 +515,7 @@ struct AgentSessionTransferSheet: View {
             guard let info = updated.sessionTransfer else {
                 throw TransferSheetError.missingState
             }
-            transfer = info
+            synchronizeTransfer(info, agentStatus: updated.agentStatus)
             await pollTransfer(id: info.id)
         } catch {
             let transportError = displayError(error)
@@ -543,13 +552,10 @@ struct AgentSessionTransferSheet: View {
                 $0.paneID == agent.paneID
                     || ($0.terminalID != nil && $0.terminalID == agent.terminalID)
             }), let durable = updatedAgent.sessionTransfer,
-                  includeTerminal || !durable.phase.isTerminal else {
+                  includeTerminal || !durable.phase.isConclusive else {
                 return false
             }
-            target = durable.target
-            transfer = durable
-            selectedAccountID = durable.targetAccount ?? ""
-            sourceStatus = updatedAgent.agentStatus
+            synchronizeTransfer(durable, agentStatus: updatedAgent.agentStatus)
             if let expectedID, durable.id != expectedID {
                 busy = false
                 errorText = "A different transfer replaced this transaction. Review the durable state shown here before taking another action."
@@ -594,18 +600,30 @@ struct AgentSessionTransferSheet: View {
             }) else { return }
             guard let updated = updatedAgent.sessionTransfer else { return }
             guard updated.id == id else {
-                transfer = updated
+                synchronizeTransfer(updated, agentStatus: updatedAgent.agentStatus)
                 busy = false
                 errorText = "A different transfer replaced this transaction. Close and reopen to review the current one."
                 return
             }
-            transfer = updated
+            synchronizeTransfer(updated, agentStatus: updatedAgent.agentStatus)
             if updated.phase.isTerminal { errorText = nil }
         } catch {
             // A daemon restart can transiently drop a poll. Keep the last verified
             // phase and retry; only the deadline above turns prolonged uncertainty
             // into user-visible text.
         }
+    }
+
+    @MainActor
+    private func synchronizeTransfer(
+        _ durable: AgentSessionTransferInfo,
+        agentStatus: String?
+    ) {
+        source = durable.source
+        target = durable.target
+        selectedAccountID = durable.targetAccount ?? ""
+        sourceStatus = agentStatus
+        transfer = durable
     }
 
     @MainActor
