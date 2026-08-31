@@ -2,10 +2,14 @@ import XCTest
 
 /// Regression receipt for the macOS/iPad agent-list freeze.
 ///
-/// The mock replaces the roster every 50 ms, moving rows between sections and changing
-/// the row count. A fixed top/bottom marker pair proves that swipes really displaced
-/// content in both directions while that refresh workload continued. The pure
-/// AgentRosterRefreshState tests separately pin deferred-snapshot promotion exactly.
+/// The mock begins with a stable 80-row roster so cold layout is a precondition, not an
+/// unrelated 50 ms starvation test. Once a real scroll starts it moves rows between
+/// sections, changes the count, and emits a deferred row plus a phase-dependent real row.
+/// A fixed top/bottom pair proves that swipes displaced content in both directions; the
+/// the complete roster count proves that a different-sized scroll-time snapshot was
+/// promoted on idle, while a named existing row changing sections independently proves
+/// status redistribution. A separate violation marker makes publication during scrolling
+/// fail instead of passing eventually. The pure state tests pin the same transition without UIKit.
 final class AgentRosterScrollTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
@@ -22,6 +26,13 @@ final class AgentRosterScrollTests: XCTestCase {
     /// seconds would pass a roster that is visibly janky to a human.
     private let rosterSettleTimeout: TimeInterval = 1.0
 
+    /// Cold simulator launch gets a separate budget from gesture response. The frozen
+    /// production head never made the top row hittable even with a measured ten-second
+    /// wait; the fixed head reached it on retry but missed the old one-second cold-start
+    /// sample. Keeping movement at one second preserves the responsiveness gate without
+    /// making simulator startup the behavior under test.
+    private let initialRosterLayoutTimeout: TimeInterval = 10.0
+
     func testRosterStaysResponsiveWhileRefreshesReorderRows() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "rosterstress"
@@ -33,52 +44,63 @@ final class AgentRosterScrollTests: XCTestCase {
         // tree but are not independently hittable because the parent owns the gesture.
         let topMarker = app.buttons["agent-row-stress:top"]
         let bottomMarker = app.buttons["agent-row-stress:bottom"]
+        let deferredMarker = app.buttons["agent-row-stress:deferred"]
+        let coalescingViolation = app.buttons["agent-row-stress:coalescing-violation"]
+        let eagerStackReceipt = app.buttons["agent-row-stress:eager-stack"]
+        let armStress = app.buttons["roster-stress-arm"]
+        let stablePhase = app.staticTexts["stable-pre-scroll-phase-marker"]
+        let activePhaseOne = app.staticTexts["scroll-refresh-phase-1-marker"]
+        let activePhaseTwo = app.staticTexts["scroll-refresh-phase-2-marker"]
+        let phaseOneRedistributionRow = app.buttons["agent-row-stress:p000"]
+        let phaseTwoRedistributionRow = app.buttons["agent-row-stress:p001"]
         XCTAssertTrue(topMarker.waitForExistence(timeout: 5), "stress roster did not load")
-        // WAIT for it, do not assert it instantly. This roster re-sorts every 50ms by
-        // design: the driver's phase alternates each poll and all 80-odd rows change
-        // section, which is the scenario the test exists to exercise. An instant
-        // `isHittable` here races that loop.
-        //
-        // It used not to. Before the roster-refresh fix, `RosterStressDriver()` was
-        // constructed inside `body`, so SwiftUI rebuilt it on every evaluation and its
-        // call counter reset to 1 each time — the phase never advanced and the roster
-        // never actually reordered. The test passed because nothing moved. Making the
-        // driver stable is what turned this into a real stress, and this precondition
-        // is what it exposed.
-        //
-        // Only the ASSUMPTION that the roster holds still is relaxed. The three
-        // receipts below — top leaves, bottom arrives, top returns — are unchanged.
-        // DIAGNOSTIC, DELIBERATELY WIDE. 1.0s — twenty of the mock's 50ms poll cycles —
-        // was not enough on the runner, and that is the interesting result: either the
-        // settle is merely slower than the cadence suggests, or the top row never
-        // becomes reachable at all, which would mean the roster is genuinely
-        // unresponsive under a load that rewrites every row twenty times a second.
-        //
-        // Those need different answers — a larger bound versus a real finding about the
-        // fix — and raising the number to get green would destroy the evidence that
-        // tells them apart. So this measures instead of asserting: it reports WHEN
-        // hittability arrived, or that it never did within a bound far past any
-        // plausible settle, and names what else was reachable at that moment.
-        let topSettle = topMarker.timeToHittable(timeout: 10.0)
-        let bottomReachable = bottomMarker.waitForHittable(timeout: 0.5)
-        XCTAssertNotNil(
-            topSettle,
-            "top marker NEVER became hittable within 10s. bottom marker hittable at that "
-                + "point: \(bottomReachable). scroll view exists: \(scroll.exists). "
-                + "If bottom is reachable and top is not, the roster is scrolled away "
-                + "from the top rather than frozen; if neither is reachable, the roster "
-                + "is not responding to layout at all."
-        )
-        if let topSettle {
-            XCTAssertLessThan(
-                topSettle,
-                rosterSettleTimeout,
-                "top marker became hittable only after \(topSettle)s, beyond the \(rosterSettleTimeout)s "
-                    + "budget derived from the 50ms reorder cadence. The roster settles, "
-                    + "but far slower than the cadence implies — the bound is wrong, or "
-                    + "the settle is."
+        if !topMarker.waitForHittable(timeout: initialRosterLayoutTimeout) {
+            // The first cold launch can expose the hierarchy before its initial scroll
+            // offset is usable. Establish the test's top-of-list precondition with real
+            // gestures instead of assuming the initial position. The stress driver is
+            // not armed yet, so these gestures cannot change the roster. A frozen list
+            // still fails because they cannot make its already-present row hittable.
+            let attachment = XCTAttachment(screenshot: app.screenshot())
+            attachment.name = "roster-cold-launch-before-top-normalization"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            let bottomWasHittable = bottomMarker.isHittable
+            for _ in 0..<6 { scroll.swipeDown() }
+            XCTAssertTrue(
+                topMarker.waitForHittable(timeout: rosterSettleTimeout),
+                "top marker stayed unreachable after six downward swipes; "
+                    + "bottom hittable before normalization: \(bottomWasHittable)"
             )
         }
+        XCTAssertTrue(
+            eagerStackReceipt.waitForExistence(timeout: 3),
+            "stress scenario did not render the eager Mac roster stack"
+        )
+        XCTAssertFalse(deferredMarker.exists, "deferred marker appeared before scrolling began")
+        XCTAssertTrue(stablePhase.exists, "stable pre-scroll roster phase was absent")
+        XCTAssertFalse(activePhaseOne.exists || activePhaseTwo.exists, "roster phase changed before scrolling began")
+        XCTAssertEqual(agentCount(scroll), 84, "stable rendered roster cardinality was wrong")
+        XCTAssertTrue(
+            phaseOneRedistributionRow.waitForExistence(timeout: 3),
+            "phase-one receipt row did not resolve in the stable roster"
+        )
+        XCTAssertTrue(
+            phaseTwoRedistributionRow.waitForExistence(timeout: 3),
+            "phase-two receipt row did not resolve in the stable roster"
+        )
+        XCTAssertEqual(
+            phaseOneRedistributionRow.value as? String,
+            "needs you",
+            "phase-one receipt row did not begin in needs-you"
+        )
+        XCTAssertEqual(
+            phaseTwoRedistributionRow.value as? String,
+            "working",
+            "phase-two receipt row did not begin in working"
+        )
+        XCTAssertFalse(coalescingViolation.exists, "roster published while scrolling before the gesture began")
+        XCTAssertTrue(armStress.waitForExistence(timeout: 3), "roster stress arm control was absent")
+        armStress.tap()
 
         for _ in 0..<18 {
             scroll.swipeUp()
@@ -106,11 +128,78 @@ final class AgentRosterScrollTests: XCTestCase {
             topMarker.waitForHittable(timeout: rosterSettleTimeout),
             "downward swipes did not return to the original visible content within \(rosterSettleTimeout)s"
         )
+        XCTAssertTrue(
+            deferredMarker.waitForExistence(timeout: 3),
+            "scroll-time snapshot was not promoted after returning to idle"
+        )
+        XCTAssertTrue(
+            deferredMarker.waitForHittable(timeout: rosterSettleTimeout),
+            "deferred marker was not visible after returning to the top"
+        )
+        XCTAssertFalse(stablePhase.exists, "stable pre-scroll phase survived scroll-time promotion")
+        let activePhase: Int
+        if activePhaseOne.waitForExistence(timeout: rosterSettleTimeout) {
+            activePhase = 1
+        } else if activePhaseTwo.waitForExistence(timeout: rosterSettleTimeout) {
+            activePhase = 2
+        } else {
+            activePhase = 0
+        }
+        XCTAssertNotEqual(activePhase, 0, "no actual scroll-refresh phase was promoted after returning to idle")
+
+        XCTAssertNotNil(
+            waitForAgentCount(scroll, allowed: [86, 87], timeout: rosterSettleTimeout),
+            "promoted roster cardinality did not change from 84 to 86 or 87"
+        )
+        let redistributed: Bool
+        switch activePhase {
+        case 1:
+            redistributed = phaseOneRedistributionRow.waitForExistence(timeout: rosterSettleTimeout)
+                && (phaseOneRedistributionRow.value as? String) == "working"
+        case 2:
+            redistributed = phaseTwoRedistributionRow.waitForExistence(timeout: rosterSettleTimeout)
+                && (phaseTwoRedistributionRow.value as? String) == "needs you"
+        default:
+            redistributed = false
+        }
+        XCTAssertTrue(redistributed, "no existing row changed status section after scroll-time promotion")
+        XCTAssertFalse(
+            coalescingViolation.exists,
+            "a refresh changed the displayed roster while scrolling instead of being coalesced"
+        )
 
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "roster-responsive-after-refresh-stress"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func agentCount(_ element: XCUIElement) -> Int? {
+        guard let value = element.value as? String,
+              let firstField = value.split(separator: " ").first else { return nil }
+        return Int(firstField)
+    }
+
+    private func waitForAgentCount(
+        _ element: XCUIElement,
+        allowed: Set<Int>,
+        timeout: TimeInterval
+    ) -> Int? {
+        var observed: Int?
+        _ = waitForReceipt(timeout: timeout) {
+            observed = agentCount(element)
+            return observed.map(allowed.contains) ?? false
+        }
+        return observed.flatMap { allowed.contains($0) ? $0 : nil }
+    }
+
+    private func waitForReceipt(timeout: TimeInterval, _ receipt: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if receipt() { return true }
+            _ = XCTWaiter.wait(for: [XCTestExpectation(description: "receipt")], timeout: 0.1)
+        } while Date() < deadline
+        return receipt()
     }
 }
 
@@ -125,21 +214,6 @@ final class AgentRosterScrollTests: XCTestCase {
 /// rule out. A bounded wait on existence would be green against a roster that never
 /// becomes reachable at all.
 extension XCUIElement {
-
-    /// How long until this element became hittable, or nil if it never did.
-    ///
-    /// Returns the measurement rather than a verdict, so a failure can say WHICH of
-    /// "slower than expected" and "never" happened. Those need different fixes and an
-    /// assertion collapses them into the same red.
-    func timeToHittable(timeout: TimeInterval) -> TimeInterval? {
-        let started = Date()
-        let deadline = started.addingTimeInterval(timeout)
-        repeat {
-            if isHittable { return Date().timeIntervalSince(started) }
-            _ = XCTWaiter.wait(for: [XCTestExpectation(description: "settle")], timeout: 0.1)
-        } while Date() < deadline
-        return isHittable ? Date().timeIntervalSince(started) : nil
-    }
 
     func waitForHittable(timeout: TimeInterval) -> Bool {
         waitForHittability(timeout: timeout, expected: true)
