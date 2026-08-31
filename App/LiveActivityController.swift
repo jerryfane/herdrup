@@ -132,6 +132,10 @@ final class LiveActivityController: ObservableObject {
             headline: lead?.title ?? "No agents",
             status: status,
             needsYouCount: list.needsYouCount,
+            // Carried so the lock screen can qualify the count. Without it the widget
+            // asserted a last-known blocked state on a degraded peer as fact, which is the
+            // one thing the roster card's "stale" marker exists to prevent.
+            unconfirmedCount: list.unconfirmedNeedsYouCount,
             workingCount: rows.filter { $0.group == .working }.count,
             totalCount: rows.count,
             workingSince: workingSince

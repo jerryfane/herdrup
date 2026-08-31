@@ -75,7 +75,24 @@ struct AgentLiveActivity: Widget {
 
     /// One-line summary line: prefer the actionable count, else the status word.
     private func summary(_ s: AgentActivityAttributes.ContentState) -> String {
-        if s.needsYouCount > 0 { return "\(s.needsYouCount) need you" }
+        AgentActivitySummary.line(s)
+    }
+}
+
+/// The summary wording, in ONE place, because two surfaces render it and the lock screen
+/// previously asserted an unconfirmed count as fact while the roster card marked it.
+enum AgentActivitySummary {
+    static func line(_ s: AgentActivityAttributes.ContentState) -> String {
+        if s.needsYouCount > 0 {
+            // Every waiting agent rests on an unconfirmed state, so the whole claim is a
+            // maybe: say so rather than appending a qualifier to an assertion.
+            if s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
+            // Some are confirmed and some are not. Lead with the fact, name the doubt.
+            if s.unconfirmedCount > 0 {
+                return "\(s.needsYouCount) need you · \(s.unconfirmedCount) stale"
+            }
+            return "\(s.needsYouCount) need you"
+        }
         if s.workingCount > 0 { return "\(s.workingCount) working" }
         return s.status.label
     }
@@ -130,11 +147,7 @@ private struct LockScreenView: View {
         .padding(.vertical, 12)
     }
 
-    private var summary: String {
-        if state.needsYouCount > 0 { return "\(state.needsYouCount) need you" }
-        if state.workingCount > 0 { return "\(state.workingCount) working" }
-        return state.status.label
-    }
+    private var summary: String { AgentActivitySummary.line(state) }
 }
 
 /// A filled status circle; colour carries the meaning (amber = needs you, blue =

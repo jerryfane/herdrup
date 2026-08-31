@@ -27,6 +27,13 @@ struct AgentActivityAttributes: ActivityAttributes {
         var status: Status
         /// How many agents are waiting on the user right now.
         var needsYouCount: Int
+        /// How many of `needsYouCount` rest on a state the home could NOT confirm on its
+        /// last poll: a federated agent on a degraded peer, whose blocked state is a
+        /// last-known value rather than a live one. The lock screen and Dynamic Island have
+        /// no room for a per-row marker, so the count is qualified in the summary line
+        /// instead. DEFAULTED, so an activity started by an older build still decodes when
+        /// this build pushes it an update.
+        var unconfirmedCount: Int = 0
         /// How many agents are actively working right now.
         var workingCount: Int
         /// Total agents in the session.

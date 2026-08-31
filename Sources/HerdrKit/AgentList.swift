@@ -118,6 +118,21 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         self.group = AgentRow.resolvedGroup(info: info, status: status, isLive: isLive)
     }
 
+    /// Whether this row's state should be shown with a STALENESS MARKER: it is live, on a
+    /// peer the home did not confirm on its last poll, and it is presenting a state the
+    /// reader would otherwise read as current.
+    ///
+    /// ONE DEFINITION, DELIBERATELY. Two surfaces render needs-you (the roster card and
+    /// the Live Activity), and the first version of this marker existed only on the card,
+    /// so the lock screen went on asserting an unconfirmed "1 need you" as fact. Any
+    /// surface that renders a status must read THIS, not re-derive it.
+    ///
+    /// `isUnreachable` is excluded because that case already replaces the status outright
+    /// with an offline mark; doubling up would say the same thing twice.
+    public var showsUnconfirmedMarker: Bool {
+        isLive && info.hasUnconfirmedStatus && !info.isUnreachable
+    }
+
     /// ESCALATION-ONLY overlay on `group(for:isLive:)`. Two signals may move a row UP
     /// into `needsYou`; nothing here may ever move a row toward a QUIETER section, so
     /// the fail-closed placement the group order encodes cannot be undone by a lenient
@@ -220,6 +235,13 @@ public struct AgentList: Equatable, Sendable {
     /// the count is never the only thing the reader sees. An unrecognised status still has
     /// its own section and is still not counted here.
     public var needsYouCount: Int { rows.filter { $0.group == .needsYou }.count }
+
+    /// How many of `needsYouCount` rest on a state the home could not confirm. A surface
+    /// with no room for a per-row marker (the Live Activity) needs this to avoid asserting
+    /// an unconfirmed "N need you" as fact on the lock screen.
+    public var unconfirmedNeedsYouCount: Int {
+        rows.filter { $0.group == .needsYou && $0.showsUnconfirmedMarker }.count
+    }
 
     /// True when nothing is blocked AND nothing is unrecognised. The quiet state
     /// has to mean "I checked everything", so an uninterpretable agent must

@@ -2903,7 +2903,7 @@ struct TerminalHomeView: View {
             // needs-you, so without a marker a stale guess reads exactly like a colleague
             // genuinely waiting. Mark the row instead of suppressing the badge: hiding the
             // needs-you signal would be the worse error of the two.
-            if row.info.hasUnconfirmedStatus && !row.info.isUnreachable {
+            if row.showsUnconfirmedMarker {
                 Text("stale")
                     .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -6207,6 +6207,10 @@ struct MockTransport: HerdrTransport {
     // you" is `blocked`; the STOPPED row is NOT a status string — it comes from
     // liveness (w2:p1 is absent from demoLivePaneIDs below), exactly as the real
     // model derives it. done folds into idle.
+    // The mcb-air row is a DEGRADED FEDERATED agent, the shape this fixture lacked: the
+    // daemon blanked `agent_status` to "unknown" after a missed poll and moved the real
+    // state into `last_known_status`, so it escalates into NEEDS YOU on a last-known
+    // value and must render the "stale" marker. It is what the UI receipt asserts.
     static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[
       {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"},
@@ -6217,15 +6221,18 @@ struct MockTransport: HerdrTransport {
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
       {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
       {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
+      {"pane_id":"mcb-air/w1:p9","name":"mcb-air/mcb-air","agent":"omp","agent_status":"unknown","last_known_status":"blocked","machine_id":"mcb-air","reachability":"degraded","cwd":"/Users/jerry/omp-workspace","terminal_title_stripped":"clone repo and help deimos"},
       {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
     ]}}
     """#
 
     /// The panes herdr still lists, for the mock render. Excludes w2:p1 so that
-    /// row lands in STOPPED via liveness (not a status string). MUST stay in sync
-    /// with the census the fixture test uses.
+    /// row lands in STOPPED via liveness (not a status string). Includes the federated
+    /// `mcb-air/w1:p9`, because a pane absent from the census is `.stopped` and a stopped
+    /// row is never escalated, which would silently defeat the degraded-peer receipt.
+    /// MUST stay in sync with the census the fixture test uses.
     static let demoLivePaneIDs: Set<String> = [
-        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2",
+        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2", "mcb-air/w1:p9",
     ]
 
     /// `accounts.list` for the Settings mock render: two claude accounts (one active

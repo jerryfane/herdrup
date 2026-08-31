@@ -39,7 +39,8 @@ final class MockWireFixtureTests: XCTestCase {
     func testMockAgentListDecodesRealisticStatuses() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let agents = try await client.agentList()
-        XCTAssertEqual(agents.count, 9, "mock agent.list did not decode to 9 agents (8 live + 1 archived)")
+        XCTAssertEqual(agents.count, 10,
+                       "mock agent.list did not decode to 10 agents (9 live + 1 archived)")
         XCTAssertEqual(agents.filter { $0.isArchived }.count, 1, "one fixture agent carries an archived block")
         XCTAssertEqual(agents.first?.paneID, "w1:p1")
         XCTAssertEqual(agents.first?.displayName, "jarvis",
@@ -73,14 +74,27 @@ final class MockWireFixtureTests: XCTestCase {
                        [.needsYou, .stopped, .working, .idle],
                        "sections did not render in the mockup's order/composition")
         let counts = Dictionary(uniqueKeysWithValues: list.sections.map { ($0.group, $0.rows.count) })
-        XCTAssertEqual(counts[.needsYou], 2)
+        XCTAssertEqual(counts[.needsYou], 3,
+                       "two locally blocked, plus the degraded federated row escalated on its last-known blocked")
         XCTAssertEqual(counts[.stopped], 1)
         XCTAssertEqual(counts[.working], 1)
         XCTAssertEqual(counts[.idle], 4, "the done agent should fold into idle, making IDLE · 4")
-        XCTAssertEqual(list.needsYouCount, 2, "header would show the wrong 'N need you'")
+        XCTAssertEqual(list.needsYouCount, 3, "header would show the wrong 'N need you'")
+        // And one of those three is a MAYBE, which every surface must be able to qualify.
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 1)
+        let federated = try XCTUnwrap(list.rows.first { $0.info.machineID != nil })
+        XCTAssertEqual(federated.group, .needsYou)
+        XCTAssertEqual(federated.status, .indefinite, "its live status is genuinely unknown")
+        XCTAssertTrue(federated.showsUnconfirmedMarker, "the card and the widget both key on this")
+        XCTAssertFalse(federated.info.isUnreachable, "degraded is not offline; it must not take the offline badge")
+        // The locally blocked rows are NOT marked, so the marker is about reachability and
+        // not about being in the needs-you group.
+        for row in list.rows where row.group == .needsYou && row.info.machineID == nil {
+            XCTAssertFalse(row.showsUnconfirmedMarker, "\(row.info.paneID) is a live blocked agent")
+        }
         // The archived fixture agent is partitioned OUT of the live sections (which still
         // sum to 8) and into its own collapsed section.
-        XCTAssertEqual(list.rows.count, 8, "archived agents must not inflate the live rows")
+        XCTAssertEqual(list.rows.count, 9, "archived agents must not inflate the live rows")
         XCTAssertEqual(list.archived.count, 1, "the archived fixture agent lands in the Archived section")
         XCTAssertEqual(list.archived.first?.info.name, "huurjacht")
 
@@ -418,6 +432,7 @@ enum MockWireFixtures {
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
       {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
       {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
+      {"pane_id":"mcb-air/w1:p9","name":"mcb-air/mcb-air","agent":"omp","agent_status":"unknown","last_known_status":"blocked","machine_id":"mcb-air","reachability":"degraded","cwd":"/Users/jerry/omp-workspace","terminal_title_stripped":"clone repo and help deimos"},
       {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
     ]}}
     """#
@@ -425,7 +440,7 @@ enum MockWireFixtures {
     /// The census the App's mock render passes (MockTransport.demoLivePaneIDs).
     /// Excludes w2:p1 so it groups STOPPED via liveness. Keep in sync with the App.
     static let demoLivePaneIDs: Set<String> = [
-        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2",
+        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2", "mcb-air/w1:p9",
     ]
 
     static let agentRead = #"""
