@@ -106,8 +106,11 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
         context.coordinator.onTailStateChange = onTailStateChange
-        context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
+        // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
+        // now foreground-guarded, and a guard that reads a flag this pass has not yet
+        // written is not a guard at all.
         context.coordinator.setForeground(isForeground)
+        context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         // Drive terminal responder ownership from SwiftUI intent.
         //
         // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
@@ -119,18 +122,20 @@ struct LiveTerminalView: UIViewRepresentable {
         // `emptyInputView`, so nothing appears. KEY ROUTING stays gated on
         // `keyDriveEnabled` inside the `send` delegate, which is the only place it belongs.
         //
-        // A BACKGROUNDED pane always resigns and drops its selection: a hidden pane
-        // holding a writable responder could otherwise take keystrokes for an agent nobody
-        // is looking at, because panes stay mounted. Ungated by idiom too, so the
-        // behaviour no longer differs by platform. Only a FOREGROUND pane mid-selection
-        // keeps its responder, which is what stops a SwiftUI body pass from hiding Copy.
+        // A BACKGROUNDED pane drops its selection UNCONDITIONALLY and resigns if it holds
+        // the responder. The clear sits OUTSIDE the first-responder test on purpose: nested
+        // inside it, a pane holding a selection WITHOUT the responder kept it across
+        // backgrounding, so the sentence above was still not literally true. That is the
+        // third time this claim has been written wider than the code, so the code now
+        // matches the claim instead of the comment being narrowed again.
+        //
+        // Only a FOREGROUND pane mid-selection keeps its responder, which is what stops a
+        // SwiftUI body pass from hiding the Copy menu.
         if wantsTerminalKeyFocus {
             if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
-        } else if uiView.isFirstResponder {
-            if !isForeground {
-                uiView.clearSelection()
-                uiView.resignFirstResponder()
-            } else if !uiView.hasActiveSelection {
+        } else {
+            if !isForeground { uiView.clearSelection() }
+            if uiView.isFirstResponder, !isForeground || !uiView.hasActiveSelection {
                 uiView.resignFirstResponder()
             }
         }
@@ -483,18 +488,40 @@ struct LiveTerminalView: UIViewRepresentable {
             twoFingerTap.delegate = self
             twoFingerTap.cancelsTouchesInView = false
             view.addGestureRecognizer(twoFingerTap)
-            // Single tap clears a selection, else takes typing focus. It deliberately does
-            // NOT `require(toFail:)` SwiftTerm's double tap: SwiftTerm's `doubleTap`
-            // selects and presents its Copy menu WITHOUT calling `becomeFirstResponder`
-            // (only its long-press path does), and `canPerformAction` gates Copy on being
-            // first responder. Firing on tap 1 is what establishes the responder in time
-            // for tap 2's menu to offer Copy. Tap 1 is harmless otherwise: with nothing
-            // selected it only takes focus, and with something selected clearing it is
-            // exactly what a tap should do before a fresh word select.
-            let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleTerminalTap(_:)))
-            singleTap.delegate = self
-            singleTap.cancelsTouchesInView = false
-            view.addGestureRecognizer(singleTap)
+            // TWO TAP RECOGNIZERS, ONE JOB EACH, and the split is load-bearing.
+            //
+            // A single recognizer doing both jobs DESTROYS THE SELECTION IT EXISTS TO
+            // ENABLE. It must not `require(toFail:)` SwiftTerm's double tap, because
+            // SwiftTerm's `doubleTap` selects and presents its Copy menu WITHOUT calling
+            // `becomeFirstResponder` (only its long press does) while `canPerformAction`
+            // gates Copy on being first responder, so firing on tap 1 is the only thing
+            // that makes Copy available. But without that failure requirement it ALSO
+            // fires on tap 2, and clearing a selection there wipes the word SwiftTerm just
+            // selected on the same touch-up. Both recognizers live on the same view with
+            // `shouldRecognizeSimultaneouslyWith` true and UIKit does not document their
+            // relative order, so it was a coin toss on whether word select survived.
+            //
+            // FOCUS TAP: no failure requirement, so it fires on tap 1 and establishes the
+            // responder in time for tap 2's menu. Taking focus is idempotent, so firing
+            // again on tap 2 costs nothing.
+            let focusTap = UITapGestureRecognizer(target: self, action: #selector(handleFocusTap(_:)))
+            focusTap.delegate = self
+            focusTap.cancelsTouchesInView = false
+            view.addGestureRecognizer(focusTap)
+            // CLEAR TAP: requires SwiftTerm's 2-tap recognizer to fail, exactly as
+            // SwiftTerm guards its own `singleTap` (setupGestures does
+            // `singleTap.require(toFail: doubleTap)` for this very reason). So it can only
+            // fire on a GENUINE single tap, never on tap 2 of a word select. SwiftTerm's
+            // doubleTap already requires its tripleTap, so this inherits the whole chain.
+            let clearTap = UITapGestureRecognizer(target: self, action: #selector(handleClearSelectionTap(_:)))
+            clearTap.delegate = self
+            clearTap.cancelsTouchesInView = false
+            for gr in view.gestureRecognizers ?? [] {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
+                    clearTap.require(toFail: t)
+                }
+            }
+            view.addGestureRecognizer(clearTap)
             // (Removed: the horizontal swipe-between-agents recognizers. A finger/mouse drag to
             // SELECT text was triggering them and paging to an unwanted agent; agent switching
             // stays fully reachable via the list/sidebar, and their removal frees horizontal drag
@@ -514,7 +541,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// from `updateUIView` and from a UIKit gesture handler, both already on the
         /// main thread, and the async send hops explicitly.
         func jumpToTail() {
-            guard !stopped, let view else { return }
+            // `foreground` here too, matching the two byte-sending gesture handlers. Reached
+            // from `updateUIView` as well as from the two-finger tap, which is why
+            // `setForeground` now runs BEFORE `performJumpToTail`: guarding on a flag this
+            // pass has not yet written would guard nothing.
+            guard !stopped, foreground, let view else { return }
             let term = view.getTerminal()
             if term.isCurrentBufferAlternate || term.mouseMode != .off {
                 // Report the tail ONLY once the send has actually landed. Reporting up
@@ -575,25 +606,37 @@ struct LiveTerminalView: UIViewRepresentable {
             jumpToTail()
         }
 
-        /// A single tap first CLEARS an active selection, and takes typing focus only
-        /// when nothing was selected. SwiftTerm's own singleTap does the clear too, but
-        /// only when the view is ALREADY first responder (`if isFirstResponder { ... }
-        /// else { becomeFirstResponder() }`), so on an unfocused pane the tap was spent
-        /// taking focus and the selection survived. `clearSelection()` flips
-        /// `SelectionService.active`, whose setter notifies `selectionChanged(source:)`,
-        /// which calls `setNeedsDisplay` and `disableSelectionPanGesture()`, so one call
-        /// both redraws and removes the lazy extend pan.
-        @objc private func handleTerminalTap(_ gr: UITapGestureRecognizer) {
-            guard !stopped, foreground, gr.state == .ended, let view else { return }
-            if view.hasActiveSelection {
-                view.clearSelection()
-                return   // a tap that dismisses a selection must not also raise the keyboard
-            }
-            // No `keyDriveEnabled` gate here. Taking the responder is what makes Copy
-            // available on SwiftTerm's double tap, which selects WITHOUT taking it, and it
-            // costs nothing on an idiom that cannot type (zero-frame `emptyInputView`).
-            // Whether keys actually route to the PTY is decided in `send`, not here.
+        /// Establishes responder ownership, and NOTHING else. Fires on tap 1 of any tap
+        /// sequence because it carries no failure requirement, which is the only way the
+        /// responder exists in time for SwiftTerm's double-tap menu to offer Copy:
+        /// SwiftTerm's `doubleTap` selects without becoming first responder, and
+        /// `canPerformAction` returns `selection.active` for Copy only to a responder.
+        ///
+        /// Deliberately does NOT clear a selection. Clearing here fired on tap 2 as well
+        /// and wiped the word SwiftTerm had just selected on the same touch-up.
+        ///
+        /// No `keyDriveEnabled` gate: owning the responder costs nothing on an idiom that
+        /// cannot type (zero-frame `emptyInputView`), and whether keys reach the PTY is
+        /// decided in `send`.
+        @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, foreground, gr.state == .ended else { return }
             onTerminalFocusRequest?()
+        }
+
+        /// Clears an active selection on a GENUINE single tap. Guarded by
+        /// `require(toFail:)` against SwiftTerm's 2-tap recognizer at attach time, so it
+        /// cannot fire on tap 2 of a word select.
+        ///
+        /// SwiftTerm's own singleTap clears too, but only when the view is ALREADY first
+        /// responder, so on an unfocused pane its tap was spent taking focus and the
+        /// selection survived. `clearSelection()` flips `SelectionService.active`, whose
+        /// setter notifies `selectionChanged(source:)`, which calls `setNeedsDisplay` and
+        /// `disableSelectionPanGesture()`, so one call both redraws and removes the lazy
+        /// extend pan.
+        @objc private func handleClearSelectionTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, foreground, gr.state == .ended, let view else { return }
+            guard view.hasActiveSelection else { return }
+            view.clearSelection()
         }
 
         func stop() {
