@@ -3489,6 +3489,9 @@ struct TerminalPaneContent: View {
                                  onTerminalFocusRequest: { terminalInputFocused = true },
                                  jumpToTailToken: jumpToTailToken,
                                  onTailStateChange: { terminalAtTail = $0 },
+                                 // The host's current belief, so a `streamGen` remount seeds a
+                                 // fresh Coordinator instead of replaying the last jump.
+                                 isAtTail: terminalAtTail,
                                  fontSize: CGFloat(terminalFontSize),
                                  // A federated/remote pane routes key-drive input via pane.send_text
                                  // (home can't proxy the persistent pane.input.stream channel). (#139)

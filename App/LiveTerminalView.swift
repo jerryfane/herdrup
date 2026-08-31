@@ -68,6 +68,11 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Reports whether the pane is parked at its newest output. Invoked ONLY when
     /// the value changes, so it cannot re-render SwiftUI on every scroll frame.
     var onTailStateChange: (Bool) -> Void = { _ in }
+    /// The host's CURRENT belief about tail state, used to seed a fresh Coordinator on
+    /// a remount. Without it a `streamGen` remount resets the Coordinator's baseline to
+    /// `true` while the host still holds `false`, and the next jump's `atTail: true`
+    /// dedupes away as "no change", leaving the pill visible after a completed jump.
+    var isAtTail: Bool = true
     /// Terminal font size in points (the `terminal.fontSize` preference). Applied
     /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
     /// no view recreation.
@@ -87,6 +92,11 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        // SEED both baselines from the host before the first `updateUIView`. A remount
+        // (the header refresh bumps `streamGen`) builds a fresh Coordinator while the
+        // host's `@State` survives, so defaulting them replays the last jump as a second
+        // Ctrl+End and mis-dedupes the tail callback.
+        context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail)
         context.coordinator.attach(view)
         return view
     }
@@ -98,14 +108,22 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.onTailStateChange = onTailStateChange
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         context.coordinator.setForeground(isForeground)
-        // Drive terminal key focus from SwiftUI intent. The resign is gated on
-        // `keyDriveEnabled` so it manages only writable-terminal focus, and on
-        // `hasActiveSelection` so a SwiftUI body pass cannot yank first responder
-        // out from under a live selection (resigning hides the Copy menu).
+        // Drive terminal key focus from SwiftUI intent.
+        //
+        // A BACKGROUNDED pane always resigns, and drops its selection with it: a hidden
+        // pane holding a writable responder could otherwise take keystrokes for an agent
+        // nobody is looking at, because panes stay mounted and the `send` delegate is not
+        // foreground-gated by itself. Only a FOREGROUND pane mid-selection keeps its
+        // responder, which is what stops a SwiftUI body pass from hiding the Copy menu.
         if wantsTerminalKeyFocus {
             if uiView.keyDriveEnabled && !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
-        } else if uiView.keyDriveEnabled, uiView.isFirstResponder, !uiView.hasActiveSelection {
-            uiView.resignFirstResponder()
+        } else if uiView.keyDriveEnabled, uiView.isFirstResponder {
+            if !isForeground {
+                uiView.clearSelection()
+                uiView.resignFirstResponder()
+            } else if !uiView.hasActiveSelection {
+                uiView.resignFirstResponder()
+            }
         }
         context.coordinator.applyFont(size: fontSize)
     }
@@ -283,11 +301,21 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Refreshed by `updateUIView`.
         var onTailStateChange: ((Bool) -> Void)?
         /// Last `jumpToTailToken` this Coordinator executed, so one increment performs
-        /// exactly one jump even though `updateUIView` runs on every body pass.
+        /// exactly one jump even though `updateUIView` runs on every body pass. SEEDED
+        /// from the host at `makeUIView`, because a remount builds a fresh Coordinator
+        /// while the host's token survives: defaulting to 0 would replay the last jump.
         private var lastJumpToTailToken = 0
-        /// Last value published through `onTailStateChange`. Starts true so a pane that
-        /// has never been scrolled publishes nothing.
+        /// Last value published through `onTailStateChange`. Also seeded from the host,
+        /// so a remount cannot dedupe away the next genuine transition.
         private var lastReportedAtTail = true
+
+        /// Adopt the host's current jump token and tail belief WITHOUT acting on either.
+        /// Called once per Coordinator, before `attach`, so a `streamGen` remount neither
+        /// re-sends a jump it already performed nor swallows the next tail callback.
+        func seedBaselines(jumpToTailToken: Int, atTail: Bool) {
+            lastJumpToTailToken = jumpToTailToken
+            lastReportedAtTail = atTail
+        }
 
         /// Per-pane geometry-ownership generation. Each `attach` for a pane id bumps this and
         /// records the value it claimed; the releasing `lock:false` — which can be DELAYED
@@ -446,18 +474,17 @@ struct LiveTerminalView: UIViewRepresentable {
             twoFingerTap.delegate = self
             twoFingerTap.cancelsTouchesInView = false
             view.addGestureRecognizer(twoFingerTap)
-            // Single tap clears a selection, else takes typing focus. It must defer to
-            // SwiftTerm's own double tap exactly as SwiftTerm's singleTap does, or tap 1
-            // of a word-select would fire it. SwiftTerm's doubleTap already requires its
-            // tripleTap, so requiring the 2-tap recognizer inherits the whole chain.
+            // Single tap clears a selection, else takes typing focus. It deliberately does
+            // NOT `require(toFail:)` SwiftTerm's double tap: SwiftTerm's `doubleTap`
+            // selects and presents its Copy menu WITHOUT calling `becomeFirstResponder`
+            // (only its long-press path does), and `canPerformAction` gates Copy on being
+            // first responder. Firing on tap 1 is what establishes the responder in time
+            // for tap 2's menu to offer Copy. Tap 1 is harmless otherwise: with nothing
+            // selected it only takes focus, and with something selected clearing it is
+            // exactly what a tap should do before a fresh word select.
             let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleTerminalTap(_:)))
             singleTap.delegate = self
             singleTap.cancelsTouchesInView = false
-            for gr in view.gestureRecognizers ?? [] {
-                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
-                    singleTap.require(toFail: t)
-                }
-            }
             view.addGestureRecognizer(singleTap)
             // (Removed: the horizontal swipe-between-agents recognizers. A finger/mouse drag to
             // SELECT text was triggering them and paging to an unwanted agent; agent switching
@@ -481,9 +508,19 @@ struct LiveTerminalView: UIViewRepresentable {
             guard !stopped, let view else { return }
             let term = view.getTerminal()
             if term.isCurrentBufferAlternate || term.mouseMode != .off {
+                // Report the tail ONLY once the send has actually landed. Reporting up
+                // front cleared the pill while a rejected or dropped Ctrl+End left the
+                // agent's viewport exactly where it was, so the reader lost the affordance
+                // and the state lied at the same time.
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
-                    _ = try? await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                    do {
+                        _ = try await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                        self.reportTailState(atTail: true)
+                    } catch {
+                        // Keep `lastReportedAtTail` untouched, so the pill stays up and the
+                        // reader can retry. A failed jump must not read as a completed one.
+                    }
                 }
             } else {
                 // animated:false — an animated jump is cancelled mid-flight on a streaming
@@ -492,8 +529,9 @@ struct LiveTerminalView: UIViewRepresentable {
                 // syncYDispFromContentOffset synchronously and re-engages auto-follow.
                 let maxY = max(0, view.contentSize.height - view.bounds.height)
                 view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
+                // Synchronous and cannot fail, so the tail is true right now.
+                reportTailState(atTail: true)
             }
-            reportTailState(atTail: true)
         }
 
         /// Executes one jump per token increment. `updateUIView` runs on every SwiftUI
@@ -533,7 +571,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which calls `setNeedsDisplay` and `disableSelectionPanGesture()`, so one call
         /// both redraws and removes the lazy extend pan.
         @objc private func handleTerminalTap(_ gr: UITapGestureRecognizer) {
-            guard !stopped, gr.state == .ended, let view else { return }
+            guard !stopped, foreground, gr.state == .ended, let view else { return }
             if view.hasActiveSelection {
                 view.clearSelection()
                 return   // a tap that dismisses a selection must not also raise the keyboard
@@ -1051,7 +1089,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// input and iPad hardware-keyboard input. Serialized through `enqueueInput` so
         /// a fast key burst becomes ordered batches rather than concurrent channels.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard !stopped, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
+            // `foreground` is part of the guard, not just first-responder status. Panes stay
+            // MOUNTED when another is fronted, and a pane that held a selection keeps its
+            // responder for a moment, so first-responder alone would let a keystroke reach
+            // an agent nobody is looking at.
+            guard !stopped, foreground, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
             enqueueInput(String(decoding: data, as: UTF8.self))
         }
 
