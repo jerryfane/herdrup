@@ -3373,6 +3373,17 @@ struct TerminalPaneContent: View {
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
     @FocusState private var replyFocused: Bool
+    /// Terminal-input focus is explicit on touch devices. A terminal tap enables
+    /// direct PTY typing; reply submission and keyboard collapse clear it so the
+    /// software keyboard can genuinely dismiss instead of immediately moving focus
+    /// back to the terminal.
+    @State private var terminalInputFocused = false
+    /// Incremented to ask the pane to jump to its newest output. LiveTerminalView
+    /// performs exactly one jump per increment.
+    @State private var jumpToTailToken = 0
+    /// False while the pane is scrolled away from its newest output. Drives the
+    /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
+    @State private var terminalAtTail = true
     /// One-time gate for the "switch Claude Code to smooth (classic) scrolling" banner.
     /// Persisted app-wide via UserDefaults, so once the reader answers it once — Switch
     /// OR dismiss, for ANY Claude Code pane — it never shows again. See `showTuiBanner`.
@@ -3468,16 +3479,16 @@ struct TerminalPaneContent: View {
                 // Code panes only, shown at most once (see showTuiBanner).
                 if showTuiBanner { tuiBanner }
                 // The live terminal: a real SwiftTerm VT fed by the pane.stream raw
-                // byte firehose (#40), full-bleed as the machine ground. Read-only —
-                // input stays on the keycaps + reply bar below (sendText/sendKeys/
-                // prompt), never routed through the terminal itself.
+                // byte firehose (#40), full-bleed as the machine ground. A terminal
+                // tap enables direct PTY input; the reply bar remains the deliberate
+                // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
-                                 // iPad + hardware keyboard: let the terminal hold key focus so keys
-                                 // drive the PTY directly — but yield focus while the reply field is
-                                 // focused, and never on iPhone (the terminal can't become first
-                                 // responder there, so this is inert).
-                                 wantsTerminalKeyFocus: isForeground && !replyFocused,
+                                 wantsTerminalKeyFocus: isForeground && !replyFocused
+                                     && (terminalInputFocused || UIDevice.current.userInterfaceIdiom == .pad),
+                                 onTerminalFocusRequest: { terminalInputFocused = true },
+                                 jumpToTailToken: jumpToTailToken,
+                                 onTailStateChange: { terminalAtTail = $0 },
                                  fontSize: CGFloat(terminalFontSize),
                                  // A federated/remote pane routes key-drive input via pane.send_text
                                  // (home can't proxy the persistent pane.input.stream channel). (#139)
@@ -3490,9 +3501,16 @@ struct TerminalPaneContent: View {
                     .padding(.horizontal, 8)
                     // NOTE: do NOT attach a SwiftUI .onTapGesture here. A tap gesture on
                     // this UIViewRepresentable competes with the wrapped UIScrollView's
-                    // native pan and starves the terminal of scroll drags (it broke
-                    // scrolling in v0.1.5). Keyboard dismissal lives on the reply bar's
-                    // own collapse button instead (see replyBar).
+                    // native pan and starves terminal scroll drags. LiveTerminalView's
+                    // UIKit recognizer owns the explicit direct-input tap instead.
+                    // A visible, one-finger replacement for the double tap that used to
+                    // jump to the tail (given back to SwiftTerm, which needs it for word
+                    // select). An OVERLAY, not a gesture, for the reason stated above:
+                    // only the pill itself hit-tests, taps elsewhere reach the terminal.
+                    .overlay(alignment: .bottomTrailing) {
+                        if !terminalAtTail { jumpToLatestPill }
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -3512,10 +3530,15 @@ struct TerminalPaneContent: View {
             await refresh()
             await deliverPrefillIfNeeded()
         }
-        // Re-resolve status each time the pane returns to the front; drop the keyboard when it
-        // backgrounds so a hidden keep-mounted pane can't hold the software keyboard.
+        // Re-resolve status each time the pane returns to the front; drop either
+        // keyboard owner when it backgrounds so a hidden keep-mounted pane cannot
+        // retain the software keyboard.
         .onChange(of: isForeground) { _, nowFront in
-            if nowFront { Task { await refresh() } } else { replyFocused = false }
+            if nowFront { Task { await refresh() }
+            } else {
+                replyFocused = false
+                terminalInputFocused = false
+            }
         }
         // When the app returns to the foreground after a real background, reseed the
         // FRONT pane the same way the header refresh button does (bump streamGen →
@@ -3676,6 +3699,23 @@ struct TerminalPaneContent: View {
         }
     }
 
+    /// Shown only while the pane is scrolled away from its newest output, so it is out
+    /// of the way the rest of the time. Uses the app's primary ink-fill treatment, the
+    /// same one the send arrow and the banner's Switch button use.
+    private var jumpToLatestPill: some View {
+        Button { jumpToTailToken += 1 } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
+                Text("Latest").font(Typography.app(12, .semibold))
+            }
+            .foregroundStyle(Palette.ground)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Palette.text).clipShape(Capsule())
+        }
+        .padding(.trailing, 16).padding(.bottom, 12)
+        .accessibilityLabel(Text("Jump to latest output"))
+    }
+
     // MARK: classic-renderer banner
 
     /// The one-time offer to switch Claude Code from its laggy fullscreen renderer to the
@@ -3786,13 +3826,28 @@ struct TerminalPaneContent: View {
                 // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
                 keyCap(label: "end", key: "End")
                 rawCap(symbol: "arrow.up.to.line", sequence: "\u{1b}[1;5H")
-                rawCap(symbol: "arrow.down.to.line", sequence: "\u{1b}[1;5F")
+                // Jump to the newest output. Routed through the pane rather than a raw
+                // byte sequence, so a plain shell scrolls its own scrollback while a
+                // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
+                // `sending || pendingPrefill` like the keycaps: this is local view
+                // navigation, not input to the agent.
+                Button { jumpToTailToken += 1 } label: {
+                    Image(systemName: "arrow.down.to.line").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 44, minHeight: 34)
+                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .accessibilityLabel(Text("Jump to latest output"))
                 keyCap(label: "tab", key: "Tab")
                 // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
                 // raw escape sequence, not a named key: delivered verbatim to the PTY.
                 rawCap(label: "S-Tab", sequence: "\u{1b}[Z")
                 // Sticky Ctrl: arm, then the next typed char becomes its control byte.
                 ctrlCap
+                // ^P (previous prompt/history) — a one-tap control sequence for
+                // navigating OMP's prompt history without first arming Ctrl.
+                rawCap(label: "^P", sequence: "\u{10}")
                 // ^C (interrupt) — the common one-tap case; a raw control byte.
                 rawCap(label: "^C", sequence: "\u{03}")
                 // The submit affordance rawKeys needs — typing never submits, so
@@ -3865,7 +3920,10 @@ struct TerminalPaneContent: View {
             // `.keyboard` accessory toolbar: that toolbar floated on top of the send
             // button. Matched to the send button's circular footprint.
             if replyFocused {
-                Button { replyFocused = false } label: {
+                Button {
+                    replyFocused = false
+                    terminalInputFocused = false
+                } label: {
                     Image(systemName: "keyboard.chevron.compact.down")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Palette.textDim)
@@ -3887,13 +3945,14 @@ struct TerminalPaneContent: View {
                     handleReplyChange(old: oldValue, new: newValue)
                 }
                 .submitLabel(.send)
-                // Hardware Return submits, exactly like tapping the send arrow. Guarded by
-                // `canSend` (mirrors the arrow's `.disabled(!canSend)`) so an empty/whitespace box
-                // is a true no-op and a fast second Return can't double-fire mid-send. Re-assert
-                // focus so the box stays ready for the next line — SwiftUI otherwise drops first
-                // responder on submit, which would hand key focus back to the terminal
-                // (wantsTerminalKeyFocus = isForeground && !replyFocused).
-                .onSubmit { if canSend { sendTapped() }; replyFocused = true }
+                // Return sends the reply then releases both input owners on iPhone and
+                // iPad, so the software keyboard dismisses instead of re-focusing the
+                // terminal. A terminal tap explicitly re-enables direct PTY input.
+                .onSubmit {
+                    if canSend { sendTapped() }
+                    replyFocused = false
+                    terminalInputFocused = false
+                }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the

@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// A first-run tutorial that teaches the app's gestures — the ones that aren't
-/// obvious because they have no on-screen affordance (swipe between agents, edge
-/// swipe back, double-tap to tail, press-and-hold to act). Shown once on first
-/// launch (gated by `@AppStorage("hasSeenGesturesHelp")`) and re-openable any time
-/// from the "Gestures" tab. Presented through the app's single `activeCover` sheet,
-/// so it inherits the swipe-down-to-dismiss grabber like Settings and Gram.
+/// A first-run tutorial that teaches the app's gestures, the ones that aren't obvious
+/// because they have no on-screen affordance (edge swipe back, double- and triple-tap
+/// to select terminal text, two-finger tap to jump to the newest output,
+/// press-and-hold to act). Shown once on first launch (gated by
+/// `@AppStorage("hasSeenGesturesHelp")`) and re-openable any time from the "Gestures"
+/// tab. Presented through the app's single `activeCover` sheet, so it inherits the
+/// swipe-down-to-dismiss grabber like Settings and Gram.
 struct GesturesHelpView: View {
     var onClose: () -> Void
 
@@ -22,18 +23,21 @@ struct GesturesHelpView: View {
         .init(symbol: "hand.tap",
               title: "Tap an agent",
               detail: "Opens its live terminal."),
-        .init(symbol: "arrow.left.and.right",
-              title: "Swipe left or right",
-              detail: "Moves to the next or previous agent's terminal."),
         .init(symbol: "chevron.backward",
               title: "Swipe in from the left edge",
               detail: "Goes back to the agents list."),
-        .init(symbol: "arrow.down.to.line",
-              title: "Double-tap the terminal",
-              detail: "Jumps to the newest output."),
         .init(symbol: "arrow.up.and.down",
               title: "Drag up and down",
               detail: "Scrolls back through the terminal history."),
+        .init(symbol: "hand.tap",
+              title: "Double-tap the terminal",
+              detail: "Selects a word. Drag the handles to extend it, then Copy."),
+        .init(symbol: "text.alignleft",
+              title: "Triple-tap the terminal",
+              detail: "Selects the whole line."),
+        .init(symbol: "arrow.down.to.line",
+              title: "Two-finger tap the terminal",
+              detail: "Jumps to the newest output."),
         .init(symbol: "hand.point.up.left",
               title: "Press and hold an agent",
               detail: "Stops it."),
