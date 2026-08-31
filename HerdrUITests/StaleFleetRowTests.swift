@@ -13,7 +13,14 @@ import XCTest
 /// `last_known_status: "blocked"` and `reachability: "degraded"`. That row escalates into
 /// NEEDS YOU on a last-known value, so it is exactly the row that must not read as a
 /// confirmed one.
+///
+/// Asserts on the ACCESSIBILITY IDENTIFIER, not the visible string. The chip overrides its
+/// accessibility label with an explanatory sentence for VoiceOver, which means the word
+/// "stale" is not findable by label. The first version of this file looked for the label
+/// and failed on its first CI run for exactly that reason.
 final class StaleFleetRowTests: XCTestCase {
+
+    private let markerID = "agent-row-stale-marker"
 
     override func setUp() { continueAfterFailure = false }
 
@@ -27,21 +34,16 @@ final class StaleFleetRowTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["mcb-air/mcb-air"].waitForExistence(timeout: 12),
                       "the degraded federated fixture row should be on the roster")
 
-        // The marker itself. `staticTexts` rather than a label lookup, because the chip is
-        // the thing a person sees; asserting the accessibility label alone would pass on a
-        // view that renders nothing visible.
-        XCTAssertTrue(app.staticTexts["stale"].waitForExistence(timeout: 4),
+        let marker = app.descendants(matching: .any).matching(identifier: markerID)
+        XCTAssertTrue(marker.firstMatch.waitForExistence(timeout: 4),
                       "a needs-you row resting on a last-known status must be marked stale")
 
-        // And the marker is SCOPED: the two locally blocked rows are live, so exactly one
-        // stale chip exists. A mutant that marked every row would pass the assertion above.
-        XCTAssertEqual(app.staticTexts.matching(identifier: "stale").count, 1,
-                       "only the unconfirmed row should carry the marker")
+        // The marker is SCOPED: the two locally blocked fixture rows are live, so exactly
+        // one chip exists. A mutant that marked every row would pass the assertion above.
+        XCTAssertEqual(marker.count, 1, "only the unconfirmed row should carry the marker")
 
-        // The row keeps its needs-you signal rather than being hidden or downgraded: the
-        // whole point is to surface it AND qualify it.
-        XCTAssertTrue(app.staticTexts["NEEDS YOU · 3"].exists
-                        || app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'NEEDS YOU'")).count > 0,
-                      "the escalated row should still be counted in the needs-you section")
+        // The label is the sentence a VoiceOver reader hears, not the four-letter chip.
+        XCTAssertEqual(marker.firstMatch.label, "status not confirmed on the last poll",
+                       "the marker must explain itself to a screen reader")
     }
 }

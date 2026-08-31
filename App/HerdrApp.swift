@@ -2908,6 +2908,11 @@ struct TerminalHomeView: View {
                     .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.textDim.opacity(0.12)))
+                    // The LABEL is replaced for VoiceOver, so the visible word "stale" is no
+                    // longer findable by label. Carry an explicit identifier as well, which is
+                    // what the UI receipt asserts on. Without it the receipt failed on its
+                    // first CI run looking for a label that the modifier above had overwritten.
+                    .accessibilityIdentifier("agent-row-stale-marker")
                     .accessibilityLabel(Text("status not confirmed on the last poll"))
             }
             // A remote agent whose machine is unreachable has a stale status, so
