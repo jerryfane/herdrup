@@ -151,6 +151,72 @@ final class AgentListTests: XCTestCase {
         XCTAssertFalse(try agent(pane: "p5", status: "idle").hasUnconfirmedStatus)
     }
 
+    /// EVERY CONJUNCT of `showsUnconfirmedMarker` gets its own assertion, because a review
+    /// found all three one-conjunct mutants surviving the full 430-test suite. The UI
+    /// receipt cannot see them either: the mock fixture has no stopped or unreachable
+    /// degraded row, so its marker count stays 1 under all three.
+    func testShowsUnconfirmedMarkerRequiresEveryConjunct() throws {
+        let degraded = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                                 machineID: "mcb-air", reachability: "degraded")
+        // The positive case, so the negatives below cannot pass by the rule never firing.
+        XCTAssertTrue(AgentRow(info: degraded).showsUnconfirmedMarker)
+
+        // isLive: a pane that is gone is not presenting anything to qualify. Dropping this
+        // conjunct puts a stale chip on a stopped row.
+        XCTAssertFalse(AgentRow(info: degraded, isLive: false).showsUnconfirmedMarker,
+                       "a stopped row must not be marked; it renders no live state at all")
+
+        // !isUnreachable: that case already REPLACES the status with an offline mark, so
+        // marking it too says the same thing twice. Dropping this conjunct double-marks.
+        let gone = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                             machineID: "mcb-air", reachability: "unreachable")
+        XCTAssertFalse(AgentRow(info: gone).showsUnconfirmedMarker,
+                       "an unreachable row takes the offline treatment instead of the chip")
+
+        // hasUnconfirmedStatus: a live local row is never marked.
+        XCTAssertFalse(AgentRow(info: try agent(pane: "p3", status: "blocked")).showsUnconfirmedMarker)
+    }
+
+    /// `unconfirmedNeedsYouCount` counts only rows that are BOTH unconfirmed and in
+    /// needs-you. Dropping the group test was the strongest surviving mutant: the marker
+    /// rule itself does not look at the group, so a degraded row whose last-known status is
+    /// working or idle groups `.unrecognised` and would then be counted as a waiting agent.
+    func testUnconfirmedNeedsYouCountRequiresTheNeedsYouGroup() throws {
+        // Unconfirmed, but its last-known status is not blocked, so it groups unrecognised.
+        let notWaiting = try agent(pane: "p1", status: "unknown", lastKnownStatus: "working",
+                                   machineID: "mcb-air", reachability: "degraded")
+        let list = AgentList(agents: [notWaiting])
+        XCTAssertEqual(list.rows.first?.group, .unrecognised, "premise: this row is not waiting")
+        XCTAssertTrue(try XCTUnwrap(list.rows.first).showsUnconfirmedMarker,
+                      "premise: it IS unconfirmed, so only the group test can exclude it")
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 0,
+                       "an unconfirmed row that is not waiting must not be counted as waiting")
+
+        // And the row that IS waiting is counted.
+        let waiting = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                                machineID: "mcb-air", reachability: "degraded")
+        XCTAssertEqual(AgentList(agents: [waiting]).unconfirmedNeedsYouCount, 1)
+    }
+
+    /// The wording spec every surface shares. Three surfaces render this count and the
+    /// first version qualified only the roster card, which is how the lock screen ended up
+    /// asserting an unconfirmed state as fact.
+    func testNeedsYouSummaryQualifiesUnconfirmedCounts() throws {
+        XCTAssertNil(AgentList(agents: [try agent(pane: "p1", status: "idle")]).needsYouSummary,
+                     "nothing waiting means no summary, so a caller can use its own wording")
+
+        let live = try agent(pane: "p1", status: "blocked")
+        XCTAssertEqual(AgentList(agents: [live]).needsYouSummary, "1 need you")
+
+        let stale = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                              machineID: "mcb-air", reachability: "degraded")
+        XCTAssertEqual(AgentList(agents: [stale]).needsYouSummary, "1 may need you",
+                       "when every waiting agent is unconfirmed, the whole claim is a maybe")
+
+        XCTAssertEqual(AgentList(agents: [live, stale]).needsYouSummary, "2 need you · 1 stale",
+                       "mixed: lead with the fact, then name the doubt")
+    }
+
     // MARK: - archived agents (issue #173)
 
     /// The `archived` block decodes through the wire path and drives `isArchived`.

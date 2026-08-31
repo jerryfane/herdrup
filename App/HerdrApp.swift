@@ -2278,7 +2278,10 @@ struct TerminalHomeView: View {
     /// nothing uninterpretable, the quiet state says so. A space holds the line
     /// while loading/empty so nothing above it moves.
     private var headerSubtitle: (text: String, color: Color) {
-        if fullList.needsYouCount > 0 { return ("\(fullList.needsYouCount) need you", Palette.waiting) }
+        // Reads the shared wording spec rather than formatting its own string: this header
+        // is NOT co-located with the row, so unlike the card it cannot rely on the reader
+        // seeing the stale marker beside the count.
+        if let summary = fullList.needsYouSummary { return (summary, Palette.waiting) }
         if fullList.isQuiet && !agents.isEmpty { return ("nothing needs you", Palette.textFaint) }
         return (" ", Palette.textFaint)
     }

@@ -243,6 +243,29 @@ public struct AgentList: Equatable, Sendable {
         rows.filter { $0.group == .needsYou && $0.showsUnconfirmedMarker }.count
     }
 
+    /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule
+    /// instead of each inventing its own. Three surfaces render this count: the roster
+    /// header, the Live Activity lock-screen line, and the Dynamic Island. The first
+    /// version qualified only the roster CARD, which is how the lock screen ended up
+    /// asserting an unconfirmed state as fact.
+    ///
+    /// The Dynamic Island compact trailing is the one place that cannot use this: it has
+    /// room for a glyph and a number, nothing more. That is a space constraint, recorded
+    /// rather than pretended away.
+    ///
+    /// `nil` when nothing is waiting, so a caller can fall through to its own wording.
+    public var needsYouSummary: String? {
+        let total = needsYouCount
+        guard total > 0 else { return nil }
+        let unconfirmed = unconfirmedNeedsYouCount
+        // Every waiting agent rests on an unconfirmed state, so the whole claim is a maybe.
+        // Saying it outright beats appending a qualifier to an assertion.
+        if unconfirmed >= total { return "\(total) may need you" }
+        // Some confirmed, some not: lead with the fact, then name the doubt.
+        if unconfirmed > 0 { return "\(total) need you · \(unconfirmed) stale" }
+        return "\(total) need you"
+    }
+
     /// True when nothing is blocked AND nothing is unrecognised. The quiet state
     /// has to mean "I checked everything", so an uninterpretable agent must
     /// prevent it — otherwise the screen says all-clear while holding a row it

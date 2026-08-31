@@ -31,8 +31,17 @@ struct AgentActivityAttributes: ActivityAttributes {
         /// last poll: a federated agent on a degraded peer, whose blocked state is a
         /// last-known value rather than a live one. The lock screen and Dynamic Island have
         /// no room for a per-row marker, so the count is qualified in the summary line
-        /// instead. DEFAULTED, so an activity started by an older build still decodes when
-        /// this build pushes it an update.
+        /// instead.
+        ///
+        /// A STORED-PROPERTY DEFAULT DOES NOT MAKE THIS DECODABLE FROM AN OLD PAYLOAD.
+        /// An earlier version of this comment claimed it did; that was measured false.
+        /// Synthesized `Decodable` calls `decode(Int.self, forKey:)` and throws
+        /// `keyNotFound` when the key is absent, because stored-property defaults are
+        /// invisible to Codable synthesis. Two directions actually break without help:
+        /// this build reading an activity persisted by an older one (ActivityKit drops an
+        /// undecodable activity, so it can never be reclaimed or ended), and a
+        /// daemon-pushed payload minted before this field existed. The explicit
+        /// `init(from:)` below uses `decodeIfPresent` for this ONE key to cover both.
         var unconfirmedCount: Int = 0
         /// How many agents are actively working right now.
         var workingCount: Int
@@ -45,6 +54,33 @@ struct AgentActivityAttributes: ActivityAttributes {
         /// A plain Double (not Date) so the daemon-pushed JSON decodes identically,
         /// dodging Swift's Date reference-date Codable strategy. `nil` when not working.
         var workingSince: Double?
+
+        /// Hand-written ONLY to make `unconfirmedCount` tolerant of an absent key; every
+        /// other field is required exactly as synthesis would have it, so a genuinely
+        /// malformed payload still fails loudly rather than decoding into a plausible zero.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            headline = try c.decode(String.self, forKey: .headline)
+            status = try c.decode(Status.self, forKey: .status)
+            needsYouCount = try c.decode(Int.self, forKey: .needsYouCount)
+            unconfirmedCount = try c.decodeIfPresent(Int.self, forKey: .unconfirmedCount) ?? 0
+            workingCount = try c.decode(Int.self, forKey: .workingCount)
+            totalCount = try c.decode(Int.self, forKey: .totalCount)
+            workingSince = try c.decodeIfPresent(Double.self, forKey: .workingSince)
+        }
+
+        /// Restored because writing `init(from:)` suppresses the synthesized memberwise
+        /// initialiser this type is constructed with everywhere else.
+        init(headline: String, status: Status, needsYouCount: Int, unconfirmedCount: Int = 0,
+             workingCount: Int, totalCount: Int, workingSince: Double?) {
+            self.headline = headline
+            self.status = status
+            self.needsYouCount = needsYouCount
+            self.unconfirmedCount = unconfirmedCount
+            self.workingCount = workingCount
+            self.totalCount = totalCount
+            self.workingSince = workingSince
+        }
     }
 
     /// The display bucket. Mirrors HerdrKit's `AgentGroup` (needs-you / stopped /
