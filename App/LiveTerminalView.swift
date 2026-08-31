@@ -108,16 +108,25 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.onTailStateChange = onTailStateChange
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         context.coordinator.setForeground(isForeground)
-        // Drive terminal key focus from SwiftUI intent.
+        // Drive terminal responder ownership from SwiftUI intent.
         //
-        // A BACKGROUNDED pane always resigns, and drops its selection with it: a hidden
-        // pane holding a writable responder could otherwise take keystrokes for an agent
-        // nobody is looking at, because panes stay mounted and the `send` delegate is not
-        // foreground-gated by itself. Only a FOREGROUND pane mid-selection keeps its
-        // responder, which is what stops a SwiftUI body pass from hiding the Copy menu.
+        // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
+        // cost the Copy menu on iPad without a hardware keyboard: gating the *become* on
+        // `keyDriveEnabled` meant the responder was never taken there, and SwiftTerm's
+        // `doubleTap` selects without taking it either, so `canPerformAction` refused Copy.
+        // Owning the responder is free on every platform: iPhone shows its keyboard
+        // (which is wanted, it is how you type), and every other idiom has the zero-frame
+        // `emptyInputView`, so nothing appears. KEY ROUTING stays gated on
+        // `keyDriveEnabled` inside the `send` delegate, which is the only place it belongs.
+        //
+        // A BACKGROUNDED pane always resigns and drops its selection: a hidden pane
+        // holding a writable responder could otherwise take keystrokes for an agent nobody
+        // is looking at, because panes stay mounted. Ungated by idiom too, so the
+        // behaviour no longer differs by platform. Only a FOREGROUND pane mid-selection
+        // keeps its responder, which is what stops a SwiftUI body pass from hiding Copy.
         if wantsTerminalKeyFocus {
-            if uiView.keyDriveEnabled && !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
-        } else if uiView.keyDriveEnabled, uiView.isFirstResponder {
+            if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
+        } else if uiView.isFirstResponder {
             if !isForeground {
                 uiView.clearSelection()
                 uiView.resignFirstResponder()
@@ -558,7 +567,11 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         @objc private func handleTwoFingerTap(_ gr: UITapGestureRecognizer) {
-            guard gr.state == .ended else { return }
+            // `foreground` is defence in depth. Today a backgrounded pane is unreachable
+            // because the keep-alive container renders it `opacity(0)` and
+            // `allowsHitTesting(false)`, but this handler SENDS BYTES, so it should not
+            // depend on a host layout decision staying the way it is.
+            guard !stopped, foreground, gr.state == .ended else { return }
             jumpToTail()
         }
 
@@ -576,7 +589,10 @@ struct LiveTerminalView: UIViewRepresentable {
                 view.clearSelection()
                 return   // a tap that dismisses a selection must not also raise the keyboard
             }
-            guard view.keyDriveEnabled else { return }
+            // No `keyDriveEnabled` gate here. Taking the responder is what makes Copy
+            // available on SwiftTerm's double tap, which selects WITHOUT taking it, and it
+            // costs nothing on an idiom that cannot type (zero-frame `emptyInputView`).
+            // Whether keys actually route to the PTY is decided in `send`, not here.
             onTerminalFocusRequest?()
         }
 
@@ -1216,7 +1232,12 @@ struct LiveTerminalView: UIViewRepresentable {
             if gr.state == .ended || gr.state == .cancelled || gr.state == .failed {
                 view?.isScrollEnabled = true
             }
-            guard !stopped, let view else { return }   // teardown began — send nothing further
+            // `foreground` is defence in depth for the same reason as the two-finger tap:
+            // this path SENDS BYTES, and it should not rely on the keep-alive container
+            // continuing to make backgrounded panes non-hit-testable. Placed AFTER the
+            // isScrollEnabled restore above, so a pane backgrounded mid-drag still gets its
+            // native scroll back rather than being stranded disabled.
+            guard !stopped, foreground, let view else { return }   // teardown or hidden: send nothing
             let term = view.getTerminal()
             // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
             guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
