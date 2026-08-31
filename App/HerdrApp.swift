@@ -2898,6 +2898,18 @@ struct TerminalHomeView: View {
                     .background(Capsule().fill(Palette.died.opacity(0.12)))
                     .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
             }
+            // A DEGRADED peer (the daemon's 1 to 2 missed polls) still renders a live
+            // status badge, and `resolvedGroup` can surface a LAST-KNOWN blocked row into
+            // needs-you, so without a marker a stale guess reads exactly like a colleague
+            // genuinely waiting. Mark the row instead of suppressing the badge: hiding the
+            // needs-you signal would be the worse error of the two.
+            if row.info.hasUnconfirmedStatus && !row.info.isUnreachable {
+                Text("stale")
+                    .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Palette.textDim.opacity(0.12)))
+                    .accessibilityLabel(Text("status not confirmed on the last poll"))
+            }
             // A remote agent whose machine is unreachable has a stale status, so
             // it reads as offline rather than showing a misleading live badge.
             if row.info.isUnreachable {

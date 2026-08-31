@@ -121,8 +121,13 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
     /// ESCALATION-ONLY overlay on `group(for:isLive:)`. Two signals may move a row UP
     /// into `needsYou`; nothing here may ever move a row toward a QUIETER section, so
     /// the fail-closed placement the group order encodes cannot be undone by a lenient
-    /// field. `group(for:isLive:)` keeps its exhaustive switch, so adding an
-    /// `AgentStatus` case still fails to compile there rather than falling through.
+    /// field.
+    ///
+    /// TWO SITES, NOT ONE. `group(for:isLive:)` keeps its exhaustive switch, so adding an
+    /// `AgentStatus` case still fails to compile THERE. This overlay does NOT get that
+    /// protection: it compares by equality (`status == .indefinite`), which keeps
+    /// compiling forever, so a new status would silently decline the last-known
+    /// escalation. Anyone adding a case must visit both.
     ///
     /// 1. `inputPending`. The group switch reads ONLY the status string, so an agent
     ///    showing a plan-approval or AskUserQuestion menu while its status is anything
@@ -146,6 +151,10 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         // A pane that is gone needs nothing from anybody: never escalate off `.stopped`.
         guard isLive else { return base }
         if info.isAwaitingMenuInput { return .needsYou }
+        // The `.indefinite` precondition is load-bearing, not decoration: a LIVE status is
+        // authoritative, and `last_known_status` is only meaningful once the daemon has
+        // blanked the live one to "unknown". Escalating on a known-idle row that happens to
+        // carry a stale blocked value would resurrect a state the server already replaced.
         if status == .indefinite, AgentStatus(wire: info.lastKnownStatus).isBlocked {
             return .needsYou
         }
@@ -197,13 +206,19 @@ public struct AgentList: Equatable, Sendable {
     /// most-recently-archived first.
     public let archived: [AgentRow]
 
-    /// What the top of the screen says. Counts only positively-blocked agents —
-    /// an unrecognised status is surfaced by its own section, and inflating this
-    /// number with maybes would make the one number on the screen untrustworthy.
-    /// Counts the GROUP, not the retained status. Reading `status.isBlocked`
-    /// directly meant a blocked agent whose pane had since vanished sorted into
-    /// `.stopped` and made `isQuiet` true while still reporting 1 here — the
-    /// screen simultaneously claiming all-clear and one-waiting.
+    /// What the top of the screen says. Counts the `needsYou` GROUP, not the retained
+    /// status. Reading `status.isBlocked` directly meant a blocked agent whose pane had
+    /// since vanished sorted into `.stopped` and made `isQuiet` true while still
+    /// reporting 1 here — the screen simultaneously claiming all-clear and one-waiting.
+    ///
+    /// THIS IS NO LONGER "positively-blocked agents only", and the older wording said so.
+    /// `AgentRow.resolvedGroup` escalates two further shapes into the group: a row whose
+    /// status is not `blocked` but which reports `input_pending`, and a row on a degraded
+    /// peer whose blocked state is a LAST-KNOWN value. The second is a maybe by
+    /// construction. That is a deliberate trade, because an agent waiting on a human is
+    /// worse to hide than to over-report, and the row itself carries a staleness mark so
+    /// the count is never the only thing the reader sees. An unrecognised status still has
+    /// its own section and is still not counted here.
     public var needsYouCount: Int { rows.filter { $0.group == .needsYou }.count }
 
     /// True when nothing is blocked AND nothing is unrecognised. The quiet state

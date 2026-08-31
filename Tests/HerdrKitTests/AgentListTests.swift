@@ -11,7 +11,8 @@ final class AgentListTests: XCTestCase {
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
         archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil,
-        inputPending: Bool? = nil, lastKnownStatus: String? = nil, machineID: String? = nil
+        inputPending: Bool? = nil, lastKnownStatus: String? = nil, machineID: String? = nil,
+        reachability: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
@@ -21,6 +22,7 @@ final class AgentListTests: XCTestCase {
         if let inputPending { obj["input_pending"] = inputPending }
         if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
         if let machineID { obj["machine_id"] = machineID }
+        if let reachability { obj["reachability"] = reachability }
         if let archivedBy {
             obj["archived"] = ["at": archivedAt ?? "2026-08-26T18:00:00Z", "by": archivedBy]
         }
@@ -85,6 +87,68 @@ final class AgentListTests: XCTestCase {
         let row = AgentRow(info: try agent(pane: "p1", status: "blocked", inputPending: true),
                            isLive: false)
         XCTAssertEqual(row.group, .stopped)
+    }
+
+    /// The input_pending escalation is written to fire for ANY status, so pin EVERY status
+    /// it can arrive with, not just one. A review mutant that narrowed it to
+    /// `status == .working` survived the whole 427-test suite because the only fixture
+    /// built "working"; the idle-plus-input_pending shape is the more common one in
+    /// practice, since an agent parked on a menu often reports idle.
+    func testInputPendingEscalatesFromEveryLiveStatus() throws {
+        for status in ["idle", "working", "done", "unknown", "blocked", "wat"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status, inputPending: true))
+            XCTAssertEqual(row.group, .needsYou, "input_pending must escalate from \(status)")
+        }
+        // Controls: the SAME statuses without the flag must land where grouping puts them,
+        // so the loop above is about input_pending and not about the fixture.
+        for (status, expected) in [("idle", AgentGroup.idle), ("working", .working),
+                                   ("done", .idle), ("unknown", .unrecognised),
+                                   ("blocked", .needsYou), ("wat", .unrecognised)] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status))
+            XCTAssertEqual(row.group, expected, "control for \(status)")
+        }
+    }
+
+    /// The `status == .indefinite` precondition on the last-known escalation is
+    /// load-bearing: a LIVE status is authoritative, and `last_known_status` only means
+    /// anything once the daemon has blanked the live one to "unknown". A review mutant
+    /// that dropped the precondition survived the full suite, so pin it directly. The
+    /// shape is real: a fixture elsewhere in this file builds status "idle" with a
+    /// last-known "working".
+    func testLastKnownBlockedIsIgnoredWhileTheLiveStatusIsKnown() throws {
+        for status in ["idle", "working", "done"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status,
+                                               lastKnownStatus: "blocked", machineID: "mcb-air"))
+            XCTAssertNotEqual(row.group, .needsYou,
+                              "a live \(status) status must not be overridden by a stale blocked value")
+        }
+        // And the case it IS for: the daemon blanked the live status, so last-known decides.
+        let blanked = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                               lastKnownStatus: "blocked", machineID: "mcb-air"))
+        XCTAssertEqual(blanked.group, .needsYou)
+    }
+
+    /// A degraded peer is 1 to 2 missed polls, not offline, so `isUnreachable` is false
+    /// while the status is nevertheless unconfirmed. The row needs a staleness marker, and
+    /// the render keys on this predicate, so pin both arms plus the fresh case.
+    func testDegradedReachabilityIsUnconfirmedButNotUnreachable() throws {
+        let degraded = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                                 machineID: "mcb-air", reachability: "degraded")
+        XCTAssertTrue(degraded.hasUnconfirmedStatus)
+        XCTAssertFalse(degraded.isUnreachable)
+        let gone = try agent(pane: "p2", status: "unknown", machineID: "mcb-air",
+                             reachability: "unreachable")
+        XCTAssertTrue(gone.hasUnconfirmedStatus)
+        XCTAssertTrue(gone.isUnreachable)
+        let live = try agent(pane: "p3", status: "idle", machineID: "mcb-air",
+                             reachability: "reachable")
+        XCTAssertFalse(live.hasUnconfirmedStatus)
+        // A newer server's unknown string must read as FRESH, never stamp every row stale.
+        let newer = try agent(pane: "p4", status: "idle", machineID: "mcb-air",
+                              reachability: "some-future-state")
+        XCTAssertFalse(newer.hasUnconfirmedStatus)
+        // A local agent carries no reachability at all.
+        XCTAssertFalse(try agent(pane: "p5", status: "idle").hasUnconfirmedStatus)
     }
 
     // MARK: - archived agents (issue #173)
