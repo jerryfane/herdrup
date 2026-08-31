@@ -159,22 +159,35 @@ jobs:
         run: |
           if xcodebuild -project Herdr.xcodeproj -list 2>/dev/null | grep -q HerdrUITests; then
             set -o pipefail
-            xcodebuild test \
-              -project Herdr.xcodeproj -scheme Herdr \
-              -destination "platform=iOS Simulator,name=${SIM_NAME}" \
-              -only-testing:HerdrUITests \
-              -derivedDataPath .build-dd \
-              -clonedSourcePackagesDirPath SourcePackages \
-              -resultBundlePath TestResults.xcresult \
-              CODE_SIGNING_ALLOWED=NO | xcbeautify || \
-            xcodebuild test \
-              -project Herdr.xcodeproj -scheme Herdr \
-              -destination "platform=iOS Simulator,name=${SIM_NAME}" \
-              -only-testing:HerdrUITests \
-              -derivedDataPath .build-dd \
-              -clonedSourcePackagesDirPath SourcePackages \
-              -resultBundlePath TestResults.xcresult \
-              CODE_SIGNING_ALLOWED=NO
+            rm -rf TestResults.xcresult TestResults-formatted-failure.xcresult
+            if ! xcodebuild test \
+                -project Herdr.xcodeproj -scheme Herdr \
+                -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+                -only-testing:HerdrUITests \
+                -derivedDataPath .build-dd \
+                -clonedSourcePackagesDirPath SourcePackages \
+                -resultBundlePath TestResults.xcresult \
+                CODE_SIGNING_ALLOWED=NO | xcbeautify; then
+              echo "formatted UI test run failed; retrying with raw xcodebuild output"
+              # Keep the FIRST failure evidence. Deleting this bundle made a green
+              # retry erase the only screenshot and activity log for the real defect.
+              if [ -d TestResults.xcresult ]; then
+                mv TestResults.xcresult TestResults-formatted-failure.xcresult
+              fi
+              xcodebuild test \
+                -project Herdr.xcodeproj -scheme Herdr \
+                -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+                -only-testing:HerdrUITests \
+                -derivedDataPath .build-dd \
+                -clonedSourcePackagesDirPath SourcePackages \
+                -resultBundlePath TestResults.xcresult \
+                CODE_SIGNING_ALLOWED=NO
+              # The raw rerun exists to preserve readable diagnostics, not to erase
+              # the first suite's failure. A pass here still leaves the check red so
+              # a cold-launch defect cannot hide behind a warm retry.
+              echo "::error::formatted UI test run failed; raw diagnostic retry passed"
+              exit 1
+            fi
           else
             echo "HerdrUITests target not present yet — skipping (compile-check only run)."
           fi
@@ -184,5 +197,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: scroll-test-results
-          path: TestResults.xcresult
+          path: |
+            TestResults.xcresult
+            TestResults-formatted-failure.xcresult
           if-no-files-found: ignore

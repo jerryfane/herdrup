@@ -225,6 +225,103 @@ public struct AgentList: Equatable, Sendable {
     }
 }
 
+/// One atomically-published roster for the app's agent list.
+///
+/// Agents, account labels, and the derived/sorted list belong to the same render
+/// frame. Keeping them together avoids the old two-step refresh where SwiftUI first
+/// laid out new agents and then laid the same rows out again with new account data.
+/// The derived list is cached here so a view evaluation never re-sorts the roster for
+/// each section it renders.
+public struct AgentRosterSnapshot: Equatable, Sendable {
+    public let agents: [AgentInfo]
+    public let accounts: [CredentialAccount]
+    public let agentList: AgentList
+
+    public init(
+        agents: [AgentInfo] = [],
+        accounts: [CredentialAccount] = [],
+        livePaneIDs: Set<String>? = nil
+    ) {
+        self.agents = agents
+        self.accounts = accounts
+        self.agentList = AgentList(agents: agents, livePaneIDs: livePaneIDs)
+    }
+}
+
+/// Buffers roster presentation while a reader is scrolling the agent list.
+///
+/// Fetching continues normally. While scrolling, each response replaces the pending
+/// value, so returning to idle applies the newest server state exactly once. A response
+/// equal to the displayed state clears a pending change: the server may legitimately
+/// move back to its earlier state before scrolling finishes.
+///
+/// The transforms return a new value instead of mutating in place. The SwiftUI caller
+/// can compare old/new and avoid writing `@State` at all for a no-op refresh, which is
+/// the load-bearing part of the macOS scrolling fix.
+public struct AgentRosterRefreshState: Equatable, Sendable {
+    public private(set) var displayed: AgentRosterSnapshot
+    public private(set) var pending: AgentRosterSnapshot?
+    public private(set) var isScrolling: Bool
+
+    public init(
+        displayed: AgentRosterSnapshot = AgentRosterSnapshot(),
+        pending: AgentRosterSnapshot? = nil,
+        isScrolling: Bool = false
+    ) {
+        self.displayed = displayed
+        self.pending = pending
+        self.isScrolling = isScrolling
+    }
+
+    /// The freshest successfully-fetched value, whether or not it is on screen yet.
+    /// Callers use this to preserve newer account data when a later best-effort
+    /// `accounts.list` request fails during the same scroll.
+    public var latest: AgentRosterSnapshot { pending ?? displayed }
+
+    public func receiving(_ snapshot: AgentRosterSnapshot) -> AgentRosterRefreshState {
+        var next = self
+        if isScrolling {
+            next.pending = snapshot == displayed ? nil : snapshot
+        } else {
+            next.pending = nil
+            if snapshot != displayed { next.displayed = snapshot }
+        }
+        return next
+    }
+
+    public func settingScrolling(_ scrolling: Bool) -> AgentRosterRefreshState {
+        guard scrolling != isScrolling else { return self }
+        var next = self
+        next.isScrolling = scrolling
+        if !scrolling {
+            if let pending, pending != displayed { next.displayed = pending }
+            next.pending = nil
+        }
+        return next
+    }
+}
+
+/// Monotonic latest-request gate for async roster refreshes.
+///
+/// `@MainActor` serializes state access, but it does not stop two `load()` calls
+/// from interleaving at an `await`. Each load captures the token returned by
+/// `begin()`, and may publish only while `accepts(_:)` remains true. Therefore an
+/// older request that resumes after a newer one can never roll the roster back.
+public struct AgentRosterLoadGate: Equatable, Sendable {
+    private var latestToken: UInt64 = 0
+
+    public init() {}
+
+    public mutating func begin() -> UInt64 {
+        latestToken &+= 1
+        return latestToken
+    }
+
+    public func accepts(_ token: UInt64) -> Bool {
+        token == latestToken
+    }
+}
+
 /// Compact "time in current state" label for the agent card badge (#173): minutes
 /// under an hour, hours under a day, else days — never seconds, always a few digits
 /// + one letter ("5m" / "2h" / "3d"). `nil` when the daemon reported no
