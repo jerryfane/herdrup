@@ -115,7 +115,41 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         self.isLive = isLive
         let status = AgentStatus(wire: info.agentStatus)
         self.status = status
-        self.group = AgentRow.group(for: status, isLive: isLive)
+        self.group = AgentRow.resolvedGroup(info: info, status: status, isLive: isLive)
+    }
+
+    /// ESCALATION-ONLY overlay on `group(for:isLive:)`. Two signals may move a row UP
+    /// into `needsYou`; nothing here may ever move a row toward a QUIETER section, so
+    /// the fail-closed placement the group order encodes cannot be undone by a lenient
+    /// field. `group(for:isLive:)` keeps its exhaustive switch, so adding an
+    /// `AgentStatus` case still fails to compile there rather than falling through.
+    ///
+    /// 1. `inputPending`. The group switch reads ONLY the status string, so an agent
+    ///    showing a plan-approval or AskUserQuestion menu while its status is anything
+    ///    other than the literal "blocked" could never reach `needsYou`. The predicate
+    ///    already exists as `AgentInfo.isAwaitingMenuInput` and already gates input
+    ///    routing; this makes the LIST agree with the router instead of contradicting it.
+    ///
+    /// 2. `lastKnownStatus`, and ONLY when it reads `blocked`. A federated peer that
+    ///    misses a SINGLE poll is marked Degraded, and the daemon then overwrites
+    ///    `agent_status` with "unknown" and moves the real state into
+    ///    `last_known_status`, so every agent on that machine leaves both `working` and
+    ///    `needsYou` at once. Reading the surviving copy for the blocked case only keeps
+    ///    a fleet agent that is waiting on a human visible, without presenting any other
+    ///    stale state as though it were live. A last-known `working` deliberately does
+    ///    NOT restore the `working` group: that would be a demotion out of
+    ///    `unrecognised`, and "this machine went quiet on us" is the louder, truer thing
+    ///    to say. The real remedy for that case is daemon-side, not blanking a whole
+    ///    peer on one missed poll.
+    static func resolvedGroup(info: AgentInfo, status: AgentStatus, isLive: Bool) -> AgentGroup {
+        let base = group(for: status, isLive: isLive)
+        // A pane that is gone needs nothing from anybody: never escalate off `.stopped`.
+        guard isLive else { return base }
+        if info.isAwaitingMenuInput { return .needsYou }
+        if status == .indefinite, AgentStatus(wire: info.lastKnownStatus).isBlocked {
+            return .needsYou
+        }
+        return base
     }
 
     /// EXHAUSTIVE OVER `AgentStatus` ON PURPOSE — no `default:` arm.

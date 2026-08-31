@@ -10,13 +10,17 @@ final class AgentListTests: XCTestCase {
     /// the JSON key was wrong.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil
+        archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil,
+        inputPending: Bool? = nil, lastKnownStatus: String? = nil, machineID: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
         if let terminalID { obj["terminal_id"] = terminalID }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
+        if let inputPending { obj["input_pending"] = inputPending }
+        if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
+        if let machineID { obj["machine_id"] = machineID }
         if let archivedBy {
             obj["archived"] = ["at": archivedAt ?? "2026-08-26T18:00:00Z", "by": archivedBy]
         }
@@ -36,6 +40,51 @@ final class AgentListTests: XCTestCase {
     ) throws -> AgentInfo {
         try agent(pane: "", status: "idle", name: name,
                   archivedBy: by, archivedAt: at, terminalID: terminalID)
+    }
+
+    // MARK: - needs-you escalation
+
+    /// An agent showing a plan-approval / AskUserQuestion menu reaches `needsYou` even
+    /// though its status string is not the literal "blocked". Before this, grouping read
+    /// only the status, so the row sat in `working` while the input router already treated
+    /// it as awaiting a menu answer: the list and the router disagreed about one fact.
+    func testInputPendingReachesNeedsYouWithoutBlockedStatus() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "working", inputPending: true))
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertEqual(row.status, .working, "the raw status is still reported verbatim")
+        // Control: the same row without the flag stays in `working`, so the assertion
+        // above is about `input_pending` and not about the fixture.
+        let control = AgentRow(info: try agent(pane: "p1", status: "working"))
+        XCTAssertEqual(control.group, .working)
+    }
+
+    /// A federated peer that misses ONE poll gets `agent_status: "unknown"` with the real
+    /// state moved to `last_known_status`. A blocked agent on that machine must stay in
+    /// `needsYou` instead of vanishing into `unrecognised` with everything else on the peer.
+    func testDegradedPeerKeepsABlockedAgentInNeedsYou() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                           lastKnownStatus: "blocked", machineID: "mcb-air"))
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertEqual(row.status, .indefinite, "the status itself is still not known")
+    }
+
+    /// Escalation is one-way. A last-known status that is not `blocked` must NOT pull the
+    /// row down into a quieter section: `unrecognised` sorts above `working` and `idle` on
+    /// purpose, and "this machine went quiet on us" is the louder, truer thing to show.
+    func testDegradedPeerDoesNotDemoteANonBlockedLastKnownStatus() throws {
+        for last in ["working", "idle", "done"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                               lastKnownStatus: last, machineID: "mcb-air"))
+            XCTAssertEqual(row.group, .unrecognised, "last_known_status \(last) must not demote")
+        }
+    }
+
+    /// A pane that no longer exists needs nothing from anybody, so a stale `input_pending`
+    /// cannot resurrect it into `needsYou`.
+    func testStoppedPaneIsNeverEscalated() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "blocked", inputPending: true),
+                           isLive: false)
+        XCTAssertEqual(row.group, .stopped)
     }
 
     // MARK: - archived agents (issue #173)
