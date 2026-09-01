@@ -453,13 +453,21 @@ struct LiveTerminalView: UIViewRepresentable {
             // / Claude-Code wheel scroll is unaffected.
             view.allowMouseReporting = false
             // Track hardware-keyboard connect/disconnect so key-drive focus follows the keyboard.
-            // On connect the front pane becomes first responder (iPad-gated by keyDriveEnabled);
+            // On connect the front pane becomes first responder (gated by keyDriveEnabled);
             // on disconnect it resigns. Tokens removed in stop().
             keyboardObservers.append(
                 NotificationCenter.default.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { [weak self, weak view] _ in
-                    // keyDriveEnabled gate keeps this iPad-only (a BT keyboard on iPhone is a no-op,
-                    // preserving the read-only path). A keyboard attached MID-session also needs
-                    // mouse reporting off, or a tap could leak a mouse report through the now-live send.
+                    // NOT iPAD-ONLY ANY MORE. This comment used to say the keyDriveEnabled gate
+                    // "keeps this iPad-only (a BT keyboard on iPhone is a no-op, preserving the
+                    // read-only path)". That described the world before this PR: keyDriveEnabled
+                    // now includes .phone, so a Bluetooth keyboard connecting to an iPHONE also
+                    // makes the terminal first responder and drives the PTY. That follows from
+                    // iPhone typing being the feature, so it is intended — but it is UNVERIFIED,
+                    // since nothing here has been exercised with a BT keyboard on a phone, and a
+                    // comment claiming the old behaviour would have hidden that. Caught by review.
+                    //
+                    // A keyboard attached MID-session also needs mouse reporting off, or a tap
+                    // could leak a mouse report through the now-live send.
                     guard let self, let view, self.foreground, view.keyDriveEnabled else { return }
                     view.allowMouseReporting = false
                     _ = view.becomeFirstResponder()

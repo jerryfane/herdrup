@@ -6254,9 +6254,27 @@ struct MockTransport: HerdrTransport {
             if let driver = ccDriver {
                 // Claude-Code stand-in: keep the stream OPEN so the driver can push
                 // redraws in response to wheel events the app sends.
+                //
+                // IT PINGS TOO, for the same reason the plain branch does. A review flagged this
+                // branch as the remaining instance of the defect class the plain branch just fixed:
+                // held open but SILENT, so a ccDriver pane left idle past the 50s stall
+                // watchdog would be re-seeded mid-test. No current test mounts one that long, so
+                // this is latent rather than active — which is exactly when it is cheap to close,
+                // and leaving one branch of a two-branch function wrong is how the plain branch's
+                // bug survived as long as it did.
                 return AsyncThrowingStream { continuation in
                     continuation.yield(Self.paneStreamAck)
                     driver.attach(continuation)
+                    let pings = Task {
+                        var seq: UInt64 = 1
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
+                            guard !Task.isCancelled else { break }
+                            continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
+                            seq += 1
+                        }
+                    }
+                    continuation.onTermination = { _ in pings.cancel() }
                 }
             }
             let reset = scrollback ? Self.scrollbackResetFrame() : Self.paneStreamReset

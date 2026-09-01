@@ -298,7 +298,25 @@ final class TerminalSelectionTests: XCTestCase {
         // after that chain times out, about two multi-tap intervals, which under CI load is not
         // instant.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.60, dy: 0.30)).tap()
-        Thread.sleep(forTimeInterval: 3.0)
+        // A BOUNDED POLL, NOT A FIXED SLEEP, and this is the blocking finding from the review of
+        // 295df46f. The recognizer chain was verified SOUND against SwiftTerm 1.15.0
+        // (iOSTerminalView.swift:1077-1078), so the failure at 0544df88 — pub=focusTap#5, sel=1
+        // after three seconds — is consistent with a STALLED RUNLOOP rather than a dead chain:
+        // those failure timers run on the app's main runloop and are unbounded under CI load. A
+        // fixed sleep therefore encodes a guess about machine speed as if it were a property of
+        // the product, and fails a slow-but-healthy chain.
+        //
+        // Polling for the state this step is actually about lets a slow chain pass and still fails
+        // a genuinely dead one, at the cost of up to 10s only when something is already wrong.
+        let deselectDeadline = Date().addingTimeInterval(10)
+        while Date() < deselectDeadline {
+            if probe.exists, probe.label.contains("sel=0") { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        // One extra settle past the state change, so the screenshot cannot catch a half-drawn
+        // repaint: the clear reaches the model synchronously but selectionChanged repaints on the
+        // next main-queue hop.
+        Thread.sleep(forTimeInterval: 0.75)
         let cleared = app.screenshot()
         attach(cleared, name: "04-after-single-tap")
 
