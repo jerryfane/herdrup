@@ -785,9 +785,26 @@ struct LiveTerminalView: UIViewRepresentable {
             let active = view.hasActiveSelection
             let selected = view.getSelection() ?? ""
             let term = view.getTerminal()
+            // yDisp IS THE LAST DISCRIMINATOR, and it is public (`Terminal.buffer` is
+            // `public private(set)`, `Buffer.yDisp` is `public`), so no internals are needed.
+            //
+            // The run at 001a092a reported a real three-character selection of "187" with ZERO
+            // painted pixels, deterministically in both passes. The fixture numbers its lines, so
+            // that text identifies the selection's line: "187" is 1-indexed, hence buffer row 186.
+            // Publishing yDisp lets the test decide, arithmetically rather than by inference,
+            // between the only two remaining explanations:
+            //   186 inside [yDisp, yDisp + rows - 1]  => the selection sits on a row being drawn,
+            //                                            so the PAINT is broken;
+            //   186 outside that window               => the selection sits on a row nobody draws,
+            //                                            so the tap's ROW SPACE is wrong after all.
+            // Both were reached by reading and neither survived; this settles it by measurement.
+            // `yBase` is deliberately NOT published: it is internal to SwiftTerm (Buffer.swift:43
+            // declares it without `public`, unlike yDisp at 58), so reading it would not compile.
+            // Checked before pushing rather than after CI said so.
             probe.accessibilityLabel =
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
-                + "rows=\(term.rows) cols=\(term.cols) resizes=\(resizeCount)"
+                + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
+                + "resizes=\(resizeCount)"
         }
 
         func stop() {

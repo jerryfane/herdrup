@@ -143,25 +143,24 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(tealPixelCount(focused), 20,
                           "a single tap on an unselected pane produced selection colour; the premise for step 4 is broken")
 
-        // (3) DOUBLE TAP INSIDE THE WIDEST LETTER RUN AVAILABLE, because the previous
-        // coordinate was a coin toss and CI proved it.
+        // (3) DOUBLE TAP ON THE LINE NUMBER, and this coordinate is now MEASURED rather than
+        // computed — my arithmetic for it was wrong twice.
         //
-        // THE PROBE ANSWERED THE QUESTION THIS TEST EXISTED TO ASK. Aimed at the line number it
-        // reported `sel=1 len=1 text=< >` — a ONE-CHARACTER SPACE. `selectWordOrExpression` has
-        // a dedicated whitespace branch, so a tap that misses the glyphs selects the run of
-        // spaces instead of nothing, which is an active, non-empty, entirely invisible-ish
-        // selection: one cell paints roughly 26 downsampled pixels, under the 60 this test
-        // requires. The retry pass then SUCCEEDED, which settles the older mystery too — the
-        // selection does paint when the tap lands on a word, so the earlier zero-teal runs were
-        // about WHERE the tap landed and not about SwiftTerm's drawing.
+        // What the probe has established across two heads:
+        //   dx 0.22  -> selected "< >", a single space
+        //   dx 0.344 -> selected "187", the three-digit line number at columns 16-18
+        // I had predicted col 17.6 and col 27.5 respectively, assuming the 80-column line spans
+        // the screen width. It does not: solving from those two readings gives roughly 49 columns
+        // across the viewport, so the terminal's 80-column content is WIDER THAN THE SCREEN and
+        // the right-hand columns are simply off-view. That also retires my earlier claim that
+        // this fixture only offers five-character letter runs of slack — the visible portion is
+        // "SCROLLTEST line NNN  the quick…", and the widest thing in it is the number plus its
+        // surrounding spaces.
         //
-        // The mock line is "SCROLLTEST line 007  the quick brown fox jumps over the lazy dog" at
-        // 80 columns, and its longest letter runs are five characters. Columns: 0-9 SCROLLTEST,
-        // 10 space, 11-14 line, 15 space, 16-18 the digits, 19-20 two spaces, 21-23 the,
-        // 24 space, 25-29 quick, 30 space, 31-35 brown. Aiming at the MIDDLE of "quick" (col 27,
-        // dx = 27.5/80 ≈ 0.344) leaves two columns of slack on either side, which is the widest
-        // margin this fixture offers. The number at 16-18 offered one column, and dx 0.22 landed
-        // on a space at least once in two runs.
+        // KEEPING dx 0.344 DELIBERATELY, because landing on the NUMBER is better than landing on
+        // a word: the fixture numbers every line, so the selected text identifies WHICH LINE the
+        // selection is on, which is exactly the fact the render assertion below needs in order to
+        // name its own cause. A word would satisfy the length check and tell me nothing.
         //
         // dy=0.30 stays in the terminal band, which the keyboard has shrunk to roughly the top 58%.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.344, dy: 0.30)).doubleTap()
@@ -199,19 +198,41 @@ final class TerminalSelectionTests: XCTestCase {
         } ?? ""
         XCTAssertFalse(selectedText.trimmingCharacters(in: .whitespaces).isEmpty,
                        "the double tap selected WHITESPACE (\(selectedText.count) char(s)), so the coordinate missed the glyphs — this is a test-aim failure, not a drawing failure. probe[\(reading)]")
+        // Three characters, which is both the shortest word in the visible fixture text and the
+        // exact width of its line number — the intended target. Shorter means the tap clipped an
+        // edge, and the pixel threshold below would then be measuring a sliver.
         XCTAssertGreaterThanOrEqual(selectedText.count, 3,
-                                    "selected '\(selectedText)', shorter than any word in the fixture line, so the tap clipped a word edge and the pixel threshold below would be unreliable. probe[\(reading)]")
+                                    "selected '\(selectedText)', shorter than the fixture's line number or any of its words, so the tap clipped an edge and the pixel threshold below would be unreliable. probe[\(reading)]")
 
-        // THE RENDER ASSERTION, which the state assertion cannot replace: the user sees pixels,
+        // THE RENDER ASSERTION, which the state assertions cannot replace: the user sees pixels,
         // and a selection that exists without being drawn is still broken for them.
         //
         // 60, three times the baseline ceiling of 20, so a marginal pass cannot straddle the
         // two limits: a run reading 19 before and 21 after would satisfy both a "nothing is
-        // teal" premise and a "something is teal" conclusion, and mean neither. A selected
-        // word is ~3000 px at full resolution, ~170 here, so the gap is not tight.
+        // teal" premise and a "something is teal" conclusion, and mean neither. A three-cell
+        // selection is roughly 250 downsampled pixels here, so the gap is not tight.
+        //
+        // AND THE MESSAGE NAMES THE CAUSE ARITHMETICALLY. Two explanations survived the source
+        // reading and neither could be chosen from a pixel count: the selection sits on a row
+        // being drawn and the PAINT is broken, or it sits outside the drawn window and the tap's
+        // ROW SPACE is wrong. The fixture numbers its lines, so the selected text identifies the
+        // selection's line, and the probe now carries ydisp — which turns the choice into
+        // subtraction instead of another hypothesis.
         let heldTeal = tealPixelCount(selected)
+        let selRow = Int(selectedText).map { $0 - 1 }          // "187" is 1-indexed; buffer rows are 0-indexed
+        let yDisp = value(of: "ydisp", in: reading)
+        let rowCount = value(of: "rows", in: reading)
+        let placement: String = {
+            guard let selRow, let yDisp, let rowCount else {
+                return "could not derive placement (selected text is not a line number, or the probe lacked ydisp/rows)"
+            }
+            let visible = yDisp...(yDisp + rowCount - 1)
+            return visible.contains(selRow)
+                ? "the selection is on buffer row \(selRow), INSIDE the drawn window \(visible), so the ROW SPACE IS CORRECT and the PAINT is what fails"
+                : "the selection is on buffer row \(selRow), OUTSIDE the drawn window \(visible), so the TAP'S ROW SPACE is wrong and the paint never had a chance"
+        }()
         XCTAssertGreaterThan(heldTeal, 60,
-                             "SwiftTerm holds a selection but nothing is painted in the selection colour (teal px=\(heldTeal), baseline \(baseTeal)). probe[\(reading)]")
+                             "SwiftTerm holds a selection but nothing is painted in the selection colour (teal px=\(heldTeal), baseline \(baseTeal)). \(placement). probe[\(reading)]")
 
         // Secondary only: Copy SHOULD be offered, but its presence alone proves nothing, since
         // an empty-but-active selection also offers it.
@@ -231,6 +252,18 @@ final class TerminalSelectionTests: XCTestCase {
                           "the selection highlight survived a genuine single tap (teal px=\(clearedTeal)); deselection is not reaching the view")
     }
 
+    /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
+    ///
+    /// Returns nil rather than a default when the field is absent, so a probe that stops
+    /// publishing something degrades into "could not derive" in the failure message instead of
+    /// silently asserting against a zero — a default here would be a plausible-looking number
+    /// with no measurement behind it, which is the shape of error this whole file exists because
+    /// of.
+    private func value(of key: String, in reading: String) -> Int? {
+        guard let start = reading.range(of: "\(key)=") else { return nil }
+        let digits = reading[start.upperBound...].prefix { $0.isNumber || $0 == "-" }
+        return Int(digits)
+    }
     // MARK: - helpers (duplicated from ScrollTests, which keeps them private)
 
     private func attach(_ shot: XCUIScreenshot, name: String) {
