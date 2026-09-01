@@ -340,6 +340,40 @@ final class ActivityContentTests: XCTestCase {
                      "only a WORKING lead has a current turn to time; a needs-you lead's last turn is not a live timer")
     }
 
+    /// THE GATE MUST HOLD FOR EVERY NON-WORKING LEAD, not just needsYou. A reviewer measured
+    /// `word == "working"` widened to `(word == "working" || word == "stopped")` surviving all 464
+    /// tests, because the test above only ever exercised a needs-you lead. Under that mutant a
+    /// stopped lead carrying a last_completed_turn publishes workingSinceUnixSeconds, contradicting
+    /// this type's documented "set only while status == .working".
+    ///
+    /// Not a live defect today, and the reason is worth recording rather than relying on: the
+    /// widget re-checks `status == .working` before reading the value at AgentLiveActivity.swift:42
+    /// and :100, so a leaked timestamp is currently ignored downstream. That is defence in depth
+    /// doing its job, not the gate being unnecessary — the contract is here.
+    func testNoNonWorkingLeadCarriesAStartTime() throws {
+        let ms: Int64 = 1_723_000_000_000
+        // A stopped lead: every row absent from the census, so nothing outranks it.
+        let stopped = AgentList(agents: [
+            try agent(pane: "p0", status: "working", name: "gone-one", completedUnixMs: ms),
+        ], livePaneIDs: [])
+        XCTAssertEqual(stopped.activityContent.statusWord, "stopped", "premise: a stopped lead")
+        XCTAssertNotNil(stopped.activityLead?.info.lastCompletedTurn?.completedUnixMs,
+                        "premise: it carries a timestamp, so a widened gate would publish it")
+        XCTAssertNil(stopped.activityContent.workingSinceUnixSeconds,
+                     "a gone pane has no current turn; publishing its last one would time a dead agent")
+
+        // An idle lead, for the same reason — the gate is about the WORD, so every word that is
+        // not "working" belongs here.
+        let idle = AgentList(agents: [
+            try agent(pane: "p0", status: "idle", name: "quiet-one", completedUnixMs: ms),
+        ], livePaneIDs: ["p0"])
+        XCTAssertEqual(idle.activityContent.statusWord, "idle", "premise: an idle lead")
+        XCTAssertNotNil(idle.activityLead?.info.lastCompletedTurn?.completedUnixMs,
+                        "premise: it carries a timestamp")
+        XCTAssertNil(idle.activityContent.workingSinceUnixSeconds,
+                     "an idle agent is between turns; there is nothing running to time")
+    }
+
     // MARK: - the residual mutants #207's review left surviving
 
     /// F1. activityContent's unconfirmedCount filter is a SECOND COPY of the hasUnconfirmedState
@@ -386,11 +420,21 @@ final class ActivityContentTests: XCTestCase {
         let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds)
         XCTAssertEqual(since, Double(leadMs) / 1000, accuracy: 0.001,
                        "the timer must start from the LEAD's turn; reading rows.first publishes a gone pane's last turn instead")
-        XCTAssertNotEqual(since, Double(strayMs) / 1000, accuracy: 0.001)
+        // THE HEADLINE IS THE SECOND `lead?` CALL SITE, and pinning only the timestamp left it
+        // open: a reviewer measured `headline: lead?.title` -> `rows.first?.title` surviving all
+        // 464 tests. Its product effect is the same shape as the timer's — one working agent plus
+        // one stopped pane sorts the stopped row first, so the lock screen headlines the GONE
+        // pane's name under a working dot reading "1 working". Same fixture, one more assertion.
+        XCTAssertEqual(l.activityContent.headline, "live-one",
+                       "the headline must name the LEAD; reading rows.first names the gone pane")
+        // DELETED: XCTAssertNotEqual(since, Double(strayMs)/1000). Dominated by the exact equality
+        // above it — nothing can satisfy that equality while also equalling the stray value — so it
+        // was the same ceremony I removed from testWorkingSinceIsSecondsNotMilliseconds two commits
+        // ago, reintroduced in a different test. Reviewer caught it; a line that cannot fail while
+        // its neighbour passes is decoration.
     }
 
-    /// F4. activityLead's comment states that min(by:) keeps the FIRST row of the winning rank, so
-    /// the server's own order decides within a rank. No test held that: changing `<` to `<=`
+    /// F4. Nothing pinned which row wins a TIE: changing `<` to `<=`
     /// survived all 460 tests, because Swift's min(by:) replaces the incumbent whenever the
     /// predicate says the newcomer sorts earlier — so a non-strict comparison silently makes the
     /// LAST row of a rank win instead of the first.
@@ -403,7 +447,7 @@ final class ActivityContentTests: XCTestCase {
         XCTAssertEqual(l.rows.filter { $0.group == .needsYou }.count, 2,
                        "premise: two rows share the winning rank, so the tiebreak is exercised")
         XCTAssertEqual(l.activityLead?.info.paneID, firstOfRank.info.paneID,
-                       "the first row of the winning rank must win, as activityLead's comment claims; a non-strict comparison hands it to the last")
+                       "a non-strict comparison violates min(by:)'s documented irreflexivity precondition and hands the tie to the last row instead of the first")
         XCTAssertEqual(l.activityContent.headline, firstOfRank.title,
                        "and the headline follows the same row")
     }
