@@ -47,5 +47,21 @@ let package = Package(
         .testTarget(
             name: "HerdrKitTests",
             dependencies: ["HerdrKit", .product(name: "Citadel", package: "Citadel")]),
+        // The Live Activity's ContentState, compiled WITHOUT ActivityKit so it can be
+        // tested on Linux. `sources` names the one file deliberately: its sibling in the
+        // same directory imports ActivityKit and must stay out of this target.
+        //
+        // Nothing links this product. The Xcode app and widget targets compile the whole
+        // Shared directory as sources, exactly as before, so these symbols are not in
+        // either binary twice. The target exists ONLY so the tests below can run: while
+        // these types were nested in the ActivityKit-importing file, a one-line revert in
+        // LiveActivityController reintroduced a shipped defect and survived everything.
+        .target(
+            name: "AgentActivityState",
+            path: "Shared",
+            sources: ["AgentActivityState.swift"]),
+        .testTarget(
+            name: "AgentActivityStateTests",
+            dependencies: ["AgentActivityState"]),
     ]
 )

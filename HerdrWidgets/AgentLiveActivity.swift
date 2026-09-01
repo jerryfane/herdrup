@@ -79,25 +79,6 @@ struct AgentLiveActivity: Widget {
     }
 }
 
-/// The summary wording, in ONE place, because two surfaces render it and the lock screen
-/// previously asserted an unconfirmed count as fact while the roster card marked it.
-enum AgentActivitySummary {
-    static func line(_ s: AgentActivityAttributes.ContentState) -> String {
-        if s.needsYouCount > 0 {
-            // Every waiting agent rests on an unconfirmed state, so the whole claim is a
-            // maybe: say so rather than appending a qualifier to an assertion.
-            if s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
-            // Some are confirmed and some are not. Lead with the fact, name the doubt.
-            if s.unconfirmedCount > 0 {
-                return "\(s.needsYouCount) need you · \(s.unconfirmedCount) stale"
-            }
-            return "\(s.needsYouCount) need you"
-        }
-        if s.workingCount > 0 { return "\(s.workingCount) working" }
-        return s.status.label
-    }
-}
-
 /// The lock-screen / banner layout: status dot, agent name + summary, host on the
 /// right. Kept compact and legible on the dark banner tint.
 private struct LockScreenView: View {
