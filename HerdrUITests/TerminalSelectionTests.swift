@@ -143,12 +143,24 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(tealPixelCount(focused), 20,
                           "a single tap on an unselected pane produced selection colour; the premise for step 4 is broken")
 
-        // (3) DOUBLE TAP ON ACTUAL TEXT, on the now-stable layout. The mock lines read
-        // "SCROLLTEST line 007  the quick brown fox…" at 80 columns, so dx=0.30 is comfortably
-        // inside the glyphs — a tap past end-of-line selects an EMPTY range, which is the third
-        // way this file has been fooled. dy=0.30 stays in the terminal band, which the keyboard
-        // has now shrunk to roughly the top 58%.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.30)).doubleTap()
+        // (3) DOUBLE TAP ON THE LINE NUMBER, deliberately, because that is what makes the
+        // probe's reading diagnostic rather than merely present.
+        //
+        // The mock seeds uniquely numbered lines, "SCROLLTEST line 007  the quick brown fox…"
+        // at 80 columns, and `selectWordOrExpression` treats digits as a selectable word. So
+        // aiming at the number makes the SELECTED TEXT identify which line the selection landed
+        // on: columns 0-10 are "SCROLLTEST ", 11-15 are "line ", and 16-18 are the digits, so
+        // col ~17 is dx ≈ 17.5/80 ≈ 0.22.
+        //
+        // Why that matters here: every explanation for "SwiftTerm holds a selection and nothing
+        // is painted" has been eliminated by reading the SwiftTerm source, which means one of
+        // those readings is wrong. The line number is the one runtime fact that discriminates —
+        // a number from far outside the visible window means the tap's row space is wrong, and a
+        // visible number means the row space is fine and the defect is in the drawing.
+        //
+        // dy=0.30 stays in the terminal band, which the keyboard has shrunk to roughly the top
+        // 58%. The band shows the tail of a 200-line buffer, so a visible number is a high one.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.30)).doubleTap()
         Thread.sleep(forTimeInterval: 1.5)
         let selected = app.screenshot()
         attach(selected, name: "03-selection-held")

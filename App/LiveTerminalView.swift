@@ -761,14 +761,33 @@ struct LiveTerminalView: UIViewRepresentable {
                 selectionProbe = probe
             }
             // `getSelection()` returns the selected TEXT as `String?` (AppleTerminalView.swift
-            // :2535) — my first version called `.getSelectedText()` on it, which is the
-            // SelectionService method and does not exist here. Only the LENGTH is published.
+            // :2535) — an earlier version called `.getSelectedText()` on it, which is the
+            // SelectionService method and does not exist here.
+            //
+            // THE TEXT ITSELF IS PUBLISHED, and it is the measurement that matters. Every
+            // hypothesis for "SwiftTerm holds a selection and nothing is painted" has now been
+            // eliminated by READING: the rows resolve to the same buffer-absolute space
+            // (contentOffset.y == yDisp * cellHeight), the paint loop does consume
+            // `.selectionBackgroundColor`, and `selectionChanged` does call `setNeedsDisplay`
+            // on both the Metal and CoreGraphics paths. So one of those readings is wrong, and
+            // the one runtime fact no public API exposes is WHICH LINE the selection landed on.
+            //
+            // The fixture answers it: the mock seeds uniquely numbered lines
+            // ("SCROLLTEST line 007  the quick brown fox…") and `selectWordOrExpression`
+            // treats digits as a selectable word, so a tap aimed at the number yields the line
+            // number as the selected text. If the test taps a line the view is showing and the
+            // probe reports a number from far outside the visible window, the tap's row space
+            // is wrong; if it reports a visible number, the row space is fine and the defect is
+            // in the drawing after all. Either answer kills a hypothesis rather than adding one.
+            //
+            // Safe to publish: this text is synthetic fixture content in a UI-test-only build,
+            // never a real pane's output.
             let active = view.hasActiveSelection
-            let length = view.getSelection()?.count ?? 0
+            let selected = view.getSelection() ?? ""
             let term = view.getTerminal()
             probe.accessibilityLabel =
-                "sel=\(active ? 1 : 0) len=\(length) rows=\(term.rows) "
-                + "cols=\(term.cols) resizes=\(resizeCount)"
+                "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
+                + "rows=\(term.rows) cols=\(term.cols) resizes=\(resizeCount)"
         }
 
         func stop() {
