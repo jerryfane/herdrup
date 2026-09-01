@@ -190,6 +190,26 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             inputAccessoryView = nil
         }
+
+        /// EMULATOR REPLIES ARE NOT USER INPUT, and this pane is never the primary viewer
+        /// of its PTY, so it must not answer the host.
+        ///
+        /// SwiftTerm funnels two different things into ONE delegate callback. Typed input
+        /// arrives via `AppleTerminalView.send(data:)`, which calls `recordUserInput()`
+        /// first. Emulator-GENERATED answers arrive through THIS `open` TerminalDelegate
+        /// bridge (`iOSTerminalView.swift:1408`): focus reports CSI I and CSI O, DA, DSR
+        /// and CPR replies, OSC colour and OSC 52 answers, CSI-t window reports.
+        ///
+        /// Before iPhone typing existed, the delegate dropped everything on this idiom, so
+        /// none of it left the phone. Enabling typing enabled the replies with it, and the
+        /// desktop herdr owns the same PTY and already answers those queries, so a second
+        /// answerer produces duplicate or contradictory replies to one host request.
+        ///
+        /// Overriding here drops ONLY the reply bridge; typed input never comes through
+        /// this method, so it is untouched. Applied on EVERY idiom, not just phone: iPad
+        /// with a hardware keyboard has been forwarding these since key drive shipped, and
+        /// a co-viewer answering for the primary is wrong there for the same reason.
+        override func send(source: Terminal, data: ArraySlice<UInt8>) {}
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     }
 
