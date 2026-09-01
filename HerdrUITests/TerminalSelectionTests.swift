@@ -143,24 +143,28 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(tealPixelCount(focused), 20,
                           "a single tap on an unselected pane produced selection colour; the premise for step 4 is broken")
 
-        // (3) DOUBLE TAP ON THE LINE NUMBER, deliberately, because that is what makes the
-        // probe's reading diagnostic rather than merely present.
+        // (3) DOUBLE TAP INSIDE THE WIDEST LETTER RUN AVAILABLE, because the previous
+        // coordinate was a coin toss and CI proved it.
         //
-        // The mock seeds uniquely numbered lines, "SCROLLTEST line 007  the quick brown fox…"
-        // at 80 columns, and `selectWordOrExpression` treats digits as a selectable word. So
-        // aiming at the number makes the SELECTED TEXT identify which line the selection landed
-        // on: columns 0-10 are "SCROLLTEST ", 11-15 are "line ", and 16-18 are the digits, so
-        // col ~17 is dx ≈ 17.5/80 ≈ 0.22.
+        // THE PROBE ANSWERED THE QUESTION THIS TEST EXISTED TO ASK. Aimed at the line number it
+        // reported `sel=1 len=1 text=< >` — a ONE-CHARACTER SPACE. `selectWordOrExpression` has
+        // a dedicated whitespace branch, so a tap that misses the glyphs selects the run of
+        // spaces instead of nothing, which is an active, non-empty, entirely invisible-ish
+        // selection: one cell paints roughly 26 downsampled pixels, under the 60 this test
+        // requires. The retry pass then SUCCEEDED, which settles the older mystery too — the
+        // selection does paint when the tap lands on a word, so the earlier zero-teal runs were
+        // about WHERE the tap landed and not about SwiftTerm's drawing.
         //
-        // Why that matters here: every explanation for "SwiftTerm holds a selection and nothing
-        // is painted" has been eliminated by reading the SwiftTerm source, which means one of
-        // those readings is wrong. The line number is the one runtime fact that discriminates —
-        // a number from far outside the visible window means the tap's row space is wrong, and a
-        // visible number means the row space is fine and the defect is in the drawing.
+        // The mock line is "SCROLLTEST line 007  the quick brown fox jumps over the lazy dog" at
+        // 80 columns, and its longest letter runs are five characters. Columns: 0-9 SCROLLTEST,
+        // 10 space, 11-14 line, 15 space, 16-18 the digits, 19-20 two spaces, 21-23 the,
+        // 24 space, 25-29 quick, 30 space, 31-35 brown. Aiming at the MIDDLE of "quick" (col 27,
+        // dx = 27.5/80 ≈ 0.344) leaves two columns of slack on either side, which is the widest
+        // margin this fixture offers. The number at 16-18 offered one column, and dx 0.22 landed
+        // on a space at least once in two runs.
         //
-        // dy=0.30 stays in the terminal band, which the keyboard has shrunk to roughly the top
-        // 58%. The band shows the tail of a 200-line buffer, so a visible number is a high one.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.30)).doubleTap()
+        // dy=0.30 stays in the terminal band, which the keyboard has shrunk to roughly the top 58%.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.344, dy: 0.30)).doubleTap()
         Thread.sleep(forTimeInterval: 1.5)
         let selected = app.screenshot()
         attach(selected, name: "03-selection-held")
@@ -175,13 +179,28 @@ final class TerminalSelectionTests: XCTestCase {
         let probe = app.descendants(matching: .any)["terminal-selection-probe"]
         let reading = probe.waitForExistence(timeout: 5) ? (probe.label) : "PROBE ABSENT"
 
-        // The state assertion. `len > 0` is the part that matters: an active-but-EMPTY selection
-        // is exactly what a tap past end-of-line produces, and it offers Copy while painting
-        // nothing, which is how an earlier version of this file passed for the wrong reason.
+        // THE STATE ASSERTIONS, in order of how badly a failure would mislead.
         XCTAssertTrue(reading.contains("sel=1"),
                       "SwiftTerm reports no active selection after a double tap. probe[\(reading)]. If resizes climbed since the focus tap, a late relayout wiped it; if not, the double tap never reached SwiftTerm's recognizer")
         XCTAssertFalse(reading.contains("len=0"),
-                       "the selection is active but EMPTY, so the tap landed off the glyphs. probe[\(reading)]")
+                       "the selection is active but EMPTY, so the tap landed past the end of the line. probe[\(reading)]")
+
+        // A WHITESPACE SELECTION IS A COORDINATE MISS, NOT A RENDER BUG, and it must say so.
+        // `selectWordOrExpression` has a dedicated branch that selects a RUN OF SPACES, so a tap
+        // between words yields an active, non-empty selection that paints one or two cells —
+        // which then fails the pixel threshold below and reads exactly like a drawing failure.
+        // That cost a CI round: the probe reported `len=1 text=< >` while the message blamed the
+        // renderer. Extracting the text and checking it is a word turns the same run into a
+        // one-line diagnosis.
+        let selectedText = reading.range(of: "text=<").flatMap { start -> String? in
+            let rest = reading[start.upperBound...]
+            guard let end = rest.range(of: ">") else { return nil }
+            return String(rest[..<end.lowerBound])
+        } ?? ""
+        XCTAssertFalse(selectedText.trimmingCharacters(in: .whitespaces).isEmpty,
+                       "the double tap selected WHITESPACE (\(selectedText.count) char(s)), so the coordinate missed the glyphs — this is a test-aim failure, not a drawing failure. probe[\(reading)]")
+        XCTAssertGreaterThanOrEqual(selectedText.count, 3,
+                                    "selected '\(selectedText)', shorter than any word in the fixture line, so the tap clipped a word edge and the pixel threshold below would be unreliable. probe[\(reading)]")
 
         // THE RENDER ASSERTION, which the state assertion cannot replace: the user sees pixels,
         // and a selection that exists without being drawn is still broken for them.
