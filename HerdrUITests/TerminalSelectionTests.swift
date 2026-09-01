@@ -98,15 +98,39 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(baseTeal, 20,
                           "found \(baseTeal) selection-coloured pixels BEFORE selecting anything; the detector cannot distinguish a selection here")
 
-        // (2) DOUBLE TAP ON ACTUAL TEXT. dx is small because these mock lines are short and a
-        // tap past end-of-line selects an EMPTY range (lesson 3); dy sits in the terminal band,
-        // above the software keyboard and below the header.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.32)).doubleTap()
+        // (2) RAISE THE KEYBOARD FIRST, AND ASSERT THAT IT HAPPENED. This step exists because
+        // of a measured failure, not for tidiness: the previous version double-tapped a COLD
+        // pane and got teal px=0 with a clean baseline. Tap 1 of that double tap fires
+        // `focusTap`, which requests terminal focus and so raises the iPhone software keyboard;
+        // the keyboard takes roughly the bottom 40%, the terminal band relaid out under the
+        // finger, and tap 2 therefore hit different content and word-selected an EMPTY range —
+        // active selection, Copy offered, nothing painted. Doing it in two stages means the
+        // layout is settled before the gesture under test runs.
+        //
+        // The assertion is what makes this a wait with a reason rather than a sleep: a large
+        // diff IS the keyboard arriving, so if it ever stops arriving this fails here, naming
+        // the cause, instead of failing later as a mysteriously absent selection.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.30)).tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        let focused = app.screenshot()
+        attach(focused, name: "02-keyboard-up")
+        let focusDiff = pixelDiffFraction(baseline, focused)
+        XCTAssertGreaterThan(focusDiff, 0.10,
+                             "the focus tap changed almost nothing (diff=\(focusDiff)); the keyboard did not come up, so the double tap below would run against a layout that is still about to move")
+        XCTAssertLessThan(tealPixelCount(focused), 20,
+                          "a single tap on an unselected pane produced selection colour; the premise for step 4 is broken")
+
+        // (3) DOUBLE TAP ON ACTUAL TEXT, on the now-stable layout. The mock lines read
+        // "SCROLLTEST line 007  the quick brown fox…" at 80 columns, so dx=0.30 is comfortably
+        // inside the glyphs — a tap past end-of-line selects an EMPTY range, which is the third
+        // way this file has been fooled. dy=0.30 stays in the terminal band, which the keyboard
+        // has now shrunk to roughly the top 58%.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.30)).doubleTap()
         Thread.sleep(forTimeInterval: 1.5)
         let selected = app.screenshot()
-        attach(selected, name: "02-selection-held")
+        attach(selected, name: "03-selection-held")
 
-        // (3) THE ASSERTION THAT CANNOT PASS BY ACCIDENT: a word is painted in the selection
+        // (4) THE ASSERTION THAT CANNOT PASS BY ACCIDENT: a word is painted in the selection
         // colour. This is where the mutant shows — with the clear tap firing on tap 2, the
         // selection is gone by now and there is no teal to find.
         //
@@ -123,13 +147,14 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 5),
                       "a word is highlighted but Copy is not offered, so the selection cannot be acted on")
 
-        // (4) DESELECTION still works, so the fix did not simply disable it. The tap stays in
+        // (5) DESELECTION still works, so the fix did not simply disable it. The tap stays in
         // the terminal band and well away from the selected word — NOT on the keyboard, which
-        // on a live pane would type a character into the agent's shell.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.70, dy: 0.22)).tap()
+        // on a live pane would type a character into the agent's shell. The keyboard is already
+        // up by now, so this tap cannot move the layout the way step 2's did.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.70, dy: 0.20)).tap()
         Thread.sleep(forTimeInterval: 2.0)
         let cleared = app.screenshot()
-        attach(cleared, name: "03-after-single-tap")
+        attach(cleared, name: "04-after-single-tap")
         let clearedTeal = tealPixelCount(cleared)
         XCTAssertLessThan(clearedTeal, 20,
                           "the selection highlight survived a genuine single tap (teal px=\(clearedTeal)); deselection is not reaching the view")
