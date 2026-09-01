@@ -257,6 +257,46 @@ public struct AgentList: Equatable, Sendable {
         rows.filter { $0.group == .needsYou && $0.hasUnconfirmedState }.count
     }
 
+    /// THE ACTIVITY HEADLINE, which answers a DIFFERENT QUESTION FROM THE LIST ORDER, and
+    /// lives here rather than in the app so it can be tested at all.
+    ///
+    /// `AgentGroup`'s ordering is a LIST order: it answers "which section does this row
+    /// belong in, and what does the reader most need to scroll to". A gone pane sorts high
+    /// there on purpose. The Live Activity asks something else — "what is this session
+    /// doing right now" — and reusing the list order to answer it made a single freshly
+    /// stopped pane outrank N working agents, so the lock screen showed a red Stopped dot
+    /// above a summary line reading "N working": one surface contradicting itself.
+    ///
+    /// This is the FOURTH time in this PR's review history that a predicate scoped for one
+    /// surface was reused to answer another surface's question, so the rule is written once,
+    /// here, next to the ordering it deliberately differs from.
+    ///
+    /// The rule, in order:
+    ///  1. `needsYou`, and WITHIN it a CONFIRMED row before an unconfirmed one, so the
+    ///     headline names an agent we actually know is waiting rather than a last-known
+    ///     guess on a peer that went quiet. The doubt is still reported, by
+    ///     `unconfirmedNeedsYouCount`; what changes is that it no longer picks the NAME.
+    ///  2. `unrecognised`, keeping the fail-closed placement: not knowing what an agent is
+    ///     doing is nearer to needing attention than to nothing to do.
+    ///  3. `working`, then `idle`.
+    ///  4. `stopped` LAST. A pane that is gone is not what the session is doing, so it is
+    ///     the headline only when there is nothing else to say — which is honest, because
+    ///     then it is the whole truth.
+    public var activityLead: AgentRow? {
+        func rank(_ r: AgentRow) -> Int {
+            switch r.group {
+            case .needsYou:     return r.hasUnconfirmedState ? 1 : 0
+            case .unrecognised: return 2
+            case .working:      return 3
+            case .idle:         return 4
+            case .stopped:      return 5
+            }
+        }
+        // `min(by:)` keeps the first row of the winning rank, so within a rank the
+        // server's own order decides and this introduces no second sort.
+        return rows.min { rank($0) < rank($1) }
+    }
+
     /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule
     /// instead of each inventing its own. Three surfaces render this count: the roster
     /// header, the Live Activity lock-screen line, and the Dynamic Island. The first

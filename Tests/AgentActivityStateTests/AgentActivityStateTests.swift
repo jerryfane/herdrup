@@ -30,8 +30,18 @@ final class AgentActivityStateTests: XCTestCase {
 
     /// The tolerance is scoped to that ONE key. A genuinely malformed payload must still
     /// fail loudly rather than decoding into a plausible zero.
+    ///
+    /// `status` IS IN THIS LOOP DELIBERATELY, and it is the subtle member. This type treats
+    /// an ABSENT status and an UNRECOGNISED status differently on purpose: an unrecognised
+    /// word falls back to `needsYou` (see the additive-ENUM-CASE test below, because a new
+    /// writer may ship a bucket this reader has never heard of), while an absent key is
+    /// malformed and must throw. A review found the loop omitting it, and the mutant that
+    /// exploits the omission — `decodeIfPresent(String.self, forKey: .status) ?? "needsYou"`
+    /// — survived all 441 tests while COLLAPSING that distinction, decoding a status-less
+    /// payload into the maximally attention-grabbing bucket. Tolerating an unknown value is
+    /// not the same as inventing a missing one.
     func testAMissingRequiredKeyStillThrows() throws {
-        for missing in ["headline", "needsYouCount", "workingCount", "totalCount"] {
+        for missing in ["headline", "status", "needsYouCount", "workingCount", "totalCount"] {
             var obj: [String: Any] = ["headline": "a", "status": "idle", "needsYouCount": 0,
                                       "workingCount": 0, "totalCount": 3]
             obj.removeValue(forKey: missing)
@@ -39,8 +49,12 @@ final class AgentActivityStateTests: XCTestCase {
             XCTAssertThrowsError(try JSONDecoder().decode(AgentActivityState.self, from: data),
                                  "a payload missing \(missing) must not decode")
         }
-        // And a wrong TYPE is still an error, not a coerced value.
+        // And a wrong TYPE is still an error, not a coerced value. `status` is checked here
+        // too: a non-string status is malformed input, NOT an unrecognised bucket, so the
+        // enum fallback must not launder it into needsYou either.
         XCTAssertThrowsError(try decode(#"{"headline":"a","status":"idle","needsYouCount":"two","workingCount":0,"totalCount":3}"#))
+        XCTAssertThrowsError(try decode(#"{"headline":"a","status":42,"needsYouCount":0,"workingCount":0,"totalCount":3}"#),
+                             "a non-string status is malformed, not an unknown bucket")
     }
 
     // MARK: - additive-ENUM-CASE tolerance

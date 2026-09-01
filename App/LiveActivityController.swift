@@ -107,13 +107,17 @@ final class LiveActivityController: ObservableObject {
 
     // MARK: - Mapping HerdrKit → the shared content state
 
-    /// Build a content state from the current agent list. The headline is the
-    /// highest-priority agent (lowest `AgentGroup` rawValue: needsYou < stopped <
-    /// unrecognised < working < idle), so the surface always leads with whatever most
-    /// wants the user's attention.
+    /// Build a content state from the current agent list.
+    ///
+    /// The headline comes from `AgentList.activityLead`, NOT from the list ordering. This
+    /// used to re-derive it here as `rows.min { $0.group.rawValue < ... }`, which reuses the
+    /// ROSTER'S SECTION ORDER to answer a different question, and a single freshly stopped
+    /// pane therefore outranked N working agents: a red Stopped dot over a summary line
+    /// reading "N working". The rule now has ONE definition, in HerdrKit, where it is unit
+    /// tested on Linux — this file cannot be, since nothing in the app has a test target.
     static func state(from list: AgentList) -> AgentActivityAttributes.ContentState {
         let rows = list.rows
-        let lead = rows.min { $0.group.rawValue < $1.group.rawValue }
+        let lead = list.activityLead
         let status: AgentActivityAttributes.Status
         switch lead?.group {
         case .needsYou, .unrecognised: status = .needsYou

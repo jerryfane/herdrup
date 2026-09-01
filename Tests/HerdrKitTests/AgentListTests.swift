@@ -863,4 +863,71 @@ final class AgentListTests: XCTestCase {
         let notice = permanentStreamRefusal(code: "pane_not_found")
         XCTAssertEqual(notice?.contains("not reconnecting"), true)
     }
+
+    // MARK: - the activity headline (a DIFFERENT question from the list order)
+
+    /// THE EXACT CONTRADICTION A REVIEWER MEASURED: one freshly stopped pane used to
+    /// outrank every working agent, because the lock screen re-derived its headline from the
+    /// roster's SECTION ORDER. The surface then showed a red "Stopped" dot above a summary
+    /// line reading "2 working" — self-contradicting, from a single list.
+    ///
+    /// `.stopped` comes from LIVENESS, not from a status word (a "done" agent folds into
+    /// idle), so the census must omit the pane. THE PREMISE IS ASSERTED FIRST: the first
+    /// version of this test used `status: "done"` and passed while producing an IDLE row,
+    /// which working outranks anyway — green, and testing nothing.
+    func testAStoppedPaneIsNotTheHeadlineWhileOthersWork() throws {
+        let list = AgentList(agents: [
+            try agent(pane: "p1", status: "blocked", name: "gone-one"),
+            try agent(pane: "p2", status: "working"),
+            try agent(pane: "p3", status: "working"),
+        ], livePaneIDs: ["p2", "p3"])   // p1 is absent from the census
+        XCTAssertEqual(list.rows.first { $0.info.paneID == "p1" }?.group, .stopped,
+                       "premise: p1 must actually be stopped, and a blocked-but-gone pane is the strongest case")
+        XCTAssertEqual(list.activityLead?.group, .working,
+                       "a gone pane is not what the session is DOING; the list order says otherwise on purpose")
+        XCTAssertEqual(list.rows.filter { $0.group == .working }.count, 2,
+                       "and the summary count the headline used to contradict is 2")
+    }
+
+    /// Stopped IS the honest headline when it is the whole truth, so the demotion above is
+    /// a re-ranking and not a suppression.
+    func testAStoppedPaneIsTheHeadlineWhenNothingElseExists() throws {
+        let list = AgentList(agents: [try agent(pane: "p1", status: "working")],
+                             livePaneIDs: [])
+        XCTAssertEqual(list.activityLead?.group, .stopped)
+    }
+
+    /// Within needsYou, a CONFIRMED row names the headline before a last-known guess on a
+    /// peer that went quiet. The doubt is still reported by the count; it just no longer
+    /// picks the name.
+    func testAConfirmedNeedsYouOutranksAnUnconfirmedOne() throws {
+        let stale = try agent(pane: "p1", status: "unknown", name: "stale-one",
+                              lastKnownStatus: "blocked", machineID: "mcb", reachability: "degraded")
+        let live = try agent(pane: "p2", status: "blocked", name: "live-one")
+        // Server order puts the unconfirmed row FIRST, so a rule that merely kept list
+        // order would pick it.
+        let list = AgentList(agents: [stale, live])
+        XCTAssertEqual(list.activityLead?.info.name, "live-one",
+                       "a confirmed blocked agent should name the headline over a stale guess")
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 1,
+                       "the doubt is still reported, just not as the headline")
+    }
+
+    /// needsYou still outranks everything, and unrecognised still keeps its fail-closed
+    /// place above working and idle — so the demotion of `stopped` did not disturb the rest.
+    func testHeadlineOrderIsOtherwiseUnchanged() throws {
+        let needs = try agent(pane: "p1", status: "blocked")
+        let unrec = try agent(pane: "p2", status: "wat")
+        let work  = try agent(pane: "p3", status: "working")
+        let idle  = try agent(pane: "p4", status: "idle")
+        XCTAssertEqual(AgentList(agents: [idle, work, unrec, needs]).activityLead?.group, .needsYou)
+        XCTAssertEqual(AgentList(agents: [idle, work, unrec]).activityLead?.group, .unrecognised)
+        XCTAssertEqual(AgentList(agents: [idle, work]).activityLead?.group, .working)
+        XCTAssertEqual(AgentList(agents: [idle]).activityLead?.group, .idle)
+    }
+
+    /// An empty list has no headline at all, which the caller renders as "No agents".
+    func testAnEmptyListHasNoHeadline() {
+        XCTAssertNil(AgentList(agents: []).activityLead)
+    }
 }
