@@ -3378,10 +3378,14 @@ struct TerminalPaneContent: View {
     /// software keyboard can genuinely dismiss instead of immediately moving focus
     /// back to the terminal.
     @State private var terminalInputFocused = false
-    /// Set true by the collapse chevron for the body pass that follows, then cleared. Without it a
+    /// Incremented by the collapse chevron to request a DELIBERATE collapse. Without it a
     /// deliberate collapse is indistinguishable from any other pass where the terminal simply does
     /// not want key focus, and the resign is refused while a selection is held.
-    @State private var terminalCollapseRequested = false
+    ///
+    /// A TOKEN, not a bool set for "the next pass" — see `LiveTerminalView.consumeCollapse`. The
+    /// bool version cleared itself in `DispatchQueue.main.async`, which drains BEFORE SwiftUI's
+    /// update flush, so the pane read it as already false and the collapse never happened.
+    @State private var terminalCollapseToken = 0
     /// Incremented to ask the pane to jump to its newest output. LiveTerminalView
     /// performs exactly one jump per increment.
     @State private var jumpToTailToken = 0
@@ -3492,7 +3496,7 @@ struct TerminalPaneContent: View {
                                      && (terminalInputFocused || UIDevice.current.userInterfaceIdiom == .pad),
                                  // Set by the collapse chevron so the resign in updateUIView can
                                  // tell a deliberate dismissal from an incidental body pass.
-                                 collapseRequested: terminalCollapseRequested,
+                                 collapseToken: terminalCollapseToken,
                                  onTerminalFocusRequest: { terminalInputFocused = true },
                                  jumpToTailToken: jumpToTailToken,
                                  onTailStateChange: { terminalAtTail = $0 },
@@ -3945,12 +3949,12 @@ struct TerminalPaneContent: View {
             if replyFocused || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone) {
                 Button {
                     // Mark the collapse as DELIBERATE before dropping the flags, so the resign in
-                    // updateUIView is allowed to run even while a word is selected. Cleared on the
-                    // next runloop turn so it cannot leak into unrelated passes.
-                    terminalCollapseRequested = true
+                    // updateUIView is allowed to run even while a word is selected. No reset: the
+                    // pane consumes the token exactly once, so there is nothing to leak into
+                    // unrelated passes and no async hop that can race the pass it was meant for.
+                    terminalCollapseToken += 1
                     replyFocused = false
                     terminalInputFocused = false
-                    DispatchQueue.main.async { terminalCollapseRequested = false }
                 } label: {
                     Image(systemName: "keyboard.chevron.compact.down")
                         .font(.system(size: 15, weight: .semibold))

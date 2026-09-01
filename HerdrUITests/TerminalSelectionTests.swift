@@ -371,6 +371,89 @@ final class TerminalSelectionTests: XCTestCase {
                           "SwiftTerm reports the selection cleared but the highlight is still painted (teal px=\(clearedTeal)), so the clear reached the model and not the screen. probe[\(afterReading)]")
     }
 
+
+    /// THE COLLAPSE CHEVRON'S RECEIPT, and it exists because this PR's FIRST attempt at the
+    /// chevron fix was inert and nothing here could tell.
+    ///
+    /// The defect: on iPhone, with a word selected, the chevron cleared both focus flags — which
+    /// hides the chevron itself — while `updateUIView`'s resign stayed gated on
+    /// `!hasActiveSelection`. So the keyboard stayed up over ~40% of the pane with its only
+    /// dismiss affordance gone. The first fix set a bool and cleared it in
+    /// `DispatchQueue.main.async`; that queue drains BEFORE SwiftUI's update flush, so the pane
+    /// read the flag as already false and the resign never ran. Review caught it by reading,
+    /// because an inert fix and a working one produce identical screenshots — there was no
+    /// observable for "gave up the responder while keeping the selection". Hence `fr=` on the
+    /// probe and hence this test.
+    ///
+    /// WHAT IT PINS, which is the product contract and not the mechanism: a deliberate collapse
+    /// resigns the responder (keyboard down) AND the selection survives in the model (a double
+    /// tap re-presents Copy without re-selecting). Under the async-reset mechanism this fails at
+    /// the `fr=0` poll; under a mechanism that resigns by clearing the selection it fails at
+    /// `sel=1`. Both are real regressions and each has its own failure message.
+    func testTheCollapseChevronDismissesTheKeyboardWithAWordSelected() throws {
+        // iPHONE-ONLY BY CONSTRUCTION: the chevron's own visibility condition is
+        // `replyFocused || (terminalInputFocused && idiom == .phone)`, because on iPad the
+        // terminal's inputView is zero-frame so there is no keyboard to collapse. CI picks an
+        // iPhone destination (ci.yml greps `iPhone [0-9]+`), so this skips only on a local iPad run
+        // rather than silently passing there.
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "the collapse chevron is iPhone-only; there is no keyboard to collapse on iPad")
+
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "system dialog") { alert in
+            let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
+            if allow.exists { allow.tap(); return true }
+            return false
+        }
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
+        app.launch()
+
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 20),
+                      "the terminal never came up, so nothing below is about the chevron")
+
+        // Two stages for the same reason the other test uses two: tap 1 raises the keyboard and
+        // relayouts the terminal band, so a double tap fired into that motion selects whatever
+        // slid under the finger. Settle first, then select.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.30)).tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        // dx 0.150 is col 7 — written on BOTH the primary and continuation row types with a
+        // column of slack either side. See the long note in the other test for the enumeration.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.150, dy: 0.30)).doubleTap()
+        Thread.sleep(forTimeInterval: 1.5)
+
+        // PREMISES FIRST. Without a live selection AND a held responder this test would pass on a
+        // pane that simply never focused, which is the vacuity that cost this PR a round already.
+        let beforeReading = probe.exists ? probe.label : "PROBE ABSENT"
+        XCTAssertTrue(beforeReading.contains("sel=1"),
+                      "premise: no selection to preserve, so the gate under test is never reached. probe[\(beforeReading)]")
+        XCTAssertTrue(beforeReading.contains("fr=1"),
+                      "premise: the terminal does not hold the responder, so there is nothing for the chevron to resign. probe[\(beforeReading)]")
+
+        let chevron = app.buttons["Collapse keyboard"]
+        XCTAssertTrue(chevron.waitForExistence(timeout: 5),
+                      "the chevron is absent while the keyboard is up with a selection held — which IS the original defect: no affordance to dismiss with")
+        chevron.tap()
+
+        // A BOUNDED POLL FOR A READING THAT IS BOTH RESIGNED AND FRESH. `fr=0` alone would accept
+        // the label from before the keyboard ever came up; `pub=<handler>#<count>` is monotonic, so
+        // a changed label is proof of a new publish. The resign publishes `pub=collapseResign`,
+        // which is the one path no gesture handler covers.
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if probe.exists, probe.label.contains("fr=0"), probe.label != beforeReading { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        let afterReading = probe.exists ? probe.label : "PROBE ABSENT"
+
+        XCTAssertTrue(afterReading.contains("fr=0"),
+                      "the chevron did not resign the responder, so the keyboard is still up and the chevron has hidden itself — the exact defect this fix exists for. If pub= is unchanged from the pre-tap reading the update pass never observed the collapse token; if it changed and fr is still 1 the resign was refused by the selection guard. probe[\(afterReading)] before[\(beforeReading)]")
+        XCTAssertTrue(afterReading.contains("sel=1"),
+                      "the collapse also DROPPED the selection. Resigning is meant to hide the Copy menu while leaving the selection in the model, so a double tap re-presents it without re-selecting. probe[\(afterReading)]")
+        XCTAssertTrue(afterReading.contains("pub=collapseResign"),
+                      "the responder was resigned by some other path than the deliberate collapse (pub names the publisher), so this run did not exercise the chevron even though the end state looks right. probe[\(afterReading)]")
+    }
+
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
     ///
     /// Returns nil rather than a default when the field is absent, so a probe that stops

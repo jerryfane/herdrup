@@ -58,11 +58,12 @@ struct LiveTerminalView: UIViewRepresentable {
     /// On iPhone this opens the software keyboard; on iPad it takes effect only with a
     /// hardware keyboard. Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
-    /// True for the one body pass that follows a DELIBERATE collapse (the reply bar's chevron), as
-    /// opposed to the many incidental passes that also see `wantsTerminalKeyFocus == false`. Only a
-    /// deliberate collapse may resign the responder while a selection is held: see the resign
-    /// branch in `updateUIView` for what went wrong when the two were indistinguishable.
-    var collapseRequested: Bool = false
+    /// Bumped by the reply bar's chevron to request a DELIBERATE collapse, as opposed to the many
+    /// incidental body passes that also see `wantsTerminalKeyFocus == false`. Only a deliberate
+    /// collapse may resign the responder while a selection is held: see the resign branch in
+    /// `updateUIView`, both for what went wrong when the two were indistinguishable and for why
+    /// this is a monotonic token rather than a bool the host resets.
+    var collapseToken: Int = 0
     /// Called after a terminal tap requests direct PTY input. The parent owns the
     /// SwiftUI focus state so a reply submission can dismiss the keyboard reliably.
     var onTerminalFocusRequest: () -> Void = {}
@@ -152,13 +153,38 @@ struct LiveTerminalView: UIViewRepresentable {
             // this class of problem, so it failing in the PR's own headline flow is the worst place
             // for it.
             //
-            // `collapseRequested` distinguishes the two cases: an incidental pass still respects
-            // the selection, while a deliberate collapse resigns regardless and keeps the
-            // selection intact in the model. Resigning hides the system Copy menu, which is the
-            // honest consequence of asking for the keyboard to go away — and the selection is
-            // still there, so a double tap re-presents it without re-selecting.
-            if uiView.isFirstResponder, !isForeground || collapseRequested || !uiView.hasActiveSelection {
+            // `collapseToken` distinguishes the two cases: an incidental pass still respects the
+            // selection, while a deliberate collapse resigns regardless and keeps the selection
+            // intact in the model. Resigning hides the system Copy menu, which is the honest
+            // consequence of asking for the keyboard to go away — and the selection is still
+            // there, so a double tap re-presents it without re-selecting. Review endorsed that
+            // behaviour choice; what it rejected was my first MECHANISM for it.
+            //
+            // A MONOTONIC TOKEN, NOT A BOOL SET-AND-ASYNC-RESET, and this is the second defect
+            // review found in this one gate. My first fix set a `collapseRequested` flag and
+            // cleared it in `DispatchQueue.main.async`, intending "true for exactly the next body
+            // pass". That does not hold: the GCD main-queue drain runs BEFORE SwiftUI's deferred
+            // update flush, so this method would have observed the flag already false, refused the
+            // resign, and reproduced the very defect it was written to fix — an INERT fix that
+            // would have tested green as an unchanged bug.
+            //
+            // A token cannot be coalesced away. It carries no lifetime and no assumption about
+            // which pass reads it: whichever pass observes a value the Coordinator has not
+            // consumed is the collapse, and every later pass sees a consumed one. This is the
+            // pattern `performJumpToTail(ifTokenChanged:)` already uses two dozen lines up, so
+            // it is also the pattern this file had already settled on for exactly this problem.
+            //
+            // Consumed HERE rather than beside `performJumpToTail`, so a pass that re-requests
+            // focus cannot silently eat a collapse it was never going to act on.
+            let deliberateCollapse = context.coordinator.consumeCollapse(ifTokenChanged: collapseToken)
+            if uiView.isFirstResponder, !isForeground || deliberateCollapse || !uiView.hasActiveSelection {
                 uiView.resignFirstResponder()
+                // A READING FROM THE ONE PATH NO GESTURE HANDLER COVERS. Every other probe publish
+                // sits in a tap handler; this resign happens during a SwiftUI update, so without
+                // this call `fr` would only ever be sampled at gesture time and the collapse would
+                // stay unobservable — which is precisely how the inert first mechanism escaped.
+                // Compiled out in Release and inert without the mock env var.
+                context.coordinator.publishSelectionProbe(deliberateCollapse ? "collapseResign" : "passResign")
             }
         }
         context.coordinator.applyFont(size: fontSize)
@@ -688,6 +714,24 @@ struct LiveTerminalView: UIViewRepresentable {
             jumpToTail()
         }
 
+        /// The last collapse token this Coordinator has acted on. Starts at 0, matching the
+        /// host's initial `collapseToken`, so a freshly created pane does not read its own
+        /// initial state as a pending collapse request.
+        private var lastCollapseToken = 0
+
+        /// True for exactly ONE `updateUIView` pass per chevron tap — the pass that observes a
+        /// token the Coordinator has not consumed yet.
+        ///
+        /// Same shape as `performJumpToTail(ifTokenChanged:)` above and for the same reason: a
+        /// SwiftUI input cannot express "for the next pass only" as a bool the host resets,
+        /// because the host does not control when passes happen and any async reset races the
+        /// pass it was meant for. A monotonic counter needs no such timing assumption.
+        func consumeCollapse(ifTokenChanged token: Int) -> Bool {
+            guard token != lastCollapseToken else { return false }
+            lastCollapseToken = token
+            return true
+        }
+
         /// Publishes tail state to the host, and ONLY on a change, so scrolling cannot
         /// re-render SwiftUI on every frame.
         ///
@@ -696,7 +740,28 @@ struct LiveTerminalView: UIViewRepresentable {
         /// synchronous call would mutate SwiftUI `@State` during a view update, which
         /// SwiftUI warns about and can re-enter. The dedupe above stays synchronous, so
         /// deferring cannot publish a stale duplicate.
+        /// THE SINGLE PUBLISHER of tail state, and the single place the alternate screen is
+        /// judged — deliberately here rather than in each caller.
+        ///
+        /// Review found the alt-screen early return I had added to `scrolled(source:position:)`
+        /// was missing from `observeContentOffset`'s KVO hop, so a finger drag on an oversized
+        /// alt-screen grid could still publish `atTail: false` and fight the delegate path into
+        /// pill flicker. The narrow fix was to copy the guard into the KVO hop. That is a SITE
+        /// fix for what is plainly a CLASS defect: two publishers, one of them guarded, and
+        /// nothing stopping a third from being added unguarded.
+        ///
+        /// So the guard lives in the funnel every publisher already goes through, and each
+        /// caller now reports what it actually observed. A future publisher inherits the
+        /// alt-screen rule by construction instead of by whoever adds it remembering.
+        ///
+        /// WHY THE ALT SCREEN IS FORCED TO at-tail rather than left alone: a TUI pane keeps its
+        /// own viewport and is served by jumpToTail's Ctrl+End path, not by this pill, so the
+        /// honest report is "nothing to return to". `isCurrentBufferAlternate` is a synchronous
+        /// buffer-IDENTITY check, not a heuristic, so it cannot transiently lie on a normal
+        /// buffer — verified in the pinned SwiftTerm 1.15.0 by review.
         private func reportTailState(atTail: Bool) {
+            var atTail = atTail
+            if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
             guard atTail != lastReportedAtTail else { return }
             lastReportedAtTail = atTail
             let publish = onTailStateChange
@@ -811,7 +876,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// What it publishes: sel, len, the selected TEXT, rows, cols, ydisp and a resize count.
         /// The text is deliberate and is what made the row-space defect findable; it is safe only
         /// because this cannot exist outside a DEBUG build fed by the canned mock transport.
-        private func publishSelectionProbe(_ publisher: String) {
+        fileprivate func publishSelectionProbe(_ publisher: String) {
             #if DEBUG
             guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
                   let view else { return }
@@ -872,10 +937,19 @@ struct LiveTerminalView: UIViewRepresentable {
             // spent a round on exactly that ambiguity: after a single tap the label still read
             // sel=1 text=<lazy>, which could have meant clearTap failed OR that the tap never
             // reached the terminal at all.
+            //
+            // `fr` IS THE RESPONDER STATE, added so the collapse chevron's contract is measurable
+            // at all. Review rejected this PR's first collapse mechanism as inert — a bool cleared
+            // in `DispatchQueue.main.async`, which drains before SwiftUI's update flush, so the
+            // resign would never have run. Nothing in the suite could have caught that, because
+            // "did the terminal give up the responder while keeping its selection" had no
+            // observable at all: an inert fix and a working one produced identical output. That is
+            // the worst shape a defect can have, so the observable comes with the fix.
             probePublishCount += 1
             probe.accessibilityLabel =
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
+                + "fr=\(view.isFirstResponder ? 1 : 0) "
                 + "resizes=\(resizeCount) pub=\(publisher)#\(probePublishCount)"
             #endif
         }
@@ -1487,26 +1561,22 @@ struct LiveTerminalView: UIViewRepresentable {
         /// reader needs it. Found by review, not by the receipt, because no test asserted the pill.
         ///
         /// `observeContentOffset()` covers the finger path. Both funnel through `reportTailState`,
-        /// which stays the single publisher and dedupes, so the two sources cannot double-publish.
+        /// which stays the single publisher, judges the alternate screen for both, and dedupes —
+        /// so the two sources cannot double-publish and neither can disagree with the other about
+        /// the alt buffer. The alt-screen guard that used to sit in this method has moved there;
+        /// see the note on `reportTailState` for why the caller is the wrong place for it.
+        ///
+        /// WHY THE ALT SCREEN NEEDED JUDGING AT ALL: AppleTerminalView.scrollPosition
+        /// short-circuits to 0 whenever the display buffer is the alternate one
+        /// (st_apple.swift:2012), while Terminal.scroll() notifies the delegate unconditionally
+        /// including on that buffer (Terminal.swift:5434). So on a Claude Code pane this callback
+        /// saw position 0 on EVERY output frame, and whenever the emulator grid exceeded the
+        /// laid-out view — the window before PTY-size negotiation settles, or a co-viewer
+        /// reclaiming the size — canScroll was true and atTail latched FALSE. The pill pinned
+        /// itself visible on a TUI pane where it cannot mean anything, and tapping it was undone
+        /// by the next frame.
         func scrolled(source: TerminalView, position: Double) {
             guard let view else { return }
-            // THE ALT SCREEN HAS NO MEANINGFUL POSITION, so do not publish one.
-            //
-            // AppleTerminalView.scrollPosition short-circuits to 0 whenever the display buffer is
-            // the alternate one (st_apple.swift:2012), while Terminal.scroll() notifies the delegate
-            // unconditionally including on that buffer (Terminal.swift:5434). So on a Claude Code
-            // pane this callback saw position 0 on EVERY output frame, and whenever the emulator
-            // grid exceeded the laid-out view — the window before PTY-size negotiation settles, or a
-            // co-viewer reclaiming the size — canScroll was true and atTail latched FALSE. The pill
-            // pinned itself visible on a TUI pane where it cannot mean anything, and tapping it was
-            // undone by the next frame. Reported by review as plausible; the short-circuit and the
-            // unconditional notify are both verified in the pinned source, so the guard is cheap
-            // insurance either way. A TUI pane keeps its own viewport and is served by
-            // jumpToTail's Ctrl+End path, not by this pill.
-            if view.getTerminal().isCurrentBufferAlternate {
-                reportTailState(atTail: true)
-                return
-            }
             let canScroll = view.contentSize.height > view.bounds.height + 1
             reportTailState(atTail: !canScroll || position >= 0.999)
         }
