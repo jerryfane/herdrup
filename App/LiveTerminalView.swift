@@ -58,6 +58,11 @@ struct LiveTerminalView: UIViewRepresentable {
     /// On iPhone this opens the software keyboard; on iPad it takes effect only with a
     /// hardware keyboard. Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
+    /// True for the one body pass that follows a DELIBERATE collapse (the reply bar's chevron), as
+    /// opposed to the many incidental passes that also see `wantsTerminalKeyFocus == false`. Only a
+    /// deliberate collapse may resign the responder while a selection is held: see the resign
+    /// branch in `updateUIView` for what went wrong when the two were indistinguishable.
+    var collapseRequested: Bool = false
     /// Called after a terminal tap requests direct PTY input. The parent owns the
     /// SwiftUI focus state so a reply submission can dismiss the keyboard reliably.
     var onTerminalFocusRequest: () -> Void = {}
@@ -135,7 +140,24 @@ struct LiveTerminalView: UIViewRepresentable {
             if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
         } else {
             if !isForeground { uiView.clearSelection() }
-            if uiView.isFirstResponder, !isForeground || !uiView.hasActiveSelection {
+            // THE SELECTION GUARD MUST NOT OUTRANK AN EXPLICIT COLLAPSE, and it did.
+            //
+            // `!uiView.hasActiveSelection` exists so an incidental SwiftUI body pass cannot yank
+            // the responder mid-selection and take the Copy menu with it. But the collapse chevron
+            // reaches this same else-branch by clearing both focus flags, and while a word was
+            // selected the guard refused the resign — so the keyboard stayed up, and because
+            // clearing the flags also hides the chevron, its only dismiss affordance vanished with
+            // it. The reader was left with a keyboard over 40% of the pane and no way down.
+            // Measured and reported by review; the chevron was the feature added to fix exactly
+            // this class of problem, so it failing in the PR's own headline flow is the worst place
+            // for it.
+            //
+            // `collapseRequested` distinguishes the two cases: an incidental pass still respects
+            // the selection, while a deliberate collapse resigns regardless and keeps the
+            // selection intact in the model. Resigning hides the system Copy menu, which is the
+            // honest consequence of asking for the keyboard to go away — and the selection is
+            // still there, so a double tap re-presents it without re-selecting.
+            if uiView.isFirstResponder, !isForeground || collapseRequested || !uiView.hasActiveSelection {
                 uiView.resignFirstResponder()
             }
         }
@@ -1468,6 +1490,23 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which stays the single publisher and dedupes, so the two sources cannot double-publish.
         func scrolled(source: TerminalView, position: Double) {
             guard let view else { return }
+            // THE ALT SCREEN HAS NO MEANINGFUL POSITION, so do not publish one.
+            //
+            // AppleTerminalView.scrollPosition short-circuits to 0 whenever the display buffer is
+            // the alternate one (st_apple.swift:2012), while Terminal.scroll() notifies the delegate
+            // unconditionally including on that buffer (Terminal.swift:5434). So on a Claude Code
+            // pane this callback saw position 0 on EVERY output frame, and whenever the emulator
+            // grid exceeded the laid-out view — the window before PTY-size negotiation settles, or a
+            // co-viewer reclaiming the size — canScroll was true and atTail latched FALSE. The pill
+            // pinned itself visible on a TUI pane where it cannot mean anything, and tapping it was
+            // undone by the next frame. Reported by review as plausible; the short-circuit and the
+            // unconditional notify are both verified in the pinned source, so the guard is cheap
+            // insurance either way. A TUI pane keeps its own viewport and is served by
+            // jumpToTail's Ctrl+End path, not by this pill.
+            if view.getTerminal().isCurrentBufferAlternate {
+                reportTailState(atTail: true)
+                return
+            }
             let canScroll = view.contentSize.height > view.bounds.height + 1
             reportTailState(atTail: !canScroll || position >= 0.999)
         }
@@ -1510,8 +1549,18 @@ struct LiveTerminalView: UIViewRepresentable {
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
-                    // `cellPixels()` returns UInt32, so convert rather than mixing numeric types.
-                    let slack = CGFloat(max(self.cellPixels().height, 1))
+                    // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
+                    // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
+                    // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
+                    // :1612-1613). A full cell of slack left a HALF-CELL BAND where this reported
+                    // at-tail and hid the pill while userScrolling was still true — new output would
+                    // not scroll into view and the one affordance for getting back was gone. On a
+                    // busy pane the delegate path corrects it on the next line; on a quiet pane it
+                    // persists, which is precisely the case the pill exists for. Reported by review,
+                    // along with the fact that my comment claiming this used "the same arithmetic" as
+                    // the delegate path was wrong: the delegate compares a 0...1 position, this
+                    // compares offsets, and they agreed only approximately.
+                    let slack = CGFloat(max(self.cellPixels().height, 2)) / 2
                     let canScroll = maxOffset > 1
                     self.reportTailState(atTail: !canScroll || offsetY >= maxOffset - slack)
                 }

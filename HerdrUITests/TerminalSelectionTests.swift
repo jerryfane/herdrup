@@ -308,9 +308,15 @@ final class TerminalSelectionTests: XCTestCase {
         //
         // Polling for the state this step is actually about lets a slow chain pass and still fails
         // a genuinely dead one, at the cost of up to 10s only when something is already wrong.
+        // The poll waits for a reading that is BOTH cleared and NEWER than the pre-tap one. Polling
+        // on `sel=0` alone would also accept a stale label from before the tap, which is the same
+        // class of error as the assertion above: a condition that can be satisfied without the
+        // event under test having happened. `pub=<handler>#<count>` is monotonic, so a changed
+        // label is proof of a fresh publish.
+        let beforeReading = probe.exists ? probe.label : ""
         let deselectDeadline = Date().addingTimeInterval(10)
         while Date() < deselectDeadline {
-            if probe.exists, probe.label.contains("sel=0") { break }
+            if probe.exists, probe.label.contains("sel=0"), probe.label != beforeReading { break }
             Thread.sleep(forTimeInterval: 0.25)
         }
         // One extra settle past the state change, so the screenshot cannot catch a half-drawn
@@ -333,10 +339,32 @@ final class TerminalSelectionTests: XCTestCase {
         // Without that field those two produce byte-identical readings, which is what cost the
         // previous round.
         let afterReading = probe.exists ? probe.label : "PROBE ABSENT"
+
+        // WHAT THIS STEP CAN AND CANNOT PROVE, corrected after a review showed the previous version
+        // passing while the app's own clear never executed.
+        //
+        // By this point the view IS first responder — focusTap took it on tap 1, and
+        // showStandardContextMenu takes it too (iOSTerminalView.swift:1392). SwiftTerm's OWN
+        // singleTap therefore runs its `if isFirstResponder` branch and calls selection.selectNone()
+        // (iOSTerminalView.swift:743-768), and it requires only its own doubleTap to fail — whereas
+        // the app's clearTap was made to require TWO 2-tap recognizers (SwiftTerm's doubleTap plus
+        // the app's menuTap, since the attach loop runs after menuTap is added). So on this path
+        // SWIFTTERM CLEARS FIRST, and the app's clearTap arrives later, publishes clearTapEntry
+        // reading sel=0, hits its `guard view.hasActiveSelection` and returns without clearing.
+        //
+        // The old assertion accepted `contains("pub=clearTap")`, which ALSO prefix-matches
+        // "pub=clearTapEntry" — so the receipt greened with view.clearSelection() never called. It
+        // was testing SwiftTerm and reporting it as testing the app.
+        //
+        // So this now asserts the USER-VISIBLE property — the selection is gone after a genuine
+        // single tap — and says plainly that it does not attribute the clear to either
+        // implementation. clearTap's own value is on an UNFOCUSED pane, where SwiftTerm's singleTap
+        // spends its tap taking the responder and does not clear; that path is not exercised here
+        // and is worth its own receipt.
         XCTAssertTrue(afterReading.contains("pub=focusTap") || afterReading.contains("pub=clearTap"),
                       "no terminal tap handler published after the single tap, so the touch never reached the terminal view — the coordinate missed it. Compare against the pre-tap reading probe[\(reading)]; after probe[\(afterReading)]")
         XCTAssertTrue(afterReading.contains("sel=0"),
-                      "the touch reached the terminal but SwiftTerm still reports an active selection, so clearTap did not run or its require(toFail:) chain had not resolved within the settle. probe[\(afterReading)]")
+                      "the touch reached the terminal but a selection is still active, so nothing cleared it — neither SwiftTerm's singleTap nor the app's clearTap. probe[\(afterReading)]")
 
         let clearedTeal = tealPixelCount(cleared)
         XCTAssertLessThan(clearedTeal, 20,
