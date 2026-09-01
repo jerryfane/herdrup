@@ -1,25 +1,32 @@
 import XCTest
+import UIKit
 
 /// THE REGRESSION RECEIPT for double-tap word selection.
 ///
 /// A review found the repaired behaviour unguarded: a compiling mutant that removes
 /// `clearTap.require(toFail: t)` restores the original defect, where the app's own tap
 /// recognizer clears the word SwiftTerm selected on the SAME touch-up, and nothing in the
-/// suite noticed. This file is the guard.
+/// suite noticed.
 ///
-/// It uses PIXEL DIFF rather than accessibility, for two reasons. SwiftTerm draws the
-/// selection highlight and its two handle ellipses with CoreGraphics, so there is no
-/// element to query; and the Copy affordance rides on `UIMenuController`, deprecated at
-/// iOS 16, so asserting on the menu would couple this receipt to an API whose survival is
-/// exactly what nobody can currently promise. Pixels are the thing a person sees.
+/// THE FIRST VERSION OF THIS FILE WAS PIXEL-BASED AND WAS WEAK, which its own CI run
+/// exposed. It asserted "the selection is still there" by diffing against the pre-selection
+/// baseline, and ANY difference satisfied that, including SwiftTerm's context menu simply
+/// being on screen. The final assertion then failed with a diff of exactly 0.0, which is the
+/// signature of a screen where nothing was left to change: the earlier step had passed for
+/// the wrong reason. Pixels cannot tell a selection from a popover.
 ///
-/// Structure mirrors ScrollTests: prove the terminal is STATIC first, so a later diff
-/// cannot be ambient animation.
+/// So this asserts on the CLIPBOARD instead, which cannot be satisfied by accident: a word
+/// only reaches the pasteboard if a selection existed AND Copy acted on it. That also
+/// settles, rather than assumes, the open question about `UIMenuController` being deprecated
+/// at iOS 16: if the menu never presents, this test says so directly.
 final class TerminalSelectionTests: XCTestCase {
 
-    override func setUp() { continueAfterFailure = false }
+    override func setUp() {
+        continueAfterFailure = false
+        UIPasteboard.general.string = ""   // a stale clipboard would fake a pass
+    }
 
-    func testDoubleTapSelectionSurvivesAndASingleTapClearsIt() {
+    func testDoubleTapSelectsAWordCopyWorksAndASingleTapDismisses() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
         app.launch()
@@ -27,8 +34,8 @@ final class TerminalSelectionTests: XCTestCase {
         // The mock feeds 200 numbered lines into a real SwiftTerm view asynchronously.
         Thread.sleep(forTimeInterval: 3.0)
 
-        // (1) PREMISE: an untouched terminal is static. Without this, every diff below
-        // could be a cursor blink or a stream repaint rather than a selection.
+        // (1) PREMISE: an untouched terminal is static, so a later pixel change means the
+        // gesture did something rather than the stream repainting under us.
         let baseline = app.screenshot()
         Thread.sleep(forTimeInterval: 1.0)
         let idleDiff = pixelDiffFraction(baseline, app.screenshot())
@@ -36,40 +43,45 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(idleDiff, 0.02,
                           "terminal is not static when untouched (diff=\(idleDiff)); no later diff would mean anything")
 
-        // (2) DOUBLE TAP on terminal text. Mid-body: below the header, above the reply bar,
-        // matching the drag origin ScrollTests uses.
-        let word = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.45))
-        word.doubleTap()
+        // (2) DOUBLE TAP on terminal text: mid-body, below the header and above the reply
+        // bar, matching the drag origin ScrollTests uses.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.45)).doubleTap()
         Thread.sleep(forTimeInterval: 1.0)
-
         let selected = app.screenshot()
         attach(selected, name: "02-after-double-tap")
-        let selectionDiff = pixelDiffFraction(baseline, selected)
-        XCTAssertGreaterThan(selectionDiff, 0.005,
-                             "double tap drew nothing (diff=\(selectionDiff)); word select is not reaching SwiftTerm")
+        XCTAssertGreaterThan(pixelDiffFraction(baseline, selected), 0.005,
+                             "double tap drew nothing at all; word select is not reaching SwiftTerm")
 
-        // (3) THE REGRESSION ITSELF: the selection must still be there a moment later.
-        // With one recognizer doing both jobs, the app's tap fired on tap 2 as well and
-        // cleared the selection on the same touch-up, so this is where that defect shows.
-        Thread.sleep(forTimeInterval: 1.5)
-        let held = app.screenshot()
-        attach(held, name: "03-selection-held")
-        let heldVsBaseline = pixelDiffFraction(baseline, held)
-        XCTAssertGreaterThan(heldVsBaseline, 0.005,
-                             "the selection vanished on its own (diff vs baseline=\(heldVsBaseline)); the clear tap is firing on tap 2")
+        // (3) THE COPY PATH. SwiftTerm presents Copy through UIMenuController, and
+        // canPerformAction only offers it while a selection is active, so the item existing
+        // IS the proof that a selection survived the same touch-up that created it. This is
+        // where the mutant shows: with the clear tap firing on tap 2, there is no selection
+        // by now and no Copy item.
+        let copy = app.menuItems["Copy"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 4),
+                      "no Copy item after a double tap. Either the selection was cleared on the same touch-up (the regression this file guards) or UIMenuController no longer presents on this OS, which is a finding in its own right")
 
-        // (4) A GENUINE SINGLE TAP elsewhere must clear it, so the fix did not simply
-        // disable deselection. Tapped well away from the selected word.
+        copy.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // (4) THE UNAMBIGUOUS ASSERTION: a word is on the clipboard. Nothing but a real
+        // selection plus a working Copy can produce this.
+        let pasted = UIPasteboard.general.string ?? ""
+        XCTAssertFalse(pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       "Copy put nothing on the clipboard, so no selection was actually held")
+        // The mock seeds numbered lines, so whatever was selected should be printable text
+        // rather than control bytes.
+        XCTAssertNil(pasted.rangeOfCharacter(from: CharacterSet.controlCharacters.subtracting(.whitespacesAndNewlines)),
+                     "clipboard holds control bytes (\(pasted.debugDescription)); that is not selected screen text")
+
+        // (5) DESELECTION still works, so the fix did not simply disable it. A genuine
+        // single tap must leave no Copy item behind, which is a state assertion rather than
+        // a pixel guess.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.70)).tap()
-        Thread.sleep(forTimeInterval: 1.5)
-
-        let cleared = app.screenshot()
-        attach(cleared, name: "04-after-single-tap")
-        let clearedVsHeld = pixelDiffFraction(held, cleared)
-        XCTAssertGreaterThan(clearedVsHeld, 0.002,
-                             "a single tap changed nothing (diff=\(clearedVsHeld)); deselection is not reaching the view")
-        XCTAssertLessThan(pixelDiffFraction(baseline, cleared), heldVsBaseline,
-                          "after a single tap the terminal should be CLOSER to its unselected baseline than it was while selected")
+        Thread.sleep(forTimeInterval: 2.0)
+        attach(app.screenshot(), name: "03-after-single-tap")
+        XCTAssertFalse(app.menuItems["Copy"].exists,
+                       "a genuine single tap left the selection up; deselection is not reaching the view")
     }
 
     // MARK: - helpers (duplicated from ScrollTests, which keeps them private)
@@ -81,8 +93,8 @@ final class TerminalSelectionTests: XCTestCase {
         add(a)
     }
 
-    /// Fraction of pixels that differ beyond a small per-pixel threshold, compared at a
-    /// fixed small resolution so PNG jitter and antialiasing do not register as change.
+    /// Fraction of pixels differing beyond a small per-pixel threshold, compared at a fixed
+    /// small resolution so PNG jitter and antialiasing do not register as change.
     private func pixelDiffFraction(_ a: XCUIScreenshot, _ b: XCUIScreenshot) -> Double {
         let w = 90, h = 180
         guard let bufA = rgbaBuffer(a.image, w: w, h: h),
