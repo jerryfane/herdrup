@@ -360,6 +360,22 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// server) read as reachable — the safe default is "not offline".
     public var isUnreachable: Bool { reachability == "unreachable" }
 
+    /// A remote agent whose status the home has NOT confirmed on its latest poll:
+    /// `degraded` (the daemon's 1 to 2 missed polls) or the fully `unreachable` case.
+    ///
+    /// The distinction matters because the daemon overwrites `agent_status` with
+    /// "unknown" the moment reachability leaves `reachable`, and moves the real state
+    /// into `last_known_status`. `AgentRow.resolvedGroup` surfaces a last-known BLOCKED
+    /// row into needs-you, so without this the reader could not tell a colleague
+    /// genuinely waiting from a guess about a machine that went quiet.
+    ///
+    /// Enumerated rather than `!= "reachable"`, matching `isUnreachable` above: an
+    /// unknown string from a newer server reads as fresh, because the safe default is
+    /// not to stamp every row as stale.
+    public var hasUnconfirmedStatus: Bool {
+        reachability == "degraded" || reachability == "unreachable"
+    }
+
     /// This agent's recorded account is gone from the server's registry, so it will
     /// REFUSE to resume rather than come back on the default account and append to the
     /// wrong transcript. An error state a person must act on (re-register the account),

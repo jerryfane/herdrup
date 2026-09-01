@@ -75,9 +75,7 @@ struct AgentLiveActivity: Widget {
 
     /// One-line summary line: prefer the actionable count, else the status word.
     private func summary(_ s: AgentActivityAttributes.ContentState) -> String {
-        if s.needsYouCount > 0 { return "\(s.needsYouCount) need you" }
-        if s.workingCount > 0 { return "\(s.workingCount) working" }
-        return s.status.label
+        AgentActivitySummary.line(s)
     }
 }
 
@@ -130,11 +128,7 @@ private struct LockScreenView: View {
         .padding(.vertical, 12)
     }
 
-    private var summary: String {
-        if state.needsYouCount > 0 { return "\(state.needsYouCount) need you" }
-        if state.workingCount > 0 { return "\(state.workingCount) working" }
-        return state.status.label
-    }
+    private var summary: String { AgentActivitySummary.line(state) }
 }
 
 /// A filled status circle; colour carries the meaning (amber = needs you, blue =

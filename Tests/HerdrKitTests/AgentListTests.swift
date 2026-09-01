@@ -10,13 +10,19 @@ final class AgentListTests: XCTestCase {
     /// the JSON key was wrong.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil
+        archivedBy: String? = nil, archivedAt: String? = nil, terminalID: String? = nil,
+        inputPending: Bool? = nil, lastKnownStatus: String? = nil, machineID: String? = nil,
+        reachability: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
         if let terminalID { obj["terminal_id"] = terminalID }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
+        if let inputPending { obj["input_pending"] = inputPending }
+        if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
+        if let machineID { obj["machine_id"] = machineID }
+        if let reachability { obj["reachability"] = reachability }
         if let archivedBy {
             obj["archived"] = ["at": archivedAt ?? "2026-08-26T18:00:00Z", "by": archivedBy]
         }
@@ -36,6 +42,216 @@ final class AgentListTests: XCTestCase {
     ) throws -> AgentInfo {
         try agent(pane: "", status: "idle", name: name,
                   archivedBy: by, archivedAt: at, terminalID: terminalID)
+    }
+
+    // MARK: - needs-you escalation
+
+    /// An agent showing a plan-approval / AskUserQuestion menu reaches `needsYou` even
+    /// though its status string is not the literal "blocked". Before this, grouping read
+    /// only the status, so the row sat in `working` while the input router already treated
+    /// it as awaiting a menu answer: the list and the router disagreed about one fact.
+    func testInputPendingReachesNeedsYouWithoutBlockedStatus() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "working", inputPending: true))
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertEqual(row.status, .working, "the raw status is still reported verbatim")
+        // Control: the same row without the flag stays in `working`, so the assertion
+        // above is about `input_pending` and not about the fixture.
+        let control = AgentRow(info: try agent(pane: "p1", status: "working"))
+        XCTAssertEqual(control.group, .working)
+    }
+
+    /// A federated peer that misses ONE poll gets `agent_status: "unknown"` with the real
+    /// state moved to `last_known_status`. A blocked agent on that machine must stay in
+    /// `needsYou` instead of vanishing into `unrecognised` with everything else on the peer.
+    func testDegradedPeerKeepsABlockedAgentInNeedsYou() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                           lastKnownStatus: "blocked", machineID: "mcb-air"))
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertEqual(row.status, .indefinite, "the status itself is still not known")
+    }
+
+    /// Escalation is one-way. A last-known status that is not `blocked` must NOT pull the
+    /// row down into a quieter section: `unrecognised` sorts above `working` and `idle` on
+    /// purpose, and "this machine went quiet on us" is the louder, truer thing to show.
+    func testDegradedPeerDoesNotDemoteANonBlockedLastKnownStatus() throws {
+        for last in ["working", "idle", "done"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                               lastKnownStatus: last, machineID: "mcb-air"))
+            XCTAssertEqual(row.group, .unrecognised, "last_known_status \(last) must not demote")
+        }
+    }
+
+    /// A pane that no longer exists needs nothing from anybody, so a stale `input_pending`
+    /// cannot resurrect it into `needsYou`.
+    func testStoppedPaneIsNeverEscalated() throws {
+        let row = AgentRow(info: try agent(pane: "p1", status: "blocked", inputPending: true),
+                           isLive: false)
+        XCTAssertEqual(row.group, .stopped)
+    }
+
+    /// The input_pending escalation is written to fire for ANY status, so pin EVERY status
+    /// it can arrive with, not just one. A review mutant that narrowed it to
+    /// `status == .working` survived the whole 427-test suite because the only fixture
+    /// built "working"; the idle-plus-input_pending shape is the more common one in
+    /// practice, since an agent parked on a menu often reports idle.
+    func testInputPendingEscalatesFromEveryLiveStatus() throws {
+        for status in ["idle", "working", "done", "unknown", "blocked", "wat"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status, inputPending: true))
+            XCTAssertEqual(row.group, .needsYou, "input_pending must escalate from \(status)")
+        }
+        // Controls: the SAME statuses without the flag must land where grouping puts them,
+        // so the loop above is about input_pending and not about the fixture.
+        for (status, expected) in [("idle", AgentGroup.idle), ("working", .working),
+                                   ("done", .idle), ("unknown", .unrecognised),
+                                   ("blocked", .needsYou), ("wat", .unrecognised)] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status))
+            XCTAssertEqual(row.group, expected, "control for \(status)")
+        }
+    }
+
+    /// The `status == .indefinite` precondition on the last-known escalation is
+    /// load-bearing: a LIVE status is authoritative, and `last_known_status` only means
+    /// anything once the daemon has blanked the live one to "unknown". A review mutant
+    /// that dropped the precondition survived the full suite, so pin it directly. The
+    /// shape is real: a fixture elsewhere in this file builds status "idle" with a
+    /// last-known "working".
+    func testLastKnownBlockedIsIgnoredWhileTheLiveStatusIsKnown() throws {
+        for status in ["idle", "working", "done"] {
+            let row = AgentRow(info: try agent(pane: "p1", status: status,
+                                               lastKnownStatus: "blocked", machineID: "mcb-air"))
+            XCTAssertNotEqual(row.group, .needsYou,
+                              "a live \(status) status must not be overridden by a stale blocked value")
+        }
+        // And the case it IS for: the daemon blanked the live status, so last-known decides.
+        let blanked = AgentRow(info: try agent(pane: "p1", status: "unknown",
+                                               lastKnownStatus: "blocked", machineID: "mcb-air"))
+        XCTAssertEqual(blanked.group, .needsYou)
+    }
+
+    /// A degraded peer is 1 to 2 missed polls, not offline, so `isUnreachable` is false
+    /// while the status is nevertheless unconfirmed. The row needs a staleness marker, and
+    /// the render keys on this predicate, so pin both arms plus the fresh case.
+    func testDegradedReachabilityIsUnconfirmedButNotUnreachable() throws {
+        let degraded = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                                 machineID: "mcb-air", reachability: "degraded")
+        XCTAssertTrue(degraded.hasUnconfirmedStatus)
+        XCTAssertFalse(degraded.isUnreachable)
+        let gone = try agent(pane: "p2", status: "unknown", machineID: "mcb-air",
+                             reachability: "unreachable")
+        XCTAssertTrue(gone.hasUnconfirmedStatus)
+        XCTAssertTrue(gone.isUnreachable)
+        let live = try agent(pane: "p3", status: "idle", machineID: "mcb-air",
+                             reachability: "reachable")
+        XCTAssertFalse(live.hasUnconfirmedStatus)
+        // A newer server's unknown string must read as FRESH, never stamp every row stale.
+        let newer = try agent(pane: "p4", status: "idle", machineID: "mcb-air",
+                              reachability: "some-future-state")
+        XCTAssertFalse(newer.hasUnconfirmedStatus)
+        // A local agent carries no reachability at all.
+        XCTAssertFalse(try agent(pane: "p5", status: "idle").hasUnconfirmedStatus)
+    }
+
+    /// EVERY CONJUNCT of `showsUnconfirmedMarker` gets its own assertion, because a review
+    /// found all three one-conjunct mutants surviving the full 430-test suite. The UI
+    /// receipt cannot see them either: the mock fixture has no stopped or unreachable
+    /// degraded row, so its marker count stays 1 under all three.
+    func testShowsUnconfirmedMarkerRequiresEveryConjunct() throws {
+        let degraded = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                                 machineID: "mcb-air", reachability: "degraded")
+        // The positive case, so the negatives below cannot pass by the rule never firing.
+        XCTAssertTrue(AgentRow(info: degraded).showsUnconfirmedMarker)
+
+        // isLive: a pane that is gone is not presenting anything to qualify. Dropping this
+        // conjunct puts a stale chip on a stopped row.
+        XCTAssertFalse(AgentRow(info: degraded, isLive: false).showsUnconfirmedMarker,
+                       "a stopped row must not be marked; it renders no live state at all")
+
+        // !isUnreachable: that case already REPLACES the status with an offline mark, so
+        // marking it too says the same thing twice. Dropping this conjunct double-marks.
+        let gone = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                             machineID: "mcb-air", reachability: "unreachable")
+        XCTAssertFalse(AgentRow(info: gone).showsUnconfirmedMarker,
+                       "an unreachable row takes the offline treatment instead of the chip")
+
+        // hasUnconfirmedStatus: a live local row is never marked.
+        XCTAssertFalse(AgentRow(info: try agent(pane: "p3", status: "blocked")).showsUnconfirmedMarker)
+    }
+
+    /// `unconfirmedNeedsYouCount` counts only rows that are BOTH unconfirmed and in
+    /// needs-you. Dropping the group test was the strongest surviving mutant: the marker
+    /// rule itself does not look at the group, so a degraded row whose last-known status is
+    /// working or idle groups `.unrecognised` and would then be counted as a waiting agent.
+    func testUnconfirmedNeedsYouCountRequiresTheNeedsYouGroup() throws {
+        // Unconfirmed, but its last-known status is not blocked, so it groups unrecognised.
+        let notWaiting = try agent(pane: "p1", status: "unknown", lastKnownStatus: "working",
+                                   machineID: "mcb-air", reachability: "degraded")
+        let list = AgentList(agents: [notWaiting])
+        XCTAssertEqual(list.rows.first?.group, .unrecognised, "premise: this row is not waiting")
+        XCTAssertTrue(try XCTUnwrap(list.rows.first).showsUnconfirmedMarker,
+                      "premise: it IS unconfirmed, so only the group test can exclude it")
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 0,
+                       "an unconfirmed row that is not waiting must not be counted as waiting")
+
+        // And the row that IS waiting is counted.
+        let waiting = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                                machineID: "mcb-air", reachability: "degraded")
+        XCTAssertEqual(AgentList(agents: [waiting]).unconfirmedNeedsYouCount, 1)
+    }
+
+    /// The wording spec every surface shares. Three surfaces render this count and the
+    /// first version qualified only the roster card, which is how the lock screen ended up
+    /// asserting an unconfirmed state as fact.
+    func testNeedsYouSummaryQualifiesUnconfirmedCounts() throws {
+        XCTAssertNil(AgentList(agents: [try agent(pane: "p1", status: "idle")]).needsYouSummary,
+                     "nothing waiting means no summary, so a caller can use its own wording")
+
+        let live = try agent(pane: "p1", status: "blocked")
+        XCTAssertEqual(AgentList(agents: [live]).needsYouSummary, "1 need you")
+
+        let stale = try agent(pane: "p2", status: "unknown", lastKnownStatus: "blocked",
+                              machineID: "mcb-air", reachability: "degraded")
+        XCTAssertEqual(AgentList(agents: [stale]).needsYouSummary, "1 may need you",
+                       "when every waiting agent is unconfirmed, the whole claim is a maybe")
+
+        XCTAssertEqual(AgentList(agents: [live, stale]).needsYouSummary, "2 need you · 1 stale",
+                       "mixed: lead with the fact, then name the doubt")
+    }
+
+    /// A FULLY OFFLINE peer's escalated rows must still count as unconfirmed. This was the
+    /// fourth surviving mutant a review found, and it was a real defect rather than a
+    /// coverage hole: the count reused `showsUnconfirmedMarker`, which excludes
+    /// `isUnreachable` because the CARD draws those an offline badge instead. Counting with
+    /// a rendering exclusion meant a dead machine's stale guess was reported as CONFIRMED
+    /// on the Live Activity and the roster header, the two surfaces with no row to mark.
+    func testUnreachablePeerStillCountsAsUnconfirmed() throws {
+        let offline = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                               machineID: "mcb-air", reachability: "unreachable")
+        let row = AgentRow(info: offline)
+        // The premises that made the defect invisible: it IS escalated, and it is
+        // deliberately NOT marked, because the offline badge replaces its status entirely.
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertFalse(row.showsUnconfirmedMarker, "the card draws it offline, not stale")
+        XCTAssertTrue(row.hasUnconfirmedState, "but the underlying state is still unconfirmed")
+
+        let list = AgentList(agents: [offline])
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 1,
+                       "a dead machine's last-known blocked must never read as confirmed")
+        XCTAssertEqual(list.needsYouSummary, "1 may need you")
+
+        // Five agents on one dead machine previously rendered a flat "5 need you".
+        let five = try (1...5).map {
+            try agent(pane: "p\($0)", status: "unknown", lastKnownStatus: "blocked",
+                      machineID: "mcb-air", reachability: "unreachable")
+        }
+        XCTAssertEqual(AgentList(agents: five).needsYouSummary, "5 may need you")
+
+        // Mixed with a genuinely live blocked agent, the doubt is named rather than hidden.
+        let live = try agent(pane: "live", status: "blocked")
+        XCTAssertEqual(AgentList(agents: [live, offline]).needsYouSummary,
+                       "2 need you · 1 stale")
+
+        // And a stopped row on a dead peer is not unconfirmed, it is simply gone.
+        XCTAssertFalse(AgentRow(info: offline, isLive: false).hasUnconfirmedState)
     }
 
     // MARK: - archived agents (issue #173)
@@ -646,5 +862,72 @@ final class AgentListTests: XCTestCase {
     func testPermanentRefusalNoticeSaysItIsNotReconnecting() {
         let notice = permanentStreamRefusal(code: "pane_not_found")
         XCTAssertEqual(notice?.contains("not reconnecting"), true)
+    }
+
+    // MARK: - the activity headline (a DIFFERENT question from the list order)
+
+    /// THE EXACT CONTRADICTION A REVIEWER MEASURED: one freshly stopped pane used to
+    /// outrank every working agent, because the lock screen re-derived its headline from the
+    /// roster's SECTION ORDER. The surface then showed a red "Stopped" dot above a summary
+    /// line reading "2 working" — self-contradicting, from a single list.
+    ///
+    /// `.stopped` comes from LIVENESS, not from a status word (a "done" agent folds into
+    /// idle), so the census must omit the pane. THE PREMISE IS ASSERTED FIRST: the first
+    /// version of this test used `status: "done"` and passed while producing an IDLE row,
+    /// which working outranks anyway — green, and testing nothing.
+    func testAStoppedPaneIsNotTheHeadlineWhileOthersWork() throws {
+        let list = AgentList(agents: [
+            try agent(pane: "p1", status: "blocked", name: "gone-one"),
+            try agent(pane: "p2", status: "working"),
+            try agent(pane: "p3", status: "working"),
+        ], livePaneIDs: ["p2", "p3"])   // p1 is absent from the census
+        XCTAssertEqual(list.rows.first { $0.info.paneID == "p1" }?.group, .stopped,
+                       "premise: p1 must actually be stopped, and a blocked-but-gone pane is the strongest case")
+        XCTAssertEqual(list.activityLead?.group, .working,
+                       "a gone pane is not what the session is DOING; the list order says otherwise on purpose")
+        XCTAssertEqual(list.rows.filter { $0.group == .working }.count, 2,
+                       "and the summary count the headline used to contradict is 2")
+    }
+
+    /// Stopped IS the honest headline when it is the whole truth, so the demotion above is
+    /// a re-ranking and not a suppression.
+    func testAStoppedPaneIsTheHeadlineWhenNothingElseExists() throws {
+        let list = AgentList(agents: [try agent(pane: "p1", status: "working")],
+                             livePaneIDs: [])
+        XCTAssertEqual(list.activityLead?.group, .stopped)
+    }
+
+    /// Within needsYou, a CONFIRMED row names the headline before a last-known guess on a
+    /// peer that went quiet. The doubt is still reported by the count; it just no longer
+    /// picks the name.
+    func testAConfirmedNeedsYouOutranksAnUnconfirmedOne() throws {
+        let stale = try agent(pane: "p1", status: "unknown", name: "stale-one",
+                              lastKnownStatus: "blocked", machineID: "mcb", reachability: "degraded")
+        let live = try agent(pane: "p2", status: "blocked", name: "live-one")
+        // Server order puts the unconfirmed row FIRST, so a rule that merely kept list
+        // order would pick it.
+        let list = AgentList(agents: [stale, live])
+        XCTAssertEqual(list.activityLead?.info.name, "live-one",
+                       "a confirmed blocked agent should name the headline over a stale guess")
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 1,
+                       "the doubt is still reported, just not as the headline")
+    }
+
+    /// needsYou still outranks everything, and unrecognised still keeps its fail-closed
+    /// place above working and idle — so the demotion of `stopped` did not disturb the rest.
+    func testHeadlineOrderIsOtherwiseUnchanged() throws {
+        let needs = try agent(pane: "p1", status: "blocked")
+        let unrec = try agent(pane: "p2", status: "wat")
+        let work  = try agent(pane: "p3", status: "working")
+        let idle  = try agent(pane: "p4", status: "idle")
+        XCTAssertEqual(AgentList(agents: [idle, work, unrec, needs]).activityLead?.group, .needsYou)
+        XCTAssertEqual(AgentList(agents: [idle, work, unrec]).activityLead?.group, .unrecognised)
+        XCTAssertEqual(AgentList(agents: [idle, work]).activityLead?.group, .working)
+        XCTAssertEqual(AgentList(agents: [idle]).activityLead?.group, .idle)
+    }
+
+    /// An empty list has no headline at all, which the caller renders as "No agents".
+    func testAnEmptyListHasNoHeadline() {
+        XCTAssertNil(AgentList(agents: []).activityLead)
     }
 }

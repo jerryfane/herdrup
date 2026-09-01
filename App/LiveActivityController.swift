@@ -107,34 +107,32 @@ final class LiveActivityController: ObservableObject {
 
     // MARK: - Mapping HerdrKit → the shared content state
 
-    /// Build a content state from the current agent list. The headline is the
-    /// highest-priority agent (lowest `AgentGroup` rawValue: needsYou < stopped <
-    /// unrecognised < working < idle), so the surface always leads with whatever most
-    /// wants the user's attention.
+    /// Copy `AgentList.activityContent` into the activity's own state type. THIS FUNCTION
+    /// DECIDES NOTHING, deliberately.
+    ///
+    /// It used to derive the headline here, first as `rows.min { $0.group.rawValue < ... }`
+    /// (the roster's section order answering a different question, which put a red Stopped dot
+    /// over a summary reading "N working") and then, after that rule moved to HerdrKit, as a
+    /// single `list.activityLead` call. A reviewer showed the second version was barely better
+    /// than the first: nothing in the repo executes this function, no test target can see
+    /// `App/`, and so the ONE-LINE REVERT back to the buggy expression restored the shipped
+    /// defect in full and passed all 446 tests. Pinning the helper was not pinning the path.
+    ///
+    /// Every decision therefore moved into `activityContent`, where a test does execute it.
+    /// What is left here is a field copy, and the one remaining judgement — an unknown status
+    /// word — resolves the way the rest of this stack resolves it, toward surfacing rather
+    /// than sinking. A cross-target test asserts HerdrKit can only ever emit the four words
+    /// this enum accepts, so the fallback is unreachable rather than merely unlikely.
     static func state(from list: AgentList) -> AgentActivityAttributes.ContentState {
-        let rows = list.rows
-        let lead = rows.min { $0.group.rawValue < $1.group.rawValue }
-        let status: AgentActivityAttributes.Status
-        switch lead?.group {
-        case .needsYou, .unrecognised: status = .needsYou
-        case .stopped:                 status = .stopped
-        case .working:                 status = .working
-        case .idle, .none:             status = .idle
-        }
-        // Only the working state carries a start time — the headline agent's current
-        // turn ≈ its last completed-turn boundary (stable while it works that turn, so
-        // the widget timer doesn't reset on every list refresh). Same signal the
-        // in-app header uses.
-        let workingSince: Double? = status == .working
-            ? lead?.info.lastCompletedTurn?.completedUnixMs.map { Double($0) / 1000 }
-            : nil
+        let c = list.activityContent
         return AgentActivityAttributes.ContentState(
-            headline: lead?.title ?? "No agents",
-            status: status,
-            needsYouCount: list.needsYouCount,
-            workingCount: rows.filter { $0.group == .working }.count,
-            totalCount: rows.count,
-            workingSince: workingSince
+            headline: c.headline,
+            status: AgentActivityAttributes.Status(rawValue: c.statusWord) ?? .needsYou,
+            needsYouCount: c.needsYouCount,
+            unconfirmedCount: c.unconfirmedCount,
+            workingCount: c.workingCount,
+            totalCount: c.totalCount,
+            workingSince: c.workingSinceUnixSeconds
         )
     }
 

@@ -115,7 +115,75 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         self.isLive = isLive
         let status = AgentStatus(wire: info.agentStatus)
         self.status = status
-        self.group = AgentRow.group(for: status, isLive: isLive)
+        self.group = AgentRow.resolvedGroup(info: info, status: status, isLive: isLive)
+    }
+
+    /// WHETHER THIS ROW'S STATE IS UNCONFIRMED. A FACT about the row, with no rendering
+    /// opinion in it: the row is live and sits on a peer the home did not confirm on its
+    /// last poll, whether that peer is merely degraded or fully unreachable.
+    ///
+    /// SEPARATE FROM `showsUnconfirmedMarker` ON PURPOSE, and the separation is the fix for
+    /// a real defect: the count below used to reuse the marker, which excludes
+    /// `isUnreachable` for a RENDERING reason, so a fully OFFLINE peer's last-known-blocked
+    /// agents escalated into needs-you and were then reported as CONFIRMED on the two
+    /// surfaces that have no row to mark. A predicate scoped to one surface's drawing
+    /// decision is the wrong thing to count with.
+    public var hasUnconfirmedState: Bool {
+        isLive && info.hasUnconfirmedStatus
+    }
+
+    /// Whether this row should be DRAWN with a staleness marker. The fact above, minus the
+    /// unreachable case, which already replaces the status outright with an offline mark;
+    /// doubling up would say the same thing twice in one row.
+    ///
+    /// ONE DEFINITION, DELIBERATELY. Every surface that draws a status reads THIS rather
+    /// than re-deriving it: the first version of this marker existed only on the roster
+    /// card, which is how the lock screen went on asserting an unconfirmed count as fact.
+    public var showsUnconfirmedMarker: Bool {
+        hasUnconfirmedState && !info.isUnreachable
+    }
+
+    /// ESCALATION-ONLY overlay on `group(for:isLive:)`. Two signals may move a row UP
+    /// into `needsYou`; nothing here may ever move a row toward a QUIETER section, so
+    /// the fail-closed placement the group order encodes cannot be undone by a lenient
+    /// field.
+    ///
+    /// TWO SITES, NOT ONE. `group(for:isLive:)` keeps its exhaustive switch, so adding an
+    /// `AgentStatus` case still fails to compile THERE. This overlay does NOT get that
+    /// protection: it compares by equality (`status == .indefinite`), which keeps
+    /// compiling forever, so a new status would silently decline the last-known
+    /// escalation. Anyone adding a case must visit both.
+    ///
+    /// 1. `inputPending`. The group switch reads ONLY the status string, so an agent
+    ///    showing a plan-approval or AskUserQuestion menu while its status is anything
+    ///    other than the literal "blocked" could never reach `needsYou`. The predicate
+    ///    already exists as `AgentInfo.isAwaitingMenuInput` and already gates input
+    ///    routing; this makes the LIST agree with the router instead of contradicting it.
+    ///
+    /// 2. `lastKnownStatus`, and ONLY when it reads `blocked`. A federated peer that
+    ///    misses a SINGLE poll is marked Degraded, and the daemon then overwrites
+    ///    `agent_status` with "unknown" and moves the real state into
+    ///    `last_known_status`, so every agent on that machine leaves both `working` and
+    ///    `needsYou` at once. Reading the surviving copy for the blocked case only keeps
+    ///    a fleet agent that is waiting on a human visible, without presenting any other
+    ///    stale state as though it were live. A last-known `working` deliberately does
+    ///    NOT restore the `working` group: that would be a demotion out of
+    ///    `unrecognised`, and "this machine went quiet on us" is the louder, truer thing
+    ///    to say. The real remedy for that case is daemon-side, not blanking a whole
+    ///    peer on one missed poll.
+    static func resolvedGroup(info: AgentInfo, status: AgentStatus, isLive: Bool) -> AgentGroup {
+        let base = group(for: status, isLive: isLive)
+        // A pane that is gone needs nothing from anybody: never escalate off `.stopped`.
+        guard isLive else { return base }
+        if info.isAwaitingMenuInput { return .needsYou }
+        // The `.indefinite` precondition is load-bearing, not decoration: a LIVE status is
+        // authoritative, and `last_known_status` is only meaningful once the daemon has
+        // blanked the live one to "unknown". Escalating on a known-idle row that happens to
+        // carry a stale blocked value would resurrect a state the server already replaced.
+        if status == .indefinite, AgentStatus(wire: info.lastKnownStatus).isBlocked {
+            return .needsYou
+        }
+        return base
     }
 
     /// EXHAUSTIVE OVER `AgentStatus` ON PURPOSE — no `default:` arm.
@@ -163,14 +231,161 @@ public struct AgentList: Equatable, Sendable {
     /// most-recently-archived first.
     public let archived: [AgentRow]
 
-    /// What the top of the screen says. Counts only positively-blocked agents —
-    /// an unrecognised status is surfaced by its own section, and inflating this
-    /// number with maybes would make the one number on the screen untrustworthy.
-    /// Counts the GROUP, not the retained status. Reading `status.isBlocked`
-    /// directly meant a blocked agent whose pane had since vanished sorted into
-    /// `.stopped` and made `isQuiet` true while still reporting 1 here — the
-    /// screen simultaneously claiming all-clear and one-waiting.
+    /// What the top of the screen says. Counts the `needsYou` GROUP, not the retained
+    /// status. Reading `status.isBlocked` directly meant a blocked agent whose pane had
+    /// since vanished sorted into `.stopped` and made `isQuiet` true while still
+    /// reporting 1 here — the screen simultaneously claiming all-clear and one-waiting.
+    ///
+    /// THIS IS NO LONGER "positively-blocked agents only", and the older wording said so.
+    /// `AgentRow.resolvedGroup` escalates two further shapes into the group: a row whose
+    /// status is not `blocked` but which reports `input_pending`, and a row on a degraded
+    /// peer whose blocked state is a LAST-KNOWN value. The second is a maybe by
+    /// construction. That is a deliberate trade, because an agent waiting on a human is
+    /// worse to hide than to over-report, and the row itself carries a staleness mark so
+    /// the count is never the only thing the reader sees. An unrecognised status still has
+    /// its own section and is still not counted here.
     public var needsYouCount: Int { rows.filter { $0.group == .needsYou }.count }
+
+    /// How many of `needsYouCount` rest on a state the home could not confirm. A surface
+    /// with no room for a per-row marker (the Live Activity) needs this to avoid asserting
+    /// an unconfirmed "N need you" as fact on the lock screen.
+    public var unconfirmedNeedsYouCount: Int {
+        // `hasUnconfirmedState`, NOT `showsUnconfirmedMarker`. The marker excludes
+        // unreachable rows because the card draws them an offline badge instead, and
+        // counting with that exclusion reported a fully OFFLINE peer's stale guess as
+        // CONFIRMED on exactly the two surfaces that have no row to mark.
+        rows.filter { $0.group == .needsYou && $0.hasUnconfirmedState }.count
+    }
+
+    /// THE ACTIVITY HEADLINE, which answers a DIFFERENT QUESTION FROM THE LIST ORDER, and
+    /// lives here rather than in the app so it can be tested at all.
+    ///
+    /// `AgentGroup`'s ordering is a LIST order: it answers "which section does this row
+    /// belong in, and what does the reader most need to scroll to". A gone pane sorts high
+    /// there on purpose. The Live Activity asks something else — "what is this session
+    /// doing right now" — and reusing the list order to answer it made a single freshly
+    /// stopped pane outrank N working agents, so the lock screen showed a red Stopped dot
+    /// above a summary line reading "N working": one surface contradicting itself.
+    ///
+    /// This is the FOURTH time in this PR's review history that a predicate scoped for one
+    /// surface was reused to answer another surface's question, so the rule is written once,
+    /// here, next to the ordering it deliberately differs from.
+    ///
+    /// The rule, in order:
+    ///  1. `needsYou`, and WITHIN it a CONFIRMED row before an unconfirmed one, so the
+    ///     headline names an agent we actually know is waiting rather than a last-known
+    ///     guess on a peer that went quiet. The doubt is still reported, by
+    ///     `unconfirmedNeedsYouCount`; what changes is that it no longer picks the NAME.
+    ///  2. `unrecognised`, keeping the fail-closed placement: not knowing what an agent is
+    ///     doing is nearer to needing attention than to nothing to do.
+    ///  3. `working`, then `idle`.
+    ///  4. `stopped` LAST. A pane that is gone is not what the session is doing, so it is
+    ///     the headline only when there is nothing else to say — which is honest, because
+    ///     then it is the whole truth.
+    public var activityLead: AgentRow? {
+        func rank(_ r: AgentRow) -> Int {
+            switch r.group {
+            case .needsYou:     return r.hasUnconfirmedState ? 1 : 0
+            case .unrecognised: return 2
+            case .working:      return 3
+            case .idle:         return 4
+            case .stopped:      return 5
+            }
+        }
+        // `min(by:)` keeps the first row of the winning rank, so within a rank the
+        // server's own order decides and this introduces no second sort.
+        return rows.min { rank($0) < rank($1) }
+    }
+
+    /// EVERY DECISION THE LIVE ACTIVITY RENDERS, computed here so it is reachable by a test.
+    ///
+    /// The previous head moved the headline RULE into `activityLead` but left the CALL SITE
+    /// in `App/LiveActivityController.state(from:)`, which no test target can see — so the
+    /// one-line revert to `rows.min { $0.group.rawValue < $1.group.rawValue }` still restored
+    /// the shipped defect in full and passed the entire suite. A test that pins a helper is
+    /// not a test of the path. So the whole mapping lives here now and the app-side function
+    /// copies fields and decides nothing.
+    ///
+    /// `statusWord` is a String rather than the activity's own enum because that enum sits in
+    /// `Shared/`, which the widget compiles without HerdrKit. The words are exactly
+    /// `AgentActivityStatus`'s raw values, and a cross-target test asserts that rather than
+    /// trusting this comment.
+    public struct ActivityContent: Equatable, Sendable {
+        public let headline: String
+        public let statusWord: String
+        public let needsYouCount: Int
+        public let unconfirmedCount: Int
+        public let workingCount: Int
+        public let totalCount: Int
+        public let workingSinceUnixSeconds: Double?
+    }
+
+    /// THE ATTENTION COUNTS DIVERGE FROM THE ROSTER'S ON PURPOSE, and this is the reason.
+    ///
+    /// `needsYouCount` counts only `group == .needsYou`; an unrecognised agent gets its own
+    /// SECTION instead, which is honest on a screen that has sections. The lock screen has
+    /// none, so with the strict count an unrecognised lead produced 0, and the summary line
+    /// fell through to the working branch: an amber needs-you dot above the text "N working",
+    /// coloured amber, on one surface, from one list. That is the same self-contradiction as
+    /// the red-Stopped-over-"2 working" defect this rule was written to remove.
+    ///
+    /// So a surface with no room for rows carries what the rows would have shown — exactly
+    /// the argument that produced `unconfirmedNeedsYouCount`. Unrecognised rows count toward
+    /// the attention total AND toward its unconfirmed portion, because "I cannot interpret
+    /// this agent" is a maybe, not a fact. The line then reads "1 may need you" beside an
+    /// amber dot, which agrees with itself and with `isQuiet`'s refusal to call an
+    /// unrecognised roster all-clear.
+    public var activityContent: ActivityContent {
+        let lead = activityLead
+        let word: String
+        switch lead?.group {
+        case .needsYou, .unrecognised: word = "needsYou"
+        case .stopped:                 word = "stopped"
+        case .working:                 word = "working"
+        case .idle, .none:             word = "idle"
+        }
+        let attention = rows.filter { $0.group == .needsYou || $0.group == .unrecognised }.count
+        let unconfirmed = rows.filter {
+            ($0.group == .needsYou && $0.hasUnconfirmedState) || $0.group == .unrecognised
+        }.count
+        // Only the working state carries a start time — the headline agent's current turn is
+        // approximated by its last completed-turn boundary, which is stable while it works
+        // that turn, so the widget's timer does not reset on every list refresh.
+        let since: Double? = word == "working"
+            ? lead?.info.lastCompletedTurn?.completedUnixMs.map { Double($0) / 1000 }
+            : nil
+        return ActivityContent(
+            headline: lead?.title ?? "No agents",
+            statusWord: word,
+            needsYouCount: attention,
+            unconfirmedCount: unconfirmed,
+            workingCount: rows.filter { $0.group == .working }.count,
+            totalCount: rows.count,
+            workingSinceUnixSeconds: since)
+    }
+
+    /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule
+    /// instead of each inventing its own. Three surfaces render this count: the roster
+    /// header, the Live Activity lock-screen line, and the Dynamic Island. The first
+    /// version qualified only the roster CARD, which is how the lock screen ended up
+    /// asserting an unconfirmed state as fact.
+    ///
+    /// The Dynamic Island compact trailing is the one place that cannot use this: it has
+    /// room for a glyph and a number, nothing more. That is a space constraint, recorded
+    /// rather than pretended away.
+    ///
+    /// `nil` when nothing is waiting, so a caller can fall through to its own wording.
+    public var needsYouSummary: String? {
+        let total = needsYouCount
+        guard total > 0 else { return nil }
+        let unconfirmed = unconfirmedNeedsYouCount
+        // Every waiting agent rests on an unconfirmed state, so the whole claim is a maybe.
+        // Saying it outright beats appending a qualifier to an assertion.
+        if unconfirmed >= total { return "\(total) may need you" }
+        // Some confirmed, some not: lead with the fact, then name the doubt.
+        if unconfirmed > 0 { return "\(total) need you · \(unconfirmed) stale" }
+        return "\(total) need you"
+    }
 
     /// True when nothing is blocked AND nothing is unrecognised. The quiet state
     /// has to mean "I checked everything", so an uninterpretable agent must
