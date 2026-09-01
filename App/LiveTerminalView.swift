@@ -696,6 +696,12 @@ struct LiveTerminalView: UIViewRepresentable {
         @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
             guard !stopped, foreground, gr.state == .ended else { return }
             onTerminalFocusRequest?()
+            // Publishes because this recognizer has NO failure requirement, so it fires on tap 1
+            // of ANY tap that actually lands on the terminal. That makes it the discriminator for
+            // a tap that appears to do nothing: if the probe's publisher changes to focusTap, the
+            // touch reached the view and the fault is downstream in clearTap's require-to-fail
+            // chain; if it does not change at all, the tap missed the terminal entirely.
+            publishSelectionProbe("focusTap")
         }
 
         /// Clears an active selection on a GENUINE single tap. Guarded by
@@ -714,7 +720,7 @@ struct LiveTerminalView: UIViewRepresentable {
             view.clearSelection()
             // So a test can distinguish "the clear reached the view" from "the highlight
             // happened to stop being drawn". No-op outside UI-test builds.
-            publishSelectionProbe()
+            publishSelectionProbe("clearTap")
         }
 
         /// Re-present the Copy menu at the TAP POINT. Ordered AFTER SwiftTerm's own handler by
@@ -733,7 +739,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let point = gr.location(in: view)
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.stopped, let view = self.view else { return }
-                self.publishSelectionProbe()   // records state even when the guards below refuse
+                self.publishSelectionProbe("menuTap")   // records state even when the guards below refuse
                 guard self.foreground, view.hasActiveSelection else { return }
                 view.showStandardContextMenu(at: point)
             }
@@ -767,7 +773,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// What it publishes: sel, len, the selected TEXT, rows, cols, ydisp and a resize count.
         /// The text is deliberate and is what made the row-space defect findable; it is safe only
         /// because this cannot exist outside a DEBUG build fed by the canned mock transport.
-        private func publishSelectionProbe() {
+        private func publishSelectionProbe(_ publisher: String) {
             #if DEBUG
             guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
                   let view else { return }
@@ -822,10 +828,17 @@ struct LiveTerminalView: UIViewRepresentable {
             // `yBase` is deliberately NOT published: it is internal to SwiftTerm (Buffer.swift:43
             // declares it without `public`, unlike yDisp at 58), so reading it would not compile.
             // Checked before pushing rather than after CI said so.
+            // `pub` names WHICH handler published this reading and counts publishes, so a test can
+            // tell "the handler ran and did nothing" from "the handler never ran". Without it, a
+            // stale reading from an earlier gesture is indistinguishable from a fresh one, and CI
+            // spent a round on exactly that ambiguity: after a single tap the label still read
+            // sel=1 text=<lazy>, which could have meant clearTap failed OR that the tap never
+            // reached the terminal at all.
+            probePublishCount += 1
             probe.accessibilityLabel =
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
-                + "resizes=\(resizeCount)"
+                + "resizes=\(resizeCount) pub=\(publisher)#\(probePublishCount)"
             #endif
         }
 
@@ -1502,6 +1515,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// outside a UI-test run. The property itself is left ungated because nothing assigns it
         /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
         private var selectionProbe: UIView?
+        /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
+        private var probePublishCount = 0
         /// How many times SwiftTerm has reported a grid change. Published by the probe because
         /// `processSizeChange` clears the selection on any rows/cols change, so a resize
         /// arriving late is one of the candidate explanations for a selection that vanishes —

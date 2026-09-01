@@ -278,30 +278,47 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 5),
                       "a word is highlighted but Copy is not offered, so the selection cannot be acted on")
 
-        // (5) DESELECTION still works, so the fix did not simply disable it. The tap stays in
-        // the terminal band and well away from the selected word — NOT on the keyboard, which
-        // on a live pane would type a character into the agent's shell. The keyboard is already
-        // up by now, so this tap cannot move the layout the way step 2's did.
+        // (5) DESELECTION still works, so the fix did not simply disable it.
         //
-        // THE SETTLE IS LONGER THAN IT LOOKS LIKE IT NEEDS TO BE, on purpose. `clearTap` requires
-        // SwiftTerm's 2-tap recognizer to fail, and `menuTap` — also in clearTap's require-to-fail
-        // set — requires the 3-tap one. So a genuine single tap clears only after that whole chain
-        // times out, roughly two multi-tap intervals, and under CI load that is not instant.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.70, dy: 0.20)).tap()
+        // dy MATCHES THE TAPS THAT DEMONSTRABLY REACH THE TERMINAL. This was 0.20, and CI failed
+        // deterministically in both passes with the selection untouched — sel=1 len=4 text=<lazy>,
+        // republished by nobody. Since `handleClearSelectionTap` publishes AFTER clearing, sel=1
+        // means clearTap never ran; and dy 0.20 was a guess about where the terminal band starts,
+        // never a measured value, while 0.30 is proven twice over in this very test — the focus tap
+        // raises the keyboard from there and the double tap selects a word from there. So the most
+        // likely reading is that 0.20 was above the terminal, in the header or the TUI banner, and
+        // no terminal recognizer saw the touch at all.
+        //
+        // dx moves to 0.60 to stay clear of the selected word at column 7 while remaining inside
+        // the 50-column viewport.
+        //
+        // THE SETTLE IS LONGER THAN IT LOOKS, on purpose. `clearTap` requires SwiftTerm's 2-tap
+        // recognizer to fail, and `menuTap` — which joined clearTap's require-to-fail set when I
+        // declared it first — requires the 3-tap one. A genuine single tap therefore clears only
+        // after that chain times out, about two multi-tap intervals, which under CI load is not
+        // instant.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.60, dy: 0.30)).tap()
         Thread.sleep(forTimeInterval: 3.0)
         let cleared = app.screenshot()
         attach(cleared, name: "04-after-single-tap")
 
-        // STATE BEFORE PIXELS HERE TOO, which this step was missing while step 4 had it. CI failed
-        // exactly here with teal px=384 and the message could only say "deselection is not reaching
-        // the view" — a conclusion it had no evidence for. `handleClearSelectionTap` republishes the
-        // probe after clearing, so the same reading that diagnoses step 4 can diagnose this one:
-        // sel=0 with teal remaining means the clear DID reach the view and the highlight is stale
-        // pixels; sel=1 means the clear never ran at all. Those are different bugs and the first
-        // version of this assertion could not tell them apart.
+        // STATE BEFORE PIXELS HERE TOO, which this step lacked while step 4 had it — so the one
+        // step that failed was the one that could not name its layer.
+        //
+        // AND `pub` SEPARATES THE TWO REMAINING CAUSES. The probe now reports which handler
+        // published it and a monotonic count, so:
+        //   pub=focusTap#N with N above the pre-tap value -> the touch REACHED the terminal
+        //     (focusTap has no failure requirement and fires on tap 1 of anything), so a still-
+        //     active selection means clearTap's require-to-fail chain is the fault;
+        //   pub unchanged from the double tap -> no terminal recognizer saw the touch, i.e. the
+        //     coordinate missed the view, which is a test-aim failure and not a product one.
+        // Without that field those two produce byte-identical readings, which is what cost the
+        // previous round.
         let afterReading = probe.exists ? probe.label : "PROBE ABSENT"
+        XCTAssertTrue(afterReading.contains("pub=focusTap") || afterReading.contains("pub=clearTap"),
+                      "no terminal tap handler published after the single tap, so the touch never reached the terminal view — the coordinate missed it. Compare against the pre-tap reading probe[\(reading)]; after probe[\(afterReading)]")
         XCTAssertTrue(afterReading.contains("sel=0"),
-                      "SwiftTerm still reports an active selection after a genuine single tap, so the clear never reached the view — clearTap did not fire, or its require(toFail:) chain had not resolved. probe[\(afterReading)]")
+                      "the touch reached the terminal but SwiftTerm still reports an active selection, so clearTap did not run or its require(toFail:) chain had not resolved within the settle. probe[\(afterReading)]")
 
         let clearedTeal = tealPixelCount(cleared)
         XCTAssertLessThan(clearedTeal, 20,
