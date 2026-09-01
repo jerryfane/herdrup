@@ -591,6 +591,7 @@ struct LiveTerminalView: UIViewRepresentable {
             for gr in view.gestureRecognizers ?? [] {
                 if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
                     clearTap.require(toFail: t)
+                    clearTapRequirementCount += 1
                 }
             }
             view.addGestureRecognizer(clearTap)
@@ -715,6 +716,13 @@ struct LiveTerminalView: UIViewRepresentable {
         /// `disableSelectionPanGesture()`, so one call both redraws and removes the lazy
         /// extend pan.
         @objc private func handleClearSelectionTap(_ gr: UITapGestureRecognizer) {
+            // PUBLISHES AT ENTRY, before any guard, because the previous round could not tell
+            // "this handler never ran" from "it ran and bailed". CI reported pub=focusTap with the
+            // selection still active, which proved the touch reached the terminal and that clearTap
+            // produced nothing — but not which of those two it was. An entry publish separates
+            // them: pub=clearTapEntry means the recognizer fired and something below refused,
+            // pub=focusTap still means the recognizer itself never recognized.
+            publishSelectionProbe("clearTapEntry(state=\(gr.state.rawValue) requires=\(clearTapRequirementCount))")
             guard !stopped, foreground, gr.state == .ended, let view else { return }
             guard view.hasActiveSelection else { return }
             view.clearSelection()
@@ -1517,6 +1525,10 @@ struct LiveTerminalView: UIViewRepresentable {
         private var selectionProbe: UIView?
         /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
         private var probePublishCount = 0
+        /// How many 2-tap recognizers `clearTap` was made to require the failure of, captured at
+        /// attach. Published by the probe so a test can see whether that chain was wired as
+        /// intended rather than inferring it from behaviour.
+        private var clearTapRequirementCount = 0
         /// How many times SwiftTerm has reported a grid change. Published by the probe because
         /// `processSizeChange` clears the selection on any rows/cols change, so a resize
         /// arriving late is one of the candidate explanations for a selection that vanishes —
