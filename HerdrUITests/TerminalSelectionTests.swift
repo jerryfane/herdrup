@@ -282,13 +282,30 @@ final class TerminalSelectionTests: XCTestCase {
         // the terminal band and well away from the selected word — NOT on the keyboard, which
         // on a live pane would type a character into the agent's shell. The keyboard is already
         // up by now, so this tap cannot move the layout the way step 2's did.
+        //
+        // THE SETTLE IS LONGER THAN IT LOOKS LIKE IT NEEDS TO BE, on purpose. `clearTap` requires
+        // SwiftTerm's 2-tap recognizer to fail, and `menuTap` — also in clearTap's require-to-fail
+        // set — requires the 3-tap one. So a genuine single tap clears only after that whole chain
+        // times out, roughly two multi-tap intervals, and under CI load that is not instant.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.70, dy: 0.20)).tap()
-        Thread.sleep(forTimeInterval: 2.0)
+        Thread.sleep(forTimeInterval: 3.0)
         let cleared = app.screenshot()
         attach(cleared, name: "04-after-single-tap")
+
+        // STATE BEFORE PIXELS HERE TOO, which this step was missing while step 4 had it. CI failed
+        // exactly here with teal px=384 and the message could only say "deselection is not reaching
+        // the view" — a conclusion it had no evidence for. `handleClearSelectionTap` republishes the
+        // probe after clearing, so the same reading that diagnoses step 4 can diagnose this one:
+        // sel=0 with teal remaining means the clear DID reach the view and the highlight is stale
+        // pixels; sel=1 means the clear never ran at all. Those are different bugs and the first
+        // version of this assertion could not tell them apart.
+        let afterReading = probe.exists ? probe.label : "PROBE ABSENT"
+        XCTAssertTrue(afterReading.contains("sel=0"),
+                      "SwiftTerm still reports an active selection after a genuine single tap, so the clear never reached the view — clearTap did not fire, or its require(toFail:) chain had not resolved. probe[\(afterReading)]")
+
         let clearedTeal = tealPixelCount(cleared)
         XCTAssertLessThan(clearedTeal, 20,
-                          "the selection highlight survived a genuine single tap (teal px=\(clearedTeal)); deselection is not reaching the view")
+                          "SwiftTerm reports the selection cleared but the highlight is still painted (teal px=\(clearedTeal)), so the clear reached the model and not the screen. probe[\(afterReading)]")
     }
 
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
