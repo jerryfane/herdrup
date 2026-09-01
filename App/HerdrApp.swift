@@ -6219,10 +6219,32 @@ struct MockTransport: HerdrTransport {
     }
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-        // `pane.stream` (the live terminal): reply with the stream_started ack, then
-        // a reset seed, then finish — so the DEBUG pane shows a rendered SwiftTerm
-        // terminal, not an empty one. The scrollback seed (UI test) feeds 200 lines so
-        // there is real history to scroll; the default seed is the short screenshot one.
+        // `pane.stream` (the live terminal): reply with the stream_started ack, then a reset
+        // seed, then STAY OPEN — so the DEBUG pane shows a rendered SwiftTerm terminal, not an
+        // empty one. The scrollback seed (UI test) feeds 200 lines so there is real history to
+        // scroll; the default seed is the short screenshot one.
+        //
+        // IT MUST NOT FINISH, and finishing was a real fixture defect with a long tail. A live
+        // `pane.stream` never ends, so the app treats an ended stream as a DROP and reconnects
+        // with capped backoff — correct product behaviour. Against a mock that finished
+        // immediately, every reconnect re-delivered the reset and appended another 200 lines,
+        // forever. Measured in CI at head 18e1daca: the probe reported ydisp=3598 in one pass and
+        // ydisp=3777 in the next, a buffer of thousands of lines in a fixture that seeds 200, and
+        // growing by one seed per reconnect between passes.
+        //
+        // The consequences all looked like unrelated bugs:
+        //   - The scroll view's contentSize tracked roughly 200 lines while `yDisp` ran past 3500,
+        //     so a tap resolved to buffer row 186 while the DRAWN window was 3598...3621. The
+        //     selection was real and off-screen, which is why the highlight was never painted and
+        //     why four rounds of hunting in SwiftTerm's renderer found nothing wrong with it.
+        //   - `testBackfillMakesHistoryScrollable`'s "terminal is static when untouched" premise
+        //     failed at diff 0.08549 against a 0.02 ceiling, because content genuinely kept
+        //     arriving.
+        //
+        // Not finishing is sufficient: the stream's storage holds the continuation for as long as
+        // the consumer iterates, so the pane simply waits for frames that never come — exactly
+        // what a quiet live pane looks like. This is what the ccDriver branch below has always
+        // done, for the same reason.
         if requestLine.contains("pane.stream") {
             if let driver = ccDriver {
                 // Claude-Code stand-in: keep the stream OPEN so the driver can push
@@ -6236,7 +6258,7 @@ struct MockTransport: HerdrTransport {
             return AsyncThrowingStream { continuation in
                 continuation.yield(Self.paneStreamAck)
                 continuation.yield(reset)
-                continuation.finish()
+                // DELIBERATELY NO finish(): see above. A finished stream is a dropped stream.
             }
         }
         return AsyncThrowingStream { $0.finish() }

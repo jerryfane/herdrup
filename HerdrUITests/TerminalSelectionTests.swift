@@ -222,6 +222,25 @@ final class TerminalSelectionTests: XCTestCase {
         let selRow = Int(selectedText).map { $0 - 1 }          // "187" is 1-indexed; buffer rows are 0-indexed
         let yDisp = value(of: "ydisp", in: reading)
         let rowCount = value(of: "rows", in: reading)
+
+        // THE FIXTURE MUST NOT HAVE RE-SEEDED, asserted before anything is concluded from ydisp.
+        //
+        // This is the guard for the defect that cost this PR four CI rounds. The mock's
+        // `pane.stream` used to FINISH after delivering its 200-line reset; the app correctly
+        // treats an ended stream as a drop and reconnects, so every reconnect appended another
+        // 200 lines. CI measured ydisp=3598 in one pass and 3777 in the next — a buffer of
+        // thousands of lines in a fixture that seeds 200 — and the scroll view's geometry tracked
+        // the original ~200 while yDisp ran away, so a tap resolved to a row nobody was drawing.
+        // The selection was real and off-screen, which is why no highlight ever appeared and why
+        // I spent four rounds looking at SwiftTerm's renderer, which was innocent throughout.
+        //
+        // 200 lines in a 24-row terminal parks yDisp at about 176. The ceiling is generous but far
+        // below a single extra seed, so a returning re-seed fails HERE, naming the fixture,
+        // instead of resurfacing as an unpaintable selection.
+        if let yDisp {
+            XCTAssertLessThan(yDisp, 400,
+                              "ydisp=\(yDisp) means the scrollback is far larger than the fixture's 200 seeded lines, so the mock stream is re-seeding on reconnect again. The paint assertion below would fail for that reason and not for a rendering fault. probe[\(reading)]")
+        }
         let placement: String = {
             guard let selRow, let yDisp, let rowCount else {
                 return "could not derive placement (selected text is not a line number, or the probe lacked ydisp/rows)"
