@@ -465,4 +465,70 @@ final class ActivityContentTests: XCTestCase {
         XCTAssertEqual(l.activityContent.totalCount, 1,
                        "the lock screen's agent count is the LIVE roster; a released pane is not part of the session")
     }
+
+    // MARK: - the sixth, seventh and eighth mutants, each measured surviving by review
+
+    /// R1 (P2). The SAME predicate-substitution class as the unconfirmedCount finding, but on the
+    /// RANK side: `case .needsYou: return r.hasUnconfirmedState ? 1 : 0` mutated to
+    /// `r.showsUnconfirmedMarker ? 1 : 0` survived all 464 tests.
+    ///
+    /// Why the existing tests could not see it, and this is the instructive part: the unreachable
+    /// fixture added for the count is a SINGLE ROW, so nothing competes with it for the headline;
+    /// and testAConfirmedNeedsYouOutranksAnUnconfirmedOne uses a DEGRADED row, where the two
+    /// predicates agree. Only an UNREACHABLE row distinguishes them, because the marker
+    /// deliberately excludes `isUnreachable` while the fact does not — so the gap needed an
+    /// unreachable row WITH competition, which no fixture had.
+    ///
+    /// Product effect under the mutant: an unreachable peer's last-known-blocked GUESS ranks as a
+    /// confirmed needs-you and can take the headline name from a genuinely confirmed blocked
+    /// agent, which is the exact thing activityLead's rank-1 tier exists to prevent.
+    func testAnUnreachableGuessDoesNotOutrankAConfirmedNeedsYou() throws {
+        // The unreachable row is given the MORE RECENT turn so it sorts FIRST within the group:
+        // under the mutant both rows rank 0, first-of-rank wins, and it would take the headline.
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "unknown", name: "dead-guess", completedUnixMs: 2_000_000_000_000,
+                      lastKnownStatus: "blocked", machineID: "mcb", reachability: "unreachable"),
+            try agent(pane: "p1", status: "blocked", name: "live-blocked", completedUnixMs: 1_000_000_000_000),
+        ], livePaneIDs: ["p0", "p1"])
+
+        // Premises: both rows are needsYou, the two predicates DISAGREE on the unreachable row,
+        // and it sorts first — without all three the mutant would die for the wrong reason.
+        let guessRow = try XCTUnwrap(l.rows.first { $0.info.name == "dead-guess" })
+        XCTAssertEqual(guessRow.group, .needsYou, "premise: the unreachable guess still escalates")
+        XCTAssertTrue(guessRow.hasUnconfirmedState, "premise: it IS unconfirmed as a fact")
+        XCTAssertFalse(guessRow.showsUnconfirmedMarker,
+                       "premise: the MARKER excludes it because the card draws an offline badge instead — this is the disagreement the rank must not inherit")
+        XCTAssertEqual(l.rows.first?.info.name, "dead-guess", "premise: it sorts first, so first-of-rank would hand it the headline")
+
+        XCTAssertEqual(l.activityLead?.info.name, "live-blocked",
+                       "a confirmed blocked agent must outrank an unreachable peer's last-known guess")
+        XCTAssertEqual(l.activityContent.headline, "live-blocked",
+                       "and the headline must name it, not the guess")
+    }
+
+    /// R2 (P3). `headline: lead?.title` mutated to `lead?.info.name` survived, because no fixture
+    /// had a NAMELESS lead — so `displayName`'s fallback chain (name ?? terminalTitleStripped ??
+    /// paneID) was unpinned at the headline call site. On the wire `name` is optional, so under the
+    /// mutant a real roster of unnamed panes headlines "No agents".
+    func testTheHeadlineFallsBackWhenTheLeadHasNoName() throws {
+        let l = AgentList(agents: [try agent(pane: "w1:p9", status: "blocked")], livePaneIDs: ["w1:p9"])
+        XCTAssertNil(l.activityLead?.info.name, "premise: the lead genuinely has no name")
+        XCTAssertEqual(l.activityContent.headline, "w1:p9",
+                       "with no name and no terminal title, displayName falls back to the paneID — never to the empty-roster constant")
+        XCTAssertNotEqual(l.activityContent.headline, "No agents")
+    }
+
+    /// R3 (P3). `Double($0) / 1000` mutated to `Double($0 / 1000)` — INTEGER division — survived,
+    /// because every fixture's completedUnixMs was divisible by 1000. Near-inert in effect (up to
+    /// 999ms of timer skew) but it is a real loss of the sub-second remainder, and the only reason
+    /// no test saw it is that every timestamp I wrote ended in three zeros.
+    func testWorkingSinceKeepsTheSubSecondRemainder() throws {
+        let ms: Int64 = 1_723_000_000_500          // deliberately NOT divisible by 1000
+        let l = AgentList(agents: [try agent(pane: "p0", status: "working", name: "busy-one",
+                                             completedUnixMs: ms)],
+                          livePaneIDs: ["p0"])
+        let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds)
+        XCTAssertEqual(since, 1_723_000_000.5, accuracy: 0.0001,
+                       "the divide must happen in Double; integer division silently truncates the millisecond remainder")
+    }
 }
