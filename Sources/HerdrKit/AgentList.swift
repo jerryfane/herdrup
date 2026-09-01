@@ -297,6 +297,73 @@ public struct AgentList: Equatable, Sendable {
         return rows.min { rank($0) < rank($1) }
     }
 
+    /// EVERY DECISION THE LIVE ACTIVITY RENDERS, computed here so it is reachable by a test.
+    ///
+    /// The previous head moved the headline RULE into `activityLead` but left the CALL SITE
+    /// in `App/LiveActivityController.state(from:)`, which no test target can see — so the
+    /// one-line revert to `rows.min { $0.group.rawValue < $1.group.rawValue }` still restored
+    /// the shipped defect in full and passed the entire suite. A test that pins a helper is
+    /// not a test of the path. So the whole mapping lives here now and the app-side function
+    /// copies fields and decides nothing.
+    ///
+    /// `statusWord` is a String rather than the activity's own enum because that enum sits in
+    /// `Shared/`, which the widget compiles without HerdrKit. The words are exactly
+    /// `AgentActivityStatus`'s raw values, and a cross-target test asserts that rather than
+    /// trusting this comment.
+    public struct ActivityContent: Equatable, Sendable {
+        public let headline: String
+        public let statusWord: String
+        public let needsYouCount: Int
+        public let unconfirmedCount: Int
+        public let workingCount: Int
+        public let totalCount: Int
+        public let workingSinceUnixSeconds: Double?
+    }
+
+    /// THE ATTENTION COUNTS DIVERGE FROM THE ROSTER'S ON PURPOSE, and this is the reason.
+    ///
+    /// `needsYouCount` counts only `group == .needsYou`; an unrecognised agent gets its own
+    /// SECTION instead, which is honest on a screen that has sections. The lock screen has
+    /// none, so with the strict count an unrecognised lead produced 0, and the summary line
+    /// fell through to the working branch: an amber needs-you dot above the text "N working",
+    /// coloured amber, on one surface, from one list. That is the same self-contradiction as
+    /// the red-Stopped-over-"2 working" defect this rule was written to remove.
+    ///
+    /// So a surface with no room for rows carries what the rows would have shown — exactly
+    /// the argument that produced `unconfirmedNeedsYouCount`. Unrecognised rows count toward
+    /// the attention total AND toward its unconfirmed portion, because "I cannot interpret
+    /// this agent" is a maybe, not a fact. The line then reads "1 may need you" beside an
+    /// amber dot, which agrees with itself and with `isQuiet`'s refusal to call an
+    /// unrecognised roster all-clear.
+    public var activityContent: ActivityContent {
+        let lead = activityLead
+        let word: String
+        switch lead?.group {
+        case .needsYou, .unrecognised: word = "needsYou"
+        case .stopped:                 word = "stopped"
+        case .working:                 word = "working"
+        case .idle, .none:             word = "idle"
+        }
+        let attention = rows.filter { $0.group == .needsYou || $0.group == .unrecognised }.count
+        let unconfirmed = rows.filter {
+            ($0.group == .needsYou && $0.hasUnconfirmedState) || $0.group == .unrecognised
+        }.count
+        // Only the working state carries a start time — the headline agent's current turn is
+        // approximated by its last completed-turn boundary, which is stable while it works
+        // that turn, so the widget's timer does not reset on every list refresh.
+        let since: Double? = word == "working"
+            ? lead?.info.lastCompletedTurn?.completedUnixMs.map { Double($0) / 1000 }
+            : nil
+        return ActivityContent(
+            headline: lead?.title ?? "No agents",
+            statusWord: word,
+            needsYouCount: attention,
+            unconfirmedCount: unconfirmed,
+            workingCount: rows.filter { $0.group == .working }.count,
+            totalCount: rows.count,
+            workingSinceUnixSeconds: since)
+    }
+
     /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule
     /// instead of each inventing its own. Three surfaces render this count: the roster
     /// header, the Live Activity lock-screen line, and the Dynamic Island. The first

@@ -44,9 +44,19 @@ let package = Package(
         .target(
             name: "HerdrKit",
             dependencies: [.product(name: "Citadel", package: "Citadel")]),
+        // `AgentActivityState` IS A TEST DEPENDENCY HERE, and it is the mechanical
+        // cross-check I previously reported as impossible. The forcing argument against
+        // sharing these types is about the SHIPPED binaries — the widget links only
+        // WidgetKit/SwiftUI/ActivityKit and cannot link HerdrKit, and a HerdrKit dependency
+        // would duplicate Shared's symbols in the app binary. NEITHER CONSTRAINT REACHES A
+        // TEST TARGET, which is linked into the test bundle and into nothing else. So the
+        // two duplicated wording tables, and HerdrKit's activity mapping against the state
+        // type it feeds, can both be pinned by real assertions instead of a "change both"
+        // comment. Reported as unfixable in note 102391; a reviewer showed it was one word.
         .testTarget(
             name: "HerdrKitTests",
-            dependencies: ["HerdrKit", .product(name: "Citadel", package: "Citadel")]),
+            dependencies: ["HerdrKit", "AgentActivityState",
+                           .product(name: "Citadel", package: "Citadel")]),
         // The Live Activity's ContentState, compiled WITHOUT ActivityKit so it can be
         // tested on Linux. `sources` names the one file deliberately: its sibling in the
         // same directory imports ActivityKit and must stay out of this target.
