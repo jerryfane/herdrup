@@ -24,7 +24,8 @@ final class ActivityContentTests: XCTestCase {
     /// AgentInfo can hold a shape the wire cannot produce.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        lastKnownStatus: String? = nil, machineID: String? = nil, reachability: String? = nil
+        lastKnownStatus: String? = nil, machineID: String? = nil, reachability: String? = nil,
+        archivedBy: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
@@ -33,6 +34,9 @@ final class ActivityContentTests: XCTestCase {
         if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
         if let machineID { obj["machine_id"] = machineID }
         if let reachability { obj["reachability"] = reachability }
+        // Archived agents are pulled out of `rows` entirely by AgentList's init, which is the
+        // property one of the residual mutants exploits.
+        if let archivedBy { obj["archived"] = ["at": "2026-08-26T18:00:00Z", "by": archivedBy] }
         let data = try JSONSerialization.data(withJSONObject: obj)
         return try JSONDecoder().decode(AgentInfo.self, from: data)
     }
@@ -303,9 +307,13 @@ final class ActivityContentTests: XCTestCase {
                                  "a working lead with a completed turn must carry a start time")
         XCTAssertEqual(since, Double(ms) / 1000, accuracy: 0.001,
                        "workingSince must be SECONDS; passing the millisecond value through is a 1000x timer error")
-        // Sanity on magnitude, so a future unit change cannot satisfy the equality above by
-        // coincidence: seconds since 1970 are ~1.7e9, milliseconds ~1.7e12.
-        XCTAssertLessThan(since, 1e11, "a plausible seconds-since-epoch value, not milliseconds")
+        // DELETED: a magnitude check `XCTAssertLessThan(since, 1e11)` used to sit here as a
+        // "sanity" guard. A reviewer measured it in both directions and showed it is dominated by
+        // the exact equality above — /1000 -> Double fails both, while /1000 -> /100000 fails the
+        // equality and PASSES the magnitude check. Because the equality is exact against a
+        // hardcoded constant, no production-only mutant exists that the magnitude check catches
+        // and the equality misses. It looked like a guard and was ceremony, so it is gone rather
+        // than left to reassure the next reader.
     }
 
     /// And the gate itself: a non-working lead carries NO start time, so a dropped gate cannot
@@ -330,5 +338,197 @@ final class ActivityContentTests: XCTestCase {
                         "premise: the lead carries a timestamp, so a dropped gate would publish it")
         XCTAssertNil(l.activityContent.workingSinceUnixSeconds,
                      "only a WORKING lead has a current turn to time; a needs-you lead's last turn is not a live timer")
+    }
+
+    /// THE GATE MUST HOLD FOR EVERY NON-WORKING LEAD, not just needsYou. A reviewer measured
+    /// `word == "working"` widened to `(word == "working" || word == "stopped")` surviving all 464
+    /// tests, because the test above only ever exercised a needs-you lead. Under that mutant a
+    /// stopped lead carrying a last_completed_turn publishes workingSinceUnixSeconds, contradicting
+    /// this type's documented "set only while status == .working".
+    ///
+    /// Not a live defect today, and the reason is worth recording rather than relying on: the
+    /// widget re-checks `status == .working` before reading the value at AgentLiveActivity.swift:42
+    /// and :100, so a leaked timestamp is currently ignored downstream. That is defence in depth
+    /// doing its job, not the gate being unnecessary — the contract is here.
+    func testNoNonWorkingLeadCarriesAStartTime() throws {
+        let ms: Int64 = 1_723_000_000_000
+        // A stopped lead: every row absent from the census, so nothing outranks it.
+        let stopped = AgentList(agents: [
+            try agent(pane: "p0", status: "working", name: "gone-one", completedUnixMs: ms),
+        ], livePaneIDs: [])
+        XCTAssertEqual(stopped.activityContent.statusWord, "stopped", "premise: a stopped lead")
+        XCTAssertNotNil(stopped.activityLead?.info.lastCompletedTurn?.completedUnixMs,
+                        "premise: it carries a timestamp, so a widened gate would publish it")
+        XCTAssertNil(stopped.activityContent.workingSinceUnixSeconds,
+                     "a gone pane has no current turn; publishing its last one would time a dead agent")
+
+        // An idle lead, for the same reason — the gate is about the WORD, so every word that is
+        // not "working" belongs here.
+        let idle = AgentList(agents: [
+            try agent(pane: "p0", status: "idle", name: "quiet-one", completedUnixMs: ms),
+        ], livePaneIDs: ["p0"])
+        XCTAssertEqual(idle.activityContent.statusWord, "idle", "premise: an idle lead")
+        XCTAssertNotNil(idle.activityLead?.info.lastCompletedTurn?.completedUnixMs,
+                        "premise: it carries a timestamp")
+        XCTAssertNil(idle.activityContent.workingSinceUnixSeconds,
+                     "an idle agent is between turns; there is nothing running to time")
+    }
+
+    // MARK: - the residual mutants #207's review left surviving
+
+    /// F1. activityContent's unconfirmedCount filter is a SECOND COPY of the hasUnconfirmedState
+    /// predicate, and the distinction it must preserve was a real shipped defect: the marker
+    /// version excludes fully unreachable peers, because the roster CARD draws those an offline
+    /// badge instead of a stale chip. A surface with no rows to mark has nothing to substitute,
+    /// so counting with the marker's exclusion reports a dead machine's stale guess as CONFIRMED.
+    ///
+    /// The mutant `hasUnconfirmedState -> showsUnconfirmedMarker` survived all 460 tests because
+    /// no fixture here was UNREACHABLE — only degraded. AgentListTests pins this on the roster
+    /// side (testUnreachablePeerStillCountsAsUnconfirmed); the activity side had no equivalent.
+    func testAnUnreachablePeerStillCountsAsUnconfirmedInTheActivity() throws {
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "unknown", name: "dead-machine",
+                      lastKnownStatus: "blocked", machineID: "mcb", reachability: "unreachable"),
+        ], livePaneIDs: ["p0"])
+        // The premises that make this test about the COUNT rather than about grouping.
+        let row = try XCTUnwrap(l.rows.first)
+        XCTAssertEqual(row.group, .needsYou, "premise: a last-known-blocked peer escalates to needs-you")
+        XCTAssertTrue(row.hasUnconfirmedState, "premise: its state is unconfirmed")
+        XCTAssertFalse(row.showsUnconfirmedMarker,
+                       "premise: the MARKER is suppressed for an unreachable peer — that is the exclusion the count must not inherit")
+        XCTAssertEqual(l.activityContent.unconfirmedCount, 1,
+                       "a fully unreachable peer's stale guess must be counted as unconfirmed; using the marker's exclusion here reports it as fact")
+        XCTAssertEqual(l.activityContent.needsYouCount, 1, "and it is still in the attention total")
+    }
+
+    /// F2. workingSince must come from the LEAD, not from rows.first. Those differ exactly when
+    /// the roster's sort order and the headline rule disagree — which is by design: `rows` sorts
+    /// by AgentGroup rawValue where stopped(1) precedes working(3), while activityLead ranks
+    /// stopped LAST. The mutant `lead? -> rows.first?` survived because the existing test used a
+    /// single-agent roster where the two coincide.
+    func testWorkingSinceComesFromTheLeadNotTheFirstRow() throws {
+        let leadMs: Int64 = 1_723_000_000_000
+        let strayMs: Int64 = 1_600_000_000_000      // distinctly different, so a swap is visible
+        let l = AgentList(agents: [
+            // Absent from the census => stopped, and it sorts FIRST in `rows` while ranking LAST
+            // for the headline. This is the row a rows.first? mutant would read.
+            try agent(pane: "p0", status: "working", name: "gone-one", completedUnixMs: strayMs),
+            try agent(pane: "p1", status: "working", name: "live-one", completedUnixMs: leadMs),
+        ], livePaneIDs: ["p1"])
+        XCTAssertEqual(l.rows.first?.group, .stopped, "premise: the stopped row sorts first")
+        XCTAssertEqual(l.activityLead?.info.name, "live-one", "premise: the working row leads")
+        let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds)
+        XCTAssertEqual(since, Double(leadMs) / 1000, accuracy: 0.001,
+                       "the timer must start from the LEAD's turn; reading rows.first publishes a gone pane's last turn instead")
+        // THE HEADLINE IS THE SECOND `lead?` CALL SITE, and pinning only the timestamp left it
+        // open: a reviewer measured `headline: lead?.title` -> `rows.first?.title` surviving all
+        // 464 tests. Its product effect is the same shape as the timer's — one working agent plus
+        // one stopped pane sorts the stopped row first, so the lock screen headlines the GONE
+        // pane's name under a working dot reading "1 working". Same fixture, one more assertion.
+        XCTAssertEqual(l.activityContent.headline, "live-one",
+                       "the headline must name the LEAD; reading rows.first names the gone pane")
+        // DELETED: XCTAssertNotEqual(since, Double(strayMs)/1000). Dominated by the exact equality
+        // above it — nothing can satisfy that equality while also equalling the stray value — so it
+        // was the same ceremony I removed from testWorkingSinceIsSecondsNotMilliseconds two commits
+        // ago, reintroduced in a different test. Reviewer caught it; a line that cannot fail while
+        // its neighbour passes is decoration.
+    }
+
+    /// F4. Nothing pinned which row wins a TIE: changing `<` to `<=`
+    /// survived all 460 tests, because Swift's min(by:) replaces the incumbent whenever the
+    /// predicate says the newcomer sorts earlier — so a non-strict comparison silently makes the
+    /// LAST row of a rank win instead of the first.
+    func testWithinARankTheFirstRowWins() throws {
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "blocked", name: "first-waiting"),
+            try agent(pane: "p1", status: "blocked", name: "second-waiting"),
+        ], livePaneIDs: ["p0", "p1"])
+        let firstOfRank = try XCTUnwrap(l.rows.first { $0.group == .needsYou })
+        XCTAssertEqual(l.rows.filter { $0.group == .needsYou }.count, 2,
+                       "premise: two rows share the winning rank, so the tiebreak is exercised")
+        XCTAssertEqual(l.activityLead?.info.paneID, firstOfRank.info.paneID,
+                       "a non-strict comparison violates min(by:)'s documented irreflexivity precondition and hands the tie to the last row instead of the first")
+        XCTAssertEqual(l.activityContent.headline, firstOfRank.title,
+                       "and the headline follows the same row")
+    }
+
+    /// F5. totalCount is the live row count and must exclude ARCHIVED agents, which AgentList's
+    /// init pulls out of `rows` entirely. The mutant `rows.count -> rows.count + archived.count`
+    /// survived because no fixture here had an archived agent.
+    func testTotalCountExcludesArchivedAgents() throws {
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "working", name: "live-one"),
+            try agent(pane: "p1", status: "idle", name: "released-one", archivedBy: "jerry"),
+        ], livePaneIDs: ["p0", "p1"])
+        XCTAssertEqual(l.archived.count, 1, "premise: one agent is archived, so the exclusion is exercised")
+        XCTAssertEqual(l.rows.count, 1, "premise: archived agents are not live rows")
+        XCTAssertEqual(l.activityContent.totalCount, 1,
+                       "the lock screen's agent count is the LIVE roster; a released pane is not part of the session")
+    }
+
+    // MARK: - the sixth, seventh and eighth mutants, each measured surviving by review
+
+    /// R1 (P2). The SAME predicate-substitution class as the unconfirmedCount finding, but on the
+    /// RANK side: `case .needsYou: return r.hasUnconfirmedState ? 1 : 0` mutated to
+    /// `r.showsUnconfirmedMarker ? 1 : 0` survived all 464 tests.
+    ///
+    /// Why the existing tests could not see it, and this is the instructive part: the unreachable
+    /// fixture added for the count is a SINGLE ROW, so nothing competes with it for the headline;
+    /// and testAConfirmedNeedsYouOutranksAnUnconfirmedOne uses a DEGRADED row, where the two
+    /// predicates agree. Only an UNREACHABLE row distinguishes them, because the marker
+    /// deliberately excludes `isUnreachable` while the fact does not — so the gap needed an
+    /// unreachable row WITH competition, which no fixture had.
+    ///
+    /// Product effect under the mutant: an unreachable peer's last-known-blocked GUESS ranks as a
+    /// confirmed needs-you and can take the headline name from a genuinely confirmed blocked
+    /// agent, which is the exact thing activityLead's rank-1 tier exists to prevent.
+    func testAnUnreachableGuessDoesNotOutrankAConfirmedNeedsYou() throws {
+        // The unreachable row is given the MORE RECENT turn so it sorts FIRST within the group:
+        // under the mutant both rows rank 0, first-of-rank wins, and it would take the headline.
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "unknown", name: "dead-guess", completedUnixMs: 2_000_000_000_000,
+                      lastKnownStatus: "blocked", machineID: "mcb", reachability: "unreachable"),
+            try agent(pane: "p1", status: "blocked", name: "live-blocked", completedUnixMs: 1_000_000_000_000),
+        ], livePaneIDs: ["p0", "p1"])
+
+        // Premises: both rows are needsYou, the two predicates DISAGREE on the unreachable row,
+        // and it sorts first — without all three the mutant would die for the wrong reason.
+        let guessRow = try XCTUnwrap(l.rows.first { $0.info.name == "dead-guess" })
+        XCTAssertEqual(guessRow.group, .needsYou, "premise: the unreachable guess still escalates")
+        XCTAssertTrue(guessRow.hasUnconfirmedState, "premise: it IS unconfirmed as a fact")
+        XCTAssertFalse(guessRow.showsUnconfirmedMarker,
+                       "premise: the MARKER excludes it because the card draws an offline badge instead — this is the disagreement the rank must not inherit")
+        XCTAssertEqual(l.rows.first?.info.name, "dead-guess", "premise: it sorts first, so first-of-rank would hand it the headline")
+
+        XCTAssertEqual(l.activityLead?.info.name, "live-blocked",
+                       "a confirmed blocked agent must outrank an unreachable peer's last-known guess")
+        XCTAssertEqual(l.activityContent.headline, "live-blocked",
+                       "and the headline must name it, not the guess")
+    }
+
+    /// R2 (P3). `headline: lead?.title` mutated to `lead?.info.name` survived, because no fixture
+    /// had a NAMELESS lead — so `displayName`'s fallback chain (name ?? terminalTitleStripped ??
+    /// paneID) was unpinned at the headline call site. On the wire `name` is optional, so under the
+    /// mutant a real roster of unnamed panes headlines "No agents".
+    func testTheHeadlineFallsBackWhenTheLeadHasNoName() throws {
+        let l = AgentList(agents: [try agent(pane: "w1:p9", status: "blocked")], livePaneIDs: ["w1:p9"])
+        XCTAssertNil(l.activityLead?.info.name, "premise: the lead genuinely has no name")
+        XCTAssertEqual(l.activityContent.headline, "w1:p9",
+                       "with no name and no terminal title, displayName falls back to the paneID — never to the empty-roster constant")
+        XCTAssertNotEqual(l.activityContent.headline, "No agents")
+    }
+
+    /// R3 (P3). `Double($0) / 1000` mutated to `Double($0 / 1000)` — INTEGER division — survived,
+    /// because every fixture's completedUnixMs was divisible by 1000. Near-inert in effect (up to
+    /// 999ms of timer skew) but it is a real loss of the sub-second remainder, and the only reason
+    /// no test saw it is that every timestamp I wrote ended in three zeros.
+    func testWorkingSinceKeepsTheSubSecondRemainder() throws {
+        let ms: Int64 = 1_723_000_000_500          // deliberately NOT divisible by 1000
+        let l = AgentList(agents: [try agent(pane: "p0", status: "working", name: "busy-one",
+                                             completedUnixMs: ms)],
+                          livePaneIDs: ["p0"])
+        let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds)
+        XCTAssertEqual(since, 1_723_000_000.5, accuracy: 0.0001,
+                       "the divide must happen in Double; integer division silently truncates the millisecond remainder")
     }
 }

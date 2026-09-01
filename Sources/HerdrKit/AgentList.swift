@@ -292,8 +292,21 @@ public struct AgentList: Equatable, Sendable {
             case .stopped:      return 5
             }
         }
-        // `min(by:)` keeps the first row of the winning rank, so within a rank the
-        // server's own order decides and this introduces no second sort.
+        // WHICH ROW WINS A TIE, corrected twice over — the previous comment here made two claims
+        // and both were wrong.
+        //
+        // It said `min(by:)` "keeps the first row of the winning rank". First-wins IS what the
+        // implementation does (`if areInIncreasingOrder(e, result) { result = e }`), but the stdlib
+        // documents NO tie-break for `min(by:)`; what it documents is IRREFLEXIVITY as a
+        // precondition, which is why the `<=` mutant is a genuine violation rather than merely a
+        // different answer. So depend on the strict comparison because the precondition requires
+        // it, not because first-wins is promised.
+        //
+        // It also said "the server's own order decides". It does not: `init` has already re-sorted
+        // `rows` by (group, completedUnixMs descending, paneID ascending), so within a rank the
+        // winner is fixed by that sort — most-recently-active first, paneID as the final tiebreak —
+        // and reordering the agent.list response changes nothing. A reader trusting the old comment
+        // would have concluded the opposite. Both corrections came from review.
         return rows.min { rank($0) < rank($1) }
     }
 
