@@ -3918,11 +3918,17 @@ struct TerminalPaneContent: View {
 
     private var replyBar: some View {
         HStack(spacing: 8) {
-            // Collapse-keyboard button — shown only while the keyboard is up. It lives
-            // INSIDE the bar's HStack (laid out beside the field/send), NOT in a
-            // `.keyboard` accessory toolbar: that toolbar floated on top of the send
-            // button. Matched to the send button's circular footprint.
-            if replyFocused {
+            // Collapse-keyboard button — shown while EITHER input owner holds the
+            // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
+            // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
+            // send button. Matched to the send button's circular footprint.
+            //
+            // `terminalInputFocused` is in the condition because a TERMINAL tap raises the
+            // software keyboard too, and gating on `replyFocused` alone left that keyboard
+            // with no dismiss affordance at all: a reader who tapped once to select and
+            // copy a line could only put it down by first focusing the reply field to make
+            // this button appear, and then pressing it.
+            if replyFocused || terminalInputFocused {
                 Button {
                     replyFocused = false
                     terminalInputFocused = false
@@ -3948,13 +3954,23 @@ struct TerminalPaneContent: View {
                     handleReplyChange(old: oldValue, new: newValue)
                 }
                 .submitLabel(.send)
-                // Return sends the reply then releases both input owners on iPhone and
-                // iPad, so the software keyboard dismisses instead of re-focusing the
-                // terminal. A terminal tap explicitly re-enables direct PTY input.
+                // Return sends the reply, then releases the input owners ONLY on iPhone,
+                // where doing so dismisses the software keyboard. On iPad it must NOT
+                // release them: `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so
+                // clearing both owners there does not dismiss anything (a Magic Keyboard
+                // cannot be dismissed) and instead hands key focus straight to the
+                // terminal, sending everything typed after Return to the agent's shell as
+                // raw keystrokes instead of composing the next reply. The reply field
+                // therefore KEEPS focus on iPad, which is what the pre-PR code did.
                 .onSubmit {
                     if canSend { sendTapped() }
-                    replyFocused = false
-                    terminalInputFocused = false
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        replyFocused = true
+                        terminalInputFocused = false
+                    } else {
+                        replyFocused = false
+                        terminalInputFocused = false
+                    }
                 }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);

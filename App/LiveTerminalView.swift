@@ -528,6 +528,37 @@ struct LiveTerminalView: UIViewRepresentable {
             focusTap.delegate = self
             focusTap.cancelsTouchesInView = false
             view.addGestureRecognizer(focusTap)
+            // MENU TAP: repositions the Copy menu SwiftTerm puts in the wrong place, and
+            // does nothing else. A review measured the menu overlapping the pane header —
+            // the back chevron, the title, the NEEDS YOU badge and the refresh icon.
+            //
+            // The cause is upstream and it is a coordinate-space bug:
+            // `makeContextMenuRegionForSelection()` builds its avoid-rect as
+            // `CGRect(y: CGFloat(selection.start.row) * cellDimension.height, ...)` from a
+            // BUFFER position, while the renderer correctly subtracts `yDisp` when it draws.
+            // With scrollback that y is thousands of points below the view, so UIMenuController
+            // clamps the menu to the top of the window. `makeContextMenuRegionForTap(point:)`
+            // is view-relative and correct, which is why long-press places the menu properly.
+            // This PR is what makes the double-tap menu reachable on iPhone, so it ships the
+            // defect and owns fixing it.
+            //
+            // A DEDICATED 2-TAP RECOGNIZER, not a branch inside `focusTap`. focusTap fires on
+            // tap 1 AND tap 2, so gating there would need to know whether SwiftTerm's handler
+            // had already run — the exact undocumented ordering this file's tap split exists to
+            // stop depending on. This one fires only on tap 2 by construction, and the async
+            // hop guarantees SwiftTerm's `doubleTap` has finished whichever order UIKit chose,
+            // because both handlers run in the same runloop turn and this block runs after it.
+            //
+            // It re-presents only; `showStandardContextMenu(at:)` computes a region and a hit
+            // and shows the menu, and does not re-select, so the word SwiftTerm just selected
+            // survives. It takes no responder and requires nothing to fail, so it cannot
+            // starve or reorder the existing chain. Declared BEFORE `clearTap` so that
+            // recognizer's "every 2-tap recognizer must fail" loop keeps meaning exactly that.
+            let menuTap = UITapGestureRecognizer(target: self, action: #selector(handleMenuRepositionTap(_:)))
+            menuTap.numberOfTapsRequired = 2
+            menuTap.delegate = self
+            menuTap.cancelsTouchesInView = false
+            view.addGestureRecognizer(menuTap)
             // CLEAR TAP: requires SwiftTerm's 2-tap recognizer to fail, exactly as
             // SwiftTerm guards its own `singleTap` (setupGestures does
             // `singleTap.require(toFail: doubleTap)` for this very reason). So it can only
@@ -657,6 +688,30 @@ struct LiveTerminalView: UIViewRepresentable {
             guard !stopped, foreground, gr.state == .ended, let view else { return }
             guard view.hasActiveSelection else { return }
             view.clearSelection()
+        }
+
+        /// Re-present the Copy menu at the TAP POINT, because SwiftTerm positions the
+        /// double-tap menu from a buffer-relative rect and UIMenuController then clamps it
+        /// over the pane header (see the `menuTap` comment in `attach`).
+        ///
+        /// The async hop is the whole reason this is order-independent: SwiftTerm's `doubleTap`
+        /// and this recognizer both fire in the same runloop turn in an order UIKit does not
+        /// document, and this block runs after that turn, so the selection and SwiftTerm's own
+        /// (mis-placed) presentation have both already happened.
+        ///
+        /// Guarded on a selection actually existing, so a double tap that selects nothing —
+        /// blank space past the end of a line yields an EMPTY range, which SwiftTerm still
+        /// marks active but paints nothing — does not get a menu moved onto it. `foreground`
+        /// is re-checked inside the hop: a pane can be backgrounded between the tap and the
+        /// hop, and a hidden pane must not present a menu.
+        @objc private func handleMenuRepositionTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, foreground, gr.state == .ended, let view else { return }
+            let point = gr.location(in: view)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, self.foreground, let view = self.view else { return }
+                guard view.hasActiveSelection else { return }
+                view.showStandardContextMenu(at: point)
+            }
         }
 
         func stop() {
