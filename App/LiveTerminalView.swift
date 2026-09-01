@@ -279,6 +279,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// defeat the release (review HIGH). Once stopped, `sendPTYSize` is inert.
         private var stopped = false
 
+        /// KVO token for the terminal's `contentOffset`, which is the only signal a FINGER scroll
+        /// produces that this layer can see. Retained because an `NSKeyValueObservation` stops
+        /// observing the moment it is released; invalidated in `stop()`.
+        private var offsetObservation: NSKeyValueObservation?
+
         /// Scrollback backfill: the in-flight `read` (source=.recent, ANSI) fetching history
         /// produced BEFORE the live stream connected, resolved to ANSI bytes (nil on empty /
         /// error / timeout). The FIRST reset awaits it once, to prepend history above the seed.
@@ -594,6 +599,9 @@ struct LiveTerminalView: UIViewRepresentable {
             // stays fully reachable via the list/sidebar, and their removal frees horizontal drag
             // for SwiftTerm's drag-to-extend selection. `onNavigate` is left wired but unused.)
             style(view)
+            // The finger-scroll half of the Latest pill's tail state. Wired here, after the
+            // gestures, so it is live for the reader's very first drag — the pill's primary case.
+            observeContentOffset(view)
             startBackfill()   // fetch history CONCURRENTLY with the stream; the first reset awaits it
             start()
         }
@@ -743,11 +751,24 @@ struct LiveTerminalView: UIViewRepresentable {
         /// been guessing between them. This publishes the state itself into an accessibility
         /// element so the test reads SwiftTerm's answer instead of inferring one.
         ///
-        /// UI-TEST BUILDS ONLY. Gated on the same `HERDR_SCREENSHOT_MOCK` launch environment
-        /// the mock transport uses, so a real build never allocates it, never attaches it to the
-        /// view tree, and cannot expose terminal contents to the accessibility layer. The label
-        /// carries the SELECTED LENGTH, never the selected text.
+        /// DEBUG BUILDS ONLY, AND THE PREVIOUS VERSION OF THIS PARAGRAPH WAS FALSE. It claimed the
+        /// label "carries the SELECTED LENGTH, never the selected text" while the code fourteen
+        /// lines below published the text, and the paragraph fourteen lines below said so — the
+        /// same comment contradicted itself, and the wrong half was the safety claim. A review
+        /// caught it.
+        ///
+        /// The runtime env check was also the ONLY gate. `MockTransport` and `ScreenshotMock` live
+        /// inside `#if DEBUG`, but this file had no `#if DEBUG` anywhere, so the probe compiled
+        /// into Release and a Release build launched with `HERDR_SCREENSHOT_MOCK` set would route
+        /// to a REAL pane while the probe attached to the view tree and published that pane's
+        /// selected text to the accessibility layer. Now compiled out entirely, so the env var is
+        /// defence in depth rather than the whole defence.
+        ///
+        /// What it publishes: sel, len, the selected TEXT, rows, cols, ydisp and a resize count.
+        /// The text is deliberate and is what made the row-space defect findable; it is safe only
+        /// because this cannot exist outside a DEBUG build fed by the canned mock transport.
         private func publishSelectionProbe() {
+            #if DEBUG
             guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
                   let view else { return }
             let probe: UIView
@@ -805,10 +826,13 @@ struct LiveTerminalView: UIViewRepresentable {
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
                 + "resizes=\(resizeCount)"
+            #endif
         }
 
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
+            offsetObservation?.invalidate() // no tail-state publish from a torn-down pane
+            offsetObservation = nil
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
             view?.isScrollEnabled = true    // restore native scroll if we disabled it mid-drag
                                             // (stop() also runs on .exited while on screen)
@@ -1399,6 +1423,20 @@ struct LiveTerminalView: UIViewRepresentable {
         /// SwiftTerm reports a 0...1 scroll position (`TerminalViewDelegate.scrolled`).
         /// A pane whose content fits the viewport can never be scrolled away from the
         /// tail, so treat it as parked; otherwise it is at the tail only at the bottom.
+        ///
+        /// THIS CALLBACK IS NOT ENOUGH ON ITS OWN, and relying on it shipped a broken Latest pill.
+        /// On iOS the only route to `terminalDelegate?.scrolled` is
+        /// `TerminalView.scrolled(source:yDisp:)` (iOSTerminalView.swift:1481), invoked solely from
+        /// `Terminal.scroll()` — i.e. when OUTPUT scrolls the buffer. A FINGER scroll takes a
+        /// different path entirely: `contentOffset.didSet` calls `syncYDispFromContentOffset()`,
+        /// which calls `Terminal.setViewYDisp(row)`, which assigns `buffer.yDisp` and notifies
+        /// NOBODY (Terminal.swift:5616-5619). So dragging back through scrollback on a quiet pane
+        /// never reached this method, `reportTailState(atTail: false)` never ran, and the pill that
+        /// exists to get the reader back to the live tail never appeared — in exactly the case a
+        /// reader needs it. Found by review, not by the receipt, because no test asserted the pill.
+        ///
+        /// `observeContentOffset()` covers the finger path. Both funnel through `reportTailState`,
+        /// which stays the single publisher and dedupes, so the two sources cannot double-publish.
         func scrolled(source: TerminalView, position: Double) {
             guard let view else { return }
             let canScroll = view.contentSize.height > view.bounds.height + 1
@@ -1412,6 +1450,45 @@ struct LiveTerminalView: UIViewRepresentable {
         /// later version added one). No-op: the read-only terminal never copies.
         func clipboardCopy(source: TerminalView, content: Data) {}
 
+        // MARK: finger-scroll tail state — the Latest pill's other half
+
+        /// KVO on the terminal's own `contentOffset`, which is the ONLY signal a finger scroll
+        /// produces that this layer can see (see `scrolled(source:position:)` for why the delegate
+        /// callback never fires on that path).
+        ///
+        /// KVO AND NOT THE SCROLL DELEGATE, deliberately. `TerminalView` is a `UIScrollView` that
+        /// declares `UIScrollViewDelegate` conformance and relies on being its own delegate;
+        /// assigning `view.delegate = self` to get `scrollViewDidScroll` would take that over, and
+        /// this repo has already paid for that once — the project notes record scrolling broken for
+        /// roughly seven builds after claiming SwiftTerm's scroll delegate. Observation is additive
+        /// and cannot displace anything.
+        ///
+        /// The tail test is the same arithmetic the delegate path uses, expressed in offsets
+        /// instead of a 0...1 position, so the two agree at the boundary: a pane whose content fits
+        /// cannot be scrolled away from the tail and is therefore always parked; otherwise it is at
+        /// the tail within one cell of the bottom. One cell rather than one point because
+        /// `contentOffset` lands on fractional values mid-deceleration, and a stricter bound made
+        /// the pill flicker on and off during a flick.
+        private func observeContentOffset(_ view: TerminalView) {
+            offsetObservation = view.observe(\.contentOffset, options: [.new]) { scroll, _ in
+                // Read the geometry SYNCHRONOUSLY, on whatever thread KVO fired on, then hop —
+                // matching this file's existing convention (`Task { @MainActor [weak self] }`) so
+                // Coordinator state is only ever touched on the main actor. Deliberately NOT
+                // `MainActor.assumeIsolated`: Coordinator is a plain NSObject rather than an
+                // actor-isolated type, and assumeIsolated TRAPS if the assumption is wrong, which
+                // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
+                let offsetY = scroll.contentOffset.y
+                let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                Task { @MainActor [weak self] in
+                    guard let self, !self.stopped else { return }
+                    // `cellPixels()` returns UInt32, so convert rather than mixing numeric types.
+                    let slack = CGFloat(max(self.cellPixels().height, 1))
+                    let canScroll = maxOffset > 1
+                    self.reportTailState(atTail: !canScroll || offsetY >= maxOffset - slack)
+                }
+            }
+        }
+
         // MARK: alt-screen scroll — drag to scroll the AGENT's own view
 
         /// Accumulated vertical drag since the last emitted scroll tick.
@@ -1419,9 +1496,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The alt-screen scroll pan recognizer, disabled on teardown so a drag can't
         /// send bytes to a pane that has exited/been replaced.
         private var scrollPan: UIPanGestureRecognizer?
-        /// UI-TEST ONLY diagnostic element (see `publishSelectionProbe`). Nil in every build
-        /// that does not launch with `HERDR_SCREENSHOT_MOCK`, so a shipped app neither
-        /// allocates it nor exposes it to the accessibility layer.
+        /// DEBUG-ONLY diagnostic element (see `publishSelectionProbe`, which is compiled out
+        /// entirely in Release). Also nil in a DEBUG build that does not launch with
+        /// `HERDR_SCREENSHOT_MOCK`, so it neither allocates nor reaches the accessibility layer
+        /// outside a UI-test run. The property itself is left ungated because nothing assigns it
+        /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
         private var selectionProbe: UIView?
         /// How many times SwiftTerm has reported a grid change. Published by the probe because
         /// `processSizeChange` clears the selection on any rows/cols change, so a resize

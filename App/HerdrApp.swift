@@ -3961,23 +3961,28 @@ struct TerminalPaneContent: View {
                     handleReplyChange(old: oldValue, new: newValue)
                 }
                 .submitLabel(.send)
-                // Return sends the reply, then releases the input owners ONLY on iPhone,
-                // where doing so dismisses the software keyboard. On iPad it must NOT
-                // release them: `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so
-                // clearing both owners there does not dismiss anything (a Magic Keyboard
-                // cannot be dismissed) and instead hands key focus straight to the
-                // terminal, sending everything typed after Return to the agent's shell as
-                // raw keystrokes instead of composing the next reply. The reply field
-                // therefore KEEPS focus on iPad, which is what the pre-PR code did.
+                // Return sends the reply and releases only the TERMINAL's claim on key input,
+                // keeping the reply field focused on every idiom — which is what the pre-PR code
+                // did, and why.
+                //
+                // The problem this has to solve is `wantsTerminalKeyFocus`, which carries
+                // `|| idiom == .pad`: if Return clears BOTH owners, that disjunct re-asserts on
+                // iPad and hands key focus to the terminal, so everything typed after Return goes
+                // to the agent's shell as raw keystrokes instead of composing the next reply.
+                // Clearing `terminalInputFocused` alone fixes that without touching the field.
+                //
+                // AN EARLIER VERSION OF THIS ALSO CLEARED `replyFocused` ON iPHONE, to dismiss the
+                // software keyboard. A review pointed out the cost: the reader then has to tap the
+                // field again for every subsequent message, and pre-PR behaviour deliberately kept
+                // focus so a back-and-forth exchange did not cost a tap per message. Dismissal was
+                // a side effect of needing to release the terminal, not a goal, and this PR already
+                // adds the affordance for doing it on purpose — the collapse chevron now renders
+                // for a terminal-raised keyboard too. So the keyboard stays up and the reader
+                // decides when it goes.
                 .onSubmit {
                     if canSend { sendTapped() }
-                    if UIDevice.current.userInterfaceIdiom == .pad {
-                        replyFocused = true
-                        terminalInputFocused = false
-                    } else {
-                        replyFocused = false
-                        terminalInputFocused = false
-                    }
+                    replyFocused = true
+                    terminalInputFocused = false
                 }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
@@ -6258,7 +6263,38 @@ struct MockTransport: HerdrTransport {
             return AsyncThrowingStream { continuation in
                 continuation.yield(Self.paneStreamAck)
                 continuation.yield(reset)
-                // DELIBERATELY NO finish(): see above. A finished stream is a dropped stream.
+                // AND THEN KEEP PINGING, because silence is not the same as being alive.
+                //
+                // Removing finish() stopped the reconnect-on-stream-end loop, but left this mock
+                // MUTE — and the app's stall watchdog treats a mute stream as a stuck one. It
+                // polls every 5s and, at 50s without any event (streamStuckTimeout), writes
+                // "no response for 50s; reconnecting…" into the terminal and re-runs start(),
+                // which delivers another ack and another 200-line reset. So the re-seed returned
+                // by a slower route: a review measured testTerminalScrollsWhenSwiped taking 85.5s
+                // against this fixture with the pane mounted from launch, which is well past the
+                // 50s threshold.
+                //
+                // A real daemon pings about every 20s, which is what the 50s timeout is sized
+                // against (2.5x, so one dropped ping is tolerated). The fixture now does the same
+                // thing, and `.ping` is a first-class frame in the wire protocol
+                // (HerdrKit/Wire.swift:649, decoded at :705) carrying nothing but seq and epoch —
+                // so it refreshes lastStreamActivity without touching the emulator, the buffer, or
+                // the rendered frame. That last property matters: several UI tests assert the
+                // terminal is byte-identical when untouched, so a keepalive that DREW anything
+                // would trade one false failure for another.
+                let pings = Task {
+                    var seq: UInt64 = 1
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
+                        guard !Task.isCancelled else { break }
+                        continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
+                        seq += 1
+                    }
+                }
+                // Stop pinging when the consumer goes away, so a torn-down pane does not leave a
+                // timer running for the life of the process.
+                continuation.onTermination = { _ in pings.cancel() }
+                // DELIBERATELY NO finish(): a finished stream is a dropped stream. See above.
             }
         }
         return AsyncThrowingStream { $0.finish() }
@@ -6373,6 +6409,15 @@ struct MockTransport: HerdrTransport {
         #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"G1syShtbSBtbMTszODs1OzM5bWhlcmRyG1swbSBsaXZlIHRlcm1pbmFsIOKAlCBtb2NrIHJlbmRlcg0KDQokIGhlcmRyIGFnZW50IGF0dGFjaCBqYXJ2aXMNCj4gUmFuIDE0NiB0ZXN0cywgMCBmYWlsdXJlcw0KDQpbZGVtbyBkYXRhIOKAlCBubyBsaXZlIGNvbm5lY3Rpb25dDQo="}"#
     static let panePtySize =
         #"{"id":"mock","result":{"type":"pane_pty_size","pane_id":"w1:p1","cols":80,"rows":24,"locked":false}}"#
+
+    /// A keepalive `pane.stream` ping, the frame a real daemon sends about every 20s and the one
+    /// the 50s stall watchdog is sized against. Carries only `seq` and `epoch`
+    /// (HerdrKit/Wire.swift:705 decodes exactly those), so it proves the stream is alive without
+    /// touching the emulator or changing a single rendered pixel — which several UI tests depend
+    /// on, since they assert the terminal is byte-identical while untouched.
+    static func paneStreamPing(seq: UInt64, epoch: UInt64) -> String {
+        #"{"stream":"pane.bytes","frame":"ping","seq":\#(seq),"epoch":\#(epoch)}"#
+    }
 
     /// A decoded blocked agent for the pane screenshot: status "blocked" groups
     /// as NEEDS YOU, so the pane renders its status badge. No composer field, so

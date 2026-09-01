@@ -250,6 +250,13 @@ final class TerminalSelectionTests: XCTestCase {
         // One extra re-seed reaches roughly 781, so 600 separates one seed from two with room on
         // both sides. Computed from the fixture rather than guessed, and stated here so the next
         // change to the fixture's line length or column pinning knows what this number depends on.
+        // AND THE GUARD MUST FAIL WHEN IT CANNOT RUN. `if let yDisp` silently took the else path
+        // if the probe ever stopped publishing that field — rename it, reorder the label, or let a
+        // selection contain "ydisp=" earlier in the string, and a fixture re-seeding to 3598 would
+        // produce a GREEN test. That is precisely the shape this file's header warns about: an
+        // instrument that cannot report its own absence. Caught by review, not by me.
+        XCTAssertNotNil(yDisp, "probe stopped publishing ydisp, so the re-seed guard did not run. probe[\(reading)]")
+        XCTAssertNotNil(rowCount, "probe stopped publishing rows, so the placement arithmetic cannot be derived. probe[\(reading)]")
         if let yDisp {
             XCTAssertLessThan(yDisp, 600,
                               "ydisp=\(yDisp) is far beyond the ~381 a single 200-line seed produces when wrapped at 50 columns, so the mock stream is re-seeding on reconnect again. The paint assertion below would then fail for that reason and not for a rendering fault. probe[\(reading)]")
