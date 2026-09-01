@@ -3393,6 +3393,25 @@ struct TerminalPaneContent: View {
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
     @FocusState private var replyFocused: Bool
+    /// Terminal-input focus is explicit on touch devices. A terminal tap enables
+    /// direct PTY typing; reply submission and keyboard collapse clear it so the
+    /// software keyboard can genuinely dismiss instead of immediately moving focus
+    /// back to the terminal.
+    @State private var terminalInputFocused = false
+    /// Incremented by the collapse chevron to request a DELIBERATE collapse. Without it a
+    /// deliberate collapse is indistinguishable from any other pass where the terminal simply does
+    /// not want key focus, and the resign is refused while a selection is held.
+    ///
+    /// A TOKEN, not a bool set for "the next pass" — see `LiveTerminalView.consumeCollapse`. The
+    /// bool version cleared itself in `DispatchQueue.main.async`, which drains BEFORE SwiftUI's
+    /// update flush, so the pane read it as already false and the collapse never happened.
+    @State private var terminalCollapseToken = 0
+    /// Incremented to ask the pane to jump to its newest output. LiveTerminalView
+    /// performs exactly one jump per increment.
+    @State private var jumpToTailToken = 0
+    /// False while the pane is scrolled away from its newest output. Drives the
+    /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
+    @State private var terminalAtTail = true
     /// One-time gate for the "switch Claude Code to smooth (classic) scrolling" banner.
     /// Persisted app-wide via UserDefaults, so once the reader answers it once — Switch
     /// OR dismiss, for ANY Claude Code pane — it never shows again. See `showTuiBanner`.
@@ -3488,16 +3507,22 @@ struct TerminalPaneContent: View {
                 // Code panes only, shown at most once (see showTuiBanner).
                 if showTuiBanner { tuiBanner }
                 // The live terminal: a real SwiftTerm VT fed by the pane.stream raw
-                // byte firehose (#40), full-bleed as the machine ground. Read-only —
-                // input stays on the keycaps + reply bar below (sendText/sendKeys/
-                // prompt), never routed through the terminal itself.
+                // byte firehose (#40), full-bleed as the machine ground. A terminal
+                // tap enables direct PTY input; the reply bar remains the deliberate
+                // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
-                                 // iPad + hardware keyboard: let the terminal hold key focus so keys
-                                 // drive the PTY directly — but yield focus while the reply field is
-                                 // focused, and never on iPhone (the terminal can't become first
-                                 // responder there, so this is inert).
-                                 wantsTerminalKeyFocus: isForeground && !replyFocused,
+                                 wantsTerminalKeyFocus: isForeground && !replyFocused
+                                     && (terminalInputFocused || UIDevice.current.userInterfaceIdiom == .pad),
+                                 // Set by the collapse chevron so the resign in updateUIView can
+                                 // tell a deliberate dismissal from an incidental body pass.
+                                 collapseToken: terminalCollapseToken,
+                                 onTerminalFocusRequest: { terminalInputFocused = true },
+                                 jumpToTailToken: jumpToTailToken,
+                                 onTailStateChange: { terminalAtTail = $0 },
+                                 // The host's current belief, so a `streamGen` remount seeds a
+                                 // fresh Coordinator instead of replaying the last jump.
+                                 isAtTail: terminalAtTail,
                                  fontSize: CGFloat(terminalFontSize),
                                  // A federated/remote pane routes key-drive input via pane.send_text
                                  // (home can't proxy the persistent pane.input.stream channel). (#139)
@@ -3510,9 +3535,16 @@ struct TerminalPaneContent: View {
                     .padding(.horizontal, 8)
                     // NOTE: do NOT attach a SwiftUI .onTapGesture here. A tap gesture on
                     // this UIViewRepresentable competes with the wrapped UIScrollView's
-                    // native pan and starves the terminal of scroll drags (it broke
-                    // scrolling in v0.1.5). Keyboard dismissal lives on the reply bar's
-                    // own collapse button instead (see replyBar).
+                    // native pan and starves terminal scroll drags. LiveTerminalView's
+                    // UIKit recognizer owns the explicit direct-input tap instead.
+                    // A visible, one-finger replacement for the double tap that used to
+                    // jump to the tail (given back to SwiftTerm, which needs it for word
+                    // select). An OVERLAY, not a gesture, for the reason stated above:
+                    // only the pill itself hit-tests, taps elsewhere reach the terminal.
+                    .overlay(alignment: .bottomTrailing) {
+                        if !terminalAtTail { jumpToLatestPill }
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -3532,10 +3564,15 @@ struct TerminalPaneContent: View {
             await refresh()
             await deliverPrefillIfNeeded()
         }
-        // Re-resolve status each time the pane returns to the front; drop the keyboard when it
-        // backgrounds so a hidden keep-mounted pane can't hold the software keyboard.
+        // Re-resolve status each time the pane returns to the front; drop either
+        // keyboard owner when it backgrounds so a hidden keep-mounted pane cannot
+        // retain the software keyboard.
         .onChange(of: isForeground) { _, nowFront in
-            if nowFront { Task { await refresh() } } else { replyFocused = false }
+            if nowFront { Task { await refresh() }
+            } else {
+                replyFocused = false
+                terminalInputFocused = false
+            }
         }
         // When the app returns to the foreground after a real background, reseed the
         // FRONT pane the same way the header refresh button does (bump streamGen →
@@ -3696,6 +3733,23 @@ struct TerminalPaneContent: View {
         }
     }
 
+    /// Shown only while the pane is scrolled away from its newest output, so it is out
+    /// of the way the rest of the time. Uses the app's primary ink-fill treatment, the
+    /// same one the send arrow and the banner's Switch button use.
+    private var jumpToLatestPill: some View {
+        Button { jumpToTailToken += 1 } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
+                Text("Latest").font(Typography.app(12, .semibold))
+            }
+            .foregroundStyle(Palette.ground)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Palette.text).clipShape(Capsule())
+        }
+        .padding(.trailing, 16).padding(.bottom, 12)
+        .accessibilityLabel(Text("Jump to latest output"))
+    }
+
     // MARK: classic-renderer banner
 
     /// The one-time offer to switch Claude Code from its laggy fullscreen renderer to the
@@ -3806,13 +3860,28 @@ struct TerminalPaneContent: View {
                 // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
                 keyCap(label: "end", key: "End")
                 rawCap(symbol: "arrow.up.to.line", sequence: "\u{1b}[1;5H")
-                rawCap(symbol: "arrow.down.to.line", sequence: "\u{1b}[1;5F")
+                // Jump to the newest output. Routed through the pane rather than a raw
+                // byte sequence, so a plain shell scrolls its own scrollback while a
+                // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
+                // `sending || pendingPrefill` like the keycaps: this is local view
+                // navigation, not input to the agent.
+                Button { jumpToTailToken += 1 } label: {
+                    Image(systemName: "arrow.down.to.line").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 44, minHeight: 34)
+                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .accessibilityLabel(Text("Jump to latest output"))
                 keyCap(label: "tab", key: "Tab")
                 // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
                 // raw escape sequence, not a named key: delivered verbatim to the PTY.
                 rawCap(label: "S-Tab", sequence: "\u{1b}[Z")
                 // Sticky Ctrl: arm, then the next typed char becomes its control byte.
                 ctrlCap
+                // ^P (previous prompt/history) — a one-tap control sequence for
+                // navigating OMP's prompt history without first arming Ctrl.
+                rawCap(label: "^P", sequence: "\u{10}")
                 // ^C (interrupt) — the common one-tap case; a raw control byte.
                 rawCap(label: "^C", sequence: "\u{03}")
                 // The submit affordance rawKeys needs — typing never submits, so
@@ -3880,12 +3949,33 @@ struct TerminalPaneContent: View {
 
     private var replyBar: some View {
         HStack(spacing: 8) {
-            // Collapse-keyboard button — shown only while the keyboard is up. It lives
-            // INSIDE the bar's HStack (laid out beside the field/send), NOT in a
-            // `.keyboard` accessory toolbar: that toolbar floated on top of the send
-            // button. Matched to the send button's circular footprint.
-            if replyFocused {
-                Button { replyFocused = false } label: {
+            // Collapse-keyboard button — shown while EITHER input owner holds the
+            // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
+            // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
+            // send button. Matched to the send button's circular footprint.
+            //
+            // `terminalInputFocused` is in the condition because a TERMINAL tap raises the
+            // software keyboard too, and gating on `replyFocused` alone left that keyboard
+            // with no dismiss affordance at all: a reader who tapped once to select and
+            // copy a line could only put it down by first focusing the reply field to make
+            // this button appear, and then pressing it.
+            //
+            // ...AND THAT DISJUNCT IS iPHONE-ONLY, because on iPad it produced a DEAD BUTTON.
+            // `terminalInputFocused` goes true on any terminal tap, but the iPad terminal's
+            // inputView is a zero-frame view, so no keyboard ever appeared for it to collapse;
+            // pressing it cleared both flags and then `wantsTerminalKeyFocus` re-asserted
+            // through its own `|| idiom == .pad` disjunct and the terminal immediately retook
+            // the responder. A control that visibly does nothing is worse than an absent one.
+            if replyFocused || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone) {
+                Button {
+                    // Mark the collapse as DELIBERATE before dropping the flags, so the resign in
+                    // updateUIView is allowed to run even while a word is selected. No reset: the
+                    // pane consumes the token exactly once, so there is nothing to leak into
+                    // unrelated passes and no async hop that can race the pass it was meant for.
+                    terminalCollapseToken += 1
+                    replyFocused = false
+                    terminalInputFocused = false
+                } label: {
                     Image(systemName: "keyboard.chevron.compact.down")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Palette.textDim)
@@ -3907,13 +3997,29 @@ struct TerminalPaneContent: View {
                     handleReplyChange(old: oldValue, new: newValue)
                 }
                 .submitLabel(.send)
-                // Hardware Return submits, exactly like tapping the send arrow. Guarded by
-                // `canSend` (mirrors the arrow's `.disabled(!canSend)`) so an empty/whitespace box
-                // is a true no-op and a fast second Return can't double-fire mid-send. Re-assert
-                // focus so the box stays ready for the next line — SwiftUI otherwise drops first
-                // responder on submit, which would hand key focus back to the terminal
-                // (wantsTerminalKeyFocus = isForeground && !replyFocused).
-                .onSubmit { if canSend { sendTapped() }; replyFocused = true }
+                // Return sends the reply and releases only the TERMINAL's claim on key input,
+                // keeping the reply field focused on every idiom — which is what the pre-PR code
+                // did, and why.
+                //
+                // The problem this has to solve is `wantsTerminalKeyFocus`, which carries
+                // `|| idiom == .pad`: if Return clears BOTH owners, that disjunct re-asserts on
+                // iPad and hands key focus to the terminal, so everything typed after Return goes
+                // to the agent's shell as raw keystrokes instead of composing the next reply.
+                // Clearing `terminalInputFocused` alone fixes that without touching the field.
+                //
+                // AN EARLIER VERSION OF THIS ALSO CLEARED `replyFocused` ON iPHONE, to dismiss the
+                // software keyboard. A review pointed out the cost: the reader then has to tap the
+                // field again for every subsequent message, and pre-PR behaviour deliberately kept
+                // focus so a back-and-forth exchange did not cost a tap per message. Dismissal was
+                // a side effect of needing to release the terminal, not a goal, and this PR already
+                // adds the affordance for doing it on purpose — the collapse chevron now renders
+                // for a terminal-raised keyboard too. So the keyboard stays up and the reader
+                // decides when it goes.
+                .onSubmit {
+                    if canSend { sendTapped() }
+                    replyFocused = true
+                    terminalInputFocused = false
+                }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
@@ -6154,24 +6260,95 @@ struct MockTransport: HerdrTransport {
     }
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-        // `pane.stream` (the live terminal): reply with the stream_started ack, then
-        // a reset seed, then finish — so the DEBUG pane shows a rendered SwiftTerm
-        // terminal, not an empty one. The scrollback seed (UI test) feeds 200 lines so
-        // there is real history to scroll; the default seed is the short screenshot one.
+        // `pane.stream` (the live terminal): reply with the stream_started ack, then a reset
+        // seed, then STAY OPEN — so the DEBUG pane shows a rendered SwiftTerm terminal, not an
+        // empty one. The scrollback seed (UI test) feeds 200 lines so there is real history to
+        // scroll; the default seed is the short screenshot one.
+        //
+        // IT MUST NOT FINISH, and finishing was a real fixture defect with a long tail. A live
+        // `pane.stream` never ends, so the app treats an ended stream as a DROP and reconnects
+        // with capped backoff — correct product behaviour. Against a mock that finished
+        // immediately, every reconnect re-delivered the reset and appended another 200 lines,
+        // forever. Measured in CI at head 18e1daca: the probe reported ydisp=3598 in one pass and
+        // ydisp=3777 in the next, a buffer of thousands of lines in a fixture that seeds 200, and
+        // growing by one seed per reconnect between passes.
+        //
+        // The consequences all looked like unrelated bugs:
+        //   - The scroll view's contentSize tracked roughly 200 lines while `yDisp` ran past 3500,
+        //     so a tap resolved to buffer row 186 while the DRAWN window was 3598...3621. The
+        //     selection was real and off-screen, which is why the highlight was never painted and
+        //     why four rounds of hunting in SwiftTerm's renderer found nothing wrong with it.
+        //   - `testBackfillMakesHistoryScrollable`'s "terminal is static when untouched" premise
+        //     failed at diff 0.08549 against a 0.02 ceiling, because content genuinely kept
+        //     arriving.
+        //
+        // Not finishing is sufficient: the stream's storage holds the continuation for as long as
+        // the consumer iterates, so the pane simply waits for frames that never come — exactly
+        // what a quiet live pane looks like. This is what the ccDriver branch below has always
+        // done, for the same reason.
         if requestLine.contains("pane.stream") {
             if let driver = ccDriver {
                 // Claude-Code stand-in: keep the stream OPEN so the driver can push
                 // redraws in response to wheel events the app sends.
+                //
+                // IT PINGS TOO, for the same reason the plain branch does. A review flagged this
+                // branch as the remaining instance of the defect class the plain branch just fixed:
+                // held open but SILENT, so a ccDriver pane left idle past the 50s stall
+                // watchdog would be re-seeded mid-test. No current test mounts one that long, so
+                // this is latent rather than active — which is exactly when it is cheap to close,
+                // and leaving one branch of a two-branch function wrong is how the plain branch's
+                // bug survived as long as it did.
                 return AsyncThrowingStream { continuation in
                     continuation.yield(Self.paneStreamAck)
                     driver.attach(continuation)
+                    let pings = Task {
+                        var seq: UInt64 = 1
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
+                            guard !Task.isCancelled else { break }
+                            continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
+                            seq += 1
+                        }
+                    }
+                    continuation.onTermination = { _ in pings.cancel() }
                 }
             }
             let reset = scrollback ? Self.scrollbackResetFrame() : Self.paneStreamReset
             return AsyncThrowingStream { continuation in
                 continuation.yield(Self.paneStreamAck)
                 continuation.yield(reset)
-                continuation.finish()
+                // AND THEN KEEP PINGING, because silence is not the same as being alive.
+                //
+                // Removing finish() stopped the reconnect-on-stream-end loop, but left this mock
+                // MUTE — and the app's stall watchdog treats a mute stream as a stuck one. It
+                // polls every 5s and, at 50s without any event (streamStuckTimeout), writes
+                // "no response for 50s; reconnecting…" into the terminal and re-runs start(),
+                // which delivers another ack and another 200-line reset. So the re-seed returned
+                // by a slower route: a review measured testTerminalScrollsWhenSwiped taking 85.5s
+                // against this fixture with the pane mounted from launch, which is well past the
+                // 50s threshold.
+                //
+                // A real daemon pings about every 20s, which is what the 50s timeout is sized
+                // against (2.5x, so one dropped ping is tolerated). The fixture now does the same
+                // thing, and `.ping` is a first-class frame in the wire protocol
+                // (HerdrKit/Wire.swift:649, decoded at :705) carrying nothing but seq and epoch —
+                // so it refreshes lastStreamActivity without touching the emulator, the buffer, or
+                // the rendered frame. That last property matters: several UI tests assert the
+                // terminal is byte-identical when untouched, so a keepalive that DREW anything
+                // would trade one false failure for another.
+                let pings = Task {
+                    var seq: UInt64 = 1
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
+                        guard !Task.isCancelled else { break }
+                        continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
+                        seq += 1
+                    }
+                }
+                // Stop pinging when the consumer goes away, so a torn-down pane does not leave a
+                // timer running for the life of the process.
+                continuation.onTermination = { _ in pings.cancel() }
+                // DELIBERATELY NO finish(): a finished stream is a dropped stream. See above.
             }
         }
         return AsyncThrowingStream { $0.finish() }
@@ -6293,6 +6470,15 @@ struct MockTransport: HerdrTransport {
         #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"G1syShtbSBtbMTszODs1OzM5bWhlcmRyG1swbSBsaXZlIHRlcm1pbmFsIOKAlCBtb2NrIHJlbmRlcg0KDQokIGhlcmRyIGFnZW50IGF0dGFjaCBqYXJ2aXMNCj4gUmFuIDE0NiB0ZXN0cywgMCBmYWlsdXJlcw0KDQpbZGVtbyBkYXRhIOKAlCBubyBsaXZlIGNvbm5lY3Rpb25dDQo="}"#
     static let panePtySize =
         #"{"id":"mock","result":{"type":"pane_pty_size","pane_id":"w1:p1","cols":80,"rows":24,"locked":false}}"#
+
+    /// A keepalive `pane.stream` ping, the frame a real daemon sends about every 20s and the one
+    /// the 50s stall watchdog is sized against. Carries only `seq` and `epoch`
+    /// (HerdrKit/Wire.swift:705 decodes exactly those), so it proves the stream is alive without
+    /// touching the emulator or changing a single rendered pixel — which several UI tests depend
+    /// on, since they assert the terminal is byte-identical while untouched.
+    static func paneStreamPing(seq: UInt64, epoch: UInt64) -> String {
+        #"{"stream":"pane.bytes","frame":"ping","seq":\#(seq),"epoch":\#(epoch)}"#
+    }
 
     /// A decoded blocked agent for the pane screenshot: status "blocked" groups
     /// as NEEDS YOU, so the pane renders its status badge. No composer field, so

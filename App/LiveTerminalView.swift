@@ -20,21 +20,18 @@ private final class ResumeGate: @unchecked Sendable {
     }
 }
 
-/// A read-only, LIVE SwiftTerm terminal for a herdr pane (#40). It consumes
+/// A live SwiftTerm terminal for a herdr pane (#40). It consumes
 /// `client.streamTerminal(pane:)` — herdr's raw PTY byte firehose — and feeds the
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
 /// instead of a reflowed snapshot.
 ///
-/// READ-ONLY for keyboard/typed input on iPhone/touch: the view never becomes first
-/// responder (no keyboard) and its delegate `send` early-returns, so SwiftTerm keystrokes
-/// are never routed to the PTY. Command/message input stays on the reply/Send + keycap
-/// affordances in `TerminalPaneContent` (`sendText`/`sendKeys`/`prompt`). Two input
-/// exceptions: (1) SCROLL — a pan on the alternate screen sends constrained wheel/arrow
-/// sequences to the agent so its full-screen view can scroll (see `handleScrollPan`) —
-/// never a keystroke; and (2) iPad KEY DRIVE — on iPad with a hardware keyboard the view
-/// becomes first responder and `send` forwards SwiftTerm's key→bytes to the PTY, so a Magic
-/// Keyboard types straight into the terminal (see `ReadOnlyTerminalView.keyDriveEnabled`).
-/// iPhone and touch behaviour are unchanged.
+/// iPhone, iPad, and hardware keyboards can drive the terminal directly. On iPhone,
+/// the terminal becomes first responder when the reply field is not focused and shows
+/// the software keyboard; SwiftTerm's delegate forwards its key→bytes translation to
+/// the PTY. The reply/Send bar remains the deliberate path for agent prompts and saved
+/// messages. SCROLL remains constrained: a pan on the alternate screen sends
+/// wheel/arrow sequences to the agent (see `handleScrollPan`), never a keystroke.
+/// iPad accepts direct terminal keys only while a hardware keyboard is present.
 ///
 /// Geometry: the view reports its own laid-out grid to the server via `setPTYSize`
 /// so the stream is generated at the phone's width. While the terminal view is open
@@ -58,10 +55,30 @@ struct LiveTerminalView: UIViewRepresentable {
     /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
     /// Whether the terminal itself should hold keyboard focus (drive keys straight to the PTY).
-    /// Only ever true on iPad with a hardware keyboard AND when the reply field is not focused;
-    /// on iPhone the terminal cannot become first responder, so this is inert (see
-    /// `ReadOnlyTerminalView.keyDriveEnabled`). Refreshed on every update.
+    /// On iPhone this opens the software keyboard; on iPad it takes effect only with a
+    /// hardware keyboard. Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
+    /// Bumped by the reply bar's chevron to request a DELIBERATE collapse, as opposed to the many
+    /// incidental body passes that also see `wantsTerminalKeyFocus == false`. Only a deliberate
+    /// collapse may resign the responder while a selection is held: see the resign branch in
+    /// `updateUIView`, both for what went wrong when the two were indistinguishable and for why
+    /// this is a monotonic token rather than a bool the host resets.
+    var collapseToken: Int = 0
+    /// Called after a terminal tap requests direct PTY input. The parent owns the
+    /// SwiftUI focus state so a reply submission can dismiss the keyboard reliably.
+    var onTerminalFocusRequest: () -> Void = {}
+    /// Bumped by the host to jump this pane to its newest output. `updateUIView`
+    /// compares it against the value the Coordinator last executed, so each
+    /// increment performs exactly one jump.
+    var jumpToTailToken: Int = 0
+    /// Reports whether the pane is parked at its newest output. Invoked ONLY when
+    /// the value changes, so it cannot re-render SwiftUI on every scroll frame.
+    var onTailStateChange: (Bool) -> Void = { _ in }
+    /// The host's CURRENT belief about tail state, used to seed a fresh Coordinator on
+    /// a remount. Without it a `streamGen` remount resets the Coordinator's baseline to
+    /// `true` while the host still holds `false`, and the next jump's `atTail: true`
+    /// dedupes away as "no change", leaving the pill visible after a completed jump.
+    var isAtTail: Bool = true
     /// Terminal font size in points (the `terminal.fontSize` preference). Applied
     /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
     /// no view recreation.
@@ -80,6 +97,12 @@ struct LiveTerminalView: UIViewRepresentable {
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
+        context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        // SEED both baselines from the host before the first `updateUIView`. A remount
+        // (the header refresh bumps `streamGen`) builds a fresh Coordinator while the
+        // host's `@State` survives, so defaulting them replays the last jump as a second
+        // Ctrl+End and mis-dedupes the tail callback.
+        context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail)
         context.coordinator.attach(view)
         return view
     }
@@ -87,15 +110,82 @@ struct LiveTerminalView: UIViewRepresentable {
     func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
+        context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        context.coordinator.onTailStateChange = onTailStateChange
+        // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
+        // now foreground-guarded, and a guard that reads a flag this pass has not yet
+        // written is not a guard at all.
         context.coordinator.setForeground(isForeground)
-        // Drive terminal KEY focus from SwiftUI intent (iPad key-drive only). The resign is
-        // gated on keyDriveEnabled so it manages ONLY key-drive focus: on iPhone/touch the view
-        // may hold first-responder status transiently for a TEXT SELECTION, and we must not yank
-        // it out from under an active selection on the next SwiftUI update.
+        context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
+        // Drive terminal responder ownership from SwiftUI intent.
+        //
+        // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
+        // cost the Copy menu on iPad without a hardware keyboard: gating the *become* on
+        // `keyDriveEnabled` meant the responder was never taken there, and SwiftTerm's
+        // `doubleTap` selects without taking it either, so `canPerformAction` refused Copy.
+        // Owning the responder is free on every platform: iPhone shows its keyboard
+        // (which is wanted, it is how you type), and every other idiom has the zero-frame
+        // `emptyInputView`, so nothing appears. KEY ROUTING stays gated on
+        // `keyDriveEnabled` inside the `send` delegate, which is the only place it belongs.
+        //
+        // A BACKGROUNDED pane drops its selection UNCONDITIONALLY and resigns if it holds
+        // the responder. The clear sits OUTSIDE the first-responder test on purpose: nested
+        // inside it, a pane holding a selection WITHOUT the responder kept it across
+        // backgrounding, so the sentence above was still not literally true. That is the
+        // third time this claim has been written wider than the code, so the code now
+        // matches the claim instead of the comment being narrowed again.
+        //
+        // Only a FOREGROUND pane mid-selection keeps its responder, which is what stops a
+        // SwiftUI body pass from hiding the Copy menu.
         if wantsTerminalKeyFocus {
             if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
-        } else if uiView.keyDriveEnabled, uiView.isFirstResponder {
-            uiView.resignFirstResponder()
+        } else {
+            if !isForeground { uiView.clearSelection() }
+            // THE SELECTION GUARD MUST NOT OUTRANK AN EXPLICIT COLLAPSE, and it did.
+            //
+            // `!uiView.hasActiveSelection` exists so an incidental SwiftUI body pass cannot yank
+            // the responder mid-selection and take the Copy menu with it. But the collapse chevron
+            // reaches this same else-branch by clearing both focus flags, and while a word was
+            // selected the guard refused the resign — so the keyboard stayed up, and because
+            // clearing the flags also hides the chevron, its only dismiss affordance vanished with
+            // it. The reader was left with a keyboard over 40% of the pane and no way down.
+            // Measured and reported by review; the chevron was the feature added to fix exactly
+            // this class of problem, so it failing in the PR's own headline flow is the worst place
+            // for it.
+            //
+            // `collapseToken` distinguishes the two cases: an incidental pass still respects the
+            // selection, while a deliberate collapse resigns regardless and keeps the selection
+            // intact in the model. Resigning hides the system Copy menu, which is the honest
+            // consequence of asking for the keyboard to go away — and the selection is still
+            // there, so a double tap re-presents it without re-selecting. Review endorsed that
+            // behaviour choice; what it rejected was my first MECHANISM for it.
+            //
+            // A MONOTONIC TOKEN, NOT A BOOL SET-AND-ASYNC-RESET, and this is the second defect
+            // review found in this one gate. My first fix set a `collapseRequested` flag and
+            // cleared it in `DispatchQueue.main.async`, intending "true for exactly the next body
+            // pass". That does not hold: the GCD main-queue drain runs BEFORE SwiftUI's deferred
+            // update flush, so this method would have observed the flag already false, refused the
+            // resign, and reproduced the very defect it was written to fix — an INERT fix that
+            // would have tested green as an unchanged bug.
+            //
+            // A token cannot be coalesced away. It carries no lifetime and no assumption about
+            // which pass reads it: whichever pass observes a value the Coordinator has not
+            // consumed is the collapse, and every later pass sees a consumed one. This is the
+            // pattern `performJumpToTail(ifTokenChanged:)` already uses two dozen lines up, so
+            // it is also the pattern this file had already settled on for exactly this problem.
+            //
+            // Consumed HERE rather than beside `performJumpToTail`, so a pass that re-requests
+            // focus cannot silently eat a collapse it was never going to act on.
+            let deliberateCollapse = context.coordinator.consumeCollapse(ifTokenChanged: collapseToken)
+            if uiView.isFirstResponder, !isForeground || deliberateCollapse || !uiView.hasActiveSelection {
+                uiView.resignFirstResponder()
+                // A READING FROM THE ONE PATH NO GESTURE HANDLER COVERS. Every other probe publish
+                // sits in a tap handler; this resign happens during a SwiftUI update, so without
+                // this call `fr` would only ever be sampled at gesture time and the collapse would
+                // stay unobservable — which is precisely how the inert first mechanism escaped.
+                // Compiled out in Release and inert without the mock env var.
+                context.coordinator.publishSelectionProbe(deliberateCollapse ? "collapseResign" : "passResign")
+            }
         }
         context.coordinator.applyFont(size: fontSize)
     }
@@ -104,12 +194,10 @@ struct LiveTerminalView: UIViewRepresentable {
         coordinator.stop()
     }
 
-    /// A `TerminalView` that is read-only for keyboard input on iPhone/touch — display +
-    /// scroll only. Blocking first-responder status is what keeps it observe-only: no keyboard
-    /// appears and no keystroke can reach the PTY input path. The ONE exception is iPad with a
-    /// hardware keyboard (`keyDriveEnabled`): there the view DOES become first responder and its
-    /// `send` delegate forwards SwiftTerm's key→bytes translation to the PTY, so a Magic Keyboard
-    /// drives the terminal like a real one. iPhone and touch behaviour are unchanged.
+    /// A `TerminalView` that accepts terminal input on iPhone and on iPad with a
+    /// hardware keyboard. On iPhone its normal UIKit input view is retained so the
+    /// software keyboard can type directly into the PTY. An iPad without a hardware
+    /// keyboard stays selection-and-copy only.
     ///
     /// SCROLL is the LIBRARY's job now. On a normal (shell) buffer the reader
     /// finger-scrolls the retained scrollback through SwiftTerm's own `UIScrollView`,
@@ -124,25 +212,17 @@ struct LiveTerminalView: UIViewRepresentable {
     /// (`Coordinator.handleScrollPan`), which sends wheel/arrow scroll INTO a
     /// full-screen TUI that keeps no scrollback of its own.
     final class ReadOnlyTerminalView: TerminalView {
-        /// KEY DRIVE (hardware keys → PTY) is allowed only on iPad with a PHYSICAL keyboard:
-        /// the `.pad` idiom (NOT horizontalSizeClass — an iPhone Max in landscape is regular
-        /// width and must stay read-only) AND a coalesced hardware keyboard. This gates the
-        /// `send` delegate, so keystrokes reach the PTY ONLY under key drive — independently of
-        /// first-responder status below.
+        /// Direct terminal input is available on iPhone through the software keyboard
+        /// and on iPad through a physical keyboard. A large iPhone in landscape must
+        /// still use the phone path, so this keys off idiom rather than size class.
         var keyDriveEnabled: Bool {
-            UIDevice.current.userInterfaceIdiom == .pad && GCKeyboard.coalesced != nil
+            UIDevice.current.userInterfaceIdiom == .phone
+                || (UIDevice.current.userInterfaceIdiom == .pad && GCKeyboard.coalesced != nil)
         }
-        /// First responder is allowed on EVERY platform, because SwiftTerm's text selection
-        /// (long-press word-select, drag-to-extend, the Copy callout) requires it. This does NOT
-        /// make the pane writable: keystroke routing stays gated on `keyDriveEnabled` in the
-        /// `send` delegate, and the zero-frame `emptyInputView` below means no soft keyboard ever
-        /// appears. Net effect on iPhone: the terminal can be selected and copied, never typed into.
+        /// First responder is allowed on every platform because SwiftTerm text selection
+        /// requires it. On iPhone it also presents the software keyboard; on iPad without
+        /// a hardware keyboard, input remains disabled by `keyDriveEnabled`.
         override var canBecomeFirstResponder: Bool { true }
-        override func becomeFirstResponder() -> Bool { super.becomeFirstResponder() }
-        /// Zero-frame input view so becoming first responder shows NO soft keyboard — hardware
-        /// keys still arrive via UIKeyInput/pressesBegan. SwiftTerm declares `inputView` and
-        /// `inputAccessoryView` as `public override` (NOT `open`), so this module cannot re-override
-        /// them; we SET them in init instead (they expose public setters).
         private let emptyInputView = UIView(frame: .zero)
 
         override init(frame: CGRect, font: UIFont?) {
@@ -151,12 +231,33 @@ struct LiveTerminalView: UIViewRepresentable {
             // flush and the library's scroll-offset math (`maxContentOffsetY`) free of a
             // shifting safe-area / keyboard inset.
             contentInsetAdjustmentBehavior = .never
-            // Suppress the soft keyboard + SwiftTerm's TerminalAccessory bar while keeping HARDWARE
-            // keys flowing. `setupAccessoryView()` (which installs the accessory) runs once during
-            // super.init's setup, so overwriting these here sticks.
-            inputView = emptyInputView
+            // Keep iPhone's system keyboard. On iPad, suppress a software keyboard while
+            // preserving hardware-key delivery and selection/copy behavior.
+            if UIDevice.current.userInterfaceIdiom != .phone {
+                inputView = emptyInputView
+            }
             inputAccessoryView = nil
         }
+
+        /// EMULATOR REPLIES ARE NOT USER INPUT, and this pane is never the primary viewer
+        /// of its PTY, so it must not answer the host.
+        ///
+        /// SwiftTerm funnels two different things into ONE delegate callback. Typed input
+        /// arrives via `AppleTerminalView.send(data:)`, which calls `recordUserInput()`
+        /// first. Emulator-GENERATED answers arrive through THIS `open` TerminalDelegate
+        /// bridge (`iOSTerminalView.swift:1408`): focus reports CSI I and CSI O, DA, DSR
+        /// and CPR replies, OSC colour and OSC 52 answers, CSI-t window reports.
+        ///
+        /// Before iPhone typing existed, the delegate dropped everything on this idiom, so
+        /// none of it left the phone. Enabling typing enabled the replies with it, and the
+        /// desktop herdr owns the same PTY and already answers those queries, so a second
+        /// answerer produces duplicate or contradictory replies to one host request.
+        ///
+        /// Overriding here drops ONLY the reply bridge; typed input never comes through
+        /// this method, so it is untouched. Applied on EVERY idiom, not just phone: iPad
+        /// with a hardware keyboard has been forwarding these since key drive shipped, and
+        /// a co-viewer answering for the primary is wrong there for the same reason.
+        override func send(source: Terminal, data: ArraySlice<UInt8>) {}
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     }
 
@@ -226,6 +327,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// defeat the release (review HIGH). Once stopped, `sendPTYSize` is inert.
         private var stopped = false
 
+        /// KVO token for the terminal's `contentOffset`, which is the only signal a FINGER scroll
+        /// produces that this layer can see. Retained because an `NSKeyValueObservation` stops
+        /// observing the moment it is released; invalidated in `stop()`.
+        private var offsetObservation: NSKeyValueObservation?
+
         /// Scrollback backfill: the in-flight `read` (source=.recent, ANSI) fetching history
         /// produced BEFORE the live stream connected, resolved to ANSI bytes (nil on empty /
         /// error / timeout). The FIRST reset awaits it once, to prepend history above the seed.
@@ -275,6 +381,28 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
         var onNavigate: ((Int) -> Void)?
+        /// Requests SwiftUI terminal-input focus after a tap. The parent controls
+        /// actual responder ownership so it can dismiss the keyboard after Send.
+        var onTerminalFocusRequest: (() -> Void)?
+        /// Publishes tail state to the host (see `LiveTerminalView.onTailStateChange`).
+        /// Refreshed by `updateUIView`.
+        var onTailStateChange: ((Bool) -> Void)?
+        /// Last `jumpToTailToken` this Coordinator executed, so one increment performs
+        /// exactly one jump even though `updateUIView` runs on every body pass. SEEDED
+        /// from the host at `makeUIView`, because a remount builds a fresh Coordinator
+        /// while the host's token survives: defaulting to 0 would replay the last jump.
+        private var lastJumpToTailToken = 0
+        /// Last value published through `onTailStateChange`. Also seeded from the host,
+        /// so a remount cannot dedupe away the next genuine transition.
+        private var lastReportedAtTail = true
+
+        /// Adopt the host's current jump token and tail belief WITHOUT acting on either.
+        /// Called once per Coordinator, before `attach`, so a `streamGen` remount neither
+        /// re-sends a jump it already performed nor swallows the next tail callback.
+        func seedBaselines(jumpToTailToken: Int, atTail: Bool) {
+            lastJumpToTailToken = jumpToTailToken
+            lastReportedAtTail = atTail
+        }
 
         /// Per-pane geometry-ownership generation. Each `attach` for a pane id bumps this and
         /// records the value it claimed; the releasing `lock:false` — which can be DELAYED
@@ -373,13 +501,21 @@ struct LiveTerminalView: UIViewRepresentable {
             // / Claude-Code wheel scroll is unaffected.
             view.allowMouseReporting = false
             // Track hardware-keyboard connect/disconnect so key-drive focus follows the keyboard.
-            // On connect the front pane becomes first responder (iPad-gated by keyDriveEnabled);
+            // On connect the front pane becomes first responder (gated by keyDriveEnabled);
             // on disconnect it resigns. Tokens removed in stop().
             keyboardObservers.append(
                 NotificationCenter.default.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { [weak self, weak view] _ in
-                    // keyDriveEnabled gate keeps this iPad-only (a BT keyboard on iPhone is a no-op,
-                    // preserving the read-only path). A keyboard attached MID-session also needs
-                    // mouse reporting off, or a tap could leak a mouse report through the now-live send.
+                    // NOT iPAD-ONLY ANY MORE. This comment used to say the keyDriveEnabled gate
+                    // "keeps this iPad-only (a BT keyboard on iPhone is a no-op, preserving the
+                    // read-only path)". That described the world before this PR: keyDriveEnabled
+                    // now includes .phone, so a Bluetooth keyboard connecting to an iPHONE also
+                    // makes the terminal first responder and drives the PTY. That follows from
+                    // iPhone typing being the feature, so it is intended — but it is UNVERIFIED,
+                    // since nothing here has been exercised with a BT keyboard on a phone, and a
+                    // comment claiming the old behaviour would have hidden that. Caught by review.
+                    //
+                    // A keyboard attached MID-session also needs mouse reporting off, or a tap
+                    // could leak a mouse report through the now-live send.
                     guard let self, let view, self.foreground, view.keyDriveEnabled else { return }
                     view.allowMouseReporting = false
                     _ = view.becomeFirstResponder()
@@ -423,41 +559,140 @@ struct LiveTerminalView: UIViewRepresentable {
             pan.delegate = self
             view.addGestureRecognizer(pan)
             scrollPan = pan
-            // Double-tap → jump to the live tail. A UIKit recognizer (NOT a SwiftUI
-            // .onTapGesture, which starves the scroll pan — HerdrApp.swift note).
-            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
-            doubleTap.numberOfTapsRequired = 2
-            doubleTap.delegate = self
-            view.addGestureRecognizer(doubleTap)
-            // SUPERSEDE SwiftTerm's own double-tap (word-select): make it wait for ours to
-            // FAIL, so a double-tap jumps to the tail without starting a word selection and
-            // its lingering selection pan (which would otherwise fight the next scroll on an
-            // idle shell pane — SwiftTerm's doubleTap has no read-only guard).
-            for gr in view.gestureRecognizers ?? [] where gr !== doubleTap {
-                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
-                    t.require(toFail: doubleTap)
+            // Two-finger tap jumps to the live tail. Every SwiftTerm recognizer is
+            // single-finger, so this needs no failure requirement and costs single,
+            // double and triple tap nothing. The single-finger double tap is LEFT TO
+            // SwiftTerm: it is the only gesture that word-selects AND installs the
+            // drag-to-extend pan, so taking it over removed selection entirely.
+            let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap(_:)))
+            twoFingerTap.numberOfTouchesRequired = 2
+            twoFingerTap.delegate = self
+            twoFingerTap.cancelsTouchesInView = false
+            view.addGestureRecognizer(twoFingerTap)
+            // TWO TAP RECOGNIZERS, ONE JOB EACH, and the split is load-bearing.
+            //
+            // A single recognizer doing both jobs DESTROYS THE SELECTION IT EXISTS TO
+            // ENABLE. It must not `require(toFail:)` SwiftTerm's double tap, because
+            // SwiftTerm's `doubleTap` selects and presents its Copy menu WITHOUT calling
+            // `becomeFirstResponder` (only its long press does) while `canPerformAction`
+            // gates Copy on being first responder, so firing on tap 1 is the only thing
+            // that makes Copy available. But without that failure requirement it ALSO
+            // fires on tap 2, and clearing a selection there wipes the word SwiftTerm just
+            // selected on the same touch-up. Both recognizers live on the same view with
+            // `shouldRecognizeSimultaneouslyWith` true and UIKit does not document their
+            // relative order, so it was a coin toss on whether word select survived.
+            //
+            // FOCUS TAP: no failure requirement, so it fires on tap 1 and establishes the
+            // responder in time for tap 2's menu. Taking focus is idempotent, so firing
+            // again on tap 2 costs nothing.
+            let focusTap = UITapGestureRecognizer(target: self, action: #selector(handleFocusTap(_:)))
+            focusTap.delegate = self
+            focusTap.cancelsTouchesInView = false
+            view.addGestureRecognizer(focusTap)
+            // MENU TAP: repositions the Copy menu SwiftTerm puts in the wrong place, and
+            // does nothing else. A review measured the menu overlapping the pane header —
+            // the back chevron, the title, the NEEDS YOU badge and the refresh icon — by
+            // downloading a CI artifact and looking at it. THAT MEASUREMENT IS THE FACT HERE.
+            //
+            // THE MECHANISM IS NOT SETTLED. I previously wrote that
+            // `makeContextMenuRegionForSelection()` builds its avoid-rect from a BUFFER row
+            // while the renderer subtracts `yDisp`. A second reviewer traced the same path and
+            // could not confirm it: on iOS the TerminalView IS the scroll view, and
+            // `calculateTapHit` returns content-space rows — the same space
+            // `makeContextMenuRegionForTap(point:)` uses — so the mismatch is not visible in
+            // that path. So the defect is observed and the cause is unproven, and the real fix
+            // may belong upstream. This re-present is a targeted workaround, not a diagnosis.
+            //
+            // IT MUST WAIT FOR THE TRIPLE TAP, and this is what made the first version INERT.
+            // SwiftTerm defers `doubleTap` behind `tripleTap.require(toFail:)`
+            // (iOSTerminalView.swift:1078), so its selection lands about one multi-tap timeout
+            // — roughly 0.3s — AFTER tap 2's touch-up. A recognizer with no failure requirement
+            // fires immediately, so the async hop ran BEFORE any selection existed, found
+            // `hasActiveSelection` false and returned: on a fresh double tap the menu stayed
+            // over the header, and on a re-double-tap SwiftTerm's own later presentation won
+            // anyway. Final placement was SwiftTerm's in every case. Mirroring the same
+            // `require(toFail:)` loop `clearTap` uses puts this after SwiftTerm's own handler,
+            // and also stops it firing on tap 2 of a TRIPLE tap.
+            //
+            // It re-presents only and does not re-select, so the word SwiftTerm just selected
+            // survives. `showStandardContextMenu(at:)` DOES call `becomeFirstResponder()`
+            // (iOSTerminalView.swift:1392-1396) — an earlier comment here claimed it takes no
+            // responder and that was simply false. The practical effect is small, since on
+            // iPhone `focusTap` already holds the responder and on iPad the terminal's
+            // inputView is zero-frame, but it does bypass the `wantsTerminalKeyFocus` gate, so
+            // the hop's `foreground`/`stopped` guards are load-bearing rather than belt-and-braces.
+            //
+            // Declared BEFORE `clearTap` so that recognizer's "every 2-tap recognizer must
+            // fail" loop keeps meaning exactly that.
+            let menuTap = UITapGestureRecognizer(target: self, action: #selector(handleMenuRepositionTap(_:)))
+            menuTap.numberOfTapsRequired = 2
+            menuTap.delegate = self
+            menuTap.cancelsTouchesInView = false
+            // SwiftTerm's tripleTap is its only 3-tap recognizer; requiring it to fail is what
+            // orders this after SwiftTerm's own doubleTap handler.
+            for gr in view.gestureRecognizers ?? [] {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 3 {
+                    menuTap.require(toFail: t)
                 }
             }
+            view.addGestureRecognizer(menuTap)
+            // CLEAR TAP: requires SwiftTerm's 2-tap recognizer to fail, exactly as
+            // SwiftTerm guards its own `singleTap` (setupGestures does
+            // `singleTap.require(toFail: doubleTap)` for this very reason). So it can only
+            // fire on a GENUINE single tap, never on tap 2 of a word select. SwiftTerm's
+            // doubleTap already requires its tripleTap, so this inherits the whole chain.
+            let clearTap = UITapGestureRecognizer(target: self, action: #selector(handleClearSelectionTap(_:)))
+            clearTap.delegate = self
+            clearTap.cancelsTouchesInView = false
+            for gr in view.gestureRecognizers ?? [] {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 2 {
+                    clearTap.require(toFail: t)
+                    clearTapRequirementCount += 1
+                }
+            }
+            view.addGestureRecognizer(clearTap)
             // (Removed: the horizontal swipe-between-agents recognizers. A finger/mouse drag to
             // SELECT text was triggering them and paging to an unwanted agent; agent switching
             // stays fully reachable via the list/sidebar, and their removal frees horizontal drag
             // for SwiftTerm's drag-to-extend selection. `onNavigate` is left wired but unused.)
             style(view)
+            // The finger-scroll half of the Latest pill's tail state. Wired here, after the
+            // gestures, so it is live for the reader's very first drag — the pill's primary case.
+            observeContentOffset(view)
             startBackfill()   // fetch history CONCURRENTLY with the stream; the first reset awaits it
             start()
         }
 
-        /// Double-tap the terminal → jump to the live tail. A mouse-mode/alt agent
-        /// (Claude Code) captures the wheel and keeps its own viewport, so send it
-        /// Ctrl+End (`ESC[1;5F` → scroll-to-bottom + re-enable auto-follow) — read-only,
-        /// exactly like the scroll bytes, never a keystroke. A plain shell has native
+        /// Jump the pane to its newest output. A mouse-mode or alt-screen agent (Claude
+        /// Code) captures the wheel and keeps its own viewport, so send it Ctrl+End
+        /// (`ESC[1;5F`, scroll-to-bottom plus re-enable auto-follow), read-only exactly
+        /// like the scroll bytes and never a keystroke. A plain shell has native
         /// SwiftTerm scrollback, so jump its UIScrollView to the maximum offset.
-        @objc private func handleDoubleTap(_ gr: UITapGestureRecognizer) {
-            guard !stopped, let view else { return }
-            if view.getTerminal().isCurrentBufferAlternate || view.getTerminal().mouseMode != .off {
+        ///
+        /// Deliberately NOT annotated `@MainActor`, matching `applyFont`: it is called
+        /// from `updateUIView` and from a UIKit gesture handler, both already on the
+        /// main thread, and the async send hops explicitly.
+        func jumpToTail() {
+            // `foreground` here too, matching the two byte-sending gesture handlers. Reached
+            // from `updateUIView` as well as from the two-finger tap, which is why
+            // `setForeground` now runs BEFORE `performJumpToTail`: guarding on a flag this
+            // pass has not yet written would guard nothing.
+            guard !stopped, foreground, let view else { return }
+            let term = view.getTerminal()
+            if term.isCurrentBufferAlternate || term.mouseMode != .off {
+                // Report the tail ONLY once the send has actually landed. Reporting up
+                // front cleared the pill while a rejected or dropped Ctrl+End left the
+                // agent's viewport exactly where it was, so the reader lost the affordance
+                // and the state lied at the same time.
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
-                    _ = try? await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                    do {
+                        _ = try await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
+                        self.reportTailState(atTail: true)
+                    } catch {
+                        // Keep `lastReportedAtTail` untouched, so the pill stays up and the
+                        // reader can retry. A failed jump must not read as a completed one.
+                    }
                 }
             } else {
                 // animated:false — an animated jump is cancelled mid-flight on a streaming
@@ -466,11 +701,263 @@ struct LiveTerminalView: UIViewRepresentable {
                 // syncYDispFromContentOffset synchronously and re-engages auto-follow.
                 let maxY = max(0, view.contentSize.height - view.bounds.height)
                 view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
+                // Synchronous and cannot fail, so the tail is true right now.
+                reportTailState(atTail: true)
             }
+        }
+
+        /// Executes one jump per token increment. `updateUIView` runs on every SwiftUI
+        /// body pass, so the token comparison is what makes this idempotent.
+        func performJumpToTail(ifTokenChanged token: Int) {
+            guard token != lastJumpToTailToken else { return }
+            lastJumpToTailToken = token
+            jumpToTail()
+        }
+
+        /// The last collapse token this Coordinator has acted on. Starts at 0, matching the
+        /// host's initial `collapseToken`, so a freshly created pane does not read its own
+        /// initial state as a pending collapse request.
+        private var lastCollapseToken = 0
+
+        /// True for exactly ONE `updateUIView` pass per chevron tap — the pass that observes a
+        /// token the Coordinator has not consumed yet.
+        ///
+        /// Same shape as `performJumpToTail(ifTokenChanged:)` above and for the same reason: a
+        /// SwiftUI input cannot express "for the next pass only" as a bool the host resets,
+        /// because the host does not control when passes happen and any async reset races the
+        /// pass it was meant for. A monotonic counter needs no such timing assumption.
+        func consumeCollapse(ifTokenChanged token: Int) -> Bool {
+            guard token != lastCollapseToken else { return false }
+            lastCollapseToken = token
+            return true
+        }
+
+        /// Publishes tail state to the host, and ONLY on a change, so scrolling cannot
+        /// re-render SwiftUI on every frame.
+        ///
+        /// The publish is deferred one main-queue turn on purpose. `performJumpToTail`
+        /// runs INSIDE `updateUIView`, and the jump reports `atTail: true`, so a
+        /// synchronous call would mutate SwiftUI `@State` during a view update, which
+        /// SwiftUI warns about and can re-enter. The dedupe above stays synchronous, so
+        /// deferring cannot publish a stale duplicate.
+        /// THE SINGLE PUBLISHER of tail state, and the single place the alternate screen is
+        /// judged — deliberately here rather than in each caller.
+        ///
+        /// Review found the alt-screen early return I had added to `scrolled(source:position:)`
+        /// was missing from `observeContentOffset`'s KVO hop, so a finger drag on an oversized
+        /// alt-screen grid could still publish `atTail: false` and fight the delegate path into
+        /// pill flicker. The narrow fix was to copy the guard into the KVO hop. That is a SITE
+        /// fix for what is plainly a CLASS defect: two publishers, one of them guarded, and
+        /// nothing stopping a third from being added unguarded.
+        ///
+        /// So the guard lives in the funnel every publisher already goes through, and each
+        /// caller now reports what it actually observed. A future publisher inherits the
+        /// alt-screen rule by construction instead of by whoever adds it remembering.
+        ///
+        /// WHY THE ALT SCREEN IS FORCED TO at-tail rather than left alone: a TUI pane keeps its
+        /// own viewport and is served by jumpToTail's Ctrl+End path, not by this pill, so the
+        /// honest report is "nothing to return to". `isCurrentBufferAlternate` is a synchronous
+        /// buffer-IDENTITY check, not a heuristic, so it cannot transiently lie on a normal
+        /// buffer — verified in the pinned SwiftTerm 1.15.0 by review.
+        private func reportTailState(atTail: Bool) {
+            var atTail = atTail
+            if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
+            guard atTail != lastReportedAtTail else { return }
+            lastReportedAtTail = atTail
+            let publish = onTailStateChange
+            DispatchQueue.main.async { publish?(atTail) }
+        }
+
+        @objc private func handleTwoFingerTap(_ gr: UITapGestureRecognizer) {
+            // `foreground` is defence in depth. Today a backgrounded pane is unreachable
+            // because the keep-alive container renders it `opacity(0)` and
+            // `allowsHitTesting(false)`, but this handler SENDS BYTES, so it should not
+            // depend on a host layout decision staying the way it is.
+            guard !stopped, foreground, gr.state == .ended else { return }
+            jumpToTail()
+        }
+
+        /// Establishes responder ownership, and NOTHING else. Fires on tap 1 of any tap
+        /// sequence because it carries no failure requirement, which is the only way the
+        /// responder exists in time for SwiftTerm's double-tap menu to offer Copy:
+        /// SwiftTerm's `doubleTap` selects without becoming first responder, and
+        /// `canPerformAction` returns `selection.active` for Copy only to a responder.
+        ///
+        /// Deliberately does NOT clear a selection. Clearing here fired on tap 2 as well
+        /// and wiped the word SwiftTerm had just selected on the same touch-up.
+        ///
+        /// No `keyDriveEnabled` gate: owning the responder costs nothing on an idiom that
+        /// cannot type (zero-frame `emptyInputView`), and whether keys reach the PTY is
+        /// decided in `send`.
+        @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, foreground, gr.state == .ended else { return }
+            onTerminalFocusRequest?()
+            // Publishes because this recognizer has NO failure requirement, so it fires on tap 1
+            // of ANY tap that actually lands on the terminal. That makes it the discriminator for
+            // a tap that appears to do nothing: if the probe's publisher changes to focusTap, the
+            // touch reached the view and the fault is downstream in clearTap's require-to-fail
+            // chain; if it does not change at all, the tap missed the terminal entirely.
+            publishSelectionProbe("focusTap")
+        }
+
+        /// Clears an active selection on a GENUINE single tap. Guarded by
+        /// `require(toFail:)` against SwiftTerm's 2-tap recognizer at attach time, so it
+        /// cannot fire on tap 2 of a word select.
+        ///
+        /// SwiftTerm's own singleTap clears too, but only when the view is ALREADY first
+        /// responder, so on an unfocused pane its tap was spent taking focus and the
+        /// selection survived. `clearSelection()` flips `SelectionService.active`, whose
+        /// setter notifies `selectionChanged(source:)`, which calls `setNeedsDisplay` and
+        /// `disableSelectionPanGesture()`, so one call both redraws and removes the lazy
+        /// extend pan.
+        @objc private func handleClearSelectionTap(_ gr: UITapGestureRecognizer) {
+            // PUBLISHES AT ENTRY, before any guard, because the previous round could not tell
+            // "this handler never ran" from "it ran and bailed". CI reported pub=focusTap with the
+            // selection still active, which proved the touch reached the terminal and that clearTap
+            // produced nothing — but not which of those two it was. An entry publish separates
+            // them: pub=clearTapEntry means the recognizer fired and something below refused,
+            // pub=focusTap still means the recognizer itself never recognized.
+            publishSelectionProbe("clearTapEntry(state=\(gr.state.rawValue) requires=\(clearTapRequirementCount))")
+            guard !stopped, foreground, gr.state == .ended, let view else { return }
+            guard view.hasActiveSelection else { return }
+            view.clearSelection()
+            // So a test can distinguish "the clear reached the view" from "the highlight
+            // happened to stop being drawn". No-op outside UI-test builds.
+            publishSelectionProbe("clearTap")
+        }
+
+        /// Re-present the Copy menu at the TAP POINT. Ordered AFTER SwiftTerm's own handler by
+        /// `menuTap.require(toFail: tripleTap)` — see the `menuTap` comment in `attach` for why
+        /// the first version, which had no failure requirement, was inert.
+        ///
+        /// Guarded on a selection actually existing, so a double tap that selects nothing —
+        /// blank space past the end of a line yields an EMPTY range, which SwiftTerm still
+        /// marks active but paints nothing — does not get a menu moved onto it. `foreground`
+        /// is re-checked inside the hop: a pane can be backgrounded between the tap and the
+        /// hop, and a hidden pane must not present a menu. Those guards also bound
+        /// `showStandardContextMenu(at:)`'s undocumented `becomeFirstResponder()`, which
+        /// bypasses the `wantsTerminalKeyFocus` gate.
+        @objc private func handleMenuRepositionTap(_ gr: UITapGestureRecognizer) {
+            guard !stopped, foreground, gr.state == .ended, let view else { return }
+            let point = gr.location(in: view)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, let view = self.view else { return }
+                self.publishSelectionProbe("menuTap")   // records state even when the guards below refuse
+                guard self.foreground, view.hasActiveSelection else { return }
+                view.showStandardContextMenu(at: point)
+            }
+        }
+
+        /// THE SELECTION PROBE — the instrument, and it exists because four consecutive CI runs
+        /// of the selection receipt failed on my own measurement rather than on the product,
+        /// and two confident diagnoses of why were both wrong.
+        ///
+        /// A UI test can only see PIXELS, so "no highlight" cannot distinguish between: the
+        /// double tap never selected anything, it selected an EMPTY range, a resize wiped the
+        /// selection (`processSizeChange` sets `selection.active = false` on any rows/cols
+        /// change, AppleTerminalView.swift:232), or the selection exists and simply is not
+        /// painted the colour the detector looks for. Those have different fixes and I have
+        /// been guessing between them. This publishes the state itself into an accessibility
+        /// element so the test reads SwiftTerm's answer instead of inferring one.
+        ///
+        /// DEBUG BUILDS ONLY, AND THE PREVIOUS VERSION OF THIS PARAGRAPH WAS FALSE. It claimed the
+        /// label "carries the SELECTED LENGTH, never the selected text" while the code fourteen
+        /// lines below published the text, and the paragraph fourteen lines below said so — the
+        /// same comment contradicted itself, and the wrong half was the safety claim. A review
+        /// caught it.
+        ///
+        /// The runtime env check was also the ONLY gate. `MockTransport` and `ScreenshotMock` live
+        /// inside `#if DEBUG`, but this file had no `#if DEBUG` anywhere, so the probe compiled
+        /// into Release and a Release build launched with `HERDR_SCREENSHOT_MOCK` set would route
+        /// to a REAL pane while the probe attached to the view tree and published that pane's
+        /// selected text to the accessibility layer. Now compiled out entirely, so the env var is
+        /// defence in depth rather than the whole defence.
+        ///
+        /// What it publishes: sel, len, the selected TEXT, rows, cols, ydisp and a resize count.
+        /// The text is deliberate and is what made the row-space defect findable; it is safe only
+        /// because this cannot exist outside a DEBUG build fed by the canned mock transport.
+        fileprivate func publishSelectionProbe(_ publisher: String) {
+            #if DEBUG
+            guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
+                  let view else { return }
+            let probe: UIView
+            if let existing = selectionProbe {
+                probe = existing
+            } else {
+                probe = UIView(frame: .zero)
+                probe.isAccessibilityElement = true
+                probe.accessibilityIdentifier = "terminal-selection-probe"
+                view.addSubview(probe)
+                selectionProbe = probe
+            }
+            // `getSelection()` returns the selected TEXT as `String?` (AppleTerminalView.swift
+            // :2535) — an earlier version called `.getSelectedText()` on it, which is the
+            // SelectionService method and does not exist here.
+            //
+            // THE TEXT ITSELF IS PUBLISHED, and it is the measurement that matters. Every
+            // hypothesis for "SwiftTerm holds a selection and nothing is painted" has now been
+            // eliminated by READING: the rows resolve to the same buffer-absolute space
+            // (contentOffset.y == yDisp * cellHeight), the paint loop does consume
+            // `.selectionBackgroundColor`, and `selectionChanged` does call `setNeedsDisplay`
+            // on both the Metal and CoreGraphics paths. So one of those readings is wrong, and
+            // the one runtime fact no public API exposes is WHICH LINE the selection landed on.
+            //
+            // The fixture answers it: the mock seeds uniquely numbered lines
+            // ("SCROLLTEST line 007  the quick brown fox…") and `selectWordOrExpression`
+            // treats digits as a selectable word, so a tap aimed at the number yields the line
+            // number as the selected text. If the test taps a line the view is showing and the
+            // probe reports a number from far outside the visible window, the tap's row space
+            // is wrong; if it reports a visible number, the row space is fine and the defect is
+            // in the drawing after all. Either answer kills a hypothesis rather than adding one.
+            //
+            // Safe to publish: this text is synthetic fixture content in a UI-test-only build,
+            // never a real pane's output.
+            let active = view.hasActiveSelection
+            let selected = view.getSelection() ?? ""
+            let term = view.getTerminal()
+            // yDisp IS THE LAST DISCRIMINATOR, and it is public (`Terminal.buffer` is
+            // `public private(set)`, `Buffer.yDisp` is `public`), so no internals are needed.
+            //
+            // The run at 001a092a reported a real three-character selection of "187" with ZERO
+            // painted pixels, deterministically in both passes. The fixture numbers its lines, so
+            // that text identifies the selection's line: "187" is 1-indexed, hence buffer row 186.
+            // Publishing yDisp lets the test decide, arithmetically rather than by inference,
+            // between the only two remaining explanations:
+            //   186 inside [yDisp, yDisp + rows - 1]  => the selection sits on a row being drawn,
+            //                                            so the PAINT is broken;
+            //   186 outside that window               => the selection sits on a row nobody draws,
+            //                                            so the tap's ROW SPACE is wrong after all.
+            // Both were reached by reading and neither survived; this settles it by measurement.
+            // `yBase` is deliberately NOT published: it is internal to SwiftTerm (Buffer.swift:43
+            // declares it without `public`, unlike yDisp at 58), so reading it would not compile.
+            // Checked before pushing rather than after CI said so.
+            // `pub` names WHICH handler published this reading and counts publishes, so a test can
+            // tell "the handler ran and did nothing" from "the handler never ran". Without it, a
+            // stale reading from an earlier gesture is indistinguishable from a fresh one, and CI
+            // spent a round on exactly that ambiguity: after a single tap the label still read
+            // sel=1 text=<lazy>, which could have meant clearTap failed OR that the tap never
+            // reached the terminal at all.
+            //
+            // `fr` IS THE RESPONDER STATE, added so the collapse chevron's contract is measurable
+            // at all. Review rejected this PR's first collapse mechanism as inert — a bool cleared
+            // in `DispatchQueue.main.async`, which drains before SwiftUI's update flush, so the
+            // resign would never have run. Nothing in the suite could have caught that, because
+            // "did the terminal give up the responder while keeping its selection" had no
+            // observable at all: an inert fix and a working one produced identical output. That is
+            // the worst shape a defect can have, so the observable comes with the fix.
+            probePublishCount += 1
+            probe.accessibilityLabel =
+                "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
+                + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
+                + "fr=\(view.isFirstResponder ? 1 : 0) "
+                + "resizes=\(resizeCount) pub=\(publisher)#\(probePublishCount)"
+            #endif
         }
 
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
+            offsetObservation?.invalidate() // no tail-state publish from a torn-down pane
+            offsetObservation = nil
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
             view?.isScrollEnabled = true    // restore native scroll if we disabled it mid-drag
                                             // (stop() also runs on .exited while on screen)
@@ -877,6 +1364,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// resizes the SHARED PTY (see `sendPTYSize`): one winsize per pane, so a
         /// co-viewing desktop reflows to the phone's grid until it re-asserts.
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // Counted for the UI-test probe only: SwiftTerm's `processSizeChange` clears any
+            // active selection on a rows/cols change, so a resize landing AFTER a word select
+            // silently destroys it. The count lets a test say "the selection was wiped" rather
+            // than "no selection appeared", which are different bugs with different fixes.
+            resizeCount += 1
             sendPTYSize(cols: newCols, rows: newRows)
         }
 
@@ -971,18 +1463,18 @@ struct LiveTerminalView: UIViewRepresentable {
             return (UInt32(max(1, advance.rounded())), UInt32(max(1, lineHeight.rounded())))
         }
 
-        // MARK: TerminalViewDelegate — read-only, so most are inert
+        // MARK: TerminalViewDelegate — terminal input
 
-        /// KEY DRIVE (iPad + hardware keyboard only): forward SwiftTerm's own key→bytes
-        /// translation to the PTY. DOUBLE-GATED — the view must be `keyDriveEnabled` AND the
-        /// current first responder — so on iPhone/touch (where the view never becomes first
-        /// responder) this stays a no-op and no keystroke or SwiftTerm-generated mouse byte is
-        /// ever routed to the PTY, exactly as before. Serialized through `enqueueInput` for the
-        /// same reason `emitScroll` serializes: batch a fast key burst into one send instead of a
-        /// flood of concurrent, possibly-reordered SSH channels. (The alt-screen SCROLL path in
-        /// `handleScrollPan` still writes wheel/arrow sequences directly via `sendText`.)
+        /// Forward SwiftTerm's key→bytes translation to the PTY whenever direct input
+        /// is enabled and the terminal owns focus. This includes iPhone software-keyboard
+        /// input and iPad hardware-keyboard input. Serialized through `enqueueInput` so
+        /// a fast key burst becomes ordered batches rather than concurrent channels.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard !stopped, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
+            // `foreground` is part of the guard, not just first-responder status. Panes stay
+            // MOUNTED when another is fronted, and a pane that held a selection keeps its
+            // responder for a moment, so first-responder alone would let a keystroke reach
+            // an agent nobody is looking at.
+            guard !stopped, foreground, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
             enqueueInput(String(decoding: data, as: UTF8.self))
         }
 
@@ -1053,7 +1545,41 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             _ = try? await self.client.sendText(pane: self.paneID, text: batch)
         }
-        func scrolled(source: TerminalView, position: Double) {}
+        /// SwiftTerm reports a 0...1 scroll position (`TerminalViewDelegate.scrolled`).
+        /// A pane whose content fits the viewport can never be scrolled away from the
+        /// tail, so treat it as parked; otherwise it is at the tail only at the bottom.
+        ///
+        /// THIS CALLBACK IS NOT ENOUGH ON ITS OWN, and relying on it shipped a broken Latest pill.
+        /// On iOS the only route to `terminalDelegate?.scrolled` is
+        /// `TerminalView.scrolled(source:yDisp:)` (iOSTerminalView.swift:1481), invoked solely from
+        /// `Terminal.scroll()` — i.e. when OUTPUT scrolls the buffer. A FINGER scroll takes a
+        /// different path entirely: `contentOffset.didSet` calls `syncYDispFromContentOffset()`,
+        /// which calls `Terminal.setViewYDisp(row)`, which assigns `buffer.yDisp` and notifies
+        /// NOBODY (Terminal.swift:5616-5619). So dragging back through scrollback on a quiet pane
+        /// never reached this method, `reportTailState(atTail: false)` never ran, and the pill that
+        /// exists to get the reader back to the live tail never appeared — in exactly the case a
+        /// reader needs it. Found by review, not by the receipt, because no test asserted the pill.
+        ///
+        /// `observeContentOffset()` covers the finger path. Both funnel through `reportTailState`,
+        /// which stays the single publisher, judges the alternate screen for both, and dedupes —
+        /// so the two sources cannot double-publish and neither can disagree with the other about
+        /// the alt buffer. The alt-screen guard that used to sit in this method has moved there;
+        /// see the note on `reportTailState` for why the caller is the wrong place for it.
+        ///
+        /// WHY THE ALT SCREEN NEEDED JUDGING AT ALL: AppleTerminalView.scrollPosition
+        /// short-circuits to 0 whenever the display buffer is the alternate one
+        /// (st_apple.swift:2012), while Terminal.scroll() notifies the delegate unconditionally
+        /// including on that buffer (Terminal.swift:5434). So on a Claude Code pane this callback
+        /// saw position 0 on EVERY output frame, and whenever the emulator grid exceeded the
+        /// laid-out view — the window before PTY-size negotiation settles, or a co-viewer
+        /// reclaiming the size — canScroll was true and atTail latched FALSE. The pill pinned
+        /// itself visible on a TUI pane where it cannot mean anything, and tapping it was undone
+        /// by the next frame.
+        func scrolled(source: TerminalView, position: Double) {
+            guard let view else { return }
+            let canScroll = view.contentSize.height > view.bounds.height + 1
+            reportTailState(atTail: !canScroll || position >= 0.999)
+        }
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
@@ -1062,6 +1588,55 @@ struct LiveTerminalView: UIViewRepresentable {
         /// later version added one). No-op: the read-only terminal never copies.
         func clipboardCopy(source: TerminalView, content: Data) {}
 
+        // MARK: finger-scroll tail state — the Latest pill's other half
+
+        /// KVO on the terminal's own `contentOffset`, which is the ONLY signal a finger scroll
+        /// produces that this layer can see (see `scrolled(source:position:)` for why the delegate
+        /// callback never fires on that path).
+        ///
+        /// KVO AND NOT THE SCROLL DELEGATE, deliberately. `TerminalView` is a `UIScrollView` that
+        /// declares `UIScrollViewDelegate` conformance and relies on being its own delegate;
+        /// assigning `view.delegate = self` to get `scrollViewDidScroll` would take that over, and
+        /// this repo has already paid for that once — the project notes record scrolling broken for
+        /// roughly seven builds after claiming SwiftTerm's scroll delegate. Observation is additive
+        /// and cannot displace anything.
+        ///
+        /// The tail test is the same arithmetic the delegate path uses, expressed in offsets
+        /// instead of a 0...1 position, so the two agree at the boundary: a pane whose content fits
+        /// cannot be scrolled away from the tail and is therefore always parked; otherwise it is at
+        /// the tail within one cell of the bottom. One cell rather than one point because
+        /// `contentOffset` lands on fractional values mid-deceleration, and a stricter bound made
+        /// the pill flicker on and off during a flick.
+        private func observeContentOffset(_ view: TerminalView) {
+            offsetObservation = view.observe(\.contentOffset, options: [.new]) { scroll, _ in
+                // Read the geometry SYNCHRONOUSLY, on whatever thread KVO fired on, then hop —
+                // matching this file's existing convention (`Task { @MainActor [weak self] }`) so
+                // Coordinator state is only ever touched on the main actor. Deliberately NOT
+                // `MainActor.assumeIsolated`: Coordinator is a plain NSObject rather than an
+                // actor-isolated type, and assumeIsolated TRAPS if the assumption is wrong, which
+                // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
+                let offsetY = scroll.contentOffset.y
+                let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                Task { @MainActor [weak self] in
+                    guard let self, !self.stopped else { return }
+                    // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
+                    // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
+                    // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
+                    // :1612-1613). A full cell of slack left a HALF-CELL BAND where this reported
+                    // at-tail and hid the pill while userScrolling was still true — new output would
+                    // not scroll into view and the one affordance for getting back was gone. On a
+                    // busy pane the delegate path corrects it on the next line; on a quiet pane it
+                    // persists, which is precisely the case the pill exists for. Reported by review,
+                    // along with the fact that my comment claiming this used "the same arithmetic" as
+                    // the delegate path was wrong: the delegate compares a 0...1 position, this
+                    // compares offsets, and they agreed only approximately.
+                    let slack = CGFloat(max(self.cellPixels().height, 2)) / 2
+                    let canScroll = maxOffset > 1
+                    self.reportTailState(atTail: !canScroll || offsetY >= maxOffset - slack)
+                }
+            }
+        }
+
         // MARK: alt-screen scroll — drag to scroll the AGENT's own view
 
         /// Accumulated vertical drag since the last emitted scroll tick.
@@ -1069,6 +1644,23 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The alt-screen scroll pan recognizer, disabled on teardown so a drag can't
         /// send bytes to a pane that has exited/been replaced.
         private var scrollPan: UIPanGestureRecognizer?
+        /// DEBUG-ONLY diagnostic element (see `publishSelectionProbe`, which is compiled out
+        /// entirely in Release). Also nil in a DEBUG build that does not launch with
+        /// `HERDR_SCREENSHOT_MOCK`, so it neither allocates nor reaches the accessibility layer
+        /// outside a UI-test run. The property itself is left ungated because nothing assigns it
+        /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
+        private var selectionProbe: UIView?
+        /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
+        private var probePublishCount = 0
+        /// How many 2-tap recognizers `clearTap` was made to require the failure of, captured at
+        /// attach. Published by the probe so a test can see whether that chain was wired as
+        /// intended rather than inferring it from behaviour.
+        private var clearTapRequirementCount = 0
+        /// How many times SwiftTerm has reported a grid change. Published by the probe because
+        /// `processSizeChange` clears the selection on any rows/cols change, so a resize
+        /// arriving late is one of the candidate explanations for a selection that vanishes —
+        /// and a count is how a test tells that apart from a selection never made.
+        private var resizeCount = 0
         /// Serialized scroll-send queue: bytes waiting to go to the agent, drained one
         /// send at a time by `scrollSendTask` — so a fast drag coalesces into batched
         /// writes instead of a flood of concurrent, possibly-reordered SSH channels.
@@ -1098,7 +1690,12 @@ struct LiveTerminalView: UIViewRepresentable {
             if gr.state == .ended || gr.state == .cancelled || gr.state == .failed {
                 view?.isScrollEnabled = true
             }
-            guard !stopped, let view else { return }   // teardown began — send nothing further
+            // `foreground` is defence in depth for the same reason as the two-finger tap:
+            // this path SENDS BYTES, and it should not rely on the keep-alive container
+            // continuing to make backgrounded panes non-hit-testable. Placed AFTER the
+            // isScrollEnabled restore above, so a pane backgrounded mid-drag still gets its
+            // native scroll back rather than being stranded disabled.
+            guard !stopped, foreground, let view else { return }   // teardown or hidden: send nothing
             let term = view.getTerminal()
             // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
             guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
@@ -1193,6 +1790,18 @@ struct LiveTerminalView: UIViewRepresentable {
         /// lets our handler drive the agent scroll.
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        /// The agent-scroll pan must not BEGIN when it has nothing to do, or when it
+        /// would fight a selection. On a plain shell pane `handleScrollPan` returns early
+        /// anyway; while a selection is active the drag belongs to SwiftTerm's lazily
+        /// installed drag-to-extend pan, which has no delegate of its own and so cannot
+        /// defend itself. Only this recognizer is gated, so the taps always begin.
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard g === scrollPan else { return true }
+            guard let view, !view.hasActiveSelection else { return false }
+            let term = view.getTerminal()
+            return term.isCurrentBufferAlternate || term.mouseMode != .off
+        }
 
         // MARK: palette helpers
 
