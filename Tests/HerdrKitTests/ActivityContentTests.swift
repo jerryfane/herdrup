@@ -247,4 +247,88 @@ final class ActivityContentTests: XCTestCase {
             kinds.map { [$0] + rest }
         }
     }
+
+    // MARK: - the three fields a mutation battery found unpinned
+
+    /// A reviewer ran three mutants against the head that merged as #204 and ALL THREE SURVIVED
+    /// all 456 tests: `totalCount: rows.count` -> `0`, `headline: lead?.title ?? "No agents"` ->
+    /// the bare constant, and `workingSinceUnixSeconds: Double($0) / 1000` -> `Double($0)`,
+    /// which hands the lock screen MILLISECONDS where it expects seconds — a 1000x timer error.
+    ///
+    /// All three were coverage gaps rather than product defects; the shipped code is correct in
+    /// each place, which is why that PR was approved rather than blocked. They are pinned here
+    /// because a correct field with no test is one edit away from being a wrong field, and
+    /// because the tests that were supposed to cover this mapping asserted `activityLead` and
+    /// `statusWord` while leaving three of the seven mapped fields untouched.
+
+    /// The headline must NAME the lead agent. The surviving mutant returned the empty-roster
+    /// constant for every roster, and only the empty-roster test asserted headline at all.
+    func testTheHeadlineNamesTheLeadAgentOnANonEmptyRoster() throws {
+        // A blocked agent leads over a working one, so the expected headline is unambiguous.
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "working", name: "busy-one"),
+            try agent(pane: "p1", status: "blocked", name: "waiting-one"),
+        ], livePaneIDs: ["p0", "p1"])
+        XCTAssertEqual(l.activityLead?.info.name, "waiting-one", "premise: the blocked agent leads")
+        XCTAssertEqual(l.activityContent.headline, "waiting-one",
+                       "the headline must name the lead agent, not fall back to the empty-roster constant")
+        // And it is the lead's name specifically, not just any non-constant string.
+        XCTAssertNotEqual(l.activityContent.headline, "busy-one")
+    }
+
+    /// totalCount must count every live row. The surviving mutant returned 0 always, and passed
+    /// because the only assertion on totalCount was the empty roster, which expects 0.
+    func testTotalCountCountsEveryLiveRow() throws {
+        for n in 1...4 {
+            let kinds = [Kind](repeating: .working, count: n)
+            XCTAssertEqual(try list(kinds).activityContent.totalCount, n,
+                           "totalCount must equal the live row count, not a constant")
+        }
+        // A stopped pane is still a ROW on the lock screen's "N agents" readout, so it counts.
+        let mixed = try list([.working, .stopped, .idle])
+        XCTAssertEqual(mixed.activityContent.totalCount, 3,
+                       "a stopped row is still an agent in the session; it is demoted as headline, not removed")
+    }
+
+    /// workingSince must be SECONDS. The surviving mutant passed milliseconds straight through,
+    /// which the widget would render as a timer roughly 1000x too long, and it survived because
+    /// no fixture set completedUnixMs so the `word == "working"` gate's true branch never ran.
+    func testWorkingSinceIsSecondsNotMilliseconds() throws {
+        let ms: Int64 = 1_723_000_000_000          // 2024-08-07T02:26:40Z in ms
+        let l = AgentList(agents: [try agent(pane: "p0", status: "working",
+                                             name: "busy-one", completedUnixMs: ms)],
+                          livePaneIDs: ["p0"])
+        XCTAssertEqual(l.activityContent.statusWord, "working", "premise: the working gate must be open")
+        let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds,
+                                 "a working lead with a completed turn must carry a start time")
+        XCTAssertEqual(since, Double(ms) / 1000, accuracy: 0.001,
+                       "workingSince must be SECONDS; passing the millisecond value through is a 1000x timer error")
+        // Sanity on magnitude, so a future unit change cannot satisfy the equality above by
+        // coincidence: seconds since 1970 are ~1.7e9, milliseconds ~1.7e12.
+        XCTAssertLessThan(since, 1e11, "a plausible seconds-since-epoch value, not milliseconds")
+    }
+
+    /// And the gate itself: a non-working lead carries NO start time, so a dropped gate cannot
+    /// hide behind the value assertion above.
+    ///
+    /// THE LEAD MUST CARRY A TIMESTAMP FOR THIS TO TEST ANYTHING. The first version of this
+    /// test gave the completed turn to the WORKING agent and left the leading blocked agent
+    /// without one, so `since` was nil whatever the gate did — and a mutant replacing
+    /// `word == "working"` with an always-true condition passed it. Caught by running that
+    /// mutant, not by reading. The blocked lead therefore has its own `completedUnixMs`: with
+    /// the gate intact that value must be suppressed, and with the gate dropped it leaks.
+    func testOnlyAWorkingLeadCarriesAStartTime() throws {
+        let ms: Int64 = 1_723_000_000_000
+        let l = AgentList(agents: [
+            try agent(pane: "p0", status: "working", name: "busy-one", completedUnixMs: ms),
+            // The LEAD, and it has a completed turn of its own — that is what makes the gate
+            // observable rather than incidentally satisfied.
+            try agent(pane: "p1", status: "blocked", name: "waiting-one", completedUnixMs: ms + 5_000),
+        ], livePaneIDs: ["p0", "p1"])
+        XCTAssertEqual(l.activityContent.statusWord, "needsYou", "premise: the blocked agent leads")
+        XCTAssertNotNil(l.activityLead?.info.lastCompletedTurn?.completedUnixMs,
+                        "premise: the lead carries a timestamp, so a dropped gate would publish it")
+        XCTAssertNil(l.activityContent.workingSinceUnixSeconds,
+                     "only a WORKING lead has a current turn to time; a needs-you lead's last turn is not a live timer")
+    }
 }
