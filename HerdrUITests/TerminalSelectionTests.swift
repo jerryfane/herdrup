@@ -143,27 +143,33 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertLessThan(tealPixelCount(focused), 20,
                           "a single tap on an unselected pane produced selection colour; the premise for step 4 is broken")
 
-        // (3) DOUBLE TAP ON THE LINE NUMBER, and this coordinate is now MEASURED rather than
-        // computed — my arithmetic for it was wrong twice.
+        // (3) DOUBLE TAP AT A COLUMN THAT IS WRITTEN ON BOTH ROW TYPES, because the terminal
+        // WRAPS and half the visible rows are continuations.
         //
-        // What the probe has established across two heads:
-        //   dx 0.22  -> selected "< >", a single space
-        //   dx 0.344 -> selected "187", the three-digit line number at columns 16-18
-        // I had predicted col 17.6 and col 27.5 respectively, assuming the 80-column line spans
-        // the screen width. It does not: solving from those two readings gives roughly 49 columns
-        // across the viewport, so the terminal's 80-column content is WIDER THAN THE SCREEN and
-        // the right-hand columns are simply off-view. That also retires my earlier claim that
-        // this fixture only offers five-character letter runs of slack — the visible portion is
-        // "SCROLLTEST line NNN  the quick…", and the widest thing in it is the number plus its
-        // surrounding spaces.
+        // The stream-lifecycle fix changed the geometry this test runs against, and the probe
+        // reported the new truth: rows=19 cols=50, not the 24x80 the fixture declares. The app
+        // pins the PTY to the phone's fit, so the fixture's 64-character line wraps:
+        //   row A (cols 0-49):  "SCROLLTEST line 187  the quick brown fox jumps ove"
+        //   row B (cols 0-13):  "r the lazy dog"   — and cols 14-49 are UNWRITTEN
+        // A tap on an unwritten cell hits selectWordOrExpression's NUL branch, which selects the
+        // run of nulls: active, and empty when read back. That is exactly what CI reported at the
+        // previous head — sel=1 len=0 text=<> — and dx 0.344 lands on col 17, which is inside the
+        // line number on row A and NUL on row B. Roughly half the rows are continuations, so that
+        // coordinate was a coin toss for the third time.
         //
-        // KEEPING dx 0.344 DELIBERATELY, because landing on the NUMBER is better than landing on
-        // a word: the fixture numbers every line, so the selected text identifies WHICH LINE the
-        // selection is on, which is exactly the fact the render assertion below needs in order to
-        // name its own cause. A word would satisfy the length check and tell me nothing.
+        // dx 0.150 is col 7, and it is chosen by enumerating every column written on BOTH row
+        // types with one column of slack either side, inside a word of at least three characters:
+        // columns 3, 7, 8 and 12 qualify. Col 7 is "SCROLLTEST" on a primary row and "lazy" on a
+        // continuation row, and cols 6 and 8 are inside the same two words, so a one-column drift
+        // still selects a real word.
+        //
+        // The cost is that the selected text no longer identifies the line, so the placement
+        // arithmetic below degrades to best-effort. That is an acceptable trade now: the row-space
+        // question it was built to answer has been ANSWERED — the fixture was re-seeding — and the
+        // ydisp guard is what protects against that returning.
         //
         // dy=0.30 stays in the terminal band, which the keyboard has shrunk to roughly the top 58%.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.344, dy: 0.30)).doubleTap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.150, dy: 0.30)).doubleTap()
         Thread.sleep(forTimeInterval: 1.5)
         let selected = app.screenshot()
         attach(selected, name: "03-selection-held")
@@ -234,12 +240,19 @@ final class TerminalSelectionTests: XCTestCase {
         // The selection was real and off-screen, which is why no highlight ever appeared and why
         // I spent four rounds looking at SwiftTerm's renderer, which was innocent throughout.
         //
-        // 200 lines in a 24-row terminal parks yDisp at about 176. The ceiling is generous but far
-        // below a single extra seed, so a returning re-seed fails HERE, naming the fixture,
-        // instead of resurfacing as an unpaintable selection.
+        // THE CEILING IS 600, AND MY FIRST ATTEMPT AT 400 WAS ABOUT TO FALSE-FAIL. I sized it for
+        // an UNWRAPPED buffer — 200 lines in a 24-row terminal parks yDisp near 176 — but the app
+        // pins the PTY to the phone's fit of 50 columns, so each 64-character fixture line wraps
+        // to TWO rows: about 400 buffer rows, minus the 19 visible, giving yDisp ≈ 381. CI observed
+        // 382. A guard at 400 would have fired on correct behaviour within nineteen rows of slack,
+        // which is the sort of check that gets deleted for crying wolf rather than fixed.
+        //
+        // One extra re-seed reaches roughly 781, so 600 separates one seed from two with room on
+        // both sides. Computed from the fixture rather than guessed, and stated here so the next
+        // change to the fixture's line length or column pinning knows what this number depends on.
         if let yDisp {
-            XCTAssertLessThan(yDisp, 400,
-                              "ydisp=\(yDisp) means the scrollback is far larger than the fixture's 200 seeded lines, so the mock stream is re-seeding on reconnect again. The paint assertion below would fail for that reason and not for a rendering fault. probe[\(reading)]")
+            XCTAssertLessThan(yDisp, 600,
+                              "ydisp=\(yDisp) is far beyond the ~381 a single 200-line seed produces when wrapped at 50 columns, so the mock stream is re-seeding on reconnect again. The paint assertion below would then fail for that reason and not for a rendering fault. probe[\(reading)]")
         }
         let placement: String = {
             guard let selRow, let yDisp, let rowCount else {
