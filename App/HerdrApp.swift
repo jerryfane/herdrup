@@ -3928,7 +3928,14 @@ struct TerminalPaneContent: View {
             // with no dismiss affordance at all: a reader who tapped once to select and
             // copy a line could only put it down by first focusing the reply field to make
             // this button appear, and then pressing it.
-            if replyFocused || terminalInputFocused {
+            //
+            // ...AND THAT DISJUNCT IS iPHONE-ONLY, because on iPad it produced a DEAD BUTTON.
+            // `terminalInputFocused` goes true on any terminal tap, but the iPad terminal's
+            // inputView is a zero-frame view, so no keyboard ever appeared for it to collapse;
+            // pressing it cleared both flags and then `wantsTerminalKeyFocus` re-asserted
+            // through its own `|| idiom == .pad` disjunct and the terminal immediately retook
+            // the responder. A control that visibly does nothing is worse than an absent one.
+            if replyFocused || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone) {
                 Button {
                     replyFocused = false
                     terminalInputFocused = false

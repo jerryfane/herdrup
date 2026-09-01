@@ -530,34 +530,50 @@ struct LiveTerminalView: UIViewRepresentable {
             view.addGestureRecognizer(focusTap)
             // MENU TAP: repositions the Copy menu SwiftTerm puts in the wrong place, and
             // does nothing else. A review measured the menu overlapping the pane header —
-            // the back chevron, the title, the NEEDS YOU badge and the refresh icon.
+            // the back chevron, the title, the NEEDS YOU badge and the refresh icon — by
+            // downloading a CI artifact and looking at it. THAT MEASUREMENT IS THE FACT HERE.
             //
-            // The cause is upstream and it is a coordinate-space bug:
-            // `makeContextMenuRegionForSelection()` builds its avoid-rect as
-            // `CGRect(y: CGFloat(selection.start.row) * cellDimension.height, ...)` from a
-            // BUFFER position, while the renderer correctly subtracts `yDisp` when it draws.
-            // With scrollback that y is thousands of points below the view, so UIMenuController
-            // clamps the menu to the top of the window. `makeContextMenuRegionForTap(point:)`
-            // is view-relative and correct, which is why long-press places the menu properly.
-            // This PR is what makes the double-tap menu reachable on iPhone, so it ships the
-            // defect and owns fixing it.
+            // THE MECHANISM IS NOT SETTLED. I previously wrote that
+            // `makeContextMenuRegionForSelection()` builds its avoid-rect from a BUFFER row
+            // while the renderer subtracts `yDisp`. A second reviewer traced the same path and
+            // could not confirm it: on iOS the TerminalView IS the scroll view, and
+            // `calculateTapHit` returns content-space rows — the same space
+            // `makeContextMenuRegionForTap(point:)` uses — so the mismatch is not visible in
+            // that path. So the defect is observed and the cause is unproven, and the real fix
+            // may belong upstream. This re-present is a targeted workaround, not a diagnosis.
             //
-            // A DEDICATED 2-TAP RECOGNIZER, not a branch inside `focusTap`. focusTap fires on
-            // tap 1 AND tap 2, so gating there would need to know whether SwiftTerm's handler
-            // had already run — the exact undocumented ordering this file's tap split exists to
-            // stop depending on. This one fires only on tap 2 by construction, and the async
-            // hop guarantees SwiftTerm's `doubleTap` has finished whichever order UIKit chose,
-            // because both handlers run in the same runloop turn and this block runs after it.
+            // IT MUST WAIT FOR THE TRIPLE TAP, and this is what made the first version INERT.
+            // SwiftTerm defers `doubleTap` behind `tripleTap.require(toFail:)`
+            // (iOSTerminalView.swift:1078), so its selection lands about one multi-tap timeout
+            // — roughly 0.3s — AFTER tap 2's touch-up. A recognizer with no failure requirement
+            // fires immediately, so the async hop ran BEFORE any selection existed, found
+            // `hasActiveSelection` false and returned: on a fresh double tap the menu stayed
+            // over the header, and on a re-double-tap SwiftTerm's own later presentation won
+            // anyway. Final placement was SwiftTerm's in every case. Mirroring the same
+            // `require(toFail:)` loop `clearTap` uses puts this after SwiftTerm's own handler,
+            // and also stops it firing on tap 2 of a TRIPLE tap.
             //
-            // It re-presents only; `showStandardContextMenu(at:)` computes a region and a hit
-            // and shows the menu, and does not re-select, so the word SwiftTerm just selected
-            // survives. It takes no responder and requires nothing to fail, so it cannot
-            // starve or reorder the existing chain. Declared BEFORE `clearTap` so that
-            // recognizer's "every 2-tap recognizer must fail" loop keeps meaning exactly that.
+            // It re-presents only and does not re-select, so the word SwiftTerm just selected
+            // survives. `showStandardContextMenu(at:)` DOES call `becomeFirstResponder()`
+            // (iOSTerminalView.swift:1392-1396) — an earlier comment here claimed it takes no
+            // responder and that was simply false. The practical effect is small, since on
+            // iPhone `focusTap` already holds the responder and on iPad the terminal's
+            // inputView is zero-frame, but it does bypass the `wantsTerminalKeyFocus` gate, so
+            // the hop's `foreground`/`stopped` guards are load-bearing rather than belt-and-braces.
+            //
+            // Declared BEFORE `clearTap` so that recognizer's "every 2-tap recognizer must
+            // fail" loop keeps meaning exactly that.
             let menuTap = UITapGestureRecognizer(target: self, action: #selector(handleMenuRepositionTap(_:)))
             menuTap.numberOfTapsRequired = 2
             menuTap.delegate = self
             menuTap.cancelsTouchesInView = false
+            // SwiftTerm's tripleTap is its only 3-tap recognizer; requiring it to fail is what
+            // orders this after SwiftTerm's own doubleTap handler.
+            for gr in view.gestureRecognizers ?? [] {
+                if let t = gr as? UITapGestureRecognizer, t.numberOfTapsRequired == 3 {
+                    menuTap.require(toFail: t)
+                }
+            }
             view.addGestureRecognizer(menuTap)
             // CLEAR TAP: requires SwiftTerm's 2-tap recognizer to fail, exactly as
             // SwiftTerm guards its own `singleTap` (setupGestures does
@@ -688,30 +704,71 @@ struct LiveTerminalView: UIViewRepresentable {
             guard !stopped, foreground, gr.state == .ended, let view else { return }
             guard view.hasActiveSelection else { return }
             view.clearSelection()
+            // So a test can distinguish "the clear reached the view" from "the highlight
+            // happened to stop being drawn". No-op outside UI-test builds.
+            publishSelectionProbe()
         }
 
-        /// Re-present the Copy menu at the TAP POINT, because SwiftTerm positions the
-        /// double-tap menu from a buffer-relative rect and UIMenuController then clamps it
-        /// over the pane header (see the `menuTap` comment in `attach`).
-        ///
-        /// The async hop is the whole reason this is order-independent: SwiftTerm's `doubleTap`
-        /// and this recognizer both fire in the same runloop turn in an order UIKit does not
-        /// document, and this block runs after that turn, so the selection and SwiftTerm's own
-        /// (mis-placed) presentation have both already happened.
+        /// Re-present the Copy menu at the TAP POINT. Ordered AFTER SwiftTerm's own handler by
+        /// `menuTap.require(toFail: tripleTap)` — see the `menuTap` comment in `attach` for why
+        /// the first version, which had no failure requirement, was inert.
         ///
         /// Guarded on a selection actually existing, so a double tap that selects nothing —
         /// blank space past the end of a line yields an EMPTY range, which SwiftTerm still
         /// marks active but paints nothing — does not get a menu moved onto it. `foreground`
         /// is re-checked inside the hop: a pane can be backgrounded between the tap and the
-        /// hop, and a hidden pane must not present a menu.
+        /// hop, and a hidden pane must not present a menu. Those guards also bound
+        /// `showStandardContextMenu(at:)`'s undocumented `becomeFirstResponder()`, which
+        /// bypasses the `wantsTerminalKeyFocus` gate.
         @objc private func handleMenuRepositionTap(_ gr: UITapGestureRecognizer) {
             guard !stopped, foreground, gr.state == .ended, let view else { return }
             let point = gr.location(in: view)
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.stopped, self.foreground, let view = self.view else { return }
-                guard view.hasActiveSelection else { return }
+                guard let self, !self.stopped, let view = self.view else { return }
+                self.publishSelectionProbe()   // records state even when the guards below refuse
+                guard self.foreground, view.hasActiveSelection else { return }
                 view.showStandardContextMenu(at: point)
             }
+        }
+
+        /// THE SELECTION PROBE — the instrument, and it exists because four consecutive CI runs
+        /// of the selection receipt failed on my own measurement rather than on the product,
+        /// and two confident diagnoses of why were both wrong.
+        ///
+        /// A UI test can only see PIXELS, so "no highlight" cannot distinguish between: the
+        /// double tap never selected anything, it selected an EMPTY range, a resize wiped the
+        /// selection (`processSizeChange` sets `selection.active = false` on any rows/cols
+        /// change, AppleTerminalView.swift:232), or the selection exists and simply is not
+        /// painted the colour the detector looks for. Those have different fixes and I have
+        /// been guessing between them. This publishes the state itself into an accessibility
+        /// element so the test reads SwiftTerm's answer instead of inferring one.
+        ///
+        /// UI-TEST BUILDS ONLY. Gated on the same `HERDR_SCREENSHOT_MOCK` launch environment
+        /// the mock transport uses, so a real build never allocates it, never attaches it to the
+        /// view tree, and cannot expose terminal contents to the accessibility layer. The label
+        /// carries the SELECTED LENGTH, never the selected text.
+        private func publishSelectionProbe() {
+            guard ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
+                  let view else { return }
+            let probe: UIView
+            if let existing = selectionProbe {
+                probe = existing
+            } else {
+                probe = UIView(frame: .zero)
+                probe.isAccessibilityElement = true
+                probe.accessibilityIdentifier = "terminal-selection-probe"
+                view.addSubview(probe)
+                selectionProbe = probe
+            }
+            // `getSelection()` returns the selected TEXT as `String?` (AppleTerminalView.swift
+            // :2535) — my first version called `.getSelectedText()` on it, which is the
+            // SelectionService method and does not exist here. Only the LENGTH is published.
+            let active = view.hasActiveSelection
+            let length = view.getSelection()?.count ?? 0
+            let term = view.getTerminal()
+            probe.accessibilityLabel =
+                "sel=\(active ? 1 : 0) len=\(length) rows=\(term.rows) "
+                + "cols=\(term.cols) resizes=\(resizeCount)"
         }
 
         func stop() {
@@ -1122,6 +1179,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// resizes the SHARED PTY (see `sendPTYSize`): one winsize per pane, so a
         /// co-viewing desktop reflows to the phone's grid until it re-asserts.
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // Counted for the UI-test probe only: SwiftTerm's `processSizeChange` clears any
+            // active selection on a rows/cols change, so a resize landing AFTER a word select
+            // silently destroys it. The count lets a test say "the selection was wiped" rather
+            // than "no selection appeared", which are different bugs with different fixes.
+            resizeCount += 1
             sendPTYSize(cols: newCols, rows: newRows)
         }
 
@@ -1321,6 +1383,15 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The alt-screen scroll pan recognizer, disabled on teardown so a drag can't
         /// send bytes to a pane that has exited/been replaced.
         private var scrollPan: UIPanGestureRecognizer?
+        /// UI-TEST ONLY diagnostic element (see `publishSelectionProbe`). Nil in every build
+        /// that does not launch with `HERDR_SCREENSHOT_MOCK`, so a shipped app neither
+        /// allocates it nor exposes it to the accessibility layer.
+        private var selectionProbe: UIView?
+        /// How many times SwiftTerm has reported a grid change. Published by the probe because
+        /// `processSizeChange` clears the selection on any rows/cols change, so a resize
+        /// arriving late is one of the candidate explanations for a selection that vanishes —
+        /// and a count is how a test tells that apart from a selection never made.
+        private var resizeCount = 0
         /// Serialized scroll-send queue: bytes waiting to go to the agent, drained one
         /// send at a time by `scrollSendTask` — so a fast drag coalesces into batched
         /// writes instead of a flood of concurrent, possibly-reordered SSH channels.

@@ -3,12 +3,21 @@ import UIKit
 
 /// THE REGRESSION RECEIPT for double-tap word selection.
 ///
-/// A review found the repaired behaviour unguarded: a compiling mutant that removes
-/// `clearTap.require(toFail: t)` restores the original defect, where the app's own tap
-/// recognizer clears the word SwiftTerm selected on the SAME touch-up, and nothing in the
-/// suite noticed.
+/// WHAT IT DOES AND DOES NOT GUARD, stated first because the previous version of this comment
+/// claimed the wrong thing. A review found the repaired behaviour unguarded by a mutant that
+/// removes `clearTap.require(toFail: t)` — and a LATER review showed this receipt does not kill
+/// that mutant either, for a timing reason neither of us had accounted for: without the failure
+/// requirement `clearTap` recognizes at tap-2 touch-up, which is STRICTLY BEFORE SwiftTerm's
+/// tripleTap-delayed `doubleTap` selects the word. The clear lands on the pre-tap state, the
+/// selection is made ~0.3s later, the highlight paints, and this test passes.
 ///
-/// THIS FILE HAS BEEN WRONG THREE TIMES, always about its own instrument and never about the
+/// The same timing implies the mutant is largely BENIGN in production, so the original P1 was a
+/// reasoned coin-toss rather than a measured wipe. What this file does guard: no highlight at
+/// all, a selection that is active but EMPTY, a selection SwiftTerm holds but does not paint,
+/// and a deselection that never reaches the view. Those are real and it has caught three of
+/// them. It is not a guard on the require(toFail:) line, and saying so was overclaiming.
+///
+/// THIS FILE HAS NOW BEEN WRONG FOUR TIMES, always about its own instrument and never about the
 /// product code. Each lesson is kept because each was independently discoverable and I missed
 /// it:
 ///
@@ -22,25 +31,39 @@ import UIKit
 ///    HerdrApp.swift:685, both saying the app writes and never reads because that prompt
 ///    failed App Review under 2.1a.
 /// 3. A COPY MENU IS NOT A SELECTION. v3 asserted `menuItems["Copy"].exists`. A reviewer
-///    downloaded the CI artifacts and measured SwiftTerm's `selectedTextBackgroundColor`
-///    (0,166,178) at 0 of 3,162,132 pixels in every frame — while Copy WAS present. The cause
-///    is in SwiftTerm's own code: `selectedColumnsRange` yields an EMPTY range when
-///    `startCol == endCol`, so double-tapping blank space leaves `selection.active == true`
-///    with nothing selected and nothing painted, and `canPerformAction` offers Copy anyway.
-///    Both of v3's taps were also mis-aimed: dx=0.35 lands past the end of these short
-///    numbered lines, and dy=0.70 lands on the software keyboard, which occupies the bottom
-///    ~40% and would type into a live agent's PTY.
+///    measured SwiftTerm's `selectedTextBackgroundColor` at 0 of 3,162,132 pixels in every
+///    frame while Copy WAS present: `selectedColumnsRange` yields an EMPTY range when
+///    `startCol == endCol`, so a tap off the glyphs leaves `selection.active == true` with
+///    nothing selected and nothing painted, and `canPerformAction` offers Copy anyway.
+/// 4. A PIXEL COUNT CANNOT NAME A CAUSE. v4 measured the highlight and reported "teal px=0"
+///    twice, which is consistent with four different bugs. I diagnosed it twice from that one
+///    number and was wrong both times — first a keyboard-relayout race, then coordinates. So
+///    the app now publishes SwiftTerm's own selection state under the mock env var and this
+///    reads it, asserting STATE before PIXELS so a failure says which layer broke.
 ///
-/// So this version measures THE HIGHLIGHT ITSELF, with the same detector the reviewer used to
-/// falsify v3. A word painted in the selection colour cannot be produced by a popover, by an
-/// empty range, or by a stale clipboard, and it needs no pasteboard read. Copy's presence is
-/// kept only as a secondary signal, never as the proof.
+/// Two corrections to v4's own claims, both from review: my "these mock lines are short"
+/// remark was wrong (they are 68 of 80 columns, so the earlier dx values were over text after
+/// all, and the retroactive "past end of line" diagnosis was dubious), and the coordinates were
+/// sound throughout. The two-stage focus tap is kept anyway: it removes a real race in which a
+/// keyboard-driven resize can clear a just-made selection, which is a hazard on device even
+/// when CI happens to win it.
 final class TerminalSelectionTests: XCTestCase {
 
     /// SwiftTerm's default `selectedTextBackgroundColor` is (0, 166/255, 178/255) and the app's
-    /// `Coordinator.style` never overrides it (it sets only nativeBackground/Foreground,
-    /// backgroundColor, caretColor and installColors), so this teal is the selection and
-    /// nothing else in the palette is near it.
+    /// `Coordinator.style` never overrides it — verified: nothing in App/ or Sources/ assigns
+    /// `selectedTextBackgroundColor` or `selectedTextForegroundColor` at all, and `style(view)`
+    /// sets only font, nativeBackground/Foreground, backgroundColor, caretColor, isOpaque and
+    /// installColors. So a teal region in a frame IS SwiftTerm's selection.
+    ///
+    /// "NOTHING ELSE IN THE PALETTE IS NEAR IT" WAS FALSE, and a reviewer did the arithmetic:
+    /// `Palette.working` and `caretColor` are both 0x5B9BE8, which passes this detector
+    /// outright (g=155 > 91+40, b=232 > 131, g > 70), as do the ANSI cyan slots 0x4FB8C8 and
+    /// 0x74CEDC. None of them appears in THIS mock — the fixture's blocked agent draws an amber
+    /// dot, the cursor is hidden by ESC[?25l, and the seeded text is uncoloured — so the
+    /// detector is specific here. What makes that safe is not the constant but the
+    /// `baseTeal < 20` premise: a working-status dot would contribute roughly 28 downsampled
+    /// pixels, so any future collision fails the PREMISE loudly instead of quietly satisfying
+    /// the conclusion.
     ///
     /// The hue tests (`g > r + 40`, `b > r + 40`) are the reviewer's, unchanged. The
     /// BRIGHTNESS floor is 70 rather than their 90 because they measured full-resolution
@@ -130,9 +153,26 @@ final class TerminalSelectionTests: XCTestCase {
         let selected = app.screenshot()
         attach(selected, name: "03-selection-held")
 
-        // (4) THE ASSERTION THAT CANNOT PASS BY ACCIDENT: a word is painted in the selection
-        // colour. This is where the mutant shows — with the clear tap firing on tap 2, the
-        // selection is gone by now and there is no teal to find.
+        // (4) READ THE STATE, THEN THE PIXELS — in that order, because for four consecutive CI
+        // runs "no teal" was all this test could say, and it cannot distinguish: no selection
+        // was made; an EMPTY range was selected; a late resize wiped it (SwiftTerm clears the
+        // selection on any rows/cols change); or a selection exists and is painted a colour the
+        // detector does not match. Those are four different bugs and I guessed wrong twice.
+        // `terminal-selection-probe` is published by the app under the same mock env var and
+        // reports sel/len/rows/cols/resizes, so the diagnosis now comes from SwiftTerm.
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        let reading = probe.waitForExistence(timeout: 5) ? (probe.label) : "PROBE ABSENT"
+
+        // The state assertion. `len > 0` is the part that matters: an active-but-EMPTY selection
+        // is exactly what a tap past end-of-line produces, and it offers Copy while painting
+        // nothing, which is how an earlier version of this file passed for the wrong reason.
+        XCTAssertTrue(reading.contains("sel=1"),
+                      "SwiftTerm reports no active selection after a double tap. probe[\(reading)]. If resizes climbed since the focus tap, a late relayout wiped it; if not, the double tap never reached SwiftTerm's recognizer")
+        XCTAssertFalse(reading.contains("len=0"),
+                       "the selection is active but EMPTY, so the tap landed off the glyphs. probe[\(reading)]")
+
+        // THE RENDER ASSERTION, which the state assertion cannot replace: the user sees pixels,
+        // and a selection that exists without being drawn is still broken for them.
         //
         // 60, three times the baseline ceiling of 20, so a marginal pass cannot straddle the
         // two limits: a run reading 19 before and 21 after would satisfy both a "nothing is
@@ -140,7 +180,7 @@ final class TerminalSelectionTests: XCTestCase {
         // word is ~3000 px at full resolution, ~170 here, so the gap is not tight.
         let heldTeal = tealPixelCount(selected)
         XCTAssertGreaterThan(heldTeal, 60,
-                             "no selection highlight after a double tap (teal px=\(heldTeal), baseline \(baseTeal)). Either the selection was cleared on the same touch-up — the regression this file guards — or the tap selected an empty range")
+                             "SwiftTerm holds a selection but nothing is painted in the selection colour (teal px=\(heldTeal), baseline \(baseTeal)). probe[\(reading)]")
 
         // Secondary only: Copy SHOULD be offered, but its presence alone proves nothing, since
         // an empty-but-active selection also offers it.
