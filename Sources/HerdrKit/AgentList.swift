@@ -118,19 +118,29 @@ public struct AgentRow: Equatable, Sendable, Identifiable {
         self.group = AgentRow.resolvedGroup(info: info, status: status, isLive: isLive)
     }
 
-    /// Whether this row's state should be shown with a STALENESS MARKER: it is live, on a
-    /// peer the home did not confirm on its last poll, and it is presenting a state the
-    /// reader would otherwise read as current.
+    /// WHETHER THIS ROW'S STATE IS UNCONFIRMED. A FACT about the row, with no rendering
+    /// opinion in it: the row is live and sits on a peer the home did not confirm on its
+    /// last poll, whether that peer is merely degraded or fully unreachable.
     ///
-    /// ONE DEFINITION, DELIBERATELY. Two surfaces render needs-you (the roster card and
-    /// the Live Activity), and the first version of this marker existed only on the card,
-    /// so the lock screen went on asserting an unconfirmed "1 need you" as fact. Any
-    /// surface that renders a status must read THIS, not re-derive it.
+    /// SEPARATE FROM `showsUnconfirmedMarker` ON PURPOSE, and the separation is the fix for
+    /// a real defect: the count below used to reuse the marker, which excludes
+    /// `isUnreachable` for a RENDERING reason, so a fully OFFLINE peer's last-known-blocked
+    /// agents escalated into needs-you and were then reported as CONFIRMED on the two
+    /// surfaces that have no row to mark. A predicate scoped to one surface's drawing
+    /// decision is the wrong thing to count with.
+    public var hasUnconfirmedState: Bool {
+        isLive && info.hasUnconfirmedStatus
+    }
+
+    /// Whether this row should be DRAWN with a staleness marker. The fact above, minus the
+    /// unreachable case, which already replaces the status outright with an offline mark;
+    /// doubling up would say the same thing twice in one row.
     ///
-    /// `isUnreachable` is excluded because that case already replaces the status outright
-    /// with an offline mark; doubling up would say the same thing twice.
+    /// ONE DEFINITION, DELIBERATELY. Every surface that draws a status reads THIS rather
+    /// than re-deriving it: the first version of this marker existed only on the roster
+    /// card, which is how the lock screen went on asserting an unconfirmed count as fact.
     public var showsUnconfirmedMarker: Bool {
-        isLive && info.hasUnconfirmedStatus && !info.isUnreachable
+        hasUnconfirmedState && !info.isUnreachable
     }
 
     /// ESCALATION-ONLY overlay on `group(for:isLive:)`. Two signals may move a row UP
@@ -240,7 +250,11 @@ public struct AgentList: Equatable, Sendable {
     /// with no room for a per-row marker (the Live Activity) needs this to avoid asserting
     /// an unconfirmed "N need you" as fact on the lock screen.
     public var unconfirmedNeedsYouCount: Int {
-        rows.filter { $0.group == .needsYou && $0.showsUnconfirmedMarker }.count
+        // `hasUnconfirmedState`, NOT `showsUnconfirmedMarker`. The marker excludes
+        // unreachable rows because the card draws them an offline badge instead, and
+        // counting with that exclusion reported a fully OFFLINE peer's stale guess as
+        // CONFIRMED on exactly the two surfaces that have no row to mark.
+        rows.filter { $0.group == .needsYou && $0.hasUnconfirmedState }.count
     }
 
     /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule

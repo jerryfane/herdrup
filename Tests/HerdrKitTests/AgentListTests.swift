@@ -217,6 +217,43 @@ final class AgentListTests: XCTestCase {
                        "mixed: lead with the fact, then name the doubt")
     }
 
+    /// A FULLY OFFLINE peer's escalated rows must still count as unconfirmed. This was the
+    /// fourth surviving mutant a review found, and it was a real defect rather than a
+    /// coverage hole: the count reused `showsUnconfirmedMarker`, which excludes
+    /// `isUnreachable` because the CARD draws those an offline badge instead. Counting with
+    /// a rendering exclusion meant a dead machine's stale guess was reported as CONFIRMED
+    /// on the Live Activity and the roster header, the two surfaces with no row to mark.
+    func testUnreachablePeerStillCountsAsUnconfirmed() throws {
+        let offline = try agent(pane: "p1", status: "unknown", lastKnownStatus: "blocked",
+                               machineID: "mcb-air", reachability: "unreachable")
+        let row = AgentRow(info: offline)
+        // The premises that made the defect invisible: it IS escalated, and it is
+        // deliberately NOT marked, because the offline badge replaces its status entirely.
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertFalse(row.showsUnconfirmedMarker, "the card draws it offline, not stale")
+        XCTAssertTrue(row.hasUnconfirmedState, "but the underlying state is still unconfirmed")
+
+        let list = AgentList(agents: [offline])
+        XCTAssertEqual(list.unconfirmedNeedsYouCount, 1,
+                       "a dead machine's last-known blocked must never read as confirmed")
+        XCTAssertEqual(list.needsYouSummary, "1 may need you")
+
+        // Five agents on one dead machine previously rendered a flat "5 need you".
+        let five = try (1...5).map {
+            try agent(pane: "p\($0)", status: "unknown", lastKnownStatus: "blocked",
+                      machineID: "mcb-air", reachability: "unreachable")
+        }
+        XCTAssertEqual(AgentList(agents: five).needsYouSummary, "5 may need you")
+
+        // Mixed with a genuinely live blocked agent, the doubt is named rather than hidden.
+        let live = try agent(pane: "live", status: "blocked")
+        XCTAssertEqual(AgentList(agents: [live, offline]).needsYouSummary,
+                       "2 need you · 1 stale")
+
+        // And a stopped row on a dead peer is not unconfirmed, it is simply gone.
+        XCTAssertFalse(AgentRow(info: offline, isLive: false).hasUnconfirmedState)
+    }
+
     // MARK: - archived agents (issue #173)
 
     /// The `archived` block decodes through the wire path and drives `isArchived`.

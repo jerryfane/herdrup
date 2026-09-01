@@ -55,13 +55,30 @@ struct AgentActivityAttributes: ActivityAttributes {
         /// dodging Swift's Date reference-date Codable strategy. `nil` when not working.
         var workingSince: Double?
 
-        /// Hand-written ONLY to make `unconfirmedCount` tolerant of an absent key; every
-        /// other field is required exactly as synthesis would have it, so a genuinely
-        /// malformed payload still fails loudly rather than decoding into a plausible zero.
+        /// Hand-written for TWO additive directions, both of which otherwise make the whole
+        /// activity undecodable, which ActivityKit answers by DROPPING the activity so it
+        /// can never be reclaimed or ended.
+        ///
+        /// 1. An absent `unconfirmedCount`, from an activity persisted by, or a payload
+        ///    minted by, a build predating the field. A stored-property default does not
+        ///    help: Codable synthesis never consults it.
+        /// 2. An UNRECOGNISED `status` word, from a newer app or daemon pushing a bucket
+        ///    this widget binary lacks. Raw-value decoding throws `dataCorrupted` there,
+        ///    which is the same drop-the-activity outcome as case 1. HerdrKit already
+        ///    treats this hazard as first-class with `AgentStatus.unrecognised(String)`;
+        ///    this file cannot carry that arm without a new case, so it falls back to
+        ///    `.needsYou`, matching HerdrKit's rule that something uninterpretable
+        ///    SURFACES rather than sinking. A wrongly-attention-grabbing lock screen is
+        ///    recoverable; a silently dropped activity is not.
+        ///
+        /// Every OTHER field stays required exactly as synthesis would have it, so a
+        /// genuinely malformed payload still fails loudly instead of decoding into a
+        /// plausible zero.
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             headline = try c.decode(String.self, forKey: .headline)
-            status = try c.decode(Status.self, forKey: .status)
+            let rawStatus = try c.decode(String.self, forKey: .status)
+            status = Status(rawValue: rawStatus) ?? .needsYou
             needsYouCount = try c.decode(Int.self, forKey: .needsYouCount)
             unconfirmedCount = try c.decodeIfPresent(Int.self, forKey: .unconfirmedCount) ?? 0
             workingCount = try c.decode(Int.self, forKey: .workingCount)
