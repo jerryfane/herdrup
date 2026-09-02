@@ -6410,9 +6410,16 @@ struct MockTransport: HerdrTransport {
                         seq += 1
                     }
                 }
-                // BUSY-PANE OUTPUT: append a line about eight times a second so SwiftTerm's
-                // auto-follow writes `contentOffset` on every frame. A normal-buffer append
-                // rather than a reset, so scrollback grows exactly as a working agent's does.
+                // BUSY-PANE OUTPUT: emit a line about eight times a second so SwiftTerm's
+                // auto-follow writes `contentOffset` on every frame, growing scrollback exactly
+                // as a working agent's does.
+                //
+                // FRAME TYPE IS `data`, and getting that wrong is why the first version of this
+                // mock produced NOTHING. StreamFrame accepts only reset/data/resize/ping/exited
+                // (Wire.swift:708-729) and decoding is deliberately STRICT — an unknown frame
+                // throws, which tears the stream down and reconnects, so my invented "append"
+                // yielded a reconnect loop and no output at all. The busy-pane test caught it by
+                // measuring its own premise (ydisp must advance) rather than assuming it.
                 let busy = Task { [busyOutput] in
                     guard busyOutput else { return }
                     var n = 1
@@ -6422,7 +6429,7 @@ struct MockTransport: HerdrTransport {
                         guard !Task.isCancelled else { break }
                         let line = String(format: "BUSY line %04d  the agent is still working\r\n", n)
                         let b64 = Data(line.utf8).base64EncodedString()
-                        continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"append\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
+                        continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"data\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
                         n += 1; seq += 1
                     }
                 }
