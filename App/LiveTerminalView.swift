@@ -791,12 +791,69 @@ struct LiveTerminalView: UIViewRepresentable {
         /// decided in `send`.
         @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
             guard !stopped, foreground, gr.state == .ended else { return }
+            // A TAP THAT STOPS A SCROLL IS NOT A REQUEST FOR THE KEYBOARD, and treating it as one
+            // is a defect the owner hit on a real iPhone: scrolling back through output would
+            // "randomly" raise the keyboard, which relayouts the terminal band, resizes the PTY and
+            // forces a re-render — losing the reader's place in the output they were reading.
+            //
+            // WHY IT FIRES AT ALL. `focusTap` is a 1-tap recognizer with NO `require(toFail:)` —
+            // deliberately, because the responder must exist by tap 1 for SwiftTerm's double-tap
+            // Copy menu to work — and it is attached to `TerminalView`, which IS a `UIScrollView`,
+            // with `cancelsTouchesInView = false`. The universal iOS idiom for arresting momentum
+            // scrolling is a single tap, so that tap lands on the terminal and the recognizer
+            // cannot tell it apart from a deliberate tap on the text.
+            //
+            // THE FIRST VERSION OF THIS GUARD WAS INERT, and the way that was caught is worth
+            // keeping. It tested `view.isDragging || view.isDecelerating` HERE, at `.ended` —
+            // i.e. touch-UP. But a scroll-arresting touch cancels deceleration at touch-DOWN, so
+            // both flags are already false by the time this runs and the guard never fired. The
+            // evidence was in front of me and I misread it: the regression test reached the guard
+            // 0 times in 6 attempts with ~1s deceleration windows, which I wrote off as unlucky
+            // timing. Review read the same 0/6 as what it was — a measurement of inertness. An
+            // empty result is a claim about the instrument, not about the world.
+            //
+            // SO THE SIGNAL IS "DID THE CONTENT JUST MOVE UNDER A FINGER", sampled from the KVO
+            // observer on `contentOffset` that already drives the Latest pill. That observer
+            // records a timestamp only for offset writes made while the scroll view reports
+            // `isDragging || isDecelerating` — see the note there.
+            //
+            // THAT QUALIFIER IS THE SECOND CORRECTION, and it came from review as well. Recording
+            // every offset change was worse than the bug: SwiftTerm's auto-follow writes
+            // `contentOffset` on every output frame, so on a BUSY pane the timestamp was
+            // permanently fresh and this guard suppressed every tap — the reader could not focus
+            // the terminal at all while an agent was producing output. The flags were never the
+            // wrong signal; reading them at tap `.ended` was the wrong PLACE. Inside the observer
+            // they are true for exactly the writes a finger caused.
+            //
+            // Nothing here depends on recognizer ordering or on when UIScrollView clears its
+            // state, which is what made the first version unprovable without a device.
+            //
+            // A tap that stops momentum arrives while the offset was changing microseconds ago, so
+            // it is suppressed. A tap on a settled pane — or on a pane that is merely following
+            // output — sees motion far in the past, so it focuses normally. The window is
+            // deliberately short: long enough to cover the gap between the last offset change and
+            // touch-up, short enough that a deliberate tap a moment after reading never waits.
+            let sinceMotion = CACurrentMediaTime() - lastContentMotion
+            if sinceMotion < Self.scrollSettleWindow {
+                publishSelectionProbe("scrollTapIgnored")
+                return
+            }
             onTerminalFocusRequest?()
             // Publishes because this recognizer has NO failure requirement, so it fires on tap 1
             // of ANY tap that actually lands on the terminal. That makes it the discriminator for
             // a tap that appears to do nothing: if the probe's publisher changes to focusTap, the
             // touch reached the view and the fault is downstream in clearTap's require-to-fail
             // chain; if it does not change at all, the tap missed the terminal entirely.
+            //
+            // The scroll-ignored path publishes its OWN publisher name so a test can tell "the tap
+            // was suppressed because the pane was scrolling" from "the tap never arrived", which
+            // are otherwise identical: both leave focus untaken and the label unchanged.
+            //
+            // NAMED `scrollTapIgnored` AND NOT `focusTapScrollIgnored` deliberately: probe
+            // assertions are substring matches, and TerminalSelectionTests already asserts
+            // `contains("pub=focusTap")`. Any name with `focusTap` as a PREFIX would satisfy that
+            // assertion from the suppressed path and silently weaken it — the same prefix trap that
+            // made `pub=clearTap` match `pub=clearTapEntry` and greened a vacuous receipt.
             publishSelectionProbe("focusTap")
         }
 
@@ -950,6 +1007,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
                 + "fr=\(view.isFirstResponder ? 1 : 0) "
+                // MOTION AGE IN MILLISECONDS, published so a test can measure the guard's PREMISE
+                // rather than infer it. The previous version of the scroll guard was inert and the
+                // only symptom was a test that never reached it, which is indistinguishable from a
+                // test whose timing never lined up. With this, a run can say "the tap arrived 40ms
+                // after the last offset change" and the premise is a measurement, not a hope.
+                + "motionms=\(Int((CACurrentMediaTime() - lastContentMotion) * 1000)) "
                 + "resizes=\(resizeCount) pub=\(publisher)#\(probePublishCount)"
             #endif
         }
@@ -1617,8 +1680,30 @@ struct LiveTerminalView: UIViewRepresentable {
                 // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
                 let offsetY = scroll.contentOffset.y
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                // USER-DRIVEN MOTION ONLY, and read HERE, synchronously, while the scroll is
+                // actually happening. This is the whole correction to the previous version.
+                //
+                // Review found that recording EVERY offset change breaks tap-to-focus on the common
+                // case: SwiftTerm's auto-follow writes `contentOffset` on every output frame, so on
+                // a busy pane the timestamp is permanently fresh and the guard suppressed every tap.
+                // That is a worse defect than the one it was fixing — the reader could not focus the
+                // terminal at all while an agent was producing output.
+                //
+                // `isDragging`/`isDecelerating` are exactly the discriminator, and the reason the
+                // FIRST attempt failed was WHERE it read them, not WHAT it read: at tap `.ended`
+                // they are already cleared, but inside this observer they are true for precisely the
+                // offset writes a finger caused. Auto-follow writes arrive with both false and are
+                // therefore not motion for this purpose.
+                //
+                // Reading them on the KVO thread alongside the geometry also keeps this immune to
+                // the ordering question the touch-down approach would have raised: nothing here
+                // depends on whether a gesture delegate runs before UIScrollView updates its state.
+                let userDriven = scroll.isDragging || scroll.isDecelerating
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
+                    // WHEN THE CONTENT LAST MOVED UNDER A FINGER, which is the signal the focus-tap
+                    // guard uses. See `handleFocusTap` for why a timestamp rather than a live flag.
+                    if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
@@ -1651,6 +1736,16 @@ struct LiveTerminalView: UIViewRepresentable {
         /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
         private var selectionProbe: UIView?
         /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
+        /// How recently the terminal's content must have moved for a tap to be read as
+        /// "stop scrolling" rather than "give me the keyboard". Covers the gap between the last
+        /// `contentOffset` change and touch-up on a scroll-arresting tap, and nothing longer: a
+        /// deliberate tap a beat after reading must not wait on this.
+        static let scrollSettleWindow: CFTimeInterval = 0.35
+        /// `CACurrentMediaTime()` of the last observed `contentOffset` change, written by the KVO
+        /// observer in `observeContentOffset`. Starts at 0, which is unreachably far in the past
+        /// against a monotonic uptime clock, so a freshly attached pane never suppresses its first
+        /// tap — the failure a naive "recent by default" sentinel would cause.
+        private var lastContentMotion: CFTimeInterval = 0
         private var probePublishCount = 0
         /// How many 2-tap recognizers `clearTap` was made to require the failure of, captured at
         /// attach. Published by the probe so a test can see whether that chain was wired as

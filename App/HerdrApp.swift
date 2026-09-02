@@ -369,6 +369,17 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "claude",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .busyScroll:
+            // A REAL SwiftTerm pane that keeps RECEIVING OUTPUT, so auto-follow writes
+            // contentOffset continuously. The receipt is the INVERSE of the scroll-tap guard:
+            // on a pane merely following output, a tap MUST still take focus. Review found
+            // that recording every contentOffset write suppressed exactly this case — the
+            // common one while an agent is working.
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(scrollback: true, busyOutput: true)),
+                                 paneID: "w1:p1", title: "busytest",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         case .backfill:
             // A REAL SwiftTerm pane whose LIVE stream carries only the short one-screen seed,
             // while agent.read (source=recent, ansi) returns ~1000 numbered lines of history —
@@ -4037,7 +4048,52 @@ struct TerminalPaneContent: View {
             if reply.trimmingCharacters(in: .whitespaces).isEmpty {
                 savedPromptsButton
             } else {
-                Button { sendTapped() } label: {
+                // THE BUTTON DISMISSES THE KEYBOARD ON iPHONE; RETURN DELIBERATELY DOES NOT.
+                //
+                // Reported by the owner on a real iPhone: tapping send left the keyboard up over
+                // ~40% of the pane, so the reply you just sent — and the agent's response to it —
+                // were behind the keyboard until you dismissed it by hand.
+                //
+                // The distinction from `.onSubmit` above is intent, not inconsistency. Return is
+                // pressed WITH your thumbs already on the keys, and the note on that path records a
+                // review's reasoning for keeping focus: a back-and-forth exchange should not cost a
+                // tap per message. Reaching for the send BUTTON is a deliberate move away from the
+                // keys, so treating it as "I am done typing" matches what the hand just did.
+                //
+                // iPHONE ONLY, and clearing `replyFocused` is the part that must be gated. On iPad
+                // `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so releasing the field hands
+                // key focus straight to the terminal and everything typed next would go to the
+                // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
+                // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
+                // there is nothing to gain there and a real regression to cause.
+                // AND IT MUST BUMP THE COLLAPSE TOKEN, not just clear the flags. Found by review:
+                // clearing the two focus flags alone reproduces the ORIGINAL #203 defect through a
+                // new door. With a word selected, `updateUIView`'s resign is gated on
+                // `deliberateCollapse || !hasActiveSelection`, so it refuses — while clearing the
+                // flags has already hidden the collapse chevron. Net result: keyboard up over the
+                // pane, selection held, and no visible way to dismiss it. That is exactly the state
+                // the chevron fix existed to eliminate, and my send-button change walked back into
+                // it because it copied the flag-clearing and not the token.
+                //
+                // Bumping the token marks this resign DELIBERATE, which is what it is: the reader
+                // pressed send. Same mechanism as the chevron, so there is one way to express
+                // "collapse on purpose" rather than two that disagree. This is the "what did last
+                // round's fix make POSSIBLE" question answered: the chevron fix made a token the
+                // only honest way to resign past a selection, and any new path that clears focus
+                // has to use it.
+                // SCOPED TO iPHONE for the same reason the flag is: on iPad the terminal's
+                // `wantsTerminalKeyFocus` carries the `.pad` disjunct, so the pass after this can
+                // take the become-focus branch and never reach `consumeCollapse` — the token would
+                // sit unconsumed and could fire on some later, unrelated collapse (herdrup#213).
+                // iPad has no software keyboard to dismiss, so there is nothing to request there.
+                Button {
+                    sendTapped()
+                    terminalInputFocused = false
+                    if UIDevice.current.userInterfaceIdiom == .phone {
+                        terminalCollapseToken += 1
+                        replyFocused = false
+                    }
+                } label: {
                     Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                         .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
                         .frame(width: 40, height: 40)
@@ -6184,7 +6240,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -6205,6 +6261,11 @@ enum ScreenshotMock {
         // agent redraws shifted content when it RECEIVES an SGR wheel event — so a swipe
         // proves drag → app emits wheel → content moves.
         case "ccscroll": return .ccscroll
+        // `busyscroll` drives the BUSY-PANE focus receipt: a real SwiftTerm pane whose stream
+        // keeps emitting output, so SwiftTerm's auto-follow writes `contentOffset` continuously.
+        // That is the state in which the first two versions of the scroll-tap guard suppressed
+        // every tap and left the terminal unfocusable while an agent was working.
+        case "busyscroll": return .busyScroll
         // `paging` drives the swipe-between-agents receipt: three distinctively-named agents
         // in the keep-mounted container; a swipe fronts the neighbour and the header changes.
         case "paging": return .paging
@@ -6234,6 +6295,10 @@ struct MockTransport: HerdrTransport {
     /// When true, `agent.read` (source=recent, ansi) returns MANY numbered lines of history
     /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
     /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
+    /// When true, `pane.stream` keeps APPENDING output after the seed, so SwiftTerm's
+    /// auto-follow writes `contentOffset` on every frame. The busy-pane state: the scroll-tap
+    /// guard must still let a tap take focus here, and two earlier versions of it did not.
+    var busyOutput = false
     var backfill = false
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
@@ -6345,9 +6410,32 @@ struct MockTransport: HerdrTransport {
                         seq += 1
                     }
                 }
+                // BUSY-PANE OUTPUT: emit a line about eight times a second so SwiftTerm's
+                // auto-follow writes `contentOffset` on every frame, growing scrollback exactly
+                // as a working agent's does.
+                //
+                // FRAME TYPE IS `data`, and getting that wrong is why the first version of this
+                // mock produced NOTHING. StreamFrame accepts only reset/data/resize/ping/exited
+                // (Wire.swift:708-729) and decoding is deliberately STRICT — an unknown frame
+                // throws, which tears the stream down and reconnects, so my invented "append"
+                // yielded a reconnect loop and no output at all. The busy-pane test caught it by
+                // measuring its own premise (ydisp must advance) rather than assuming it.
+                let busy = Task { [busyOutput] in
+                    guard busyOutput else { return }
+                    var n = 1
+                    var seq: UInt64 = 10_000
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        guard !Task.isCancelled else { break }
+                        let line = String(format: "BUSY line %04d  the agent is still working\r\n", n)
+                        let b64 = Data(line.utf8).base64EncodedString()
+                        continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"data\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
+                        n += 1; seq += 1
+                    }
+                }
                 // Stop pinging when the consumer goes away, so a torn-down pane does not leave a
                 // timer running for the life of the process.
-                continuation.onTermination = { _ in pings.cancel() }
+                continuation.onTermination = { _ in pings.cancel(); busy.cancel() }
                 // DELIBERATELY NO finish(): a finished stream is a dropped stream. See above.
             }
         }

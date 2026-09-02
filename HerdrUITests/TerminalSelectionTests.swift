@@ -454,6 +454,199 @@ final class TerminalSelectionTests: XCTestCase {
                       "the responder was resigned by some other path than the deliberate collapse (pub names the publisher), so this run did not exercise the chevron even though the end state looks right. probe[\(afterReading)]")
     }
 
+    /// THE RECEIPT FOR "SCROLLING MUST NOT RAISE THE KEYBOARD", reported by the owner on a real
+    /// iPhone: scrolling back through output would randomly raise the keyboard, which relayouts the
+    /// terminal band, resizes the PTY and forces a re-render — losing the place they were reading.
+    ///
+    /// The cause is structural rather than a race: `focusTap` is a 1-tap recognizer with NO
+    /// `require(toFail:)` (deliberately — the responder must exist by tap 1 for SwiftTerm's
+    /// double-tap Copy menu), attached to `TerminalView`, which IS a `UIScrollView`. The universal
+    /// iOS gesture for arresting momentum scrolling is a single tap, so that tap reaches the
+    /// recognizer and was indistinguishable from a deliberate tap on the text.
+    ///
+    /// WHAT THIS PINS is the guard's behaviour, not the timing: a tap delivered while the pane is
+    /// dragging or decelerating must NOT take the responder. `pub=scrollTapIgnored` is published
+    /// only from that branch, so it proves the suppression ran rather than that the tap missed —
+    /// two states that are otherwise byte-identical, both leaving focus untaken.
+    ///
+    /// HONEST ABOUT ITS OWN LIMIT: whether a synthesized tap lands inside the deceleration window
+    /// is not something the test controls. So it retries, and if it never lands it SKIPS with the
+    /// count rather than passing — a pass here would assert nothing at all, which is precisely the
+    /// vacuity that let an inert fix green earlier in this PR's history.
+    func testATapThatStopsAScrollDoesNotRaiseTheKeyboard() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "the raised software keyboard this protects only exists on iPhone; iPad's terminal inputView is zero-frame")
+
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "system dialog") { alert in
+            let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
+            if allow.exists { allow.tap(); return true }
+            return false
+        }
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
+        app.launch()
+
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
+
+        // PREMISE: start from an UNFOCUSED pane, so any fr=1 below is this test's own doing. A
+        // pane that already held the responder would pass the assertion for the wrong reason.
+        XCTAssertTrue(probe.label.contains("fr=0"),
+                      "premise: the terminal already holds the responder before any tap, so this test cannot attribute a raise. probe[\(probe.label)]")
+
+        let term = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
+        var suppressed = 0, duringMotion = 0, inertEvidence: [String] = []
+
+        for _ in 1...6 {
+            // Fling to get real motion, then tap into it immediately — the arrest-the-scroll
+            // gesture a reader actually makes.
+            app.swipeDown(velocity: .fast)
+            term.tap()
+            Thread.sleep(forTimeInterval: 0.4)
+            let reading = probe.exists ? probe.label : ""
+            let motionMs = value(of: "motionms", in: reading)
+
+            // ONLY A READING PUBLISHED BY THE FOCUS DECISION ITSELF CAN BE JUDGED, and the previous
+            // version of this test got that wrong in a way worth recording. It read the LAST label,
+            // which a later handler routinely overwrites: CI showed `pub=clearTapEntry` carrying
+            // `motionms=650`, and the test attributed that 650ms to the focus decision. It was never
+            // the focus decision's number — `motionms` is computed at PUBLISH time, so a reading
+            // from a different handler describes a different moment. That mis-attribution reported
+            // the guard as inert on a run where it had behaved correctly.
+            //
+            // `handleFocusTap` publishes exactly one of two names — `focusTap` when it takes the
+            // responder, `scrollTapIgnored` when it suppresses — so a reading bearing neither is
+            // not evidence about this guard and is discarded rather than interpreted.
+            let fromFocusDecision = reading.contains("pub=scrollTapIgnored") || reading.contains("pub=focusTap")
+
+            // AND THE MEASUREMENT SHOWS XCUITEST CANNOT MAKE THIS GESTURE. Across two CI runs the
+            // synthesized `swipeDown(velocity: .fast)` + `tap()` produced motion ages clustered at
+            // ~630-870ms: the swipe settles completely before the tap is delivered, so it is a tap
+            // on a STATIONARY pane, not the scroll-arresting tap a reader makes. A guard with a
+            // 350ms window is RIGHT to let those through, so "not suppressed" at 650ms is not
+            // evidence of inertness — which is precisely what the previous version concluded.
+            if fromFocusDecision, let ms = motionMs, ms < 300 {
+                duringMotion += 1
+                if reading.contains("pub=scrollTapIgnored") {
+                    suppressed += 1
+                    XCTAssertTrue(reading.contains("fr=0"),
+                                  "the tap was suppressed as scroll-arresting yet the terminal took the responder anyway, so the keyboard will still raise mid-scroll. probe[\(reading)]")
+                } else if reading.contains("fr=1") {
+                    // THE INERTNESS DETECTOR, narrowed to readings this guard actually published
+                    // with motion demonstrably still in progress.
+                    inertEvidence.append("motionms=\(ms) reading[\(reading)]")
+                }
+            }
+            // Settle fully, and drop any focus a genuine settled tap took, so the next attempt
+            // starts from the same premise this one did.
+            //
+            // BEST-EFFORT, AND THAT MATTERS: the first CI run of this test failed here rather than
+            // on any assertion, because it tapped the chevron unconditionally and XCUITest hard-
+            // fails a tap with no matching element ("No matches found for ... Collapse keyboard").
+            // The chevron is only rendered while an input owner holds the keyboard, so on any
+            // iteration where focus was not taken it legitimately does not exist. A RESET STEP MUST
+            // NOT BE ABLE TO FAIL THE TEST IT IS RESETTING FOR — that reports a harness defect as a
+            // product verdict, which is the same class of error as a test that passes vacuously.
+            Thread.sleep(forTimeInterval: 1.2)
+            let chevron = app.buttons["Collapse keyboard"].firstMatch
+            if probe.exists, probe.label.contains("fr=1"), chevron.waitForExistence(timeout: 2) {
+                chevron.tap()
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+        }
+
+        // FAIL on positive evidence of inertness, whatever else happened. This is the assertion the
+        // first version of the guard would have failed, and did not have.
+        XCTAssertTrue(inertEvidence.isEmpty,
+                      "a tap that arrived DURING content motion raised the keyboard anyway — the scroll guard is inert on this build. \(inertEvidence.count)/6 attempts: \(inertEvidence.joined(separator: " | "))")
+
+        // Only if no tap ever landed during motion is this run genuinely uninformative. Skip rather
+        // than pass, because a pass here would assert nothing at all.
+        //
+        // THIS SKIP IS THE EXPECTED OUTCOME IN CI, and saying so is the point. Two measured runs put
+        // the synthesized swipe-then-tap at ~630-870ms after motion stopped, so it lands on a
+        // settled pane and the guard is never reached. That is a limitation of XCUITest's gesture
+        // synthesis, not of the guard: the real gesture has the finger arriving while the content is
+        // still under it. So this test's job in CI is narrow and honest — it FAILS loudly if a tap
+        // ever does arrive during motion and the keyboard still comes up, and otherwise reports that
+        // it could not make the gesture. The scroll behaviour itself needs one on-device pass.
+        try XCTSkipUnless(duringMotion > 0,
+                          "no synthesized tap landed while the content was still moving in 6 attempts (motionms never below 300 on a reading published by the focus decision), so neither the guard nor its absence was exercised. Skipping rather than reporting a pass that measured nothing.")
+        XCTAssertGreaterThan(suppressed, 0,
+                             "\(duringMotion)/6 taps arrived during content motion and NONE were suppressed, so the guard is not firing on the path it exists for. probe last[\(probe.label)]")
+    }
+
+    /// THE BUSY-PANE RECEIPT, and it is the one CI can actually run.
+    ///
+    /// Review found that the scroll-tap guard, as first written, suppressed EVERY tap on a pane
+    /// that was merely following output: SwiftTerm's auto-follow writes `contentOffset` on each
+    /// output frame, so a guard keyed on "did the content just move" was permanently armed. The
+    /// terminal became unfocusable exactly while an agent was working, which is the common case
+    /// and a worse defect than the keyboard-on-scroll bug it was fixing.
+    ///
+    /// The fix records motion ONLY for offset writes made while the scroll view reports
+    /// `isDragging || isDecelerating`, so auto-follow no longer counts. This test pins that: on a
+    /// pane receiving output about eight times a second, a tap must still take the responder.
+    ///
+    /// WHY THIS ONE IS NOT TIMING-DEPENDENT, unlike the scroll-arrest test next door: it does not
+    /// need a finger to arrive during motion. It needs output to be flowing, which the
+    /// `busyscroll` mock guarantees for as long as the pane is mounted. So it passes or fails on
+    /// the guard's behaviour and nothing else.
+    func testATapFocusesTheTerminalWhileOutputIsStreaming() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "the raised keyboard this concerns is iPhone-only; iPad's terminal inputView is zero-frame")
+
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "system dialog") { alert in
+            let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
+            if allow.exists { allow.tap(); return true }
+            return false
+        }
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "busyscroll"
+        app.launch()
+
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
+        XCTAssertTrue(probe.label.contains("fr=0"),
+                      "premise: the terminal already holds the responder before any tap. probe[\(probe.label)]")
+
+        // PREMISE: OUTPUT MUST ACTUALLY BE FLOWING, or this test proves nothing about a busy pane.
+        //
+        // MEASURED FROM THE SCREEN, NOT THE PROBE, and the reason is a defect this test already
+        // hit twice. The probe label is only rewritten when a GESTURE HANDLER publishes it, so on
+        // an untouched pane it holds whatever was published last — my first two attempts read
+        // `ydisp` from it and got the same stale 0 both times, which failed the premise while
+        // saying nothing about whether output was flowing. Sampling the probe to detect change
+        // that the probe is not sampling is circular.
+        //
+        // `pixelDiffFraction` looks at the rendered frames instead, which is the thing the claim
+        // is actually about: a pane receiving output redraws, a dead one does not. The other
+        // tests in this file use the same helper for the same reason, and the `scroll` fixture
+        // hides the cursor so a STATIC terminal is byte-identical frame to frame — meaning any
+        // measurable diff here is content, not a blinking caret.
+        let busyBefore = app.screenshot()
+        Thread.sleep(forTimeInterval: 2.0)
+        let busyAfter = app.screenshot()
+        let flowing = pixelDiffFraction(busyBefore, busyAfter)
+        attach(busyBefore, name: "01-busy-before")
+        attach(busyAfter, name: "02-busy-after")
+        XCTAssertGreaterThan(flowing, 0.005,
+                             "premise: the terminal did not redraw in 2s (diff=\(flowing)), so output is NOT streaming and this is not a busy pane. A pass here would certify the busy-pane guard against a pane with nothing arriving — vacuous. Check the busyscroll mock's frame type: StreamFrame accepts only reset/data/resize/ping/exited and decoding is strict.")
+
+        // THE ASSERTION. A single tap on a pane that is following output must take the responder.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)).tap()
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            if probe.exists, probe.label.contains("fr=1") { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        let after = probe.exists ? probe.label : "PROBE ABSENT"
+        XCTAssertTrue(after.contains("fr=1"),
+                      "a tap on a pane that is merely FOLLOWING OUTPUT did not take the responder, so the terminal is unfocusable while an agent works — the regression the scroll-tap guard introduced. If pub=scrollTapIgnored the guard is treating auto-follow as user scrolling. probe[\(after)]")
+        XCTAssertFalse(after.contains("pub=scrollTapIgnored"),
+                       "the guard suppressed a tap on a busy pane, i.e. it is counting SwiftTerm's auto-follow writes as user scrolling. probe[\(after)]")
+    }
+
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
     ///
     /// Returns nil rather than a default when the field is absent, so a probe that stops
