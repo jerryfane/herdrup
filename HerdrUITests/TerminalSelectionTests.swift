@@ -624,12 +624,12 @@ final class TerminalSelectionTests: XCTestCase {
         // tests in this file use the same helper for the same reason, and the `scroll` fixture
         // hides the cursor so a STATIC terminal is byte-identical frame to frame — meaning any
         // measurable diff here is content, not a blinking caret.
-        let before = app.screenshot()
+        let busyBefore = app.screenshot()
         Thread.sleep(forTimeInterval: 2.0)
-        let after = app.screenshot()
-        let flowing = pixelDiffFraction(before, after)
-        attach(before, name: "01-busy-before")
-        attach(after, name: "02-busy-after")
+        let busyAfter = app.screenshot()
+        let flowing = pixelDiffFraction(busyBefore, busyAfter)
+        attach(busyBefore, name: "01-busy-before")
+        attach(busyAfter, name: "02-busy-after")
         XCTAssertGreaterThan(flowing, 0.005,
                              "premise: the terminal did not redraw in 2s (diff=\(flowing)), so output is NOT streaming and this is not a busy pane. A pass here would certify the busy-pane guard against a pane with nothing arriving — vacuous. Check the busyscroll mock's frame type: StreamFrame accepts only reset/data/resize/ping/exited and decoding is strict.")
 
