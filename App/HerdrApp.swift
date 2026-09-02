@@ -4055,10 +4055,33 @@ struct TerminalPaneContent: View {
                 // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
                 // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
                 // there is nothing to gain there and a real regression to cause.
+                // AND IT MUST BUMP THE COLLAPSE TOKEN, not just clear the flags. Found by review:
+                // clearing the two focus flags alone reproduces the ORIGINAL #203 defect through a
+                // new door. With a word selected, `updateUIView`'s resign is gated on
+                // `deliberateCollapse || !hasActiveSelection`, so it refuses — while clearing the
+                // flags has already hidden the collapse chevron. Net result: keyboard up over the
+                // pane, selection held, and no visible way to dismiss it. That is exactly the state
+                // the chevron fix existed to eliminate, and my send-button change walked back into
+                // it because it copied the flag-clearing and not the token.
+                //
+                // Bumping the token marks this resign DELIBERATE, which is what it is: the reader
+                // pressed send. Same mechanism as the chevron, so there is one way to express
+                // "collapse on purpose" rather than two that disagree. This is the "what did last
+                // round's fix make POSSIBLE" question answered: the chevron fix made a token the
+                // only honest way to resign past a selection, and any new path that clears focus
+                // has to use it.
+                // SCOPED TO iPHONE for the same reason the flag is: on iPad the terminal's
+                // `wantsTerminalKeyFocus` carries the `.pad` disjunct, so the pass after this can
+                // take the become-focus branch and never reach `consumeCollapse` — the token would
+                // sit unconsumed and could fire on some later, unrelated collapse (herdrup#213).
+                // iPad has no software keyboard to dismiss, so there is nothing to request there.
                 Button {
                     sendTapped()
                     terminalInputFocused = false
-                    if UIDevice.current.userInterfaceIdiom == .phone { replyFocused = false }
+                    if UIDevice.current.userInterfaceIdiom == .phone {
+                        terminalCollapseToken += 1
+                        replyFocused = false
+                    }
                 } label: {
                     Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                         .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
