@@ -800,16 +800,31 @@ struct LiveTerminalView: UIViewRepresentable {
             // deliberately, because the responder must exist by tap 1 for SwiftTerm's double-tap
             // Copy menu to work — and it is attached to `TerminalView`, which IS a `UIScrollView`,
             // with `cancelsTouchesInView = false`. The universal iOS idiom for arresting momentum
-            // scrolling is a single tap, and that tap lands on the terminal, so the recognizer sees
-            // it and cannot tell it apart from a deliberate tap on the text.
+            // scrolling is a single tap, so that tap lands on the terminal and the recognizer
+            // cannot tell it apart from a deliberate tap on the text.
             //
-            // `isDragging`/`isDecelerating` DO tell them apart, and they are the scroll view's own
-            // state rather than a heuristic of mine: a tap arriving while the content is under the
-            // finger or still coasting belongs to the scroll, and a tap on a settled pane is a real
-            // focus request. This is deliberately NOT `require(toFail: view.panGestureRecognizer)`:
-            // that would also delay focus on every genuine tap by the pan's recognition window, and
-            // it would not help at all in the decelerating case, where the pan has already ended.
-            if let scroll = view, scroll.isDragging || scroll.isDecelerating {
+            // THE FIRST VERSION OF THIS GUARD WAS INERT, and the way that was caught is worth
+            // keeping. It tested `view.isDragging || view.isDecelerating` HERE, at `.ended` —
+            // i.e. touch-UP. But a scroll-arresting touch cancels deceleration at touch-DOWN, so
+            // both flags are already false by the time this runs and the guard never fired. The
+            // evidence was in front of me and I misread it: the regression test reached the guard
+            // 0 times in 6 attempts with ~1s deceleration windows, which I wrote off as unlucky
+            // timing. Review read the same 0/6 as what it was — a measurement of inertness. An
+            // empty result is a claim about the instrument, not about the world.
+            //
+            // SO THE SIGNAL IS "DID THE CONTENT JUST MOVE", sampled from the KVO observer on
+            // `contentOffset` that already drives the Latest pill. That observer fires on every
+            // offset change whatever caused it, and it records the time. This depends on NO
+            // recognizer ordering and on NO UIScrollView flag lifecycle, which is what made the
+            // previous version unprovable without a device.
+            //
+            // A tap that stops momentum arrives while the offset was changing microseconds ago, so
+            // it is suppressed. A tap on a settled pane sees motion far in the past, so it focuses
+            // normally. The window is deliberately short: long enough to cover the gap between the
+            // last offset change and touch-up, short enough that a deliberate tap a moment after
+            // reading never waits for it.
+            let sinceMotion = CACurrentMediaTime() - lastContentMotion
+            if sinceMotion < Self.scrollSettleWindow {
                 publishSelectionProbe("scrollTapIgnored")
                 return
             }
@@ -982,6 +997,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
                 + "fr=\(view.isFirstResponder ? 1 : 0) "
+                // MOTION AGE IN MILLISECONDS, published so a test can measure the guard's PREMISE
+                // rather than infer it. The previous version of the scroll guard was inert and the
+                // only symptom was a test that never reached it, which is indistinguishable from a
+                // test whose timing never lined up. With this, a run can say "the tap arrived 40ms
+                // after the last offset change" and the premise is a measurement, not a hope.
+                + "motionms=\(Int((CACurrentMediaTime() - lastContentMotion) * 1000)) "
                 + "resizes=\(resizeCount) pub=\(publisher)#\(probePublishCount)"
             #endif
         }
@@ -1651,6 +1672,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
+                    // WHEN THE CONTENT LAST MOVED, which is the signal the focus-tap guard uses.
+                    // Recorded here because this observer already fires on EVERY offset change from
+                    // any cause — finger drag, momentum, or SwiftTerm's own auto-follow — so it is
+                    // the one place that sees scrolling without depending on gesture-recognizer
+                    // ordering or on UIScrollView's internal flag lifecycle. See `handleFocusTap`.
+                    self.lastContentMotion = CACurrentMediaTime()
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
@@ -1683,6 +1710,16 @@ struct LiveTerminalView: UIViewRepresentable {
         /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
         private var selectionProbe: UIView?
         /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
+        /// How recently the terminal's content must have moved for a tap to be read as
+        /// "stop scrolling" rather than "give me the keyboard". Covers the gap between the last
+        /// `contentOffset` change and touch-up on a scroll-arresting tap, and nothing longer: a
+        /// deliberate tap a beat after reading must not wait on this.
+        static let scrollSettleWindow: CFTimeInterval = 0.35
+        /// `CACurrentMediaTime()` of the last observed `contentOffset` change, written by the KVO
+        /// observer in `observeContentOffset`. Starts at 0, which is unreachably far in the past
+        /// against a monotonic uptime clock, so a freshly attached pane never suppresses its first
+        /// tap — the failure a naive "recent by default" sentinel would cause.
+        private var lastContentMotion: CFTimeInterval = 0
         private var probePublishCount = 0
         /// How many 2-tap recognizers `clearTap` was made to require the failure of, captured at
         /// attach. Published by the probe so a test can see whether that chain was wired as

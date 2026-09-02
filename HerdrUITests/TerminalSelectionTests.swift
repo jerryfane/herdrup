@@ -495,23 +495,34 @@ final class TerminalSelectionTests: XCTestCase {
                       "premise: the terminal already holds the responder before any tap, so this test cannot attribute a raise. probe[\(probe.label)]")
 
         let term = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
-        var exercised = 0
+        var suppressed = 0, duringMotion = 0, inertEvidence: [String] = []
 
         for _ in 1...6 {
-            // Fling to get real deceleration, then tap into it immediately — the arrest-the-scroll
+            // Fling to get real motion, then tap into it immediately — the arrest-the-scroll
             // gesture a reader actually makes.
             app.swipeDown(velocity: .fast)
             term.tap()
             Thread.sleep(forTimeInterval: 0.4)
             let reading = probe.exists ? probe.label : ""
+            let motionMs = value(of: "motionms", in: reading)
 
-            if reading.contains("pub=scrollTapIgnored") {
-                exercised += 1
-                // THE ASSERTION THAT IS THE WHOLE POINT: the guard ran, so the responder must not
-                // have been taken. Before the fix this same tap called onTerminalFocusRequest and
-                // the keyboard came up.
-                XCTAssertTrue(reading.contains("fr=0"),
-                              "a tap delivered while the pane was scrolling was suppressed (pub=scrollTapIgnored) yet the terminal took the responder anyway — the keyboard will raise and relayout the pane mid-scroll. probe[\(reading)]")
+            // THE PREMISE IS NOW MEASURED, NOT HOPED FOR. `motionms` is the age of the last
+            // contentOffset change at publish time, so a small value proves the tap really did
+            // arrive while the content was moving. The previous version of this test could only
+            // report "the guard was not reached", which is indistinguishable between a guard that
+            // cannot fire and a tap that never landed in the window — and that ambiguity is
+            // exactly what let an inert guard through.
+            if let ms = motionMs, ms < 900 {
+                duringMotion += 1
+                if reading.contains("pub=scrollTapIgnored") {
+                    suppressed += 1
+                    XCTAssertTrue(reading.contains("fr=0"),
+                                  "the tap was suppressed as scroll-arresting yet the terminal took the responder anyway, so the keyboard will still raise mid-scroll. probe[\(reading)]")
+                } else if reading.contains("fr=1") {
+                    // THE INERTNESS DETECTOR. A tap that demonstrably arrived during motion, was
+                    // NOT suppressed, and took the responder is the original defect reproducing.
+                    inertEvidence.append("motionms=\(ms) reading[\(reading)]")
+                }
             }
             // Settle fully, and drop any focus a genuine settled tap took, so the next attempt
             // starts from the same premise this one did.
@@ -522,9 +533,17 @@ final class TerminalSelectionTests: XCTestCase {
             }
         }
 
-        try XCTSkipUnless(exercised > 0,
-                          "no synthesized tap landed inside a deceleration window in 6 attempts, so the guard was never reached and this run proves nothing. Skipping rather than reporting a pass that asserted nothing.")
-        XCTAssertGreaterThan(exercised, 0, "guard exercised \(exercised)/6 attempts")
+        // FAIL on positive evidence of inertness, whatever else happened. This is the assertion the
+        // first version of the guard would have failed, and did not have.
+        XCTAssertTrue(inertEvidence.isEmpty,
+                      "a tap that arrived DURING content motion raised the keyboard anyway — the scroll guard is inert on this build. \(inertEvidence.count)/6 attempts: \(inertEvidence.joined(separator: " | "))")
+
+        // Only if no tap ever landed during motion is this run genuinely uninformative. Skip rather
+        // than pass, because a pass here would assert nothing at all.
+        try XCTSkipUnless(duringMotion > 0,
+                          "no synthesized tap landed while the content was still moving in 6 attempts (motionms never below 900), so neither the guard nor its absence was exercised. Skipping rather than reporting a pass that measured nothing.")
+        XCTAssertGreaterThan(suppressed, 0,
+                             "\(duringMotion)/6 taps arrived during content motion and NONE were suppressed, so the guard is not firing on the path it exists for. probe last[\(probe.label)]")
     }
 
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
