@@ -506,21 +506,34 @@ final class TerminalSelectionTests: XCTestCase {
             let reading = probe.exists ? probe.label : ""
             let motionMs = value(of: "motionms", in: reading)
 
-            // THE PREMISE IS NOW MEASURED, NOT HOPED FOR. `motionms` is the age of the last
-            // contentOffset change at publish time, so a small value proves the tap really did
-            // arrive while the content was moving. The previous version of this test could only
-            // report "the guard was not reached", which is indistinguishable between a guard that
-            // cannot fire and a tap that never landed in the window — and that ambiguity is
-            // exactly what let an inert guard through.
-            if let ms = motionMs, ms < 900 {
+            // ONLY A READING PUBLISHED BY THE FOCUS DECISION ITSELF CAN BE JUDGED, and the previous
+            // version of this test got that wrong in a way worth recording. It read the LAST label,
+            // which a later handler routinely overwrites: CI showed `pub=clearTapEntry` carrying
+            // `motionms=650`, and the test attributed that 650ms to the focus decision. It was never
+            // the focus decision's number — `motionms` is computed at PUBLISH time, so a reading
+            // from a different handler describes a different moment. That mis-attribution reported
+            // the guard as inert on a run where it had behaved correctly.
+            //
+            // `handleFocusTap` publishes exactly one of two names — `focusTap` when it takes the
+            // responder, `scrollTapIgnored` when it suppresses — so a reading bearing neither is
+            // not evidence about this guard and is discarded rather than interpreted.
+            let fromFocusDecision = reading.contains("pub=scrollTapIgnored") || reading.contains("pub=focusTap")
+
+            // AND THE MEASUREMENT SHOWS XCUITEST CANNOT MAKE THIS GESTURE. Across two CI runs the
+            // synthesized `swipeDown(velocity: .fast)` + `tap()` produced motion ages clustered at
+            // ~630-870ms: the swipe settles completely before the tap is delivered, so it is a tap
+            // on a STATIONARY pane, not the scroll-arresting tap a reader makes. A guard with a
+            // 350ms window is RIGHT to let those through, so "not suppressed" at 650ms is not
+            // evidence of inertness — which is precisely what the previous version concluded.
+            if fromFocusDecision, let ms = motionMs, ms < 300 {
                 duringMotion += 1
                 if reading.contains("pub=scrollTapIgnored") {
                     suppressed += 1
                     XCTAssertTrue(reading.contains("fr=0"),
                                   "the tap was suppressed as scroll-arresting yet the terminal took the responder anyway, so the keyboard will still raise mid-scroll. probe[\(reading)]")
                 } else if reading.contains("fr=1") {
-                    // THE INERTNESS DETECTOR. A tap that demonstrably arrived during motion, was
-                    // NOT suppressed, and took the responder is the original defect reproducing.
+                    // THE INERTNESS DETECTOR, narrowed to readings this guard actually published
+                    // with motion demonstrably still in progress.
                     inertEvidence.append("motionms=\(ms) reading[\(reading)]")
                 }
             }
@@ -549,8 +562,16 @@ final class TerminalSelectionTests: XCTestCase {
 
         // Only if no tap ever landed during motion is this run genuinely uninformative. Skip rather
         // than pass, because a pass here would assert nothing at all.
+        //
+        // THIS SKIP IS THE EXPECTED OUTCOME IN CI, and saying so is the point. Two measured runs put
+        // the synthesized swipe-then-tap at ~630-870ms after motion stopped, so it lands on a
+        // settled pane and the guard is never reached. That is a limitation of XCUITest's gesture
+        // synthesis, not of the guard: the real gesture has the finger arriving while the content is
+        // still under it. So this test's job in CI is narrow and honest — it FAILS loudly if a tap
+        // ever does arrive during motion and the keyboard still comes up, and otherwise reports that
+        // it could not make the gesture. The scroll behaviour itself needs one on-device pass.
         try XCTSkipUnless(duringMotion > 0,
-                          "no synthesized tap landed while the content was still moving in 6 attempts (motionms never below 900), so neither the guard nor its absence was exercised. Skipping rather than reporting a pass that measured nothing.")
+                          "no synthesized tap landed while the content was still moving in 6 attempts (motionms never below 300 on a reading published by the focus decision), so neither the guard nor its absence was exercised. Skipping rather than reporting a pass that measured nothing.")
         XCTAssertGreaterThan(suppressed, 0,
                              "\(duringMotion)/6 taps arrived during content motion and NONE were suppressed, so the guard is not firing on the path it exists for. probe last[\(probe.label)]")
     }
