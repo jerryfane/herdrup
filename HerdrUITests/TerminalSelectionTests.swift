@@ -611,15 +611,27 @@ final class TerminalSelectionTests: XCTestCase {
                       "premise: the terminal already holds the responder before any tap. probe[\(probe.label)]")
 
         // PREMISE: OUTPUT MUST ACTUALLY BE FLOWING, or this test proves nothing about a busy pane.
-        // `motionms` is the age of the last USER-DRIVEN motion, so it is NOT the right instrument
-        // here — auto-follow deliberately does not update it. `ydisp` is: on a following pane it
-        // advances as lines arrive. Two readings a second apart must differ.
-        let firstYdisp = value(of: "ydisp", in: probe.label)
-        Thread.sleep(forTimeInterval: 1.5)
-        let secondYdisp = value(of: "ydisp", in: probe.label)
-        XCTAssertNotNil(firstYdisp); XCTAssertNotNil(secondYdisp)
-        XCTAssertNotEqual(firstYdisp, secondYdisp,
-                          "premise: ydisp did not advance in 1.5s, so output is NOT streaming and this is not a busy pane — the mock or the stream is broken, and a pass here would be vacuous. ydisp \(firstYdisp as Int?) -> \(secondYdisp as Int?)")
+        //
+        // MEASURED FROM THE SCREEN, NOT THE PROBE, and the reason is a defect this test already
+        // hit twice. The probe label is only rewritten when a GESTURE HANDLER publishes it, so on
+        // an untouched pane it holds whatever was published last — my first two attempts read
+        // `ydisp` from it and got the same stale 0 both times, which failed the premise while
+        // saying nothing about whether output was flowing. Sampling the probe to detect change
+        // that the probe is not sampling is circular.
+        //
+        // `pixelDiffFraction` looks at the rendered frames instead, which is the thing the claim
+        // is actually about: a pane receiving output redraws, a dead one does not. The other
+        // tests in this file use the same helper for the same reason, and the `scroll` fixture
+        // hides the cursor so a STATIC terminal is byte-identical frame to frame — meaning any
+        // measurable diff here is content, not a blinking caret.
+        let before = app.screenshot()
+        Thread.sleep(forTimeInterval: 2.0)
+        let after = app.screenshot()
+        let flowing = pixelDiffFraction(before, after)
+        attach(before, name: "01-busy-before")
+        attach(after, name: "02-busy-after")
+        XCTAssertGreaterThan(flowing, 0.005,
+                             "premise: the terminal did not redraw in 2s (diff=\(flowing)), so output is NOT streaming and this is not a busy pane. A pass here would certify the busy-pane guard against a pane with nothing arriving — vacuous. Check the busyscroll mock's frame type: StreamFrame accepts only reset/data/resize/ping/exited and decoding is strict.")
 
         // THE ASSERTION. A single tap on a pane that is following output must take the responder.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)).tap()
