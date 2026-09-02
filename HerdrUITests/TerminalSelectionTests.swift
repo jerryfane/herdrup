@@ -454,6 +454,79 @@ final class TerminalSelectionTests: XCTestCase {
                       "the responder was resigned by some other path than the deliberate collapse (pub names the publisher), so this run did not exercise the chevron even though the end state looks right. probe[\(afterReading)]")
     }
 
+    /// THE RECEIPT FOR "SCROLLING MUST NOT RAISE THE KEYBOARD", reported by the owner on a real
+    /// iPhone: scrolling back through output would randomly raise the keyboard, which relayouts the
+    /// terminal band, resizes the PTY and forces a re-render — losing the place they were reading.
+    ///
+    /// The cause is structural rather than a race: `focusTap` is a 1-tap recognizer with NO
+    /// `require(toFail:)` (deliberately — the responder must exist by tap 1 for SwiftTerm's
+    /// double-tap Copy menu), attached to `TerminalView`, which IS a `UIScrollView`. The universal
+    /// iOS gesture for arresting momentum scrolling is a single tap, so that tap reaches the
+    /// recognizer and was indistinguishable from a deliberate tap on the text.
+    ///
+    /// WHAT THIS PINS is the guard's behaviour, not the timing: a tap delivered while the pane is
+    /// dragging or decelerating must NOT take the responder. `pub=scrollTapIgnored` is published
+    /// only from that branch, so it proves the suppression ran rather than that the tap missed —
+    /// two states that are otherwise byte-identical, both leaving focus untaken.
+    ///
+    /// HONEST ABOUT ITS OWN LIMIT: whether a synthesized tap lands inside the deceleration window
+    /// is not something the test controls. So it retries, and if it never lands it SKIPS with the
+    /// count rather than passing — a pass here would assert nothing at all, which is precisely the
+    /// vacuity that let an inert fix green earlier in this PR's history.
+    func testATapThatStopsAScrollDoesNotRaiseTheKeyboard() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "the raised software keyboard this protects only exists on iPhone; iPad's terminal inputView is zero-frame")
+
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "system dialog") { alert in
+            let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
+            if allow.exists { allow.tap(); return true }
+            return false
+        }
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
+        app.launch()
+
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
+
+        // PREMISE: start from an UNFOCUSED pane, so any fr=1 below is this test's own doing. A
+        // pane that already held the responder would pass the assertion for the wrong reason.
+        XCTAssertTrue(probe.label.contains("fr=0"),
+                      "premise: the terminal already holds the responder before any tap, so this test cannot attribute a raise. probe[\(probe.label)]")
+
+        let term = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
+        var exercised = 0
+
+        for _ in 1...6 {
+            // Fling to get real deceleration, then tap into it immediately — the arrest-the-scroll
+            // gesture a reader actually makes.
+            app.swipeDown(velocity: .fast)
+            term.tap()
+            Thread.sleep(forTimeInterval: 0.4)
+            let reading = probe.exists ? probe.label : ""
+
+            if reading.contains("pub=scrollTapIgnored") {
+                exercised += 1
+                // THE ASSERTION THAT IS THE WHOLE POINT: the guard ran, so the responder must not
+                // have been taken. Before the fix this same tap called onTerminalFocusRequest and
+                // the keyboard came up.
+                XCTAssertTrue(reading.contains("fr=0"),
+                              "a tap delivered while the pane was scrolling was suppressed (pub=scrollTapIgnored) yet the terminal took the responder anyway — the keyboard will raise and relayout the pane mid-scroll. probe[\(reading)]")
+            }
+            // Settle fully, and drop any focus a genuine settled tap took, so the next attempt
+            // starts from the same premise this one did.
+            Thread.sleep(forTimeInterval: 1.2)
+            if probe.exists, probe.label.contains("fr=1") {
+                app.buttons["Collapse keyboard"].firstMatch.tap()
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+        }
+
+        try XCTSkipUnless(exercised > 0,
+                          "no synthesized tap landed inside a deceleration window in 6 attempts, so the guard was never reached and this run proves nothing. Skipping rather than reporting a pass that asserted nothing.")
+        XCTAssertGreaterThan(exercised, 0, "guard exercised \(exercised)/6 attempts")
+    }
+
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
     ///
     /// Returns nil rather than a default when the field is absent, so a probe that stops

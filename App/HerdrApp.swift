@@ -4037,7 +4037,29 @@ struct TerminalPaneContent: View {
             if reply.trimmingCharacters(in: .whitespaces).isEmpty {
                 savedPromptsButton
             } else {
-                Button { sendTapped() } label: {
+                // THE BUTTON DISMISSES THE KEYBOARD ON iPHONE; RETURN DELIBERATELY DOES NOT.
+                //
+                // Reported by the owner on a real iPhone: tapping send left the keyboard up over
+                // ~40% of the pane, so the reply you just sent — and the agent's response to it —
+                // were behind the keyboard until you dismissed it by hand.
+                //
+                // The distinction from `.onSubmit` above is intent, not inconsistency. Return is
+                // pressed WITH your thumbs already on the keys, and the note on that path records a
+                // review's reasoning for keeping focus: a back-and-forth exchange should not cost a
+                // tap per message. Reaching for the send BUTTON is a deliberate move away from the
+                // keys, so treating it as "I am done typing" matches what the hand just did.
+                //
+                // iPHONE ONLY, and clearing `replyFocused` is the part that must be gated. On iPad
+                // `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so releasing the field hands
+                // key focus straight to the terminal and everything typed next would go to the
+                // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
+                // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
+                // there is nothing to gain there and a real regression to cause.
+                Button {
+                    sendTapped()
+                    terminalInputFocused = false
+                    if UIDevice.current.userInterfaceIdiom == .phone { replyFocused = false }
+                } label: {
                     Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                         .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
                         .frame(width: 40, height: 40)

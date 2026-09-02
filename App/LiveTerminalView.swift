@@ -791,12 +791,44 @@ struct LiveTerminalView: UIViewRepresentable {
         /// decided in `send`.
         @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
             guard !stopped, foreground, gr.state == .ended else { return }
+            // A TAP THAT STOPS A SCROLL IS NOT A REQUEST FOR THE KEYBOARD, and treating it as one
+            // is a defect the owner hit on a real iPhone: scrolling back through output would
+            // "randomly" raise the keyboard, which relayouts the terminal band, resizes the PTY and
+            // forces a re-render — losing the reader's place in the output they were reading.
+            //
+            // WHY IT FIRES AT ALL. `focusTap` is a 1-tap recognizer with NO `require(toFail:)` —
+            // deliberately, because the responder must exist by tap 1 for SwiftTerm's double-tap
+            // Copy menu to work — and it is attached to `TerminalView`, which IS a `UIScrollView`,
+            // with `cancelsTouchesInView = false`. The universal iOS idiom for arresting momentum
+            // scrolling is a single tap, and that tap lands on the terminal, so the recognizer sees
+            // it and cannot tell it apart from a deliberate tap on the text.
+            //
+            // `isDragging`/`isDecelerating` DO tell them apart, and they are the scroll view's own
+            // state rather than a heuristic of mine: a tap arriving while the content is under the
+            // finger or still coasting belongs to the scroll, and a tap on a settled pane is a real
+            // focus request. This is deliberately NOT `require(toFail: view.panGestureRecognizer)`:
+            // that would also delay focus on every genuine tap by the pan's recognition window, and
+            // it would not help at all in the decelerating case, where the pan has already ended.
+            if let scroll = view, scroll.isDragging || scroll.isDecelerating {
+                publishSelectionProbe("scrollTapIgnored")
+                return
+            }
             onTerminalFocusRequest?()
             // Publishes because this recognizer has NO failure requirement, so it fires on tap 1
             // of ANY tap that actually lands on the terminal. That makes it the discriminator for
             // a tap that appears to do nothing: if the probe's publisher changes to focusTap, the
             // touch reached the view and the fault is downstream in clearTap's require-to-fail
             // chain; if it does not change at all, the tap missed the terminal entirely.
+            //
+            // The scroll-ignored path publishes its OWN publisher name so a test can tell "the tap
+            // was suppressed because the pane was scrolling" from "the tap never arrived", which
+            // are otherwise identical: both leave focus untaken and the label unchanged.
+            //
+            // NAMED `scrollTapIgnored` AND NOT `focusTapScrollIgnored` deliberately: probe
+            // assertions are substring matches, and TerminalSelectionTests already asserts
+            // `contains("pub=focusTap")`. Any name with `focusTap` as a PREFIX would satisfy that
+            // assertion from the suppressed path and silently weaken it — the same prefix trap that
+            // made `pub=clearTap` match `pub=clearTapEntry` and greened a vacuous receipt.
             publishSelectionProbe("focusTap")
         }
 
