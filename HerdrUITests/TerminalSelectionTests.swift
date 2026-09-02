@@ -576,6 +576,65 @@ final class TerminalSelectionTests: XCTestCase {
                              "\(duringMotion)/6 taps arrived during content motion and NONE were suppressed, so the guard is not firing on the path it exists for. probe last[\(probe.label)]")
     }
 
+    /// THE BUSY-PANE RECEIPT, and it is the one CI can actually run.
+    ///
+    /// Review found that the scroll-tap guard, as first written, suppressed EVERY tap on a pane
+    /// that was merely following output: SwiftTerm's auto-follow writes `contentOffset` on each
+    /// output frame, so a guard keyed on "did the content just move" was permanently armed. The
+    /// terminal became unfocusable exactly while an agent was working, which is the common case
+    /// and a worse defect than the keyboard-on-scroll bug it was fixing.
+    ///
+    /// The fix records motion ONLY for offset writes made while the scroll view reports
+    /// `isDragging || isDecelerating`, so auto-follow no longer counts. This test pins that: on a
+    /// pane receiving output about eight times a second, a tap must still take the responder.
+    ///
+    /// WHY THIS ONE IS NOT TIMING-DEPENDENT, unlike the scroll-arrest test next door: it does not
+    /// need a finger to arrive during motion. It needs output to be flowing, which the
+    /// `busyscroll` mock guarantees for as long as the pane is mounted. So it passes or fails on
+    /// the guard's behaviour and nothing else.
+    func testATapFocusesTheTerminalWhileOutputIsStreaming() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "the raised keyboard this concerns is iPhone-only; iPad's terminal inputView is zero-frame")
+
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "system dialog") { alert in
+            let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
+            if allow.exists { allow.tap(); return true }
+            return false
+        }
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "busyscroll"
+        app.launch()
+
+        let probe = app.descendants(matching: .any)["terminal-selection-probe"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
+        XCTAssertTrue(probe.label.contains("fr=0"),
+                      "premise: the terminal already holds the responder before any tap. probe[\(probe.label)]")
+
+        // PREMISE: OUTPUT MUST ACTUALLY BE FLOWING, or this test proves nothing about a busy pane.
+        // `motionms` is the age of the last USER-DRIVEN motion, so it is NOT the right instrument
+        // here — auto-follow deliberately does not update it. `ydisp` is: on a following pane it
+        // advances as lines arrive. Two readings a second apart must differ.
+        let firstYdisp = value(of: "ydisp", in: probe.label)
+        Thread.sleep(forTimeInterval: 1.5)
+        let secondYdisp = value(of: "ydisp", in: probe.label)
+        XCTAssertNotNil(firstYdisp); XCTAssertNotNil(secondYdisp)
+        XCTAssertNotEqual(firstYdisp, secondYdisp,
+                          "premise: ydisp did not advance in 1.5s, so output is NOT streaming and this is not a busy pane — the mock or the stream is broken, and a pass here would be vacuous. ydisp \(firstYdisp as Int?) -> \(secondYdisp as Int?)")
+
+        // THE ASSERTION. A single tap on a pane that is following output must take the responder.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)).tap()
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            if probe.exists, probe.label.contains("fr=1") { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        let after = probe.exists ? probe.label : "PROBE ABSENT"
+        XCTAssertTrue(after.contains("fr=1"),
+                      "a tap on a pane that is merely FOLLOWING OUTPUT did not take the responder, so the terminal is unfocusable while an agent works — the regression the scroll-tap guard introduced. If pub=scrollTapIgnored the guard is treating auto-follow as user scrolling. probe[\(after)]")
+        XCTAssertFalse(after.contains("pub=scrollTapIgnored"),
+                       "the guard suppressed a tap on a busy pane, i.e. it is counting SwiftTerm's auto-follow writes as user scrolling. probe[\(after)]")
+    }
+
     /// Pull an integer field out of the probe label, e.g. `ydisp=176` -> 176.
     ///
     /// Returns nil rather than a default when the field is absent, so a probe that stops

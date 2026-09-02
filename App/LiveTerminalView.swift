@@ -812,17 +812,27 @@ struct LiveTerminalView: UIViewRepresentable {
             // timing. Review read the same 0/6 as what it was — a measurement of inertness. An
             // empty result is a claim about the instrument, not about the world.
             //
-            // SO THE SIGNAL IS "DID THE CONTENT JUST MOVE", sampled from the KVO observer on
-            // `contentOffset` that already drives the Latest pill. That observer fires on every
-            // offset change whatever caused it, and it records the time. This depends on NO
-            // recognizer ordering and on NO UIScrollView flag lifecycle, which is what made the
-            // previous version unprovable without a device.
+            // SO THE SIGNAL IS "DID THE CONTENT JUST MOVE UNDER A FINGER", sampled from the KVO
+            // observer on `contentOffset` that already drives the Latest pill. That observer
+            // records a timestamp only for offset writes made while the scroll view reports
+            // `isDragging || isDecelerating` — see the note there.
+            //
+            // THAT QUALIFIER IS THE SECOND CORRECTION, and it came from review as well. Recording
+            // every offset change was worse than the bug: SwiftTerm's auto-follow writes
+            // `contentOffset` on every output frame, so on a BUSY pane the timestamp was
+            // permanently fresh and this guard suppressed every tap — the reader could not focus
+            // the terminal at all while an agent was producing output. The flags were never the
+            // wrong signal; reading them at tap `.ended` was the wrong PLACE. Inside the observer
+            // they are true for exactly the writes a finger caused.
+            //
+            // Nothing here depends on recognizer ordering or on when UIScrollView clears its
+            // state, which is what made the first version unprovable without a device.
             //
             // A tap that stops momentum arrives while the offset was changing microseconds ago, so
-            // it is suppressed. A tap on a settled pane sees motion far in the past, so it focuses
-            // normally. The window is deliberately short: long enough to cover the gap between the
-            // last offset change and touch-up, short enough that a deliberate tap a moment after
-            // reading never waits for it.
+            // it is suppressed. A tap on a settled pane — or on a pane that is merely following
+            // output — sees motion far in the past, so it focuses normally. The window is
+            // deliberately short: long enough to cover the gap between the last offset change and
+            // touch-up, short enough that a deliberate tap a moment after reading never waits.
             let sinceMotion = CACurrentMediaTime() - lastContentMotion
             if sinceMotion < Self.scrollSettleWindow {
                 publishSelectionProbe("scrollTapIgnored")
@@ -1670,14 +1680,30 @@ struct LiveTerminalView: UIViewRepresentable {
                 // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
                 let offsetY = scroll.contentOffset.y
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                // USER-DRIVEN MOTION ONLY, and read HERE, synchronously, while the scroll is
+                // actually happening. This is the whole correction to the previous version.
+                //
+                // Review found that recording EVERY offset change breaks tap-to-focus on the common
+                // case: SwiftTerm's auto-follow writes `contentOffset` on every output frame, so on
+                // a busy pane the timestamp is permanently fresh and the guard suppressed every tap.
+                // That is a worse defect than the one it was fixing — the reader could not focus the
+                // terminal at all while an agent was producing output.
+                //
+                // `isDragging`/`isDecelerating` are exactly the discriminator, and the reason the
+                // FIRST attempt failed was WHERE it read them, not WHAT it read: at tap `.ended`
+                // they are already cleared, but inside this observer they are true for precisely the
+                // offset writes a finger caused. Auto-follow writes arrive with both false and are
+                // therefore not motion for this purpose.
+                //
+                // Reading them on the KVO thread alongside the geometry also keeps this immune to
+                // the ordering question the touch-down approach would have raised: nothing here
+                // depends on whether a gesture delegate runs before UIScrollView updates its state.
+                let userDriven = scroll.isDragging || scroll.isDecelerating
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
-                    // WHEN THE CONTENT LAST MOVED, which is the signal the focus-tap guard uses.
-                    // Recorded here because this observer already fires on EVERY offset change from
-                    // any cause — finger drag, momentum, or SwiftTerm's own auto-follow — so it is
-                    // the one place that sees scrolling without depending on gesture-recognizer
-                    // ordering or on UIScrollView's internal flag lifecycle. See `handleFocusTap`.
-                    self.lastContentMotion = CACurrentMediaTime()
+                    // WHEN THE CONTENT LAST MOVED UNDER A FINGER, which is the signal the focus-tap
+                    // guard uses. See `handleFocusTap` for why a timestamp rather than a live flag.
+                    if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift

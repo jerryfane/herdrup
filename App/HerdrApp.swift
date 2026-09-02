@@ -369,6 +369,17 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "claude",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .busyScroll:
+            // A REAL SwiftTerm pane that keeps RECEIVING OUTPUT, so auto-follow writes
+            // contentOffset continuously. The receipt is the INVERSE of the scroll-tap guard:
+            // on a pane merely following output, a tap MUST still take focus. Review found
+            // that recording every contentOffset write suppressed exactly this case — the
+            // common one while an agent is working.
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(scrollback: true, busyOutput: true)),
+                                 paneID: "w1:p1", title: "busytest",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         case .backfill:
             // A REAL SwiftTerm pane whose LIVE stream carries only the short one-screen seed,
             // while agent.read (source=recent, ansi) returns ~1000 numbered lines of history —
@@ -6229,7 +6240,7 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, paging, backfill, gram
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -6250,6 +6261,11 @@ enum ScreenshotMock {
         // agent redraws shifted content when it RECEIVES an SGR wheel event — so a swipe
         // proves drag → app emits wheel → content moves.
         case "ccscroll": return .ccscroll
+        // `busyscroll` drives the BUSY-PANE focus receipt: a real SwiftTerm pane whose stream
+        // keeps emitting output, so SwiftTerm's auto-follow writes `contentOffset` continuously.
+        // That is the state in which the first two versions of the scroll-tap guard suppressed
+        // every tap and left the terminal unfocusable while an agent was working.
+        case "busyscroll": return .busyScroll
         // `paging` drives the swipe-between-agents receipt: three distinctively-named agents
         // in the keep-mounted container; a swipe fronts the neighbour and the header changes.
         case "paging": return .paging
@@ -6279,6 +6295,10 @@ struct MockTransport: HerdrTransport {
     /// When true, `agent.read` (source=recent, ansi) returns MANY numbered lines of history
     /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
     /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
+    /// When true, `pane.stream` keeps APPENDING output after the seed, so SwiftTerm's
+    /// auto-follow writes `contentOffset` on every frame. The busy-pane state: the scroll-tap
+    /// guard must still let a tap take focus here, and two earlier versions of it did not.
+    var busyOutput = false
     var backfill = false
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
@@ -6390,9 +6410,25 @@ struct MockTransport: HerdrTransport {
                         seq += 1
                     }
                 }
+                // BUSY-PANE OUTPUT: append a line about eight times a second so SwiftTerm's
+                // auto-follow writes `contentOffset` on every frame. A normal-buffer append
+                // rather than a reset, so scrollback grows exactly as a working agent's does.
+                let busy = Task { [busyOutput] in
+                    guard busyOutput else { return }
+                    var n = 1
+                    var seq: UInt64 = 10_000
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        guard !Task.isCancelled else { break }
+                        let line = String(format: "BUSY line %04d  the agent is still working\r\n", n)
+                        let b64 = Data(line.utf8).base64EncodedString()
+                        continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"append\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
+                        n += 1; seq += 1
+                    }
+                }
                 // Stop pinging when the consumer goes away, so a torn-down pane does not leave a
                 // timer running for the life of the process.
-                continuation.onTermination = { _ in pings.cancel() }
+                continuation.onTermination = { _ in pings.cancel(); busy.cancel() }
                 // DELIBERATELY NO finish(): a finished stream is a dropped stream. See above.
             }
         }
