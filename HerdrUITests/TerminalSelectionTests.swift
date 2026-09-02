@@ -526,9 +526,18 @@ final class TerminalSelectionTests: XCTestCase {
             }
             // Settle fully, and drop any focus a genuine settled tap took, so the next attempt
             // starts from the same premise this one did.
+            //
+            // BEST-EFFORT, AND THAT MATTERS: the first CI run of this test failed here rather than
+            // on any assertion, because it tapped the chevron unconditionally and XCUITest hard-
+            // fails a tap with no matching element ("No matches found for ... Collapse keyboard").
+            // The chevron is only rendered while an input owner holds the keyboard, so on any
+            // iteration where focus was not taken it legitimately does not exist. A RESET STEP MUST
+            // NOT BE ABLE TO FAIL THE TEST IT IS RESETTING FOR — that reports a harness defect as a
+            // product verdict, which is the same class of error as a test that passes vacuously.
             Thread.sleep(forTimeInterval: 1.2)
-            if probe.exists, probe.label.contains("fr=1") {
-                app.buttons["Collapse keyboard"].firstMatch.tap()
+            let chevron = app.buttons["Collapse keyboard"].firstMatch
+            if probe.exists, probe.label.contains("fr=1"), chevron.waitForExistence(timeout: 2) {
+                chevron.tap()
                 Thread.sleep(forTimeInterval: 1.0)
             }
         }
