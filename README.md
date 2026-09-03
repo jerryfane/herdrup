@@ -6,7 +6,7 @@ herdrup is an iOS client for [herdr](https://github.com/jerryfane/herdr) — a c
 board for the coding agents running on your machine, with a real terminal one tap behind each.
 When an agent needs you, you see it at a glance and can reply from anywhere.
 
-🌐 [herdrup.themartian.app](https://herdrup.themartian.app)
+[**⬇ Download on the App Store**](https://apps.apple.com/app/id6798087089) · 🌐 [herdrup.themartian.app](https://herdrup.themartian.app)
 
 The framing is *a herdr client that contains a terminal*, not a terminal app that happens to run
 herdr. A generic SSH terminal renders a character grid and cannot know what a pane or an agent is;
@@ -33,8 +33,11 @@ there is no system libssh2 to install, which is exactly what lets the protocol l
 
 ## Getting it
 
-The app ships to **TestFlight**. Join the beta from [herdrup.themartian.app](https://herdrup.themartian.app),
-or build it yourself below.
+**[Download on the App Store](https://apps.apple.com/app/id6798087089)** — herdrup is live, free, and
+iPhone + iPad (it also installs on Apple Silicon Macs as a Designed-for-iPad app).
+
+You can also [build it yourself](#building-from-source); it is Apache-2.0 and the whole client is in
+this repository.
 
 ## Building from source
 
