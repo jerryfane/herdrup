@@ -47,11 +47,20 @@ published encryption (AES/SSH via a standard library — no proprietary or custo
 which qualifies for the standard mass-market exemption (EAR Category 5 Part 2) — the
 declaration used by essentially every SSH client on the App Store. Owner-approved
 determination, 2026-08-05. The stricter `true` value was tried first but requires a full
-CCATS filing to upload (App Store Connect altool error 90592), disproportionate for a
-standard-encryption test build. A public App Store release should confirm the
-self-classification paperwork with a compliance specialist. The CI verifier still fails
-loudly on `MISSING_EXPORT_COMPLIANCE` as a backstop, but with `false` an internal build
-goes straight to testable. See Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+CCATS filing to upload (App Store Connect altool error 90592), disproportionate for
+standard encryption of this kind.
+
+**Confirmed for the public release.** This paragraph used to end by saying a public App
+Store release "should confirm the self-classification paperwork with a compliance
+specialist" — written when the app only shipped to TestFlight, and therefore stale from
+the moment 1.0.3 reached the App Store on 2026-09-03. The owner has since confirmed the
+self-classification for a public release (org directive 110552), which closes that
+deferral. Being exact about what the confirmation is: it is the owner's own determination
+as the responsible party. **No compliance specialist has reviewed it**, and nothing here
+should be read as a specialist opinion. The declaration value is unchanged.
+
+The CI verifier still fails loudly on `MISSING_EXPORT_COMPLIANCE` as a backstop. See
+Apple's [export-compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
 ## Fallback — run on a Mac by hand
 
