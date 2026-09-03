@@ -161,9 +161,16 @@ targets:
         # Store. Owner (the legal authority) approved this determination 2026-08-05,
         # after the stricter `true` value was found to REQUIRE A FULL CCATS FILING to
         # upload (App Store Connect altool error 90592: an empty ITSEncryptionExport
-        # ComplianceCode) — disproportionate for a standard-encryption test build.
-        # A public App Store release should confirm the self-classification paperwork
-        # with a compliance specialist; for TestFlight this uploads cleanly.
+        # ComplianceCode) — disproportionate for standard encryption of this kind.
+        # CONFIRMED FOR THE PUBLIC RELEASE: this comment used to say a public App
+        # Store release "should confirm the self-classification paperwork with a
+        # compliance specialist; for TestFlight this uploads cleanly" — written when
+        # the app only shipped to TestFlight, and stale from the moment 1.0.3 reached
+        # the App Store on 2026-09-03. The owner confirmed the self-classification for
+        # a public release (org directive 110552), closing that deferral. To be exact:
+        # that is the OWNER'S OWN determination as the responsible party. NO COMPLIANCE
+        # SPECIALIST HAS REVIEWED IT and nothing here is a specialist opinion. The
+        # value below is unchanged by that confirmation.
         ITSAppUsesNonExemptEncryption: false
         # Bundled design fonts (App/Fonts/, added as resources by xcodegen). Geist is
         # the APP voice, IBM Plex Mono the MACHINE voice — the two families the Claude
