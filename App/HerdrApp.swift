@@ -3616,12 +3616,30 @@ struct TerminalPaneContent: View {
             case .background:
                 wasBackgrounded = true
             case .active:
-                // Read staleness at the moment of the decision, not at background time: on
-                // iOS nothing of ours runs while suspended, so the silence only becomes
-                // measurable now.
-                let streamDied = terminalLiveness.isStale(
-                    timeout: LiveTerminalView.streamStuckTimeout
-                )
+                // WHY THE PLATFORM CHECK IS HERE AND STALENESS IS NOT ENOUGH ALONE, found by
+                // review. On iOS the process is SUSPENDED, so `lastFrameAt` freezes at the
+                // instant of suspension and never advances while away. Return within 50s and
+                // staleness reads false — yet the gap is real, because a suspended socket
+                // received nothing. The reconnect does not cover it either: startBackfill()
+                // runs only from `attach`, and the history prepend inside the .reset keyframe
+                // is gated on `firstReset`, so a mid-session reconnect repaints the visible
+                // screen and leaves the scrolled-off output missing. That would narrow #62's
+                // repair to backgrounds longer than 50s.
+                //
+                // So the two platforms are asked different questions, because their facts
+                // differ. On iOS a real background IS a real gap — always reseed, exactly as
+                // before this change. Only on a Mac, where the process keeps running and
+                // frames keep arriving, is staleness the honest test.
+                //
+                // Note this is NOT the "two-line platform gate" rejected while designing
+                // this: that version used the platform alone to SUPPRESS the reseed, which
+                // would also have suppressed a legitimate one under App Nap. Here the
+                // platform WIDENS (iOS always reseeds) and staleness still governs the Mac,
+                // so an App-Nap-suspended Mac window reads stale and reseeds correctly.
+                let streamDied = !ProcessInfo.processInfo.isiOSAppOnMac
+                    || terminalLiveness.isStale(
+                        timeout: LiveTerminalView.streamStuckTimeout
+                    )
                 if wasBackgrounded && isForeground && streamDied { streamGen += 1 }
                 wasBackgrounded = false
             default:

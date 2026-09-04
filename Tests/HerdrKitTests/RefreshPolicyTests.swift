@@ -291,6 +291,24 @@ final class StreamLivenessTests: XCTestCase {
         )
     }
 
+    /// The CALLER's timeout is the only threshold that decides. Pinned because the type's
+    /// whole justification is that it carries no threshold of its own — if it did, it would
+    /// drift from the reconnect watchdog the moment `streamStuckTimeout` were retuned, and
+    /// nothing would fail. Review proved the gap: replacing `> timeout` with `> 50` left the
+    /// suite green, because every other test passes exactly 50.
+    func testTheCallersTimeoutIsTheOneThatDecides() {
+        let now = Date()
+        let liveness = StreamLiveness(lastFrameAt: now.addingTimeInterval(-30))
+        XCTAssertFalse(
+            liveness.isStale(now: now, timeout: stuckTimeout),
+            "30s of silence is alive against the 50s watchdog threshold"
+        )
+        XCTAssertTrue(
+            liveness.isStale(now: now, timeout: 20),
+            "the same 30s must read stale against a 20s timeout; a hardcoded 50 would not"
+        )
+    }
+
     /// `noteFrame` is what the terminal calls on every frame; without it advancing, a
     /// long-lived pane would eventually look dead and reseed itself mid-session.
     func testNotingAFrameClearsPriorStaleness() {
