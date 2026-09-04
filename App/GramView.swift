@@ -37,6 +37,16 @@ struct GramView: View {
     /// call sites (and the DEBUG harness) compile unchanged; written on load and
     /// mark-read so reading a message clears the badge without leaving the tab.
     var unread: GramUnreadTracker? = nil
+    /// Which "conversation" is shown — Inbox (false) or Saved (true). OWNED BY THE HOST, not
+    /// by this view, because on regular width the selector lives in the app's real
+    /// NavigationSplitView sidebar rather than inside this page. A sibling column cannot drive
+    /// a `@State` in here, so the state is hoisted and both layouts read the same binding.
+    @Binding var showingSaved: Bool
+    /// Bumped by the host to request a reload. The regular-width refresh affordance moved to
+    /// the sidebar with the rest of the selector, and a sidebar button cannot call this view's
+    /// async `load` directly — so it changes a token and `onChange` performs the load, the same
+    /// one-shot-signal pattern the terminal uses for jump-to-tail and collapse.
+    var refreshToken: Int = 0
 
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
@@ -60,11 +70,12 @@ struct GramView: View {
     /// A non-fatal refresh failure while messages are already shown.
     @State private var refreshNote: String?
     @State private var isLoading = false
-    /// Saved (bookmarked) Gram messages + whether the page is showing the Saved section.
+    /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
+    /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
-    @State private var showingSaved = false
-    /// On iPad (regular width) Gram becomes a two-pane split — an Inbox/Saved rail beside the
-    /// message feed + composer — instead of the phone's header toggle. iPhone stays single-column.
+    /// On regular width this page renders the feed + composer only; the Inbox/Saved selector and
+    /// the refresh action live in the app's NavigationSplitView sidebar, so there is exactly ONE
+    /// sidebar on screen. iPhone keeps its single column with the header toggle.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
@@ -218,6 +229,14 @@ struct GramView: View {
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
         .task { await pollLoop() }
+        // The sidebar's refresh button bumps `refreshToken`; consume the change here so a
+        // sibling column can drive this view's async reload without owning its state. Guarded on
+        // a real change (SwiftUI may re-run the body for unrelated reasons) and on `initial:
+        // false` so it refreshes in place instead of dropping back to the loading phase.
+        .onChange(of: refreshToken) { old, new in
+            guard new != old else { return }
+            Task { await load(initial: false) }
+        }
         // Paperclip → a Telegram-style attach sheet picks the source, so we open the
         // RIGHT system picker. The picker is opened in the sheet's onDismiss (via
         // `pendingPicker`), not inline — presenting a sheet while another dismisses
@@ -325,89 +344,21 @@ struct GramView: View {
         }
     }
 
-    /// iPad / regular width: a two-pane split — a fixed Inbox/Saved rail on the left (the phone's
-    /// header toggle, promoted to a persistent list) beside the message feed + composer on the
-    /// right. Reuses the SAME `content` / `bannerView` / `composer` as the phone; only the framing
-    /// differs, so every send/attach/poll behaviour is identical.
+    /// Regular width: the message feed + composer ONLY. The Inbox/Saved selector and the refresh
+    /// action are rendered by the host in the app's real `NavigationSplitView` sidebar, beside
+    /// the section picker, exactly like the agents list.
+    ///
+    /// This page used to draw its OWN 260pt rail here, which on iPad and Mac put a second
+    /// sidebar next to the split view's own column — and that column was rendering an empty
+    /// `Spacer()` for this section, so the screen showed one empty system sidebar and one
+    /// hand-rolled one. Reuses the SAME `content` / `bannerView` / `composer` as the phone, so
+    /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
-        HStack(spacing: 0) {
-            gramRail
-                .frame(width: 260)
-            Divider().overlay(Palette.hairlineQuiet)
-            VStack(spacing: 0) {
-                content
-                bannerView
-                composer
-            }
+        VStack(spacing: 0) {
+            content
+            bannerView
+            composer
         }
-    }
-
-    /// The left rail of the iPad two-pane: the section title, a refresh action, and the two
-    /// "conversations" this channel has — Inbox (all messages, with an unread badge) and Saved
-    /// (bookmarked copies, with a count). Selecting one drives the same `showingSaved` state the
-    /// phone's header toggle does, so the right pane's `content` swaps in place.
-    private var gramRail: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Gram")
-                    .font(Typography.app(20, .semibold))
-                    .foregroundStyle(Palette.text)
-                Spacer()
-                Button {
-                    Task { await load(initial: false) }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            Divider().overlay(Palette.hairlineQuiet)
-            VStack(spacing: 4) {
-                railRow(title: "Inbox", icon: "tray", selected: !showingSaved,
-                        badge: unreadCount) { showingSaved = false }
-                railRow(title: "Saved", icon: "bookmark", selected: showingSaved,
-                        badge: savedGrams.saved.count, badgeMuted: true) { showingSaved = true }
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            Spacer(minLength: 0)
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Palette.surface.ignoresSafeArea())
-    }
-
-    /// One selectable row in the Gram rail. `badgeMuted` renders the count as a quiet pill
-    /// (Saved) rather than the attention-coloured unread pill (Inbox).
-    private func railRow(title: String, icon: String, selected: Bool, badge: Int,
-                         badgeMuted: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: selected && icon == "bookmark" ? "bookmark.fill" : icon)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(selected ? Palette.brand : Palette.textDim)
-                    .frame(width: 20)
-                Text(title)
-                    .font(Typography.app(15, selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? Palette.text : Palette.textDim)
-                Spacer(minLength: 0)
-                if badge > 0 {
-                    Text("\(badge)")
-                        .font(Typography.machine(11, .semibold))
-                        .foregroundStyle(badgeMuted ? Palette.textDim : Palette.ground)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(badgeMuted ? Palette.surfaceRaised : Palette.waiting))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(selected ? Palette.surfaceRaised : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
