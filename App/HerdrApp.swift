@@ -397,11 +397,10 @@ struct RootView: View {
             // reresolveAgent leaves the seeded identity in place and the header stays stable.
             PagingTestHarness(client: mockClient)
         case .gram:
-            // The Gram page over a mock that answers gram.list with a canned owner
-            // view. Empty `agents` keeps the recipient picker to the shared queue;
-            // onClose nil hides the close X (there is nothing to dismiss to in the
-            // standalone screenshot render). The messages + claim states are the FYI.
-            GramView(client: mockClient, agents: [], onClose: nil)
+            // The Gram page over a mock that answers gram.list with a canned owner view. The
+            // harness owns the Inbox/Saved binding (see GramScreenshotHarness); the messages +
+            // claim states are the FYI.
+            GramScreenshotHarness(client: mockClient)
         }
     }
     #endif
@@ -1504,6 +1503,18 @@ struct TerminalHomeView: View {
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
     @StateObject private var gramUnread = GramUnreadTracker()
+    /// Gram's Inbox/Saved selection, owned HERE rather than inside `GramView` because on regular
+    /// width the selector is rendered in the split view's sidebar — a sibling column of the page
+    /// it drives. Shared by both layouts, so the phone's header toggle and the sidebar rows read
+    /// and write the same value.
+    @State private var gramShowingSaved = false
+    /// One-shot signal for the sidebar's refresh button. A sidebar button cannot call `GramView`'s
+    /// async `load`, so it bumps this and the page's `onChange` performs the reload.
+    @State private var gramRefreshToken = 0
+    /// Observed, not read statically: the Gram sidebar shows the Saved count as a badge, and
+    /// `SavedGramStore.shared.saved.count` read directly would only refresh when some unrelated
+    /// state re-rendered this view — so saving or removing a gram would leave a stale number.
+    @ObservedObject private var savedGrams = SavedGramStore.shared
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
 
@@ -1736,8 +1747,14 @@ struct TerminalHomeView: View {
                         }
                     case .settings:
                         settingsIndex   // the section index; each jumps the detail pane
+                    case .gram:
+                        // Gram's Inbox/Saved selector belongs in THIS column, beside the section
+                        // picker, the same way the agents list does. It used to render an empty
+                        // Spacer() here while GramView drew its own 260pt rail in the detail
+                        // pane, which put two sidebars on screen — one of them blank.
+                        gramSidebar
                     default:
-                        Spacer()   // Gram / Call live in the detail pane
+                        Spacer()   // Call lives in the detail pane
                     }
                 }
             }
@@ -1755,7 +1772,9 @@ struct TerminalHomeView: View {
                         detailPlaceholder("Select an agent", "square.grid.2x2")
                     }
                 case .gram:
-                    GramView(client: client, agents: agents, unread: gramUnread)
+                    GramView(client: client, agents: agents, unread: gramUnread,
+                             showingSaved: $gramShowingSaved,
+                             refreshToken: gramRefreshToken)
                 case .settings:
                     SettingsView(
                         client: client,
@@ -1858,6 +1877,81 @@ struct TerminalHomeView: View {
         Spacer(minLength: 0)
     }
 
+    /// Gram's sidebar column: a header matching the agents header's shape (title, one-number
+    /// subtitle, a trailing circle action) over the two "conversations" this channel has.
+    ///
+    /// This is the SAME column the agents list uses. Gram previously drew its own rail inside the
+    /// detail pane while this column rendered a blank `Spacer()`, so the reader saw two sidebars
+    /// and the left one was empty. Selecting a row writes `gramShowingSaved`, which the page
+    /// reads as a binding, so the detail pane's content swaps in place with no navigation.
+    private var gramSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Spacer()
+                VStack(spacing: 2) {
+                    Text("Gram").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
+                    // Reserved height so the title never jumps as the count appears, matching
+                    // the agents header's `headerSubtitle` treatment.
+                    Text(gramUnread.count > 0
+                         ? "\(gramUnread.count) unread"
+                         : "nothing unread")
+                        .font(Typography.machine(12))
+                        .foregroundStyle(gramUnread.count > 0 ? Palette.waiting : Palette.textFaint)
+                        .frame(height: 15)
+                }
+                Spacer()
+                circleButton("arrow.clockwise") { gramRefreshToken += 1 }
+            }
+            .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+            Divider().overlay(Palette.hairlineQuiet)
+            VStack(spacing: 4) {
+                gramSidebarRow(title: "Inbox", icon: "tray", selected: !gramShowingSaved,
+                               badge: gramUnread.count) { gramShowingSaved = false }
+                gramSidebarRow(title: "Saved", icon: "bookmark", selected: gramShowingSaved,
+                               badge: savedGrams.saved.count,
+                               badgeMuted: true) { gramShowingSaved = true }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            Spacer(minLength: 0)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// One selectable row in the Gram sidebar. `badgeMuted` renders the count as a quiet pill
+    /// (Saved) rather than the attention-coloured unread pill (Inbox).
+    private func gramSidebarRow(title: String, icon: String, selected: Bool, badge: Int,
+                                badgeMuted: Bool = false,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: selected && icon == "bookmark" ? "bookmark.fill" : icon)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(selected ? Palette.brand : Palette.textDim)
+                    .frame(width: 20)
+                Text(title)
+                    .font(Typography.app(15, selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Palette.text : Palette.textDim)
+                Spacer(minLength: 0)
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(Typography.machine(11, .semibold))
+                        .foregroundStyle(badgeMuted ? Palette.textDim : Palette.ground)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(badgeMuted ? Palette.surfaceRaised : Palette.waiting))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(selected ? Palette.surfaceRaised : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+    }
+
     /// The four top-level sections, a pill at the top of the iPad sidebar (the phone's tab bar,
     /// rotated up here — same sections, so the future Call tab already has its slot).
     private var sidebarSectionPicker: some View {
@@ -1919,7 +2013,8 @@ struct TerminalHomeView: View {
 
                 // Gram and Settings were modal covers; they are persistent tabs now.
                 // Both are nav-agnostic and take no onClose as tabs (no close button).
-                GramView(client: client, agents: agents, unread: gramUnread)
+                GramView(client: client, agents: agents, unread: gramUnread,
+                         showingSaved: $gramShowingSaved)
                     .tag(HomeTab.gram)
                     .tabItem { Label("Gram", systemImage: "bubble.left.and.bubble.right") }
                     .badge(gramUnread.count == 0 ? nil : Text("\(gramUnread.count)"))
@@ -6234,6 +6329,21 @@ private extension View {
 /// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
 /// launch argument.
 #if DEBUG
+/// Gram screenshot/UI-test harness (`HERDR_SCREENSHOT_MOCK=gram`). `GramView`'s Inbox/Saved
+/// selection is a binding owned by the host (on regular width the selector lives in the app's
+/// split-view sidebar), and `mockView` is a function that cannot hold `@State` — so this holds
+/// it, exactly as `PagingTestHarness` holds the pane slots for its harness.
+struct GramScreenshotHarness: View {
+    let client: HerdrClient
+    @State private var showingSaved = false
+
+    var body: some View {
+        // Empty `agents` keeps the recipient picker to the shared queue; `onClose` nil hides the
+        // close X (there is nothing to dismiss to in a standalone render).
+        GramView(client: client, agents: [], onClose: nil, showingSaved: $showingSaved)
+    }
+}
+
 /// Swipe-between-agents receipt harness (`HERDR_SCREENSHOT_MOCK=paging`). Holds three agents
 /// in the REAL `PaneKeepAliveContainer`, mirroring `TerminalHomeView`'s open/navigate, so an
 /// XCUITest swipe pages the front pane and the header heading changes. No LRU eviction here —
