@@ -38,8 +38,16 @@ private final class ResumeGate: @unchecked Sendable {
 /// the phone OWNS the pane geometry (`lock:true`, Fix A): the server pins the shared
 /// PTY to the phone's fit, so the agent's TUI lays out at the phone's width and fits
 /// crisply with no horizontal overflow. A co-viewing desktop narrows to that width
-/// while the phone views the pane; on teardown we fire one `lock:false` to hand
-/// ownership back (see `releaseGeometryOwnership`) so the desktop reclaims its width.
+/// while the app views the pane.
+///
+/// The lock is handed back on TEARDOWN ONLY — one `lock:false` from `stop()` (see
+/// `releaseGeometryOwnership`), i.e. on close or LRU eviction. Merely HIDING a
+/// keep-mounted pane keeps the lease and simply stops refreshing it, so it lapses on the
+/// daemon's 5-minute TTL and the desktop reclaims the width once nobody has looked at the
+/// pane for that long. Releasing on every hide was the original design and it made every
+/// switch between two loaded panes cost two winsize changes — one when the TUI reclaimed
+/// its layout width, one when re-fronting re-pinned ours — and therefore two full agent
+/// repaints, which read as the terminal rescrolling on every agent switch.
 struct LiveTerminalView: UIViewRepresentable {
     let client: HerdrClient
     let paneID: String
@@ -446,12 +454,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// it and then drives toward the LIVE grid.
         private var relockPending = false
         /// The generation whose lock has already been handed back (a `lock:false` release). A
-        /// generation is released AT MOST ONCE: `releaseGeometryOwnership` runs from both
-        /// `setForeground(false)` and `stop()` (which itself can run twice — `.exited` then
-        /// dismantle — and follows a hide at the SAME generation), and none of those bump the
-        /// generation. Without this idempotence a second same-generation release would fire a
-        /// redundant `lock:false` (re-resizing the shared PTY) AND let the first release's
-        /// generation-keyed self-prune clobber the newer release's registry handle.
+        /// generation is released AT MOST ONCE. `releaseGeometryOwnership` now runs from `stop()`
+        /// ONLY — a hide keeps the lease — but `stop()` itself can run twice (`.exited` then
+        /// dismantle) without bumping the generation, so the idempotence is still required.
+        /// Without it a second same-generation release would fire a redundant `lock:false`
+        /// (re-resizing the shared PTY) AND let the first release's generation-keyed self-prune
+        /// clobber the newer release's registry handle.
         private var releasedGeneration: Int?
         /// Hardware-keyboard connect/disconnect observers so key-drive focus follows the keyboard
         /// live (plug in → the front pane takes focus; unplug → it resigns). Removed in `stop()`.
@@ -1125,15 +1133,20 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
-        /// Front↔background transition for a KEEP-MOUNTED pane. Only the front pane holds the
-        /// PTY width-lock: hiding releases it (WITHOUT tearing the stream down), showing re-takes
-        /// it. The VISIBLE pane is never left unlocked because the re-lock's `lock:true` is
-        /// guaranteed to be the LAST geometry op: (1) bumping `geometryGeneration` makes a
-        /// not-yet-sent background `lock:false` bail on its generation guard; (2) `relockPending`
-        /// makes EVERY `sendPTYSize` caller (the re-lock itself AND any `sizeChanged` in the
-        /// window) defer while we await the in-flight release, so no `lock:true` can race the
-        /// `lock:false`; the deferred re-lock then drives toward the LIVE grid. Different panes own
-        /// different PTYs + generation keys, so releases/retakes across panes never contend.
+        /// Front↔background transition for a KEEP-MOUNTED pane. A HIDE KEEPS THE PTY WIDTH-LOCK
+        /// and stops refreshing it, letting it lapse on the daemon's TTL; a show RE-ASSERTS it,
+        /// which is a no-op at the PTY whenever the lease never lapsed. Hiding used to release
+        /// immediately, and that made every agent switch reflow the shared PTY twice and repaint
+        /// the agent twice — see the type comment.
+        ///
+        /// The VISIBLE pane is never left unlocked, because the re-assert's `lock:true` is
+        /// guaranteed to be the LAST geometry op even when a TEARDOWN-INITIATED `lock:false` is
+        /// still in flight for this pane: (1) bumping `geometryGeneration` makes a not-yet-sent
+        /// `lock:false` bail on its generation guard; (2) `relockPending` makes EVERY
+        /// `sendPTYSize` caller (the re-assert itself AND any `sizeChanged` in the window) defer
+        /// while we await that release, so no `lock:true` can race it; the deferred re-assert then
+        /// drives toward the LIVE grid. Different panes own different PTYs + generation keys, so
+        /// releases/retakes across panes never contend.
         func setForeground(_ f: Bool) {
             guard !stopped, f != foreground else { return }
             foreground = f
@@ -1141,9 +1154,18 @@ struct LiveTerminalView: UIViewRepresentable {
                 let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
                 Self.geometryGeneration[paneID] = gen
                 myGeometryGeneration = gen
-                lastSentCols = 0                // defeat sendPTYSize's dedup so the re-lock re-sends
+                // DEFEAT sendPTYSize's dedup so the re-assert genuinely re-sends. This is required
+                // for correctness now that a hide no longer releases: if the lease LAPSED on the
+                // daemon TTL while this pane was hidden, `lastSent` is stale-but-EQUAL to `desired`,
+                // so without zeroing here the dedup would skip the re-lock and leave the pane at
+                // whatever width the TUI reclaimed. Re-asserting when the lease did NOT lapse is
+                // free: it resolves to the same size and the daemon returns early on an unchanged
+                // winsize, so it cannot cause the redraw this whole path exists to avoid.
+                lastSentCols = 0
                 lastSentRows = 0
-                relockPending = true            // hold off ALL sendPTYSize until the release lands
+                relockPending = true            // hold off ALL sendPTYSize until any teardown release lands
+                // Populated only by `stop()` now, so on a normal re-front this is nil and the await
+                // below is a no-op; it still orders a re-front that races a teardown release.
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
                     // Re-fronting a keep-mounted pane whose geometry changed while hidden can leave
@@ -1160,7 +1182,20 @@ struct LiveTerminalView: UIViewRepresentable {
                 }
             } else {
                 relockPending = false           // a hide cancels any pending re-lock intent
-                releaseGeometryOwnership()       // release lock:false, keep the stream + emulator warm
+                // DELIBERATELY NO RELEASE HERE. A `lock:false` would drop the last width lease,
+                // and the daemon then stops forcing a size on purpose (`effective_pty_size` -> None,
+                // so `reconcile_pty_lease_size` leaves the winsize to the local TUI, which reclaims
+                // its own layout width). That is a REAL winsize change, so the agent takes a SIGWINCH
+                // and reflows its whole transcript — and re-fronting re-locked at our grid and made it
+                // reflow BACK. Two resizes and two full redraws for every switch between two panes
+                // that never even unmounted, which is the "terminal rescrolls when I change agent"
+                // report. Holding the lease makes both no-ops, because an unchanged size returns early
+                // in the daemon (`current_size == size`).
+                //
+                // The lease is not refreshed either: `startHeartbeat` is foreground-gated, so a pane
+                // nobody is viewing lets its lease expire on the daemon's DEFAULT_PTY_LEASE_TTL (5
+                // minutes) and the desktop reclaims the width then. Teardown still releases at once —
+                // see `stop()`, which is what hands the width back on close or LRU eviction.
             }
         }
 
@@ -1268,9 +1303,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// we re-assert the current COMMITTED size (defeating `sendPTYSize`'s dedup so the
         /// same size actually re-sends), which the drain delivers as a fresh `lock:true`
         /// carrying our `viewerID` + TTL. Only a FOREGROUND, non-relocking, idle-drain view
-        /// with a committed size refreshes: a hidden/relocking pane has already released its
-        /// lease (or is mid-retake) and must not re-pin, and skipping while a drain is in
-        /// flight preserves the "at most one set_pty_size in flight per pane" invariant.
+        /// with a committed size refreshes, and the foreground half of that is now
+        /// LOAD-BEARING POLICY rather than bookkeeping: a hidden pane KEEPS its lease (a hide no
+        /// longer releases — see `setForeground`) and deliberately stops refreshing it, so the
+        /// lease expires on the daemon TTL and a co-viewing desktop reclaims the width only once
+        /// nobody has looked at the pane for that long. Do not relax this guard to cover hidden
+        /// panes: that would pin the width for as long as the app is open. Skipping while a
+        /// relock is pending or a drain is in flight preserves the "at most one set_pty_size in
+        /// flight per pane" invariant.
         private func startHeartbeat() {
             heartbeatTask?.cancel()
             heartbeatTask = Task { @MainActor [weak self] in
