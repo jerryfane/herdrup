@@ -88,6 +88,12 @@ struct LiveTerminalView: UIViewRepresentable {
     /// can't proxy the persistent `pane.input.stream` channel). Refreshed on every
     /// update since the agent can resolve as federated after the view mounts. (#139)
     var isFederated: Bool = false
+    /// Shared with the host so it can ask whether this pane's stream is alive before
+    /// deciding to remount on foreground. Written by the Coordinator, read by the host.
+    var liveness: StreamLiveness? = nil
+    /// The host's own copy of the stuck-stream threshold, so it judges staleness by the
+    /// same rule the watchdog reconnects on rather than a second, drifting number.
+    static var streamStuckTimeout: TimeInterval { Coordinator.streamStuckTimeout }
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -98,6 +104,9 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        // BEFORE attach, which starts the stream: the first frame must be recorded, or a
+        // pane that connects while the app is backgrounding looks stale on return.
+        context.coordinator.liveness = liveness
         // SEED both baselines from the host before the first `updateUIView`. A remount
         // (the header refresh bumps `streamGen`) builds a fresh Coordinator while the
         // host's `@State` survives, so defaulting them replays the last jump as a second
@@ -111,6 +120,9 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        // A remount builds a fresh Coordinator while the host's box survives, so re-point
+        // it every pass rather than only at mount.
+        context.coordinator.liveness = liveness
         context.coordinator.onTailStateChange = onTailStateChange
         // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
@@ -360,9 +372,12 @@ struct LiveTerminalView: UIViewRepresentable {
         private var streamRunID = 0
         private var reconnectTask: Task<Void, Never>?
         private var watchdogTask: Task<Void, Never>?
+        /// The host's liveness box, mirrored on every stream frame. Optional because the
+        /// header-refresh path and the tests construct a Coordinator with no host box.
+        var liveness: StreamLiveness?
         /// No stream event (data, ping, resize) for this long → treat the stream as stuck and
         /// reconnect. 2.5× the server's 20s ping, so a single dropped ping is tolerated.
-        private static let streamStuckTimeout: TimeInterval = 50
+        fileprivate static let streamStuckTimeout: TimeInterval = 50
 
         /// PTY width-lease heartbeat (#137). The daemon expires a viewer's lease on a
         /// 5-minute TTL backstop (`DEFAULT_PTY_LEASE_TTL`), so a stable-size FOREGROUND
@@ -1296,7 +1311,13 @@ struct LiveTerminalView: UIViewRepresentable {
         @MainActor
         private func handle(_ event: TerminalStreamEvent) async {
             guard let view else { return }
-            lastStreamActivity = Date()   // any event (data, ping, resize) means the stream is alive
+            let now = Date()
+            lastStreamActivity = now   // any event (data, ping, resize) means the stream is alive
+            // Mirror to the host, which uses it to decide whether returning to the front has
+            // a real gap to repair. Only REAL frames count: `start()` optimistically stamps
+            // lastStreamActivity before anything arrives, and treating that as evidence would
+            // make a stream that connected and then received nothing look healthy.
+            liveness?.noteFrame(at: now)
             switch event {
             case .started(let started):
                 // Align the emulator to the pane's real geometry the ack carries.
