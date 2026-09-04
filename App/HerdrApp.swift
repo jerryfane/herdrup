@@ -3393,6 +3393,9 @@ struct TerminalPaneContent: View {
     /// `.active` fires only after a real background — not a transient `.inactive`
     /// (Control Center / a notification banner), which would flash needlessly.
     @State private var wasBackgrounded = false
+    /// The live terminal's stream-liveness box. A `@State` reference type, so it SURVIVES
+    /// a `streamGen` remount and keeps reading the same stream's evidence across one.
+    @State private var terminalLiveness = StreamLiveness()
     /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
     /// typed in the reply field is then sent as its control byte (and consumed, not
     /// added to the message), and the modifier disarms. See `handleReplyChange`.
@@ -3537,7 +3540,10 @@ struct TerminalPaneContent: View {
                                  fontSize: CGFloat(terminalFontSize),
                                  // A federated/remote pane routes key-drive input via pane.send_text
                                  // (home can't proxy the persistent pane.input.stream channel). (#139)
-                                 isFederated: agent?.machineID != nil)
+                                 isFederated: agent?.machineID != nil,
+                                 // Read on foreground to tell a suspended stream from a
+                                 // still-running one; see the scenePhase handler below.
+                                 liveness: terminalLiveness)
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3585,19 +3591,38 @@ struct TerminalPaneContent: View {
                 terminalInputFocused = false
             }
         }
-        // When the app returns to the foreground after a real background, reseed the
-        // FRONT pane the same way the header refresh button does (bump streamGen →
-        // remount → startBackfill() reads the durable current screen + scrollback).
-        // Its live stream stalled while backgrounded and reconnects from the live
-        // tail, so output produced while away is otherwise lost until a manual
-        // refresh (issue #62 follow-up). Gated on isForeground so only the visible
-        // pane pays the reseed; hidden keep-mounted panes reseed when next front.
+        // When the app returns to the foreground, reseed the FRONT pane the same way the
+        // header refresh button does (bump streamGen → remount → startBackfill() reads the
+        // durable current screen + scrollback) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
+        //
+        // #62's fix keyed the reseed on scene phase alone, which is a PROXY, and the proxy
+        // is only true on iOS. There the app is suspended, the stream really did stall, and
+        // output produced while away is lost until a manual refresh, so a reseed repairs a
+        // genuine gap. On a Mac the process keeps running while another Space or app is
+        // front: frames keep arriving, nothing is lost, and the reseed then destroys a
+        // perfectly live terminal — remounting throws away the reader's SELECTION and
+        // scroll position, which is the whole point of the selection work in #203/#215.
+        //
+        // So judge the FACT instead. `terminalLiveness` records when a frame last arrived,
+        // and the server pings every 20s, so a still-connected stream is at most ~20s stale
+        // while `streamStuckTimeout` (50s, 2.5× the ping) is the Coordinator's own
+        // definition of a dead stream. Reusing that one constant keeps the host and the
+        // watchdog from drifting apart on what "dead" means.
+        //
+        // Gated on isForeground so only the visible pane pays a reseed; hidden keep-mounted
+        // panes reseed when next front.
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background:
                 wasBackgrounded = true
             case .active:
-                if wasBackgrounded && isForeground { streamGen += 1 }
+                // Read staleness at the moment of the decision, not at background time: on
+                // iOS nothing of ours runs while suspended, so the silence only becomes
+                // measurable now.
+                let streamDied = terminalLiveness.isStale(
+                    timeout: LiveTerminalView.streamStuckTimeout
+                )
+                if wasBackgrounded && isForeground && streamDied { streamGen += 1 }
                 wasBackgrounded = false
             default:
                 break
