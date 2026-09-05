@@ -18,9 +18,10 @@ public actor HerdrClient {
     }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
-    /// Cached `ping` capabilities, so a multi-file send pays one probe, not one
-    /// per file. Reset to nil on a ping failure so a reconnected or upgraded
-    /// daemon is re-probed.
+    /// Cached `ping` capabilities, so a multi-file send pays one probe, not one per
+    /// file. Only a probe that ADVERTISED streaming is cached, so a failed ping, a
+    /// daemon with no capabilities, or one that says `false` is re-probed on the next
+    /// upload and an upgraded daemon is used without relaunching the app.
     private var cachedCapabilities: ServerCapabilities?
 
     public init(transport: HerdrTransport) {
@@ -526,13 +527,19 @@ public actor HerdrClient {
     /// the connection closed, so the reply cannot be correlated to the attempt.
     public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
         guard let citadel = transport as? CitadelTransport else { return nil }
-        // `??` takes a non-async autoclosure, so the probe cannot be inlined
-        // into it. A failed or capability-less ping leaves the cache nil, so a
-        // reconnected or upgraded daemon is probed again.
+        // `??` takes a non-async autoclosure, so the probe cannot be inlined into it.
+        // Only a POSITIVE result is cached: a daemon that answers `false` (or a ping
+        // that fails, or one with no capabilities at all) is re-probed on the next
+        // upload, so an upgraded daemon is picked up without relaunching the app.
+        // That costs one extra ping per file against an old daemon — one round trip
+        // versus the thousands the per-chunk path already pays.
         if cachedCapabilities == nil {
-            cachedCapabilities = try? await serverCapabilities()
+            let probed = try? await serverCapabilities()
+            if probed?.gramUploadStream == true {
+                cachedCapabilities = probed
+            }
+            guard probed?.gramUploadStream == true else { return nil }
         }
-        guard cachedCapabilities?.gramUploadStream == true else { return nil }
         let env = RequestEnvelope(
             id: "herdrkit:gram.upload.stream:\(uploadID)",
             method: "gram.upload.stream",
@@ -624,7 +631,10 @@ public actor HerdrClient {
         defer { try? handle.close() }
 
         // Report at most ~once per 1% (or per chunk, whichever is coarser) so a
-        // big file's round-trips don't schedule thousands of UI updates.
+        // big file's round-trips don't schedule thousands of UI updates. The total is
+        // widened to the bytes actually read: the file is stat'd before the first
+        // read, so one that GREW in between must not drive a determinate bar past
+        // 100% (a shrunken one simply reports fewer bytes and ends early).
         let reportStep = max(chunkBytes, total / 100)
         var lastReported = -reportStep
         var offset = 0
@@ -643,7 +653,7 @@ public actor HerdrClient {
             offset += chunk.count
             if offset >= total || offset - lastReported >= reportStep {
                 lastReported = offset
-                await onProgress?(offset, total)
+                await onProgress?(offset, max(total, offset))
             }
         }
         return uploadID

@@ -150,10 +150,21 @@ public actor GramUploadChannel {
         buffer.writeString(line)
         buffer.writeInteger(UInt8(ascii: "\n"))
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            pendingSeq = frameSeq
-            ackContinuation = continuation
-            framesCont.yield(buffer)
+        // A cancelled upload must not leave this task parked forever: nothing else
+        // resumes the ack (the resumers are an ack line, a frame error, `close()` and
+        // `markDead()`), and the caller's `defer`-based close cannot run while it is
+        // suspended here. Cancelling tears the channel down, which resumes the ack
+        // with `closedBeforeFrameAck`.
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                pendingSeq = frameSeq
+                ackContinuation = continuation
+                framesCont.yield(buffer)
+            }
+        } onCancel: {
+            Task { await self.close() }
         }
     }
 
@@ -172,9 +183,15 @@ public actor GramUploadChannel {
 
     @available(macOS 15.0, *)
     private func run(_ frameStream: AsyncStream<ByteBuffer>) async {
+        // Held outside the `do` so a throw from `withExec` — a dropped link, a failed
+        // channel open, a write error mid-upload — still closes the SSH connection.
+        // Leaking it would strand one TCP session, one sshd session and one remote
+        // `api-bridge` process PER FILE, since each upload mints its own connection.
+        var connection: SSHClient?
         do {
             let client = try await makeConnection()
             self.client = client
+            connection = client
             try await client.withExec(command) { [weak self] inbound, stdin in
                 let reader = Task { [weak self] in
                     var accumulator = LineAccumulator()
@@ -195,10 +212,10 @@ public actor GramUploadChannel {
                     try await stdin.write(buffer)
                 }
             }
-            try? await client.close()
         } catch {
             // makeConnection / withExec failed before or during the channel.
         }
+        if let connection { try? await connection.close() }
         settleOpen(.failure(ChannelError.closedBeforeAck))
         markDead()
     }

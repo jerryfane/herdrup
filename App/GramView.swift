@@ -277,7 +277,10 @@ struct GramView: View {
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
         .task {
-            Self.sweepAbandonedStaging()
+            // Off the main actor: the sweep unlinks whole abandoned session
+            // directories, which after a jetsam can be ten 100 MB attachments, and
+            // `removeItem` is a synchronous recursive walk.
+            await Task.detached(priority: .utility) { Self.sweepAbandonedStaging() }.value
             await pollLoop()
         }
         // The sidebar's refresh button bumps `refreshToken`; consume the change here so a
@@ -384,10 +387,13 @@ struct GramView: View {
             openFileTask?.cancel()
             if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
             if let url = webDoc?.fileURL { try? FileManager.default.removeItem(at: url) }
-            // Staged attachment bytes are ours to remove: nothing else references
-            // them once the page is gone. `.interactiveDismissDisabled(sending ||
-            // loadingPhoto)` keeps this from firing mid-send.
-            for file in attachedFiles { try? FileManager.default.removeItem(at: file.dir) }
+            // Staged attachment bytes are deliberately NOT removed here. Gram is a
+            // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
+            // plain tab switch while this view's `@State` — including the chips in
+            // `attachedFiles` — survives. Unlinking here would delete the bytes of an
+            // attachment still shown in the composer, and make its retry unfixable.
+            // The staged bytes are released on chip-X, after a successful send, and
+            // for a killed session by the next launch's staging sweep.
         }
         // Don't let a swipe-down (the new sheet dismissal) abandon an in-flight send
         // or a photo load mid-way — the chunked upload would keep running off-screen.
@@ -1411,12 +1417,19 @@ struct GramView: View {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let destination = dir.appendingPathComponent(safeTempFileName(name))
-            try FileManager.default.copyItem(at: source, to: destination)
             // `copyItem` does not set data protection, and every other temp write in
             // this file uses `.completeFileProtection`. A staged gram attachment can
             // be a secret; it must not be the one temp file here that sits unprotected.
+            //
+            // `completeUnlessOpen`, NOT `complete`: this file is held open across a
+            // whole upload, and the send keeps running when the app is backgrounded.
+            // Class A protection evicts the key on lock and fails reads even on an
+            // already-open descriptor, so locking the phone mid-upload would abort the
+            // send. Class B keeps an open file readable and still denies a new open
+            // while locked, which is the property that matters for a staged secret.
             try? FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
+                [.protectionKey: FileProtectionType.completeUnlessOpen],
+                ofItemAtPath: destination.path)
             guard let size = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                 size > 0, size <= maxFileBytes
             else {
