@@ -1511,6 +1511,9 @@ struct TerminalHomeView: View {
     /// One-shot signal for the sidebar's refresh button. A sidebar button cannot call `GramView`'s
     /// async `load`, so it bumps this and the page's `onChange` performs the reload.
     @State private var gramRefreshToken = 0
+    /// One-shot signal for the sidebar's Read-all button, same reason as `gramRefreshToken`:
+    /// a sidebar button cannot call `GramView`'s async mark-read pass directly.
+    @State private var gramReadAllToken = 0
     /// Observed, not read statically: the Gram sidebar shows the Saved count as a badge, and
     /// `SavedGramStore.shared.saved.count` read directly would only refresh when some unrelated
     /// state re-rendered this view — so saving or removing a gram would leave a stale number.
@@ -1774,7 +1777,8 @@ struct TerminalHomeView: View {
                 case .gram:
                     GramView(client: client, agents: agents, unread: gramUnread,
                              showingSaved: $gramShowingSaved,
-                             refreshToken: gramRefreshToken)
+                             refreshToken: gramRefreshToken,
+                             readAllToken: gramReadAllToken)
                 case .settings:
                     SettingsView(
                         client: client,
@@ -1900,6 +1904,12 @@ struct TerminalHomeView: View {
                         .frame(height: 15)
                 }
                 Spacer()
+                // Read all, beside refresh and only while something is unread — the count the
+                // ambient poll already keeps here, so the button needs nothing from the page.
+                if gramUnread.count > 0 {
+                    circleButton("envelope.open") { gramReadAllToken += 1 }
+                        .accessibilityLabel("Read all")
+                }
                 circleButton("arrow.clockwise") { gramRefreshToken += 1 }
             }
             .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
