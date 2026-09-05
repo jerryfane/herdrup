@@ -1493,12 +1493,17 @@ struct TerminalHomeView: View {
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var columnVisibility = NavigationSplitViewVisibility.all
-    /// Whether the split-view sidebar is collapsed, remembered ACROSS LAUNCHES.
+    /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
     ///
-    /// `columnVisibility` is `@State`, so on its own a collapse lasts until the app is
-    /// relaunched — which is the wrong default for a preference the owner set
-    /// deliberately to get the terminal full width on a Mac window or an iPad.
-    @AppStorage("ui.sidebarCollapsed") private var sidebarCollapsed = false
+    /// There is deliberately no fully-hidden state. Hiding the column outright loses
+    /// the section badges and the activity counts and leaves nothing to click, so the
+    /// only way back was ⌘K on a hardware keyboard; the rail keeps a compact signal
+    /// and a one-click way back, which makes a third state pure surface area.
+    ///
+    /// Persisted because `columnVisibility` is `@State`: on its own the choice lasts
+    /// only until relaunch, which is wrong for a preference set deliberately to give
+    /// the terminal full width.
+    @AppStorage("ui.sidebarMinimized") private var sidebarMinimized = false
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -1775,7 +1780,38 @@ struct TerminalHomeView: View {
             .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 460)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
-            ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                // The minimised sidebar, beside the detail content rather than over it.
+                if sidebarMinimized { sidebarRail.transition(.move(edge: .leading)) }
+                detailColumn
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .navigationSplitViewStyle(.balanced)
+        // The split's own sidebar carries the FULL list; minimising hides that column and
+        // hands its job to the rail. Driven off the persisted flag so a relaunch restores
+        // the choice, and `.onChange` also catches a sidebar the owner drags shut.
+        .onChange(of: sidebarMinimized, initial: true) { _, minimized in
+            columnVisibility = minimized ? .detailOnly : .all
+        }
+        .onChange(of: columnVisibility) { _, visibility in
+            sidebarMinimized = visibility == .detailOnly
+        }
+        .tint(Palette.brand)
+        // Hardware-keyboard shortcuts (iPad): ⌘K minimises/expands the sidebar, ⌘/ opens the
+        // shortcut reference. Hidden zero-size buttons carry the key bindings.
+        .background { keyboardShortcuts }
+        .sheet(isPresented: $showShortcuts) {
+            ShortcutsSheet(onClose: { showShortcuts = false })
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+        )
+    }
+
+    /// The detail column's content, factored out so the rail can sit beside it.
+    private var detailColumn: some View {
+        ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
                 // Base layer: the switch renders Gram / Settings / Call and the agents
                 // placeholder. The terminal container is deliberately NOT in here — it is the
@@ -1817,31 +1853,7 @@ struct TerminalHomeView: View {
                     onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                     .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
                     .allowsHitTesting(selectedTab == .agents && frontID != nil)
-                // The only way back once the sidebar is collapsed. Top-leading, above
-                // the keep-mounted terminal so it stays reachable while a pane is
-                // fronted, and present ONLY while collapsed so it never covers content
-                // the sidebar is already beside.
-                if columnVisibility == .detailOnly {
-                    sidebarToggleButton(
-                        icon: "sidebar.left", hint: "Show sidebar (⌘K)", collapse: false)
-                        .padding(.leading, 12)
-                        .padding(.top, 12)
-                        .transition(.opacity)
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
         }
-        .navigationSplitViewStyle(.balanced)
-        .tint(Palette.brand)
-        // Hardware-keyboard shortcuts (iPad): ⌘K collapses/shows the sidebar, ⌘/ opens the
-        // shortcut reference. Hidden zero-size buttons carry the key bindings.
-        .background { keyboardShortcuts }
-        .sheet(isPresented: $showShortcuts) {
-            ShortcutsSheet(onClose: { showShortcuts = false })
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
-        }
-        )
     }
 
     /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
@@ -1993,19 +2005,18 @@ struct TerminalHomeView: View {
             sectionButton(.call, "Call", "phone")
             sectionButton(.settings, "Settings", "gearshape")
             sidebarToggleButton(
-                icon: "sidebar.leading", hint: "Hide sidebar (⌘K)", collapse: true)
+                icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
         }
         .padding(5)
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
     }
 
-    /// The collapse/expand control. It exists because ⌘K was the ONLY way to collapse
-    /// the sidebar, bound to a zero-opacity button — so on an iPad without a hardware
-    /// keyboard, or on the Mac build where a click is the expected gesture, there was
-    /// nothing to hit. The expand half has to live in the DETAIL column: once the
-    /// sidebar is collapsed there is nothing left of it to tap.
-    private func sidebarToggleButton(icon: String, hint: String, collapse: Bool) -> some View {
+    /// The minimise / restore control. ⌘K was the only trigger before, bound to a
+    /// zero-opacity button, and the navigation bar is hidden in both columns — so on
+    /// an iPad without a hardware keyboard, or on the Mac build where a click is the
+    /// expected gesture, there was nothing to hit.
+    private func sidebarToggleButton(icon: String, hint: String, minimize: Bool) -> some View {
         Button { toggleSidebar() } label: {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .medium))
@@ -2015,16 +2026,96 @@ struct TerminalHomeView: View {
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
-        .accessibilityLabel(collapse ? "Hide sidebar" : "Show sidebar")
+        .accessibilityLabel(minimize ? "Minimise sidebar" : "Expand sidebar")
         .help(hint)
     }
 
     private func toggleSidebar() {
-        withAnimation {
-            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+        withAnimation { sidebarMinimized.toggle() }
+    }
+
+    /// The minimised sidebar: a 64pt icon rail that keeps the section badges and the
+    /// activity counts visible and is one click from expanding.
+    ///
+    /// It lives in the DETAIL column rather than as a narrow sidebar column on
+    /// purpose. `NavigationSplitView` enforces its own minimum sidebar width on iPad,
+    /// so a 64pt column is not reliably honoured, and a control whose width the
+    /// platform may override is not something to ship untested on a device. Rendering
+    /// the rail ourselves is exact on both platforms.
+    private var sidebarRail: some View {
+        let activity = fullList.activityContent
+        return VStack(spacing: 6) {
+            sidebarToggleButton(
+                icon: "sidebar.left", hint: "Expand sidebar (⌘K)", minimize: false)
+                .padding(.bottom, 2)
+            railSectionButton(.agents, "Agents", "square.grid.2x2.fill")
+            railSectionButton(.gram, "Gram", "bubble.left.and.bubble.right",
+                              badge: gramUnread.count)
+            railSectionButton(.call, "Call", "phone")
+            railSectionButton(.settings, "Settings", "gearshape")
+            Divider().overlay(Palette.hairlineQuiet).padding(.horizontal, 10).padding(.vertical, 4)
+            // The counts are the reason to minimise rather than hide. Read from the
+            // SHARED wording spec (`AgentList.activityContent`), never counted here,
+            // so the rail cannot disagree with the expanded header about how many
+            // agents need you.
+            railCount(activity.needsYouCount, tone: Palette.waiting, label: "need you")
+            railCount(activity.workingCount, tone: Palette.working, label: "working")
+            Spacer()
+        }
+        .frame(width: 64)
+        .padding(.top, 12)
+        .background(Palette.ground)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Palette.hairlineQuiet).frame(width: 0.5).ignoresSafeArea()
         }
     }
 
+    /// A rail section icon. Tapping selects the section AND expands, which is the
+    /// predictable reading of a click on a minimised menu; the chevron above expands
+    /// without changing section.
+    private func railSectionButton(
+        _ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0
+    ) -> some View {
+        Button {
+            selectedTab = tab
+            withAnimation { sidebarMinimized = false }
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .medium))
+                .overlay(alignment: .topTrailing) {
+                    if badge > 0 {
+                        Circle().fill(Palette.waiting).frame(width: 7, height: 7).offset(x: 6, y: -2)
+                    }
+                }
+                .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textFaint)
+                .frame(width: 40, height: 36)
+                .background(selectedTab == tab ? Palette.surfaceRaised : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(label)
+    }
+
+    /// One activity count. Rendered only when non-zero: a rail of zeroes is noise, and
+    /// "nothing needs you" is already the expanded header's job.
+    @ViewBuilder
+    private func railCount(_ count: Int, tone: Color, label: String) -> some View {
+        if count > 0 {
+            VStack(spacing: 2) {
+                Circle().fill(tone).frame(width: 6, height: 6)
+                Text("\(count)")
+                    .font(Typography.machine(13, .semibold))
+                    .foregroundStyle(Palette.text)
+            }
+            .frame(width: 40)
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(count) \(label)")
+        }
+    }
+
+    /// The sidebar's own section button (expanded state), unchanged.
     private func sectionButton(_ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0) -> some View {
         Button { selectedTab = tab } label: {
             VStack(spacing: 3) {
