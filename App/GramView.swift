@@ -992,10 +992,23 @@ struct GramView: View {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        // Spinner only when there is genuinely nothing to show. Keyed on the store's
-        // `hasLoaded`, not on `messages.isEmpty`: after a section switch the list is
-        // already in hand, so a remount renders it immediately instead of flashing a
-        // spinner over content it has.
+        // A warm cache means there is something to render RIGHT NOW, so leave
+        // `.loading` before touching the network.
+        //
+        // `phase` is `@State`, and on iPad this page is rebuilt inside the detail
+        // column's `switch selectedTab` — the same destruction that motivated moving
+        // the messages out of the view. So the phase resets to `.loading` on every
+        // section switch, and merely declining to SET `.loading` (as this guard used
+        // to) could not help: it was already `.loading` from the initialiser, and the
+        // spinner rendered over a list that was already in hand. The cache saved the
+        // bytes and none of the latency, which was the whole point.
+        //
+        // This also stops a failed refresh from spinning forever: both catch arms
+        // below escalate to `.unavailable` only when there is nothing to show, and
+        // otherwise leave `phase` alone — which, before this line, meant `.loading`
+        // for good, with a "Showing the last loaded messages" banner above an empty
+        // spinner and no Retry.
+        if inboxStore.inbox.hasLoaded, phase == .loading { phase = .loaded }
         if initial && !inboxStore.inbox.hasLoaded && messages.isEmpty { phase = .loading }
         do {
             // Conditional on the digest we hold. An unchanged store answers in a few

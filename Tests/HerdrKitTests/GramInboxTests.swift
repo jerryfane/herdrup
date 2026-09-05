@@ -36,6 +36,28 @@ final class GramInboxTests: XCTestCase {
         XCTAssertEqual(inbox.conditionalDigest, "d1")
     }
 
+    /// An unchanged reply must leave the digest EXACTLY as it was, not re-assign it.
+    /// A previous version adopted `answer.digest` here; the assignment was dead on a
+    /// correct daemon (an unchanged reply only comes back when the digest we sent
+    /// matched) and survived mutation, so this pins the branch that replaced it.
+    /// The dangerous case is the one asserted second: an in-flight unchanged reply
+    /// landing AFTER a local mutation cleared the digest must not re-arm one that
+    /// describes the pre-mutation list, or the next poll is answered "unchanged"
+    /// against a list we have already altered and the page never reconciles.
+    func testUnchangedAnswerNeverReArmsTheDigest() throws {
+        var inbox = GramInbox()
+        inbox.apply(answer([try message("g1"), try message("g2")], digest: "d1"))
+
+        inbox.apply(answer(nil, digest: "d-other"))
+        XCTAssertEqual(inbox.conditionalDigest, "d1", "an unchanged reply must not change the digest")
+
+        inbox.remove(id: "g1")
+        XCTAssertNil(inbox.conditionalDigest)
+        inbox.apply(answer(nil, digest: "d1"))
+        XCTAssertNil(inbox.conditionalDigest,
+                     "a late unchanged reply must not re-arm a digest for the pre-mutation list")
+    }
+
     /// A warm inbox is what suppresses the spinner on a remount. `hasLoaded` has to be
     /// distinct from `messages.isEmpty`, or a genuinely empty inbox would spin forever.
     func testGenuinelyEmptyInboxCountsAsLoaded() {

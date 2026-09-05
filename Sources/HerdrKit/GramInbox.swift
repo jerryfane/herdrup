@@ -60,9 +60,17 @@ public struct GramInbox: Sendable, Equatable {
         if let incoming = answer.storeID { storeID = incoming }
 
         guard let fresh = answer.messages else {
-            // Unchanged: adopt the digest (it may be the first time we have been told
-            // one) but keep the list. Never treat this as an empty inbox.
-            if answer.digest != nil { digest = answer.digest }
+            // Unchanged: keep the list AND the digest we already hold. Never treat
+            // this as an empty inbox.
+            //
+            // Deliberately does NOT adopt `answer.digest`. An unchanged reply is only
+            // returned when the digest we SENT matched, so there is nothing new to
+            // adopt; the previous version's assignment was dead on a correct daemon
+            // and survived every mutation of it, which is how it was found. Leaving
+            // the digest alone is also the safer behaviour in the one race that can
+            // reach here: an in-flight unchanged reply landing after `remove` or
+            // `markRead` cleared the digest must not re-arm a digest that describes
+            // the pre-mutation list.
             return false
         }
         let changed = fresh != messages
