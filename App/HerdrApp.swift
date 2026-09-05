@@ -2088,26 +2088,47 @@ struct TerminalHomeView: View {
 
     /// Records a measured sidebar width, ignoring anything that is not a real resize.
     ///
-    /// Filters three cases that would corrupt the stored value: a minimised sidebar
-    /// (the column collapses toward zero), a width outside the modifier's own bounds
-    /// (transient layout passes report those), and sub-point jitter, which would
+    /// Filters three cases that would corrupt the stored value: a column that is not
+    /// actually open (it collapses toward zero), a width outside the modifier's own
+    /// bounds (transient layout passes report those), and sub-point jitter, which would
     /// otherwise write to `AppStorage` on every layout.
+    ///
+    /// The first guard reads `columnVisibility`, the LAYOUT, not the persisted
+    /// preference: after a layout-initiated collapse the preference still says
+    /// "expanded", so guarding on it would admit the collapse sweep's own widths.
     private func recordSidebarWidth(_ width: CGFloat) {
-        guard !sidebarMinimized else { return }
+        guard columnVisibility != .detailOnly else { return }
         guard Self.sidebarWidthRange.contains(width) else { return }
         guard abs(width - CGFloat(sidebarWidth)) >= 1 else { return }
         sidebarWidth = Double(width)
     }
 
-    /// Toggles the sidebar WITHOUT animating it.
+    /// Minimises or expands the sidebar, WITHOUT animating it.
     ///
     /// An animated width change is not cosmetic here: the detail column holds a live
     /// terminal, and every intermediate width makes SwiftTerm reflow the grid and fire
     /// `sizeChanged` -> `sendPTYSize`, so one animated collapse costs dozens of
     /// reflows and a `set_pty_size` round-trip for each distinct width. That is the
     /// visible re-scrolling/re-wrapping churn. One step = one reflow.
+    ///
+    /// Intent is read from the LAYOUT and both variables are written directly. Deriving
+    /// it from the preference instead (`sidebarMinimized.toggle()`) desyncs the moment
+    /// iPadOS collapses the column itself: the flag still says "expanded", so a tap
+    /// meaning "expand" computed "minimise", the `onChange` re-applied the state the
+    /// layout was already in, and the control did nothing — while persisting
+    /// "minimised", which is the durable corruption removing the layout->preference
+    /// edge was meant to prevent. Setting `columnVisibility` here rather than relying
+    /// on the `onChange` is required: when the flag already equals the new value, that
+    /// handler does not fire at all.
     private func toggleSidebar() {
-        sidebarMinimized.toggle()
+        let minimize = columnVisibility != .detailOnly
+        // Commit any pending measurement before collapsing: the debounce is 500ms, and
+        // a drag followed straight away by a minimise would otherwise lose the width
+        // the owner just chose. Runs while the column is still open, so the layout
+        // guard above passes.
+        if minimize { recordSidebarWidth(measuredSidebarWidth) }
+        sidebarMinimized = minimize
+        columnVisibility = minimize ? .detailOnly : .all
     }
 
     /// The minimised sidebar: a 64pt icon rail that keeps the section badges and the
@@ -2162,7 +2183,11 @@ struct TerminalHomeView: View {
     ) -> some View {
         Button {
             selectedTab = tab
-            sidebarMinimized = false     // unanimated: see `toggleSidebar`
+            // Both variables, for the same reason `toggleSidebar` writes both: the rail
+            // is only on screen when the LAYOUT is collapsed, which the preference may
+            // not reflect, and `onChange` does not fire when the flag is already false.
+            sidebarMinimized = false
+            columnVisibility = .all      // unanimated: see `toggleSidebar`
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 16, weight: .medium))
