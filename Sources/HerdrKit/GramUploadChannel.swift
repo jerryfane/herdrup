@@ -93,15 +93,27 @@ public actor GramUploadChannel {
     private var ackContinuation: CheckedContinuation<Void, Error>?
     private var pendingSeq: UInt64?
 
+    /// How long [`closeAndWait`] may wait for the SSH session to go away before the
+    /// runner is cancelled. Injectable for the same reason
+    /// `CitadelTransport.connectTimeoutNanoseconds` is: an unstructured race is only
+    /// provably bounded if a test can shorten the bound.
+    private let closeGrace: UInt64
+
     init(
         makeConnection: @escaping @Sendable () async throws -> SSHClient,
         command: String,
-        openLine: String
+        openLine: String,
+        closeGrace: UInt64 = GramUploadChannel.defaultCloseGraceNanoseconds
     ) {
         self.makeConnection = makeConnection
         self.command = command
         self.openLine = openLine
+        self.closeGrace = closeGrace
     }
+
+    /// Generous for a live link (the frames are already acked, so this is only
+    /// channel teardown) and short enough that a dead link cannot hold the UI.
+    static let defaultCloseGraceNanoseconds: UInt64 = 5 * 1_000_000_000
 
     /// Encodes one frame line. A static seam so the property that makes 512 KiB
     /// frames legal — a slash-heavy chunk stays inside the daemon's 1 MiB frame
@@ -204,8 +216,12 @@ public actor GramUploadChannel {
     /// are UNSTRUCTURED and signal a one-shot gate, so this returns on the deadline
     /// whatever the runner is doing. A half-open TCP (cell handoff, Wi-Fi drop, NAT
     /// rebind) would otherwise park here for the kernel's whole retransmit budget and
-    /// wedge the composer exactly as the deadlocking reader used to. Waiting longer
-    /// buys nothing anyway: the daemon frees its claim when the socket dies.
+    /// wedge the composer exactly as the deadlocking reader used to.
+    ///
+    /// On the EXPIRY path the daemon has NOT yet freed its claim on this `upload_id`
+    /// — that is precisely why we are returning early — so a `gram.post` issued next
+    /// can legitimately be refused `upload_in_progress`. The caller must present that
+    /// as retryable rather than as a failure; see `HerdrClient.gramUploadFile`.
     public nonisolated func closeAndWait() async {
         guard let runner = await beginGracefulClose() else { return }
         let gate = CloseGate()
@@ -213,13 +229,18 @@ public actor GramUploadChannel {
             await runner.value
             await gate.signal()
         }
+        let grace = await closeGraceNanoseconds
         Task {
-            try? await Task.sleep(nanoseconds: Self.closeGraceNanoseconds)
+            // `try?`: a cancelled sleep must still fall through to the signal, or a
+            // cancelled caller would hang on the gate forever.
+            try? await Task.sleep(nanoseconds: grace)
             runner.cancel()
             await gate.signal()
         }
         await gate.wait()
     }
+
+    private var closeGraceNanoseconds: UInt64 { closeGrace }
 
     /// One-shot rendezvous: whichever of the two observers finishes first releases
     /// the waiter, and the other's later signal is dropped.
@@ -239,11 +260,6 @@ public actor GramUploadChannel {
             continuation = nil
         }
     }
-
-    /// How long a close may wait for the SSH session to go away before the runner is
-    /// cancelled. Generous for a live link (the frames are already acked, so this is
-    /// just channel teardown) and short enough that a dead link cannot hold the UI.
-    private static let closeGraceNanoseconds: UInt64 = 5 * 1_000_000_000
 
     /// Finishes the frame stream and hands back the runner to await. The runner is
     /// deliberately NOT nilled: `close()` must keep something to cancel, since

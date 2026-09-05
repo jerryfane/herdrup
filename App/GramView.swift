@@ -1101,7 +1101,16 @@ struct GramView: View {
                 sentCount += 1
                 if index == 0 { draft = "" }
             } catch let error as APIError {
-                failure = error.message
+                // `upload_in_progress` here means the daemon has not yet reaped the
+                // upload connection this file just used — the streamed upload waits
+                // for that teardown, but the wait is bounded, so on a stalled link it
+                // can return first. The file itself is fine and the staged copy is
+                // kept below, so this is a retry, not a failure: the daemon's own
+                // sentence ("read the upload connection to EOF") would be meaningless
+                // to the owner.
+                failure = error.code == "upload_in_progress"
+                    ? "Still finishing the last upload. Tap Send again."
+                    : error.message
                 remaining.append(contentsOf: files[index...])
                 break
             } catch {
