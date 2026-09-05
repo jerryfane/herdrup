@@ -1493,6 +1493,12 @@ struct TerminalHomeView: View {
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    /// Whether the split-view sidebar is collapsed, remembered ACROSS LAUNCHES.
+    ///
+    /// `columnVisibility` is `@State`, so on its own a collapse lasts until the app is
+    /// relaunched — which is the wrong default for a preference the owner set
+    /// deliberately to get the terminal full width on a Mac window or an iPad.
+    @AppStorage("ui.sidebarCollapsed") private var sidebarCollapsed = false
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -1769,7 +1775,7 @@ struct TerminalHomeView: View {
             .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 460)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
                 // Base layer: the switch renders Gram / Settings / Call and the agents
                 // placeholder. The terminal container is deliberately NOT in here — it is the
@@ -1811,6 +1817,17 @@ struct TerminalHomeView: View {
                     onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                     .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
                     .allowsHitTesting(selectedTab == .agents && frontID != nil)
+                // The only way back once the sidebar is collapsed. Top-leading, above
+                // the keep-mounted terminal so it stays reachable while a pane is
+                // fronted, and present ONLY while collapsed so it never covers content
+                // the sidebar is already beside.
+                if columnVisibility == .detailOnly {
+                    sidebarToggleButton(
+                        icon: "sidebar.left", hint: "Show sidebar (⌘K)", collapse: false)
+                        .padding(.leading, 12)
+                        .padding(.top, 12)
+                        .transition(.opacity)
+                }
             }
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -1830,9 +1847,7 @@ struct TerminalHomeView: View {
     /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
     private var keyboardShortcuts: some View {
         ZStack {
-            Button("Toggle sidebar") {
-                withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
-            }
+            Button("Toggle sidebar") { toggleSidebar() }
             .keyboardShortcut("k", modifiers: .command)
             Button("Shortcuts") { showShortcuts = true }
                 .keyboardShortcut("/", modifiers: .command)
@@ -1977,10 +1992,37 @@ struct TerminalHomeView: View {
             sectionButton(.gram, "Gram", "bubble.left.and.bubble.right", badge: gramUnread.count)
             sectionButton(.call, "Call", "phone")
             sectionButton(.settings, "Settings", "gearshape")
+            sidebarToggleButton(
+                icon: "sidebar.leading", hint: "Hide sidebar (⌘K)", collapse: true)
         }
         .padding(5)
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
+    }
+
+    /// The collapse/expand control. It exists because ⌘K was the ONLY way to collapse
+    /// the sidebar, bound to a zero-opacity button — so on an iPad without a hardware
+    /// keyboard, or on the Mac build where a click is the expected gesture, there was
+    /// nothing to hit. The expand half has to live in the DETAIL column: once the
+    /// sidebar is collapsed there is nothing left of it to tap.
+    private func sidebarToggleButton(icon: String, hint: String, collapse: Bool) -> some View {
+        Button { toggleSidebar() } label: {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.textFaint)
+                .frame(width: 34, height: 34)
+                .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(collapse ? "Hide sidebar" : "Show sidebar")
+        .help(hint)
+    }
+
+    private func toggleSidebar() {
+        withAnimation {
+            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+        }
     }
 
     private func sectionButton(_ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0) -> some View {
