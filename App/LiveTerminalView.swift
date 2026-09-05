@@ -1546,14 +1546,21 @@ struct LiveTerminalView: UIViewRepresentable {
                 // proceeds to `lock:false`.
                 while let self, !Task.isCancelled, !self.stopped, self.foreground,
                       self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
-                    // SETTLE EACH ITERATION, not once per drain. A layout change that
-                    // sweeps through widths — the split view's own column animation
-                    // (~0.3s, which it runs whether or not WE animate), a divider drag,
-                    // a keyboard raise, a rotation — fires `sizeChanged` per frame. A
-                    // single sleep outside this loop would coalesce only its first
-                    // 140ms and then send once per round-trip for the rest of the
-                    // sweep; re-taking it here means we only ever transmit a width that
-                    // has STOOD STILL for a full settle.
+                    // SETTLE EACH ITERATION, not once per drain, and compare the target
+                    // ACROSS the sleep. A layout change that sweeps through widths — the
+                    // split view's own column animation (~0.3s, which it runs whether or
+                    // not WE animate), a divider drag, a keyboard raise, a rotation —
+                    // fires `sizeChanged` per frame.
+                    //
+                    // Sleeping alone would only rate-limit: the post-sleep check compares
+                    // the target against the last COMMITTED size, so a width still moving
+                    // every frame would be transmitted just as readily as a stationary
+                    // one, and a 0.3s animation would still ship one or two intermediate
+                    // widths. Recording the target BEFORE the sleep and requiring it to
+                    // be unchanged after is what makes "we only transmit a width that has
+                    // stood still" true rather than approximate. A moving target loops
+                    // instead of sending, so a long drag transmits once, on release.
+                    let before = (self.desiredCols, self.desiredRows)
                     try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
                     // Re-check everything the `while` checked: the sleep is a window in
                     // which teardown can begin (`stopped`), the pane can be hidden, or
@@ -1564,6 +1571,11 @@ struct LiveTerminalView: UIViewRepresentable {
                           self.desiredCols != self.lastSentCols
                               || self.desiredRows != self.lastSentRows
                     else { break }
+                    // Still moving: wait for it to stop rather than spending a
+                    // round-trip (and an agent-visible reflow) on a width in transit.
+                    // Convergence is unaffected — the `while` condition still holds, so
+                    // the next iteration re-settles against the newer target.
+                    guard before == (self.desiredCols, self.desiredRows) else { continue }
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
                     do {
