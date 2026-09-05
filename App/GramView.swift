@@ -276,13 +276,7 @@ struct GramView: View {
         // Poll while the page is open so new agent messages appear without a manual
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
-        .task {
-            // Off the main actor: the sweep unlinks whole abandoned session
-            // directories, which after a jetsam can be ten 100 MB attachments, and
-            // `removeItem` is a synchronous recursive walk.
-            await Task.detached(priority: .utility) { Self.sweepAbandonedStaging() }.value
-            await pollLoop()
-        }
+        .task { await pollLoop() }
         // The sidebar's refresh button bumps `refreshToken`; consume the change here so a
         // sibling column can drive this view's async reload without owning its state. Guarded on
         // a real change (SwiftUI may re-run the body for unrelated reasons) and on `initial:
@@ -1190,13 +1184,7 @@ struct GramView: View {
         sendError = attachmentSkipNote(bad: bad, capped: capped)
     }
 
-    /// A file staged on disk, app-owned: the bytes plus the per-item directory that
-    /// holds them (removing the directory removes the bytes).
-    private struct StagedFile {
-        let url: URL
-        let dir: URL
-        let size: Int
-    }
+    // A staged pick is `HerdrKit.StagedAttachment` (url + per-item dir + size).
 
     /// A photo-library pick copied into app-owned staging. PhotosUI exports the item
     /// to a temp file and DELETES it when the closure returns, so the copy has to
@@ -1211,7 +1199,7 @@ struct GramView: View {
     private struct PickedMedia: Transferable {
         /// Non-nil only for an in-cap pick that was copied into staging; nil =
         /// rejected (over-cap, size unknown — treated as over-cap — or uncopyable).
-        let staged: StagedFile?
+        let staged: StagedAttachment?
         static var transferRepresentation: some TransferRepresentation {
             FileRepresentation(importedContentType: .item) { received in
                 // Unknown size is treated as OVER-cap (reject), never under-cap — an
@@ -1408,53 +1396,31 @@ struct GramView: View {
     private static let sessionStagingDirectory = stagingRoot
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-    /// Copy a picked file into a fresh per-item staging directory, so the send can
-    /// stream it from disk and the app owns its lifetime. nil when the copy fails or
-    /// the copied file is empty / over the cap — the caller reports it as a skip.
-    private static func stageCopy(of source: URL, named name: String) -> StagedFile? {
-        let dir = sessionStagingDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let destination = dir.appendingPathComponent(safeTempFileName(name))
-            // `copyItem` does not set data protection, and every other temp write in
-            // this file uses `.completeFileProtection`. A staged gram attachment can
-            // be a secret; it must not be the one temp file here that sits unprotected.
-            //
-            // `completeUnlessOpen`, NOT `complete`: this file is held open across a
-            // whole upload, and the send keeps running when the app is backgrounded.
-            // Class A protection evicts the key on lock and fails reads even on an
-            // already-open descriptor, so locking the phone mid-upload would abort the
-            // send. Class B keeps an open file readable and still denies a new open
-            // while locked, which is the property that matters for a staged secret.
-            try? FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.completeUnlessOpen],
-                ofItemAtPath: destination.path)
-            guard let size = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                size > 0, size <= maxFileBytes
-            else {
-                try? FileManager.default.removeItem(at: dir)
-                return nil
-            }
-            return StagedFile(url: destination, dir: dir, size: size)
-        } catch {
-            try? FileManager.default.removeItem(at: dir)
-            return nil
-        }
+    /// Copy a picked file into app-owned staging, so the send streams it from disk
+    /// and the app owns its lifetime. nil when the copy fails or the copied file is
+    /// empty / over the cap — the caller reports it as a skip.
+    ///
+    /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is iOS-only
+    /// and cannot run on CI, and a staging bug here is silent (it renders as the same
+    /// "unreadable pick" message as a genuinely bad file). In HerdrKit it is tested.
+    private static func stageCopy(of source: URL, named name: String) -> StagedAttachment? {
+        GramStaging.stageCopy(
+            of: source, named: name, in: sessionStagingDirectory, maxBytes: maxFileBytes)
     }
 
     /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no
-    /// cleanup). Bounded and stateless: every sibling of this session's directory is
-    /// by definition abandoned, since a session directory is named at launch.
-    private static func sweepAbandonedStaging() {
-        let manager = FileManager.default
-        guard let entries = try? manager.contentsOfDirectory(
-            at: stagingRoot, includingPropertiesForKeys: nil)
-        else { return }
+    /// cleanup).
+    ///
+    /// Called from the app root's `.task`, not this page's: bytes from a killed
+    /// session must be reclaimed even in a launch where the Gram tab is never opened.
+    /// Off the main actor because the unlink is a synchronous recursive walk and the
+    /// abandoned set can be ten 100 MB attachments.
+    static func sweepAbandonedStagingOffMainActor() async {
+        let root = stagingRoot
         let current = sessionStagingDirectory.lastPathComponent
-        for entry in entries where entry.lastPathComponent != current {
-            try? manager.removeItem(at: entry)
-        }
+        await Task.detached(priority: .utility) {
+            GramStaging.sweepAbandoned(root: root, keeping: current)
+        }.value
     }
 
     /// A file we should render as formatted HTML (a markdown source), by extension

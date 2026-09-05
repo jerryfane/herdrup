@@ -651,10 +651,20 @@ public actor HerdrClient {
                     as: JSONNull.self)
             }
             offset += chunk.count
-            if offset >= total || offset - lastReported >= reportStep {
+            // Throttle ONLY: no `offset >= total` disjunct. That condition is
+            // permanently true once the cursor passes the stat'd size, so a file that
+            // grew after being stat'd reported every single chunk — the exact main-actor
+            // flood the throttle exists to prevent. The terminal report is emitted once,
+            // after the loop.
+            if offset - lastReported >= reportStep {
                 lastReported = offset
                 await onProgress?(offset, max(total, offset))
             }
+        }
+        // One terminal report, so a determinate bar always lands on 100% — including
+        // for a file that SHRANK after the stat, where `offset < total` at EOF.
+        if lastReported != offset {
+            await onProgress?(offset, max(total, offset))
         }
         return uploadID
     }
