@@ -174,10 +174,8 @@ struct GramView: View {
         let size: Int
     }
 
-    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES` (100 MiB).
-    /// The upload streams from disk in frames, so any size uploads fine regardless of
-    /// divisibility; this is just the pre-send size gate.
-    private static let maxFileBytes = 100 * 1024 * 1024
+    // The pre-send size gate lives on `Staging` (nonisolated, so the photo importer
+    // can read it): `GramView.Staging.maxFileBytes`.
     /// How many files can be staged at once. Each sends as its own gram message.
     ///
     /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
@@ -1167,12 +1165,12 @@ struct GramView: View {
             // replaces the old non-empty check. Mirrors PickedMedia's guard so
             // neither the document nor the photo path can stage blind.
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                size > 0, size <= Self.maxFileBytes
+                size > 0, size <= Staging.maxFileBytes
             else {
                 badNames.append(url.lastPathComponent)
                 continue
             }
-            guard let staged = Self.stageCopy(of: url, named: url.lastPathComponent) else {
+            guard let staged = Staging.copy(of: url, named: url.lastPathComponent) else {
                 badNames.append(url.lastPathComponent)
                 continue
             }
@@ -1205,13 +1203,13 @@ struct GramView: View {
                 // Unknown size is treated as OVER-cap (reject), never under-cap — an
                 // unstat-able export must not fall through to an unbounded copy.
                 guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                    size > 0, size <= GramView.maxFileBytes
+                    size > 0, size <= GramView.Staging.maxFileBytes
                 else {
                     return PickedMedia(staged: nil)
                 }
                 // Inside the closure: `received.file` is gone once it returns.
                 return PickedMedia(
-                    staged: GramView.stageCopy(
+                    staged: GramView.Staging.copy(
                         of: received.file, named: received.file.lastPathComponent))
             }
         }
@@ -1384,43 +1382,59 @@ struct GramView: View {
         return base
     }
 
-    /// Root of all attachment staging, one directory per app SESSION.
+    /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
     ///
-    /// The per-session level exists for the case where no cleanup path runs at all:
-    /// on a crash or a jetsam kill `onDisappear` never fires, so staged bytes would
-    /// otherwise sit in tmp untracked. A session directory makes every earlier
-    /// session's leftovers a single identifiable sibling the page's `.task` sweeps,
-    /// while the per-item directories inside it still give a per-chip unlink.
-    private static let stagingRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("gram-staging", isDirectory: true)
-    private static let sessionStagingDirectory = stagingRoot
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    /// `View` is `@MainActor`, so everything on `GramView` inherits that isolation —
+    /// but `PickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
+    /// closure, so calling a main-actor static from it is a cross-actor call (a hard
+    /// error for a method). A nested type does NOT inherit the enclosing isolation,
+    /// which is what is wanted here twice over: the importer can call it directly,
+    /// and copying a 100 MB pick never runs on the main actor.
+    ///
+    /// One staging directory per app SESSION. That level exists for the case where no
+    /// cleanup path runs at all: on a crash or a jetsam kill `onDisappear` never
+    /// fires, so staged bytes would otherwise sit in tmp untracked. A session
+    /// directory makes every earlier session's leftovers a single identifiable
+    /// sibling for the launch-time sweep, while the per-item directories inside it
+    /// still give a per-chip unlink.
+    enum Staging {
+        /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`
+        /// (100 MiB) and inclusive as the server's is. The upload streams from disk
+        /// in frames, so any size uploads fine regardless of divisibility; this is
+        /// just the pre-send size gate.
+        static let maxFileBytes = 100 * 1024 * 1024
 
-    /// Copy a picked file into app-owned staging, so the send streams it from disk
-    /// and the app owns its lifetime. nil when the copy fails or the copied file is
-    /// empty / over the cap — the caller reports it as a skip.
-    ///
-    /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is iOS-only
-    /// and cannot run on CI, and a staging bug here is silent (it renders as the same
-    /// "unreadable pick" message as a genuinely bad file). In HerdrKit it is tested.
-    private static func stageCopy(of source: URL, named name: String) -> StagedAttachment? {
-        GramStaging.stageCopy(
-            of: source, named: name, in: sessionStagingDirectory, maxBytes: maxFileBytes)
-    }
+        static let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-staging", isDirectory: true)
+        static let session = root
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-    /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no
-    /// cleanup).
-    ///
-    /// Called from the app root's `.task`, not this page's: bytes from a killed
-    /// session must be reclaimed even in a launch where the Gram tab is never opened.
-    /// Off the main actor because the unlink is a synchronous recursive walk and the
-    /// abandoned set can be ten 100 MB attachments.
-    static func sweepAbandonedStagingOffMainActor() async {
-        let root = stagingRoot
-        let current = sessionStagingDirectory.lastPathComponent
-        await Task.detached(priority: .utility) {
-            GramStaging.sweepAbandoned(root: root, keeping: current)
-        }.value
+        /// Copy a picked file into app-owned staging, so the send streams it from
+        /// disk and the app owns its lifetime. nil when the copy fails or the copied
+        /// file is empty / over the cap — the caller reports it as a skip.
+        ///
+        /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is
+        /// iOS-only and cannot run on CI, and a staging bug here is silent (it
+        /// renders as the same "unreadable pick" message as a genuinely bad file).
+        /// In HerdrKit it is tested.
+        static func copy(of source: URL, named name: String) -> StagedAttachment? {
+            GramStaging.stageCopy(of: source, named: name, in: session, maxBytes: maxFileBytes)
+        }
+
+        /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no
+        /// cleanup).
+        ///
+        /// Called from the app root's `.task`, not the Gram page's: bytes from a
+        /// killed session must be reclaimed even in a launch where the Gram tab is
+        /// never opened. Off the main actor because the unlink is a synchronous
+        /// recursive walk and the abandoned set can be ten 100 MB attachments.
+        static func sweepAbandonedOffMainActor() async {
+            let stagingRoot = root
+            let current = session.lastPathComponent
+            await Task.detached(priority: .utility) {
+                GramStaging.sweepAbandoned(root: stagingRoot, keeping: current)
+            }.value
+        }
     }
 
     /// A file we should render as formatted HTML (a markdown source), by extension

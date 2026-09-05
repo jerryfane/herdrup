@@ -85,6 +85,30 @@ final class GramStagingTests: XCTestCase {
         XCTAssertEqual(leftovers, [], "a rejected pick left staging behind: \(leftovers)")
     }
 
+
+    /// The cap is INCLUSIVE, and that direction is the one worth pinning: a guard
+    /// that refuses a file of exactly the allowed size fails silently — the pick just
+    /// reports as "too large" — and the app's own gate uses the same `<=`, so an
+    /// off-by-one here would reject a file the composer already accepted.
+    func testExactlyMaxBytesStagesAndOneMoreDoesNot() throws {
+        let cap = 8 * 1024
+        let atCap = try sourceFile(Data(repeating: 3, count: cap), name: "at-cap.bin")
+        let staged = try XCTUnwrap(
+            GramStaging.stageCopy(of: atCap, named: "at-cap.bin", in: session, maxBytes: cap),
+            "a file of exactly maxBytes must stage")
+        XCTAssertEqual(staged.size, cap)
+
+        let overCap = try sourceFile(Data(repeating: 3, count: cap + 1), name: "over-cap.bin")
+        XCTAssertNil(
+            GramStaging.stageCopy(of: overCap, named: "over-cap.bin", in: session, maxBytes: cap),
+            "one byte past maxBytes must be refused")
+
+        // A single-byte file is the other boundary: `size > 0` must not reject it.
+        let oneByte = try sourceFile(Data([7]), name: "tiny.bin")
+        let tiny = try XCTUnwrap(
+            GramStaging.stageCopy(of: oneByte, named: "tiny.bin", in: session, maxBytes: cap))
+        XCTAssertEqual(tiny.size, 1)
+    }
     /// A pick named `../../evil` must not stage outside its own directory.
     func testTraversalNameStaysInsideTheItemDirectory() throws {
         let source = try sourceFile(Data("x".utf8))

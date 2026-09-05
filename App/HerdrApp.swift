@@ -235,7 +235,7 @@ struct RootView: View {
         // jetsam kill runs no cleanup) here rather than on the Gram page: bytes from a
         // killed session — up to ten 100 MB attachments — would otherwise survive every
         // launch in which the user never opens the Gram tab.
-        .task { await GramView.sweepAbandonedStagingOffMainActor() }
+        .task { await GramView.Staging.sweepAbandonedOffMainActor() }
     }
 
     @ViewBuilder
