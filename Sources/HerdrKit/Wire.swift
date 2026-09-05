@@ -15,7 +15,7 @@ public struct EmptyParams: Encodable {
     public init() {}
 }
 
-public struct APIError: Error, Decodable, CustomStringConvertible {
+public struct APIError: Error, Decodable, Equatable, Sendable, CustomStringConvertible {
     public let code: String
     public let message: String
     public var description: String { "\(code): \(message)" }
@@ -871,6 +871,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let liveHandoff: Bool
     public let detachedServerDaemon: Bool
     public let paneInputStream: Bool
+    public let gramUploadStream: Bool
     public let agentSessionTransfer: Bool
     /// Nil means the daemon predates explicit harness advertisement and uses
     /// the legacy Claude/Codex pair. An explicit list, including an empty or
@@ -881,6 +882,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case liveHandoff = "live_handoff"
         case detachedServerDaemon = "detached_server_daemon"
         case paneInputStream = "pane_input_stream"
+        case gramUploadStream = "gram_upload_stream"
         case agentSessionTransfer = "agent_session_transfer"
         case agentSessionTransferHarnesses = "agent_session_transfer_harnesses"
     }
@@ -890,6 +892,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         liveHandoff = try c.decodeIfPresent(Bool.self, forKey: .liveHandoff) ?? false
         detachedServerDaemon = try c.decodeIfPresent(Bool.self, forKey: .detachedServerDaemon) ?? false
         paneInputStream = try c.decodeIfPresent(Bool.self, forKey: .paneInputStream) ?? false
+        gramUploadStream = try c.decodeIfPresent(Bool.self, forKey: .gramUploadStream) ?? false
         agentSessionTransfer = try c.decodeIfPresent(Bool.self, forKey: .agentSessionTransfer) ?? false
         agentSessionTransferHarnesses = try c.decodeIfPresent(
             [AgentSessionTransferHarness].self,
