@@ -89,6 +89,9 @@ struct GramView: View {
     @State private var search = ""
     /// True while a Read-all pass is running, so the button disables rather than stacking passes.
     @State private var markingAllRead = false
+    /// A partial-failure report from a Read-all pass. Its OWN slot rather than `refreshNote`,
+    /// which the 6-second poll clears on every success — same reasoning as `sendError`.
+    @State private var markAllNote: String?
 
     /// Files the owner picked to attach to the next post (read into memory at pick
     /// time), empty when none are staged. Several can be staged at once; each sends as
@@ -384,7 +387,7 @@ struct GramView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Palette.hairlineQuiet)
-            searchField
+            searchFieldIfFilterable
             content
             bannerView
             composer
@@ -402,7 +405,7 @@ struct GramView: View {
     /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
         VStack(spacing: 0) {
-            searchField
+            searchFieldIfFilterable
             content
             bannerView
             composer
@@ -423,12 +426,21 @@ struct GramView: View {
             .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
     }
 
+    /// The field, but only where there is something to filter. `content` renders a spinner while
+    /// loading and an error card (with a Retry) when the daemon has no gram, and a search box
+    /// pinned above either of those is a live control over nothing. The agents list's field sits
+    /// above an EMPTY LIST, never above an error state.
+    @ViewBuilder
+    private var searchFieldIfFilterable: some View {
+        if showingSaved || phase == .loaded { searchField }
+    }
+
     /// A load error / send error, shown ABOVE the composer in every phase — the
     /// composer is enabled in all states, so a failure must be visible in all states
     /// (empty inbox, pre-deploy daemon, or a loaded list alike).
     @ViewBuilder
     private var bannerView: some View {
-        if let text = sendError ?? refreshNote {
+        if let text = sendError ?? markAllNote ?? refreshNote {
             Text(text)
                 .font(Typography.app(12))
                 .foregroundStyle(Palette.died)
@@ -615,8 +627,11 @@ struct GramView: View {
                 .padding(.horizontal, 32)
             }
         // Must sit ABOVE `case .loaded:` — Swift evaluates cases in order, so below it this
-        // is unreachable. The store-empty case above keeps its own "No messages yet" copy.
-        case .loaded where !search.isEmpty && visibleMessages.isEmpty:
+        // is unreachable. `!messages.isEmpty` is load-bearing: an EMPTY inbox showing the setup
+        // card falls through to `case .loaded:` (the case above needs `!shouldShowSetupCard`),
+        // and without it one keystroke would replace the only affordance telling the owner how
+        // to give their agents gram with "No matches" about a list that never had rows.
+        case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
             noMatches
         case .loaded:
             ScrollView {
@@ -1433,30 +1448,53 @@ struct GramView: View {
         guard !markingAllRead else { return }
         markingAllRead = true
         defer { markingAllRead = false }
+        markAllNote = nil
         // Snapshot the ids first: `serverMessages` is mutated inside the loop and a poll may
         // replace it mid-pass, so iterating the live array could skip or repeat a message.
-        let unreadIDs = serverMessages.filter { $0.isUnread }.map(\.id)
+        var pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        // Ids this pass actually marked, re-applied after the loop: `load` REPLACES
+        // `serverMessages` wholesale, so a poll landing mid-pass reverts the flips written
+        // below and the badge would still show a count after a fully successful pass.
+        var marked: Set<String> = []
+        var attempted = 0
         var failed = 0
-        for id in unreadIDs {
-            // A row's `onAppear` may already have this one in flight; reusing the same
-            // in-flight set is what stops a duplicate `gram.mark_read`.
-            guard !markingRead.contains(id) else { continue }
-            markingRead.insert(id)
-            do {
-                try await client.gramMarkRead(id: id)
-                if let index = serverMessages.firstIndex(where: { $0.id == id }) {
-                    serverMessages[index].readByOwner = true
+        // Two passes: an id a row's own `onAppear` had in flight when we first reached it is
+        // retried once, by which time that Task has cleared its entry — otherwise "Read all"
+        // could silently leave it unread if that Task's own call failed (its catch is a no-op).
+        for _ in 0..<2 {
+            var stillInFlight: [String] = []
+            for id in pending {
+                // Reusing the existing in-flight set is what stops a duplicate `gram.mark_read`.
+                guard !markingRead.contains(id) else { stillInFlight.append(id); continue }
+                // Someone else's pass already read it; nothing left to do for this id.
+                guard serverMessages.first(where: { $0.id == id })?.isUnread ?? false else { continue }
+                markingRead.insert(id)
+                attempted += 1
+                do {
+                    try await client.gramMarkRead(id: id)
+                    marked.insert(id)
+                    if let index = serverMessages.firstIndex(where: { $0.id == id }) {
+                        serverMessages[index].readByOwner = true
+                    }
+                } catch {
+                    failed += 1
                 }
-            } catch {
-                failed += 1
+                markingRead.remove(id)
             }
-            markingRead.remove(id)
+            pending = stillInFlight
+            if pending.isEmpty { break }
         }
-        // Recomputed from the array rather than decremented, so a racing poll cannot desync it.
+        // Whatever array is current now, the ids we confirmed read are read. Ids still in flight
+        // elsewhere are left to their own Task, which flips them on success.
+        for index in serverMessages.indices where marked.contains(serverMessages[index].id) {
+            serverMessages[index].readByOwner = true
+        }
         unread?.count = serverMessages.filter { $0.isUnread }.count
         // Partial failure is reported, not swallowed: the badge will still show a count and the
-        // reader needs to know why. `refreshNote` is the existing banner channel (bannerView).
-        refreshNote = failed == 0 ? nil : "\(failed) of \(unreadIDs.count) could not be marked read."
+        // reader needs to know why. Its OWN slot, not `refreshNote` — the 6-second poll clears
+        // that one unconditionally on success, so the explanation would outlive the badge by
+        // seconds at most. `sendError` carries the same reasoning (see its declaration).
+        markAllNote = failed == 0 ? nil : "\(failed) of \(attempted) could not be marked read."
     }
 }
 

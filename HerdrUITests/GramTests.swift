@@ -80,10 +80,15 @@ final class GramTests: XCTestCase {
     /// Read all marks the unread messages read: the button is present while something is unread
     /// and gone once the pass completes (it renders only for `unreadCount > 0`).
     ///
-    /// Bounded retry, deliberately: the mock's `gram.list` is a CONSTANT that always reports g1
-    /// unread, so the page's 6-second poll re-introduces the unread message and the button
-    /// reappears. The receipt is that a tap drives it away at all — one attempt could sample the
-    /// instant a poll lands. A failure here means no tap ever cleared the unread count.
+    /// The button's presence is only STABLE after the first poll, and the test waits for that
+    /// deliberately: at launch the single unread message's own row marks itself read within a
+    /// moment (`markReadIfNeeded` from `onAppear`), which drives the count to zero and removes
+    /// the button — so a tap aimed at the launch-time button can miss. The mock's `gram.list` is
+    /// a CONSTANT that always reports g1 unread, so the 6-second poll restores it, and because
+    /// the row's identity is unchanged `onAppear` does not fire again: from then on the button
+    /// stays up. The retry exists because the same poll also re-creates it a few seconds after a
+    /// successful pass; each attempt guards `exists`/`isHittable` so a vanished button re-enters
+    /// the loop instead of failing the test on an unrecoverable `tap()`.
     func testGramReadAllClearsTheUnreadCount() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
@@ -94,10 +99,13 @@ final class GramTests: XCTestCase {
 
         let readAll = app.buttons["Read all"]
         var cleared = false
-        for _ in 0..<3 {
-            // Up to two poll intervals: the row's own onAppear mark-read can clear the count
-            // first, and the next poll restores it.
-            guard readAll.waitForExistence(timeout: 14) else { continue }
+        for _ in 0..<4 {
+            // One poll interval plus slack, so this waits out the launch-time flip described
+            // above rather than racing it.
+            guard readAll.waitForExistence(timeout: 14), readAll.isHittable else {
+                Thread.sleep(forTimeInterval: 1.0)
+                continue
+            }
             readAll.tap()
             if readAll.waitForNonExistence(timeout: 4) { cleared = true; break }
         }

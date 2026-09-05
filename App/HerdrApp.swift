@@ -1904,9 +1904,11 @@ struct TerminalHomeView: View {
                         .frame(height: 15)
                 }
                 Spacer()
-                // Read all, beside refresh and only while something is unread — the count the
-                // ambient poll already keeps here, so the button needs nothing from the page.
-                if gramUnread.count > 0 {
+                // Read all, beside refresh. Gated exactly like the phone header's copy: only on
+                // the Inbox (Saved has no unread concept, so it would be a no-op control there)
+                // and only while something is unread. The count comes from the ambient poll this
+                // view already owns, so the button needs nothing from the page.
+                if !gramShowingSaved, gramUnread.count > 0 {
                     circleButton("envelope.open") { gramReadAllToken += 1 }
                         .accessibilityLabel("Read all")
                 }
