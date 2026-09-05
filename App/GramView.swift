@@ -1091,9 +1091,10 @@ struct GramView: View {
                 }
                 uploading = false
                 uploadBytes = nil
-                let posted = try await client.gramPost(
-                    text: caption, to: to,
-                    attachment: .init(uploadID: uploadID, name: file.name, mime: file.mime))
+                let attachment = HerdrClient.GramFileAttachment(
+                    uploadID: uploadID, name: file.name, mime: file.mime)
+                let posted = try await Self.postAttachment(
+                    client: client, text: caption, to: to, attachment: attachment)
                 // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
                 // cannot drop it; de-duped by id, reconciled once the server reflects it.
                 pendingPosts.removeAll { $0.id == posted.id }
@@ -1101,13 +1102,11 @@ struct GramView: View {
                 sentCount += 1
                 if index == 0 { draft = "" }
             } catch let error as APIError {
-                // `upload_in_progress` here means the daemon has not yet reaped the
-                // upload connection this file just used — the streamed upload waits
-                // for that teardown, but the wait is bounded, so on a stalled link it
-                // can return first. The file itself is fine and the staged copy is
-                // kept below, so this is a retry, not a failure: the daemon's own
-                // sentence ("read the upload connection to EOF") would be meaningless
-                // to the owner.
+                // A post still refused after the retries above means the daemon has
+                // not reaped the upload connection at all. The bytes are staged and
+                // complete, so this is a retry rather than a failure — but the raw
+                // daemon sentence ("read the upload connection to EOF") would be
+                // meaningless to the owner.
                 failure = error.code == "upload_in_progress"
                     ? "Still finishing the last upload. Tap Send again."
                     : error.message
@@ -1135,6 +1134,37 @@ struct GramView: View {
                 ? "Sent \(sentCount) of \(files.count). \(failure)"
                 : failure
         }
+    }
+
+    /// Posts an attachment, retrying the POST — never the upload — while the daemon
+    /// still owns the `upload_id`.
+    ///
+    /// The daemon frees its single-writer claim only when it observes EOF on the
+    /// upload connection, and the client's close wait is bounded, so a stalled link
+    /// can put the post in front of that release. Re-entering `gramUploadFile` would
+    /// mint a FRESH `upload_id` and transfer the whole file again, leaving the
+    /// previous — complete — staging file to age out over 24 hours; ten taps of a
+    /// 100 MB attachment would exhaust the daemon's 1 GiB staging budget and fail
+    /// every gram upload from every client. The bytes are already there, so all that
+    /// is needed is to ask again.
+    private static func postAttachment(
+        client: HerdrClient,
+        text: String,
+        to: String?,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramMessage {
+        // Three tries over ~3 s: the daemon's own reap is 60 s, but the case this
+        // covers is a teardown a few hundred ms behind the post.
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPost(text: text, to: to, attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        // Unreachable: the loop either returns or throws on its last attempt.
+        throw GramError.invalidFileData
     }
 
     /// One combined skip note for a batch pick. `bad` (already phrased) covers picks

@@ -47,29 +47,49 @@ final class GramUploadChannelTests: XCTestCase {
             "closeAndWait took \(elapsed / 1_000_000) ms against a \(grace / 1_000_000) ms grace — the bound is not holding")
     }
 
-    /// Idempotence: a second close must not hang on an already-signalled gate, and
-    /// the caller's `defer`-close runs after `closeAndWait` on every real path.
-    func testCloseAndWaitIsIdempotentAndSurvivesAPlainClose() async throws {
-        let channel = stalledChannel(closeGrace: 100_000_000)
+    /// Idempotence AND boundedness: a second close must not hang on an
+    /// already-signalled gate, and the caller's `defer`-close runs after
+    /// `closeAndWait` on every real path.
+    ///
+    /// The timing assertion is the point of the second half. Without it this test
+    /// PASSED in 60 s under the mutation that removes the bound — reporting
+    /// "idempotent" while the property the file exists to prove was gone, and adding
+    /// a silent minute to every mutant run.
+    func testCloseAndWaitIsIdempotentAndBounded() async throws {
+        let grace: UInt64 = 100_000_000  // 100 ms
+        let channel = stalledChannel(closeGrace: grace)
         let opening = Task { try? await channel.start() }
         try await Task.sleep(nanoseconds: 50_000_000)
 
+        let began = DispatchTime.now().uptimeNanoseconds
         await channel.closeAndWait()
         await channel.close()
         await channel.closeAndWait()
+        let elapsed = DispatchTime.now().uptimeNanoseconds - began
 
         opening.cancel()
+        XCTAssertLessThan(
+            elapsed, grace * 40,
+            "three closes took \(elapsed / 1_000_000) ms against a \(grace / 1_000_000) ms grace")
     }
 
-    /// A frame written after the channel is closed must fail rather than park on an
-    /// ack that can never arrive.
-    func testSendChunkAfterCloseFailsInsteadOfHanging() async throws {
+    /// A frame written on a channel that was never started must fail rather than
+    /// park on an ack that can never arrive.
+    ///
+    /// NOTE what this does and does not cover. It exercises the never-started guard
+    /// (`live` is false, `framesCont` nil), which is a real caller mistake. It does
+    /// NOT cover the post-close path on a LIVE channel: `live` only becomes true when
+    /// the daemon acks the open, which needs a real SSH connection, so an earlier
+    /// version of this test that called `close()` first was measured to pass with
+    /// that call deleted — it pinned nothing. The live-then-closed path is exercised
+    /// by `closeAndWait`'s own `resumeAck(.closedBeforeFrameAck)` and remains
+    /// unguarded by a unit test; it needs the integration path, not a double.
+    func testSendChunkOnANeverStartedChannelFailsInsteadOfHanging() async throws {
         let channel = stalledChannel(closeGrace: 100_000_000)
-        await channel.close()
 
         do {
             try await channel.sendChunk(offset: 0, dataBase64: "aGk=")
-            XCTFail("sendChunk on a closed channel must throw")
+            XCTFail("sendChunk on a channel that was never started must throw")
         } catch let error as GramUploadChannel.ChannelError {
             XCTAssertEqual(error, .closedBeforeFrameAck)
         }

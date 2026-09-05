@@ -231,16 +231,33 @@ public actor GramUploadChannel {
         }
         let grace = await closeGraceNanoseconds
         Task {
-            // `try?`: a cancelled sleep must still fall through to the signal, or a
+            // `try?`: a cancelled sleep must still fall through to the teardown, or a
             // cancelled caller would hang on the gate forever.
             try? await Task.sleep(nanoseconds: grace)
             runner.cancel()
+            // Cancellation does NOT interrupt the runner's await on the SSH channel's
+            // close promise, so without this the parent connection is never closed:
+            // the actor would keep an `SSHClient`, a socket and a live Task for the
+            // kernel's whole retransmit budget, and — because the FIN is never even
+            // attempted — the daemon would see a channel that is open but silent,
+            // which is exactly the input that pins its single-writer claim. Same
+            // pattern as `CitadelTransport.close()`: tear the connection down locally
+            // rather than wait on a per-channel promise.
+            await self.closeConnection()
             await gate.signal()
         }
         await gate.wait()
     }
 
     private var closeGraceNanoseconds: UInt64 { closeGrace }
+
+    /// Closes the upload's own SSH connection and forgets it. Idempotent: the field
+    /// is cleared, so a later `run` tail close is a no-op rather than a double close.
+    private func closeConnection() async {
+        guard let client else { return }
+        self.client = nil
+        try? await client.close()
+    }
 
     /// One-shot rendezvous: whichever of the two observers finishes first releases
     /// the waiter, and the other's later signal is dropped.
@@ -276,15 +293,15 @@ public actor GramUploadChannel {
 
     @available(macOS 15.0, *)
     private func run(_ frameStream: AsyncStream<ByteBuffer>) async {
-        // Held outside the `do` so a throw from `withExec` — a dropped link, a failed
-        // channel open, a write error mid-upload — still closes the SSH connection.
-        // Leaking it would strand one TCP session, one sshd session and one remote
-        // `api-bridge` process PER FILE, since each upload mints its own connection.
-        var connection: SSHClient?
+        // The connection is closed through `closeConnection()` on every exit — a
+        // throw from `withExec` (dropped link, failed channel open, mid-upload write
+        // error) included. Leaking it would strand one TCP session, one sshd session
+        // and one remote `api-bridge` process PER FILE, since each upload mints its
+        // own connection. One teardown path also means the expiry branch in
+        // `closeAndWait` and this tail cannot double-close.
         do {
             let client = try await makeConnection()
             self.client = client
-            connection = client
             try await client.withExec(command) { [weak self] inbound, stdin in
                 let reader = Task { [weak self] in
                     var accumulator = LineAccumulator()
@@ -316,7 +333,7 @@ public actor GramUploadChannel {
         } catch {
             // makeConnection / withExec failed before or during the channel.
         }
-        if let connection { try? await connection.close() }
+        await closeConnection()
         settleOpen(.failure(ChannelError.closedBeforeAck))
         markDead()
     }
