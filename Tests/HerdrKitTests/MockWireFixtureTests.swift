@@ -313,7 +313,11 @@ final class MockWireFixtureTests: XCTestCase {
     /// omitted in JSON when absent — decoding must yield nil, not fail.
     func testMockGramListDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
-        let messages = try await client.gramList()
+        // `messages` is optional now (an unchanged conditional answer omits it); a
+        // fixture answer always carries the list, so nil here is a real failure.
+        // Bound before unwrapping: XCTUnwrap's autoclosure cannot contain an `await`.
+        let answer = try await client.gramList()
+        let messages = try XCTUnwrap(answer.messages)
         XCTAssertEqual(messages.count, 5, "gram.list fixture did not decode to 5 messages")
 
         // Newest first: the unread agent->owner digest leads.
@@ -361,7 +365,8 @@ final class MockWireFixtureTests: XCTestCase {
     /// not a failure — so the row shows a chip only when there is one.
     func testMockGramListDecodesFileAttachment() async throws {
         let client = HerdrClient(transport: FixtureTransport())
-        let messages = try await client.gramList()
+        let answer = try await client.gramList()
+        let messages = try XCTUnwrap(answer.messages)
 
         let withFile = try XCTUnwrap(messages.first { $0.id == "g5" })
         let file = try XCTUnwrap(withFile.file, "g5 should carry a file")

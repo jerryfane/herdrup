@@ -2286,7 +2286,9 @@ struct TerminalHomeView: View {
         .task(id: selectedTab) {
             guard selectedTab != .gram else { return }
             while !Task.isCancelled {
-                if let count = try? await client.gramList(unreadOnly: true).count {
+                // Unconditional on purpose: `unread_only` is a small answer already,
+                // and this poller keeps no list to compare a digest against.
+                if let count = try? await client.gramList(unreadOnly: true).messages?.count {
                     gramUnread.count = count
                 }
                 try? await Task.sleep(nanoseconds: 15_000_000_000)

@@ -55,7 +55,16 @@ struct GramView: View {
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
     /// can never drop an optimistic post it hasn't caught up to.
-    @State private var serverMessages: [GramMessage] = []
+    /// The server snapshot, held in a store that OUTLIVES this view: on iPad the page
+    /// is destroyed whenever the section changes, and a view-local list meant every
+    /// return re-fetched the whole store behind a spinner. Accessed through
+    /// `serverMessages` below so the rest of the page reads unchanged.
+    @ObservedObject private var inboxStore = GramInboxStore.shared
+    /// The last server snapshot, newest first. Read-only: every mutation goes through
+    /// a `GramInbox` method so the digest is invalidated with the change (a locally
+    /// altered list must not be re-validated by a digest the daemon issued for the
+    /// list before it).
+    private var serverMessages: [GramMessage] { inboxStore.inbox.messages }
     @State private var pendingPosts: [GramMessage] = []
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
@@ -983,24 +992,32 @@ struct GramView: View {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        // Spinner only on the first load with nothing to show yet; a refresh keeps
-        // the current messages visible.
-        if initial && messages.isEmpty { phase = .loading }
+        // Spinner only when there is genuinely nothing to show. Keyed on the store's
+        // `hasLoaded`, not on `messages.isEmpty`: after a section switch the list is
+        // already in hand, so a remount renders it immediately instead of flashing a
+        // spinner over content it has.
+        if initial && !inboxStore.inbox.hasLoaded && messages.isEmpty { phase = .loading }
         do {
-            let fetched = try await client.gramList()
-            serverMessages = fetched
+            // Conditional on the digest we hold. An unchanged store answers in a few
+            // hundred bytes; only a real change ships the list.
+            let answer = try await client.gramList(
+                ifUnchangedDigest: inboxStore.inbox.conditionalDigest)
+            let changed = inboxStore.inbox.apply(answer)
+            phase = .loaded
+            refreshNote = nil
+            // Nothing moved: the reconciliation below would compute the same result
+            // from the same list, so skip it (the common case on a 6s poll).
+            guard changed || !answer.isUnchanged else { return }
             // Keep the tab badge in step with what we just loaded.
-            unread?.count = fetched.filter { $0.isUnread }.count
+            unread?.count = inboxStore.inbox.unreadCount
             // Drop optimistic posts the server now reflects; unconfirmed ones stay
             // visible via `messages` (gram.post writes synchronously, so any in-flight
             // load started BEFORE a post can no longer discard it).
-            let serverIDs = Set(fetched.map(\.id))
+            let serverIDs = Set(inboxStore.inbox.messages.map(\.id))
             pendingPosts.removeAll { serverIDs.contains($0.id) }
             // Retire delete-tombstones the server has confirmed gone; keep only those
             // it still returns (a poll that raced the delete), which stay suppressed.
             deletedIDs.formIntersection(serverIDs)
-            phase = .loaded
-            refreshNote = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
             if messages.isEmpty {
                 phase = .unavailable("Gram isn't available on this server yet.")
@@ -1532,7 +1549,7 @@ struct GramView: View {
                 // can't briefly resurrect the row; cleared in `load` once the server
                 // no longer returns it.
                 deletedIDs.insert(message.id)
-                serverMessages.removeAll { $0.id == message.id }
+                inboxStore.inbox.remove(id: message.id)
                 pendingPosts.removeAll { $0.id == message.id }
             } catch let error as APIError {
                 sendError = "Couldn't delete: \(error.message)"
@@ -1553,11 +1570,9 @@ struct GramView: View {
                 try await client.gramMarkRead(id: message.id)
                 // Flip the local copy only after the server confirms — an unread
                 // agent->owner message always lives in the server snapshot.
-                if let index = serverMessages.firstIndex(where: { $0.id == message.id }) {
-                    serverMessages[index].readByOwner = true
-                    // Reading a message clears it from the badge immediately.
-                    unread?.count = serverMessages.filter { $0.isUnread }.count
-                }
+                inboxStore.inbox.markRead(id: message.id)
+                // Reading a message clears it from the badge immediately.
+                unread?.count = inboxStore.inbox.unreadCount
             } catch {
                 // Leave it unread; the next poll re-surfaces it.
             }
@@ -1598,9 +1613,7 @@ struct GramView: View {
                 do {
                     try await client.gramMarkRead(id: id)
                     marked.insert(id)
-                    if let index = serverMessages.firstIndex(where: { $0.id == id }) {
-                        serverMessages[index].readByOwner = true
-                    }
+                    inboxStore.inbox.markRead(id: id)
                 } catch {
                     failed += 1
                 }
@@ -1611,10 +1624,8 @@ struct GramView: View {
         }
         // Whatever array is current now, the ids we confirmed read are read. Ids still in flight
         // elsewhere are left to their own Task, which flips them on success.
-        for index in serverMessages.indices where marked.contains(serverMessages[index].id) {
-            serverMessages[index].readByOwner = true
-        }
-        unread?.count = serverMessages.filter { $0.isUnread }.count
+        for id in marked { inboxStore.inbox.markRead(id: id) }
+        unread?.count = inboxStore.inbox.unreadCount
         // Partial failure is reported, not swallowed: the badge will still show a count and the
         // reader needs to know why. Its OWN slot, not `refreshNote` — the 6-second poll clears
         // that one unconditionally on success, so the explanation would outlive the badge by
