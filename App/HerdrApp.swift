@@ -1510,6 +1510,14 @@ struct TerminalHomeView: View {
     /// there is no SwiftUI hook for "the user dragged the divider" — so the column
     /// measures itself (see `iPadLayout`) and the settled value is stored here.
     @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 320
+    /// The column's last MEASURED width, pre-persistence. Debounced into `sidebarWidth`
+    /// so a transient layout value cannot become the stored preference (it would also
+    /// become the new `ideal`, which is what makes a bad sample stick).
+    @State private var measuredSidebarWidth: CGFloat = 0
+    /// How long a measured width must hold still before it is persisted. Comfortably
+    /// longer than the split view's own column animation, so a minimise/expand sweep
+    /// commits once, at the width it ended on.
+    private static let sidebarWidthSettle: UInt64 = 500_000_000
     /// The bounds the modifier enforces. Kept as one constant so the stored width, the
     /// clamp and the modifier cannot drift apart.
     private static let sidebarWidthRange: ClosedRange<CGFloat> = 250...460
@@ -1790,12 +1798,26 @@ struct TerminalHomeView: View {
             // column measures itself and feeds the settled value back as `ideal` on the
             // next launch. Clamped to the same min/max the modifier enforces, so a
             // stored value can never put the sidebar outside its own bounds.
+            //
+            // DEBOUNCED, because the stored value also drives `ideal` below and that
+            // makes an intermediate measurement SELF-FULFILLING: persist 250 mid-sweep
+            // and `ideal` retargets to 250, so the column settles at a width the owner
+            // never chose and every later launch opens there. The measurement lands in
+            // `@State` immediately (cheap, no persistence) and only reaches `AppStorage`
+            // once it has stopped moving for `sidebarWidthSettle`.
             .background {
                 GeometryReader { proxy in
                     Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in
-                        recordSidebarWidth(width)
+                        measuredSidebarWidth = width
                     }
                 }
+            }
+            // `task(id:)` IS the debounce: a new measurement cancels the pending commit
+            // and restarts the wait, so only a width that survives the interval is kept.
+            .task(id: measuredSidebarWidth) {
+                try? await Task.sleep(nanoseconds: Self.sidebarWidthSettle)
+                guard !Task.isCancelled else { return }
+                recordSidebarWidth(measuredSidebarWidth)
             }
             .navigationSplitViewColumnWidth(
                 min: Self.sidebarWidthRange.lowerBound,
@@ -1804,23 +1826,32 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
             HStack(spacing: 0) {
-                // The minimised sidebar, beside the detail content rather than over it.
+                // Keyed on `columnVisibility`, the LAYOUT TRUTH, not on the persisted
+                // preference: iPadOS collapses this column on its own (rotation, Stage
+                // Manager, any transition it cannot honour at `.balanced`), and when it
+                // does, the rail must still appear or there is no way back at all.
+                //
                 // No transition: a sliding rail animates the detail column's width, and
                 // every intermediate width reflows the live terminal (see `toggleSidebar`).
-                if sidebarMinimized { sidebarRail }
+                if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)
         // The split's own sidebar carries the FULL list; minimising hides that column and
-        // hands its job to the rail. Driven off the persisted flag so a relaunch restores
-        // the choice, and `.onChange` also catches a sidebar the owner drags shut.
+        // hands its job to the rail.
+        //
+        // ONE-WAY on purpose. The preference -> layout edge restores the owner's choice at
+        // launch. The reverse edge (layout -> preference) is deliberately absent: this
+        // binding is written by iPadOS itself, and a handler cannot tell an owner gesture
+        // from a system layout decision. Persisting the latter meant one system collapse
+        // (a rotation, a Stage Manager resize) silently rewrote a durable preference, and
+        // since only an explicit expand clears it, the app would then open on the rail
+        // forever with no record that the owner ever asked for it. `sidebarMinimized` is
+        // now written ONLY by `toggleSidebar` and `railSectionButton` - real gestures.
         .onChange(of: sidebarMinimized, initial: true) { _, minimized in
             columnVisibility = minimized ? .detailOnly : .all
-        }
-        .onChange(of: columnVisibility) { _, visibility in
-            sidebarMinimized = visibility == .detailOnly
         }
         .tint(Palette.brand)
         // Hardware-keyboard shortcuts (iPad): ⌘K minimises/expands the sidebar, ⌘/ opens the
