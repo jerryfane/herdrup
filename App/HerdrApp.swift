@@ -2099,11 +2099,19 @@ struct TerminalHomeView: View {
             railSectionButton(.call, "Call", "phone")
             railSectionButton(.settings, "Settings", "gearshape")
             Divider().overlay(Palette.hairlineQuiet).padding(.horizontal, 10).padding(.vertical, 4)
-            // The counts are the reason to minimise rather than hide. Read from the
-            // SHARED wording spec (`AgentList.activityContent`), never counted here,
-            // so the rail cannot disagree with the expanded header about how many
-            // agents need you.
-            railCount(activity.needsYouCount, tone: Palette.waiting, label: "need you")
+            // The counts are the reason to minimise rather than hide. `needsYou` is the
+            // ROSTER's STRICT count (`AgentList.needsYouCount`), deliberately NOT
+            // `activityContent.needsYouCount`: that one folds `.unrecognised` rows into
+            // the total for the section-less Live Activity, so it would print a BIGGER
+            // number than the expanded header this rail stands in for
+            // (`headerSubtitle` -> `needsYouSummary` -> the strict count). One
+            // unrecognised agent and the two surfaces disagree one click apart.
+            //
+            // The same fold is why the wording spec hedges unrecognised agents as
+            // "N may need you": they are unconfirmed, not facts. A bare number cannot
+            // carry that hedge, so the rail shows only what IS confirmed and leaves the
+            // maybes to the header, which has room to say so.
+            railCount(fullList.needsYouCount, tone: Palette.waiting, label: "need you")
             railCount(activity.workingCount, tone: Palette.working, label: "working")
             Spacer()
         }

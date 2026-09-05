@@ -1540,23 +1540,30 @@ struct LiveTerminalView: UIViewRepresentable {
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = cellPixels()
             resizeTask = Task { @MainActor [weak self] in
-                // SETTLE FIRST. A layout change that sweeps through widths — a sidebar
-                // collapse or divider drag, a keyboard raise, a rotation — fires
-                // `sizeChanged` per frame, and without this each distinct width bought
-                // its own `set_pty_size` round-trip while the emulator reflowed to
-                // match. The loop below always re-reads `desired`, so one sleep turns a
-                // burst into a single resize at the width the layout ended on.
-                //
-                // A cancelled sleep is not a reason to send: the `while` re-checks
-                // `Task.isCancelled` immediately after, so teardown still exits without
-                // issuing a `lock:true`.
-                try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
                 // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
                 // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
                 // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then
                 // proceeds to `lock:false`.
-                while let self, !Task.isCancelled, self.foreground,
+                while let self, !Task.isCancelled, !self.stopped, self.foreground,
                       self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
+                    // SETTLE EACH ITERATION, not once per drain. A layout change that
+                    // sweeps through widths — the split view's own column animation
+                    // (~0.3s, which it runs whether or not WE animate), a divider drag,
+                    // a keyboard raise, a rotation — fires `sizeChanged` per frame. A
+                    // single sleep outside this loop would coalesce only its first
+                    // 140ms and then send once per round-trip for the rest of the
+                    // sweep; re-taking it here means we only ever transmit a width that
+                    // has STOOD STILL for a full settle.
+                    try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
+                    // Re-check everything the `while` checked: the sleep is a window in
+                    // which teardown can begin (`stopped`), the pane can be hidden, or
+                    // the target can reach `lastSent` some other way. A cancelled sleep
+                    // throws and is swallowed, so this guard — not the sleep — is what
+                    // stops a `lock:true` escaping after `stop()`.
+                    guard !Task.isCancelled, !self.stopped, self.foreground,
+                          self.desiredCols != self.lastSentCols
+                              || self.desiredRows != self.lastSentRows
+                    else { break }
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
                     do {
