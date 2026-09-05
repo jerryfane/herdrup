@@ -416,6 +416,237 @@ final class MockWireFixtureTests: XCTestCase {
             capture.maxLen, 80_000,
             "slash escaping inflated the upload request line to \(capture.maxLen) bytes")
     }
+
+    /// Collects `onProgress` callbacks, which arrive on the main actor from a
+    /// `@Sendable` closure and so cannot capture a local `var`.
+    private final class Reports: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [(sent: Int, total: Int)] = []
+        func append(sent: Int, total: Int) {
+            lock.lock()
+            values.append((sent: sent, total: total))
+            lock.unlock()
+        }
+        func snapshot() -> [(sent: Int, total: Int)] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
+
+    /// The SAME slash-escaping property for the FROM-DISK path. `Capture` is not a
+    /// `CitadelTransport`, so `gramOpenUploadChannel` returns nil and this exercises
+    /// the per-chunk fallback — the CI-visible proof that reading from a file did not
+    /// regress the request-line size the in-memory path guards above.
+    func testGramUploadFromDiskRequestStaysCompactForSlashHeavyData() async throws {
+        final class Capture: HerdrTransport, @unchecked Sendable {
+            var maxLen = 0
+            func roundTrip(_ requestLine: String) async throws -> String {
+                maxLen = max(maxLen, requestLine.utf8.count)
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-slashes-\(UUID().uuidString).bin")
+        try Data(repeating: 0xFF, count: HerdrClient.gramStreamChunkBytes).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let capture = Capture()
+        let client = HerdrClient(transport: capture)
+        _ = try await client.gramUploadFile(fileURL: url)
+        XCTAssertLessThan(
+            capture.maxLen, 80_000,
+            "slash escaping inflated the from-disk request line to \(capture.maxLen) bytes")
+    }
+
+    /// The from-disk fallback path must walk the file in CONTIGUOUS chunks: staging
+    /// is append-only, so the daemon rejects any offset that is not the running
+    /// staged size. A gap (or a repeat) is the bug this pins.
+    func testGramUploadFromDiskSendsContiguousOffsets() async throws {
+        final class Capture: HerdrTransport, @unchecked Sendable {
+            struct Chunk: Decodable {
+                struct Params: Decodable {
+                    let offset: UInt64
+                    let dataBase64: String
+                    enum CodingKeys: String, CodingKey {
+                        case offset
+                        case dataBase64 = "data_base64"
+                    }
+                }
+                let method: String
+                let params: Params
+            }
+            var offsets: [UInt64] = []
+            var bytes = Data()
+            func roundTrip(_ requestLine: String) async throws -> String {
+                if let chunk = try? JSONDecoder().decode(Chunk.self, from: Data(requestLine.utf8)),
+                    chunk.method == "gram.upload_chunk"
+                {
+                    offsets.append(chunk.params.offset)
+                    bytes.append(Data(base64Encoded: chunk.params.dataBase64) ?? Data())
+                }
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let chunkBytes = HerdrClient.gramUploadChunkBytes
+        let payload = Data((0..<(chunkBytes * 2 + 7)).map { UInt8($0 % 251) })
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-offsets-\(UUID().uuidString).bin")
+        try payload.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let capture = Capture()
+        let client = HerdrClient(transport: capture)
+        _ = try await client.gramUploadFile(fileURL: url)
+
+        XCTAssertEqual(
+            capture.offsets, [0, UInt64(chunkBytes), UInt64(chunkBytes * 2)],
+            "offsets must be contiguous multiples of the chunk size")
+        XCTAssertEqual(capture.bytes, payload, "the streamed bytes must reassemble the file")
+    }
+
+    /// Progress is reported from the file's own size, once at 0 and once at the end,
+    /// so a determinate progress bar cannot be driven past 100% or left short.
+    func testGramUploadFromDiskReportsProgressToTotal() async throws {
+        final class Sink: HerdrTransport, @unchecked Sendable {
+            func roundTrip(_ requestLine: String) async throws -> String {
+                #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let payload = Data(repeating: 7, count: HerdrClient.gramUploadChunkBytes + 128)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-progress-\(UUID().uuidString).bin")
+        try payload.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reports = Reports()
+        _ = try await HerdrClient(transport: Sink()).gramUploadFile(fileURL: url) { sent, total in
+            reports.append(sent: sent, total: total)
+        }
+        let observed = reports.snapshot()
+        XCTAssertEqual(observed.first?.sent, 0)
+        XCTAssertEqual(observed.last?.sent, payload.count)
+        XCTAssertTrue(
+            observed.allSatisfy { $0.total == payload.count },
+            "every report must carry the file's real size")
+    }
+
+    /// A 512 KiB all-0xFF chunk — base64 is ENTIRELY "/" — must encode into a frame
+    /// that stays inside the daemon's 1 MiB frame cap, which is the property that
+    /// makes 512 KiB frames legal at all. Otherwise unreachable in CI: a real
+    /// `GramUploadChannel` needs an SSH connection.
+    func testGramUploadFrameStaysWithinDaemonFrameCap() throws {
+        let chunk = Data(repeating: 0xFF, count: HerdrClient.gramStreamChunkBytes)
+        let line = try GramUploadChannel.encodeFrame(
+            seq: 1, offset: 0, dataBase64: chunk.base64EncodedString())
+
+        XCTAssertFalse(line.contains("\\/"), "the frame encoder must not escape slashes")
+        XCTAssertLessThan(
+            line.utf8.count, 1024 * 1024,
+            "frame is \(line.utf8.count) bytes, past the daemon's MAX_UPLOAD_FRAME_BYTES")
+
+        struct Frame: Decodable {
+            let seq: UInt64
+            let offset: UInt64
+            let dataBase64: String
+            enum CodingKeys: String, CodingKey {
+                case seq, offset
+                case dataBase64 = "data_base64"
+            }
+        }
+        let decoded = try JSONDecoder().decode(Frame.self, from: Data(line.utf8))
+        XCTAssertEqual(decoded.seq, 1)
+        XCTAssertEqual(decoded.offset, 0)
+        XCTAssertEqual(Data(base64Encoded: decoded.dataBase64), chunk)
+    }
+
+    /// An old daemon answers an unknown method with `invalid_request`, which MUST
+    /// fall back per-chunk; a real rejection MUST NOT, because the staged file may be
+    /// partly written and a fallback retry from offset 0 would be a second writer.
+    func testFatalStreamOpenErrorFallsBackOnlyForUnknownMethod() {
+        let unknown = GramUploadChannel.ChannelError.remoteError(
+            APIError(code: "invalid_request", message: "unknown variant"))
+        XCTAssertNil(HerdrClient.fatalStreamOpenError(unknown))
+
+        XCTAssertNil(HerdrClient.fatalStreamOpenError(GramUploadChannel.ChannelError.unsupported))
+        XCTAssertNil(
+            HerdrClient.fatalStreamOpenError(GramUploadChannel.ChannelError.closedBeforeAck))
+
+        for code in ["invalid_params", "gram_unavailable", "upload_in_progress", "gram_file_error"] {
+            let fatal = HerdrClient.fatalStreamOpenError(
+                GramUploadChannel.ChannelError.remoteError(APIError(code: code, message: "no")))
+            XCTAssertEqual((fatal as? APIError)?.code, code, "\(code) must not fall back")
+        }
+
+        // `server_unavailable` is the open handshake timing out on the daemon's
+        // single-threaded app loop, or a shutdown. The daemon read no frame, so the
+        // fallback must complete the send rather than aborting the whole batch.
+        XCTAssertNil(
+            HerdrClient.fatalStreamOpenError(
+                GramUploadChannel.ChannelError.remoteError(
+                    APIError(
+                        code: "server_unavailable",
+                        message: "timed out waiting for app response after 5000 ms"))),
+            "an app-dispatch timeout must fall back, not fail the send")
+    }
+
+    /// A file that SHRANK between the stat and the read must still finish at 100%.
+    /// The stat is the only size the uploader has up front, so a bar driven by it
+    /// would stop short — and if the last chunk lands exactly on `reportStep`, the
+    /// throttle's own bookkeeping would emit no terminal report at all.
+    func testGramUploadFromDiskProgressEndsAtTheBytesActuallyRead() async throws {
+        final class Shrinker: HerdrTransport, @unchecked Sendable {
+            let url: URL
+            let keep: Int
+            private var truncated = false
+            init(url: URL, keep: Int) {
+                self.url = url
+                self.keep = keep
+            }
+            func roundTrip(_ requestLine: String) async throws -> String {
+                if !truncated {
+                    truncated = true
+                    // Shrink the file after its first chunk has been read, which is
+                    // exactly the window the stat cannot see.
+                    let handle = try FileHandle(forWritingTo: url)
+                    try handle.truncate(atOffset: UInt64(keep))
+                    try handle.close()
+                }
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let chunkBytes = HerdrClient.gramUploadChunkBytes
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-shrink-\(UUID().uuidString).bin")
+        try Data(repeating: 4, count: chunkBytes * 4).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reports = Reports()
+        _ = try await HerdrClient(transport: Shrinker(url: url, keep: chunkBytes * 2))
+            .gramUploadFile(fileURL: url) { sent, total in
+                reports.append(sent: sent, total: total)
+            }
+
+        let observed = reports.snapshot()
+        let last = try XCTUnwrap(observed.last)
+        XCTAssertEqual(
+            last.sent, last.total,
+            "the final report must land on 100%, got \(last.sent)/\(last.total)")
+        XCTAssertLessThan(last.sent, chunkBytes * 4, "the file shrank, so fewer bytes were read")
+        XCTAssertEqual(observed.map(\.sent), observed.map(\.sent).sorted(), "progress must be monotonic")
+    }
 }
 
 /// THE FIXTURES. Duplicated verbatim in App/HerdrApp.swift's MockTransport (the

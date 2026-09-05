@@ -431,6 +431,26 @@ public actor CitadelTransport: HerdrTransport {
         )
     }
 
+    /// Opens a streaming upload channel for one gram attachment: a dedicated SSH
+    /// exec channel running `herdr api-bridge --duplex`, over which
+    /// `GramUploadChannel` writes chunk frames to the daemon's
+    /// `gram.upload.stream`. Its OWN connection, like `stream` and
+    /// `openInputChannel`, so a multi-MB upload never blocks the shared command
+    /// client or the `pane.stream` firehose. `openLine` is the JSON
+    /// `gram.upload.stream` open request the `--duplex` bridge reads first.
+    ///
+    /// Deliberately NOT part of `HerdrTransport`: that protocol has two members,
+    /// and a third would force an implementation into all 21 conformances (18 of
+    /// them test doubles) for no gain. The downcast is what makes every double
+    /// take the per-chunk fallback path automatically.
+    public nonisolated func openUploadChannel(_ openLine: String) -> GramUploadChannel {
+        GramUploadChannel(
+            makeConnection: { try await self.makeConnection() },
+            command: Self.herdrPathResolution + "--duplex",
+            openLine: openLine
+        )
+    }
+
     /// Closes the held SSH connection. Idempotent.
     public func close() async {
         // Invalidate any in-flight connect so a handshake that resolves after this

@@ -160,26 +160,32 @@ struct GramView: View {
         let fileURL: URL
     }
 
-    /// A file staged for sending: read into memory so the send is one atomic action.
+    /// A file staged for sending, held as a COPY ON DISK rather than in memory, so a
+    /// batch of large picks costs one open file handle at send time rather than
+    /// N × 100 MB resident. `dir` is the per-item staging directory (same idiom as
+    /// `ExportFile`); removing it removes the staged bytes.
     /// Identifiable so the composer strip can render + remove chips by identity.
     private struct PickedAttachment: Identifiable {
         let id = UUID()
         let name: String
         let mime: String
-        let data: Data
+        let url: URL
+        let dir: URL
+        let size: Int
     }
 
-    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES` (100 MiB).
-    /// The upload is chunked (`HerdrClient.gramUploadChunkBytes`), so any size streams
-    /// fine regardless of divisibility; this is just the pre-send size gate. A single
-    /// staged file of this size is read whole into memory (see `PickedAttachment.data`);
-    /// `maxAttachments` bounds how many at once.
-    private static let maxFileBytes = 100 * 1024 * 1024
+    // The pre-send size gate lives on `Staging` (nonisolated, so the photo importer
+    // can read it): `GramView.Staging.maxFileBytes`.
     /// How many files can be staged at once. Each sends as its own gram message.
-    /// Bounded to 3 (was 10) now that the per-file cap is 100 MB: staged files are
-    /// read whole into memory, so this caps the worst case at 3 × 100 MB ≈ 300 MB
-    /// resident rather than ~1 GB — safe on a phone while still allowing a small batch.
-    private static let maxAttachments = 3
+    ///
+    /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
+    /// staged file was held in memory as `Data`: ten 100 MB picks would have been
+    /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads them
+    /// one frame at a time, so the resident ceiling is a single frame no matter how
+    /// many files are staged or how large they are. The send loop is serial and
+    /// `gram.post` consumes each staging file, so the daemon's 1 GiB aggregate
+    /// staging budget never sees more than one upload in flight.
+    private static let maxAttachments = 10
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -373,6 +379,13 @@ struct GramView: View {
             openFileTask?.cancel()
             if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
             if let url = webDoc?.fileURL { try? FileManager.default.removeItem(at: url) }
+            // Staged attachment bytes are deliberately NOT removed here. Gram is a
+            // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
+            // plain tab switch while this view's `@State` — including the chips in
+            // `attachedFiles` — survives. Unlinking here would delete the bytes of an
+            // attachment still shown in the composer, and make its retry unfixable.
+            // The staged bytes are released on chip-X, after a successful send, and
+            // for a killed session by the next launch's staging sweep.
         }
         // Don't let a swipe-down (the new sheet dismissal) abandon an in-flight send
         // or a photo load mid-way — the chunked upload would keep running off-screen.
@@ -871,10 +884,13 @@ struct GramView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: 140)
-            Text(GramFile.displaySize(of: UInt64(file.data.count)))
+            Text(GramFile.displaySize(of: UInt64(file.size)))
                 .font(Typography.machine(11))
                 .foregroundStyle(Palette.textFaint)
             Button {
+                // Remove the staged bytes with the chip: a dropped attachment must
+                // not leave a secret-bearing temp file behind.
+                try? FileManager.default.removeItem(at: file.dir)
                 attachedFiles.removeAll { $0.id == file.id }
             } label: {
                 Image(systemName: "xmark.circle.fill")
@@ -1069,15 +1085,16 @@ struct GramView: View {
             let caption = index == 0 ? text : ""
             do {
                 uploading = true
-                uploadBytes = (sent: 0, total: file.data.count)
-                let uploadID = try await client.gramUploadFile(file.data) { sent, total in
+                uploadBytes = (sent: 0, total: file.size)
+                let uploadID = try await client.gramUploadFile(fileURL: file.url) { sent, total in
                     uploadBytes = (sent: sent, total: total)
                 }
                 uploading = false
                 uploadBytes = nil
-                let posted = try await client.gramPost(
-                    text: caption, to: to,
-                    attachment: .init(uploadID: uploadID, name: file.name, mime: file.mime))
+                let attachment = HerdrClient.GramFileAttachment(
+                    uploadID: uploadID, name: file.name, mime: file.mime)
+                let posted = try await Self.postAttachment(
+                    client: client, text: caption, to: to, attachment: attachment)
                 // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
                 // cannot drop it; de-duped by id, reconciled once the server reflects it.
                 pendingPosts.removeAll { $0.id == posted.id }
@@ -1085,7 +1102,14 @@ struct GramView: View {
                 sentCount += 1
                 if index == 0 { draft = "" }
             } catch let error as APIError {
-                failure = error.message
+                // A post still refused after the retries above means the daemon has
+                // not reaped the upload connection at all. The bytes are staged and
+                // complete, so this is a retry rather than a failure — but the raw
+                // daemon sentence ("read the upload connection to EOF") would be
+                // meaningless to the owner.
+                failure = error.code == "upload_in_progress"
+                    ? "Still finishing the last upload. Tap Send again."
+                    : error.message
                 remaining.append(contentsOf: files[index...])
                 break
             } catch {
@@ -1098,11 +1122,49 @@ struct GramView: View {
         // for a one-tap retry; a full success clears the strip. Already-sent messages
         // are live and are not rolled back.
         attachedFiles = remaining
+        // Drop the staged bytes of everything that DID send — after reassigning, so
+        // a failed delete cannot corrupt the retry set. Files still in `remaining`
+        // keep their temp dirs for the one-tap retry.
+        let keptIDs = Set(remaining.map(\.id))
+        for file in files where !keptIDs.contains(file.id) {
+            try? FileManager.default.removeItem(at: file.dir)
+        }
         if let failure {
             sendError = sentCount > 0
                 ? "Sent \(sentCount) of \(files.count). \(failure)"
                 : failure
         }
+    }
+
+    /// Posts an attachment, retrying the POST — never the upload — while the daemon
+    /// still owns the `upload_id`.
+    ///
+    /// The daemon frees its single-writer claim only when it observes EOF on the
+    /// upload connection, and the client's close wait is bounded, so a stalled link
+    /// can put the post in front of that release. Re-entering `gramUploadFile` would
+    /// mint a FRESH `upload_id` and transfer the whole file again, leaving the
+    /// previous — complete — staging file to age out over 24 hours; ten taps of a
+    /// 100 MB attachment would exhaust the daemon's 1 GiB staging budget and fail
+    /// every gram upload from every client. The bytes are already there, so all that
+    /// is needed is to ask again.
+    private static func postAttachment(
+        client: HerdrClient,
+        text: String,
+        to: String?,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramMessage {
+        // Three tries over ~3 s: the daemon's own reap is 60 s, but the case this
+        // covers is a teardown a few hundred ms behind the post.
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPost(text: text, to: to, attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        // Unreachable: the loop either returns or throws on its last attempt.
+        throw GramError.invalidFileData
     }
 
     /// One combined skip note for a batch pick. `bad` (already phrased) covers picks
@@ -1117,10 +1179,13 @@ struct GramView: View {
         return "Skipped: " + parts.joined(separator: "; ") + "."
     }
 
-    /// Read picked files into memory (each bounded by the server's size cap) so each
-    /// send is one atomic action. File URLs from the importer are security-scoped.
-    /// Over-cap / unreadable picks are COLLECTED into one summary rather than dropped
-    /// silently, so picking several where one is bad still stages the good ones.
+    /// Stage picked files as COPIES ON DISK (each bounded by the server's size cap),
+    /// so the send streams from a file rather than holding it in memory. File URLs
+    /// from the importer are security-scoped, so the copy must happen inside the
+    /// access window below — the URL is unreadable after it.
+    /// Over-cap / unreadable / uncopyable picks are COLLECTED into one summary rather
+    /// than dropped silently, so picking several where one is bad still stages the
+    /// good ones.
     private func handlePickedFiles(_ result: Result<[URL], Error>) {
         guard case .success(let urls) = result else { return }
         var badNames: [String] = []
@@ -1132,66 +1197,70 @@ struct GramView: View {
             }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            // Require a KNOWN size within the cap BEFORE reading. An unstat-able URL
-            // (size lookup returns nil) is treated as over-cap and skipped, never read
-            // — otherwise a multi-gigabyte pick with no reported size would fall through
-            // to an unbounded Data(contentsOf:) and jetsam the app. Mirrors PickedMedia's
-            // guard so neither the document nor the photo path can read blind.
+            // Require a KNOWN size within the cap BEFORE copying. An unstat-able URL
+            // (size lookup returns nil) is treated as over-cap and skipped, never
+            // staged — otherwise a multi-gigabyte pick with no reported size would
+            // fall through to an unbounded copy and fill the device. `size > 0` also
+            // replaces the old non-empty check. Mirrors PickedMedia's guard so
+            // neither the document nor the photo path can stage blind.
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                size <= Self.maxFileBytes
+                size > 0, size <= Staging.maxFileBytes
             else {
                 badNames.append(url.lastPathComponent)
                 continue
             }
-            guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            guard let staged = Staging.copy(of: url, named: url.lastPathComponent) else {
                 badNames.append(url.lastPathComponent)
                 continue
             }
             attachedFiles.append(PickedAttachment(
-                name: url.lastPathComponent, mime: Self.mimeType(for: url), data: data))
+                name: url.lastPathComponent, mime: Self.mimeType(for: url),
+                url: staged.url, dir: staged.dir, size: staged.size))
         }
         let bad = badNames.isEmpty ? nil : "too large or unreadable: \(badNames.joined(separator: ", "))"
         sendError = attachmentSkipNote(bad: bad, capped: capped)
     }
 
-    /// A photo-library pick loaded as a size-checked file. PhotosUI exports the item to
-    /// a temp file; the importer stats that file and rejects an over-cap (or unstat-able)
-    /// pick THERE — `data == nil` — before any bytes are read, mirroring the document
-    /// path's "reject before reading into memory" guard.
+    // A staged pick is `HerdrKit.StagedAttachment` (url + per-item dir + size).
+
+    /// A photo-library pick copied into app-owned staging. PhotosUI exports the item
+    /// to a temp file and DELETES it when the closure returns, so the copy has to
+    /// happen inside `FileRepresentation`; the importer stats that export and rejects
+    /// an over-cap (or unstat-able) pick THERE — `staged == nil` — before any copy,
+    /// mirroring the document path's "reject before staging" guard.
     ///
-    /// Rejection is signalled as a VALUE (`data == nil`), NOT a thrown error, on purpose:
-    /// `loadTransferable` routes through NSItemProvider's Obj-C error bridge, across which
-    /// a thrown Swift error type may not survive — so a `nil` payload is the only reliable
-    /// way to carry "rejected" back and still show the right message.
+    /// Rejection is signalled as a VALUE (`staged == nil`), NOT a thrown error, on
+    /// purpose: `loadTransferable` routes through NSItemProvider's Obj-C error bridge,
+    /// across which a thrown Swift error type may not survive — so a `nil` payload is
+    /// the only reliable way to carry "rejected" back and still show the right message.
     private struct PickedMedia: Transferable {
-        /// Non-nil only for an in-cap, readable pick; nil = rejected (over-cap OR the
-        /// exported file's size could not be determined — treated as over-cap, never
-        /// read blindly into memory).
-        let data: Data?
+        /// Non-nil only for an in-cap pick that was copied into staging; nil =
+        /// rejected (over-cap, size unknown — treated as over-cap — or uncopyable).
+        let staged: StagedAttachment?
         static var transferRepresentation: some TransferRepresentation {
             FileRepresentation(importedContentType: .item) { received in
                 // Unknown size is treated as OVER-cap (reject), never under-cap — an
-                // unstat-able export must not fall through to an unbounded read.
+                // unstat-able export must not fall through to an unbounded copy.
                 guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                    size <= GramView.maxFileBytes
+                    size > 0, size <= GramView.Staging.maxFileBytes
                 else {
-                    return PickedMedia(data: nil)
+                    return PickedMedia(staged: nil)
                 }
-                let data = try Data(contentsOf: received.file)
-                // Belt-and-braces, matching the document path: reject if the read somehow
-                // exceeded the stat'd size, so an over-cap Data can never reach the caller.
-                guard data.count <= GramView.maxFileBytes else { return PickedMedia(data: nil) }
-                return PickedMedia(data: data)
+                // Inside the closure: `received.file` is gone once it returns.
+                return PickedMedia(
+                    staged: GramView.Staging.copy(
+                        of: received.file, named: received.file.lastPathComponent))
             }
         }
     }
 
     /// Load a batch of photo-library picks into `attachedFiles`. Each routes through
-    /// `PickedMedia` so the size cap is enforced on the exported file's size before
-    /// any bytes are read — the same invariant the document path holds. Loads SERIALLY
-    /// (not concurrently) so the memory ceiling stays at one file at a time, and
-    /// COLLECTS skips into one summary so picking five where one is oversized doesn't
-    /// silently eat the other four's outcome.
+    /// `PickedMedia` so the size cap is enforced on the exported file's size before it
+    /// is copied — the same invariant the document path holds. Loads SERIALLY (not
+    /// concurrently) to bound disk pressure and keep the staged order stable — the
+    /// send loop posts in this order and the caption rides on message 0 — and COLLECTS
+    /// skips into one summary so picking five where one is oversized doesn't silently
+    /// eat the other four's outcome.
     private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
         loadingPhoto = true
         defer { loadingPhoto = false }
@@ -1204,15 +1273,16 @@ struct GramView: View {
             }
             do {
                 // A nil transferable = couldn't produce a file; a non-nil transferable
-                // with a nil `data` = rejected by the size guard (over-cap / unstat-able).
+                // with a nil `staged` = rejected by the size guard, or the copy failed.
                 guard let media = try await item.loadTransferable(type: PickedMedia.self),
-                    let data = media.data, !data.isEmpty
+                    let staged = media.staged
                 else {
                     bad += 1
                     continue
                 }
                 let (name, mime) = Self.photoNameAndMime(for: item)
-                attachedFiles.append(PickedAttachment(name: name, mime: mime, data: data))
+                attachedFiles.append(PickedAttachment(
+                    name: name, mime: mime, url: staged.url, dir: staged.dir, size: staged.size))
             } catch {
                 bad += 1
             }
@@ -1349,6 +1419,61 @@ struct GramView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if base.isEmpty || base == "." || base == ".." { return "file" }
         return base
+    }
+
+    /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
+    ///
+    /// `View` is `@MainActor`, so everything on `GramView` inherits that isolation —
+    /// but `PickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
+    /// closure, so calling a main-actor static from it is a cross-actor call (a hard
+    /// error for a method). A nested type does NOT inherit the enclosing isolation,
+    /// which is what is wanted here twice over: the importer can call it directly,
+    /// and copying a 100 MB pick never runs on the main actor.
+    ///
+    /// One staging directory per app SESSION. That level exists for the case where no
+    /// cleanup path runs at all: on a crash or a jetsam kill `onDisappear` never
+    /// fires, so staged bytes would otherwise sit in tmp untracked. A session
+    /// directory makes every earlier session's leftovers a single identifiable
+    /// sibling for the launch-time sweep, while the per-item directories inside it
+    /// still give a per-chip unlink.
+    enum Staging {
+        /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`
+        /// (100 MiB) and inclusive as the server's is. The upload streams from disk
+        /// in frames, so any size uploads fine regardless of divisibility; this is
+        /// just the pre-send size gate.
+        static let maxFileBytes = 100 * 1024 * 1024
+
+        static let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-staging", isDirectory: true)
+        static let session = root
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        /// Copy a picked file into app-owned staging, so the send streams it from
+        /// disk and the app owns its lifetime. nil when the copy fails or the copied
+        /// file is empty / over the cap — the caller reports it as a skip.
+        ///
+        /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is
+        /// iOS-only and cannot run on CI, and a staging bug here is silent (it
+        /// renders as the same "unreadable pick" message as a genuinely bad file).
+        /// In HerdrKit it is tested.
+        static func copy(of source: URL, named name: String) -> StagedAttachment? {
+            GramStaging.stageCopy(of: source, named: name, in: session, maxBytes: maxFileBytes)
+        }
+
+        /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no
+        /// cleanup).
+        ///
+        /// Called from the app root's `.task`, not the Gram page's: bytes from a
+        /// killed session must be reclaimed even in a launch where the Gram tab is
+        /// never opened. Off the main actor because the unlink is a synchronous
+        /// recursive walk and the abandoned set can be ten 100 MB attachments.
+        static func sweepAbandonedOffMainActor() async {
+            let stagingRoot = root
+            let current = session.lastPathComponent
+            await Task.detached(priority: .utility) {
+                GramStaging.sweepAbandoned(root: stagingRoot, keeping: current)
+            }.value
+        }
     }
 
     /// A file we should render as formatted HTML (a markdown source), by extension

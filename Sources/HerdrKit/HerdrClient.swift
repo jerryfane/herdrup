@@ -18,6 +18,19 @@ public actor HerdrClient {
     }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
+    /// Whether this daemon serves `gram.upload.stream`, cached per client so a
+    /// multi-file send pays ONE `ping`.
+    ///
+    /// Three states on purpose: a successful probe is cached either way (so an old
+    /// daemon is not re-probed per file), while a FAILED probe stays `unknown` (so a
+    /// transient error cannot pin this client to the per-chunk path for its whole
+    /// lifetime, and a daemon upgraded under a long-lived app is picked up).
+    private enum StreamCapability {
+        case unknown
+        case supported
+        case unsupported
+    }
+    private var streamCapability: StreamCapability = .unknown
 
     public init(transport: HerdrTransport) {
         self.transport = transport
@@ -503,6 +516,51 @@ public actor HerdrClient {
     /// lands around 87 KB of command — safely under the cap with headroom.
     static let gramUploadChunkBytes = 48 * 1024
 
+    /// Raw bytes per streamed frame. The streaming path has no argv, so the
+    /// 120 KB command cap does not apply; this is the daemon's own
+    /// `MAX_CHUNK_BYTES` (512 KiB), which keeps a base64 frame (~700 KB) under
+    /// its 1 MiB request-line ceiling.
+    static let gramStreamChunkBytes = 512 * 1024
+
+    struct GramUploadStreamParams: Encodable {
+        let uploadID: String
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "upload_id"
+        }
+    }
+
+    /// Opens a streaming upload channel, or nil when this transport or daemon
+    /// cannot serve one. Feature-detected by `ping` CAPABILITY, never by
+    /// attempting the method: an unknown method comes back with an EMPTY `id` and
+    /// the connection closed, so the reply cannot be correlated to the attempt.
+    public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
+        guard let citadel = transport as? CitadelTransport else { return nil }
+        // Three cache states, not two, and the probe is NOT written with `try?`:
+        // `serverCapabilities()` both throws AND returns an Optional, so `try?`
+        // flattens "the ping failed" into the same nil as "the daemon sent no
+        // capabilities" — which would cache a transient error as `unsupported` and pin
+        // this client to the per-chunk path for its whole lifetime, the exact outcome
+        // the `unknown` state exists to prevent. A ping that SUCCEEDS is cached either
+        // way, so a ten-file send pays one probe even against an old daemon; a ping
+        // that THROWS leaves the cache `unknown` and is re-probed on the next upload.
+        if case .unknown = streamCapability {
+            do {
+                let probed = try await serverCapabilities()
+                streamCapability = probed?.gramUploadStream == true ? .supported : .unsupported
+            } catch {
+                return nil
+            }
+        }
+        guard case .supported = streamCapability else { return nil }
+        let env = RequestEnvelope(
+            id: "herdrkit:gram.upload.stream:\(uploadID)",
+            method: "gram.upload.stream",
+            params: GramUploadStreamParams(uploadID: uploadID)
+        )
+        guard let data = try? encoder.encode(env) else { return nil }
+        return citadel.openUploadChannel(String(decoding: data, as: UTF8.self))
+    }
+
     /// Uploads a file's bytes in chunks and returns the `upload_id` to attach to a
     /// `gramPost`. Chunks are sent in order; the server validates each against the
     /// running offset. A single request per chunk keeps every one under the SSH
@@ -539,6 +597,133 @@ public actor HerdrClient {
             }
         }
         return uploadID
+    }
+
+    /// A fresh `upload_id`. The daemon keys its staging file and its single-writer
+    /// claim on this, and validates it as one safe path component.
+    static func mintUploadID() -> String {
+        "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    }
+
+    /// Uploads a file's bytes FROM DISK and returns the `upload_id` to attach to a
+    /// `gramPost`.
+    ///
+    /// Streams over one held channel when the daemon advertises
+    /// `gram_upload_stream`, else falls back to per-chunk `gram.upload_chunk` —
+    /// still reading from disk, so neither path holds the whole file in memory
+    /// and a 100 MB attachment costs one chunk of resident bytes.
+    ///
+    /// `onProgress` (if given) is called on the main actor with
+    /// `(bytesSent, totalBytes)` — once at 0, then throttled to ~1% steps, and
+    /// once at completion.
+    public func gramUploadFile(
+        fileURL: URL,
+        onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
+    ) async throws -> String {
+        var uploadID = Self.mintUploadID()
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let total = (attributes[.size] as? NSNumber)?.intValue ?? 0
+
+        // Open the FILE first, and only then the channel. A file we cannot read must
+        // not cost an SSH channel and a daemon-side claim on this `upload_id` that is
+        // then released asynchronously by the `defer` below.
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+
+        let channel = await gramOpenUploadChannel(uploadID: uploadID)
+        var streaming = false
+        if let channel {
+            do {
+                try await channel.start()
+                streaming = true
+            } catch {
+                // An out-of-date capability flag, a daemon that advertises the
+                // method but cannot serve it, or a channel that died before the
+                // ack must not fail the send — fall back. A REAL rejection
+                // (invalid_params, gram_unavailable, upload_in_progress,
+                // gram_file_error) is rethrown: the staged file may be partially
+                // written, so a fallback retry from offset 0 would be a second
+                // writer on the same upload_id.
+                await channel.close()
+                if let fatal = Self.fatalStreamOpenError(error) { throw fatal }
+                // Fall back under an id the daemon has NEVER seen. It takes its
+                // single-writer claim at OPEN — before it asks the app anything — and
+                // refuses a per-chunk write while that claim is held, so reusing this
+                // id can lose a race with the claim's release and fail the send with
+                // `upload_in_progress` for a reason unrelated to the file. Nothing
+                // outside this function keys on the id: the caller passes whatever is
+                // returned straight to `gramPost(attachment:)`.
+                uploadID = Self.mintUploadID()
+            }
+        }
+        defer { if let channel { Task { await channel.close() } } }
+
+        let chunkBytes = streaming ? Self.gramStreamChunkBytes : Self.gramUploadChunkBytes
+
+        // Report at most ~once per 1% (or per chunk, whichever is coarser) so a
+        // big file's round-trips don't schedule thousands of UI updates. The total is
+        // widened to the bytes actually read: the file is stat'd before the first
+        // read, so one that GREW in between must not drive a determinate bar past
+        // 100% (a shrunken one simply reports fewer bytes and ends early).
+        let reportStep = max(chunkBytes, total / 100)
+        var lastReported = -reportStep
+        var offset = 0
+        await onProgress?(0, total)
+        while let chunk = try handle.read(upToCount: chunkBytes), !chunk.isEmpty {
+            let encoded = chunk.base64EncodedString()
+            if streaming, let channel {
+                try await channel.sendChunk(offset: UInt64(offset), dataBase64: encoded)
+            } else {
+                _ = try await call(
+                    "gram.upload_chunk",
+                    GramUploadChunkParams(
+                        uploadID: uploadID, offset: UInt64(offset), dataBase64: encoded),
+                    as: JSONNull.self)
+            }
+            offset += chunk.count
+            // Throttle ONLY: no `offset >= total` disjunct. That condition is
+            // permanently true once the cursor passes the stat'd size, so a file that
+            // grew after being stat'd reported every single chunk — the exact main-actor
+            // flood the throttle exists to prevent. The terminal report is emitted once,
+            // after the loop.
+            if offset - lastReported >= reportStep {
+                lastReported = offset
+                await onProgress?(offset, max(total, offset))
+            }
+        }
+        // One terminal report at the bytes ACTUALLY read, so a determinate bar always
+        // lands on 100%. `(offset, offset)`, not `max(total, offset)`: a file that
+        // SHRANK after the stat would otherwise leave the bar at `offset/total` — 50%
+        // for a file half the stat'd size — and a shrink whose last chunk happens to
+        // land on `reportStep` would emit no terminal report at all.
+        if lastReported != offset || total != offset {
+            await onProgress?(offset, offset)
+        }
+        // The daemon frees its single-writer claim on the `upload_id` only when it
+        // observes EOF on the upload connection, and it REFUSES a `gram.post` that
+        // would finalize an upload a stream still owns. The caller posts immediately
+        // after this returns, over the already-warm command connection, so returning
+        // before the teardown completes makes that post race the claim release and
+        // fail with `upload_in_progress` after a fully successful upload.
+        if streaming, let channel {
+            await channel.closeAndWait()
+        }
+        return uploadID
+    }
+
+    /// A streaming-open failure the caller must NOT retry per-chunk, or nil when
+    /// falling back is safe. Only a daemon-side REJECTION of the UPLOAD is fatal;
+    /// transport, capability and availability failures are what the fallback exists
+    /// for, because on those paths the daemon read no frame and staging is untouched.
+    static func fatalStreamOpenError(_ error: Error) -> Error? {
+        guard case GramUploadChannel.ChannelError.remoteError(let api) = error else { return nil }
+        // `invalid_request`: an older daemon's answer to an unknown method.
+        // `server_unavailable`: the open handshake timed out waiting on the daemon's
+        // single-threaded app loop (5 s), or the daemon is shutting down. Neither
+        // says anything about the upload, so both fall back rather than failing the
+        // send — a busy app thread must not abort a whole batch.
+        let recoverable = ["invalid_request", "server_unavailable"]
+        return recoverable.contains(api.code) ? nil : api
     }
 
     struct GramGetFileParams: Encodable { let id: String }
