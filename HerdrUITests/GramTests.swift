@@ -32,4 +32,83 @@ final class GramTests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+
+    /// The search field filters the loaded inbox, and a filter that matches nothing says so
+    /// instead of leaving a blank scroll that reads as an empty inbox.
+    ///
+    /// Strings are picked from the `gram` fixture (MockTransport.gramList): "Digest" appears in
+    /// exactly one message (g1, from trend-scout), and "vetrina" is the sender label of a
+    /// DIFFERENT message (g5) — so one label surviving while the other disappears is a receipt
+    /// that rows were filtered, not merely re-laid-out.
+    func testGramSearchFiltersTheInbox() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+
+        // Both senders are present before any filter: the pre-state the filter acts on. Without
+        // this the later disappearance would prove nothing (it could have never rendered).
+        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 10),
+                      "the unread agent->owner message should render before filtering")
+        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
+                      "the second agent->owner message should render before filtering")
+
+        let field = app.textFields["Search messages"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "the search field should be pinned above the list")
+        field.tap()
+        field.typeText("Digest")
+        // Assert the FIELD took the text before asserting anything about the list: an unfocused
+        // field would otherwise fail as "filtering is broken" when the real fault is the keyboard.
+        XCTAssertEqual(field.value as? String, "Digest", "the search field did not take the typed text")
+
+        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 3),
+                      "the matching message should survive the filter")
+        XCTAssertTrue(app.staticTexts["vetrina"].waitForNonExistence(timeout: 5),
+                      "a message matching nothing in the search should be filtered out")
+
+        // A filter that matches nothing: the "No matches" state, NOT a blank list.
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 6))
+        field.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5),
+                      "a filter matching no message should say so")
+
+        // Clearing the field restores the full list.
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
+        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
+                      "clearing the search should bring the filtered-out messages back")
+    }
+
+    /// Read all marks the unread messages read: the button is present while something is unread
+    /// and gone once the pass completes (it renders only for `unreadCount > 0`).
+    ///
+    /// The button's presence is only STABLE after the first poll, and the test waits for that
+    /// deliberately: at launch the single unread message's own row marks itself read within a
+    /// moment (`markReadIfNeeded` from `onAppear`), which drives the count to zero and removes
+    /// the button — so a tap aimed at the launch-time button can miss. The mock's `gram.list` is
+    /// a CONSTANT that always reports g1 unread, so the 6-second poll restores it, and because
+    /// the row's identity is unchanged `onAppear` does not fire again: from then on the button
+    /// stays up. The retry exists because the same poll also re-creates it a few seconds after a
+    /// successful pass; each attempt guards `exists`/`isHittable` so a vanished button re-enters
+    /// the loop instead of failing the test on an unrecoverable `tap()`.
+    func testGramReadAllClearsTheUnreadCount() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 10),
+                      "the Gram page should load the mock inbox")
+
+        let readAll = app.buttons["Read all"]
+        var cleared = false
+        for _ in 0..<4 {
+            // One poll interval plus slack, so this waits out the launch-time flip described
+            // above rather than racing it.
+            guard readAll.waitForExistence(timeout: 14), readAll.isHittable else {
+                Thread.sleep(forTimeInterval: 1.0)
+                continue
+            }
+            readAll.tap()
+            if readAll.waitForNonExistence(timeout: 4) { cleared = true; break }
+        }
+        XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
+    }
 }

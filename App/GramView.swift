@@ -47,6 +47,10 @@ struct GramView: View {
     /// async `load` directly — so it changes a token and `onChange` performs the load, the same
     /// one-shot-signal pattern the terminal uses for jump-to-tail and collapse.
     var refreshToken: Int = 0
+    /// Bumped by the host's sidebar Read-all button, same one-shot-signal reason as
+    /// `refreshToken`: a sibling column cannot call this view's async `markAllRead` directly.
+    /// Defaulted so the phone call site (which has its own header button) omits it.
+    var readAllToken: Int = 0
 
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
@@ -80,6 +84,14 @@ struct GramView: View {
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
+    /// Free-text filter over the visible section. Local to the page: it is a transient view
+    /// concern, unlike `showingSaved`, which the sidebar owns (a sibling column drives that).
+    @State private var search = ""
+    /// True while a Read-all pass is running, so the button disables rather than stacking passes.
+    @State private var markingAllRead = false
+    /// A partial-failure report from a Read-all pass. Its OWN slot rather than `refreshNote`,
+    /// which the 6-second poll clears on every success — same reasoning as `sendError`.
+    @State private var markAllNote: String?
 
     /// Files the owner picked to attach to the next post (read into memory at pick
     /// time), empty when none are staged. Several can be staged at once; each sends as
@@ -177,6 +189,34 @@ struct GramView: View {
             .filter { !deletedIDs.contains($0.id) }
     }
 
+    /// Inbox rows after the search filter. Matches message text, the sender, the recipient,
+    /// and an attachment's filename — a reader looking for "the key I sent keephair" searches
+    /// by any of those, and matching only `text` would miss the last two.
+    ///
+    /// DELIBERATELY SEPARATE from `messages`: the unfiltered set is what `unreadCount`,
+    /// `markReadIfNeeded` and `markAllRead` read, so an active search can never make the
+    /// badge lie or hide a message from a Read-all pass. Do not fold the filter into
+    /// `messages` itself.
+    private var visibleMessages: [GramMessage] {
+        guard !search.isEmpty else { return messages }
+        return messages.filter { message in
+            message.text.localizedCaseInsensitiveContains(search)
+                || message.from.localizedCaseInsensitiveContains(search)
+                || (message.to ?? "").localizedCaseInsensitiveContains(search)
+                || (message.file?.name ?? "").localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    /// Saved rows after the same filter. `SavedGram` has no `to`, so sender + text + filename.
+    private var visibleSaved: [SavedGram] {
+        guard !search.isEmpty else { return savedGrams.saved }
+        return savedGrams.saved.filter { saved in
+            saved.text.localizedCaseInsensitiveContains(search)
+                || saved.from.localizedCaseInsensitiveContains(search)
+                || (saved.file?.name ?? "").localizedCaseInsensitiveContains(search)
+        }
+    }
+
     private enum LoadPhase: Equatable {
         case loading
         case loaded
@@ -237,6 +277,15 @@ struct GramView: View {
             guard new != old else { return }
             Task { await load(initial: false) }
         }
+        // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
+        .onChange(of: readAllToken) { old, new in
+            guard new != old else { return }
+            Task { await markAllRead() }
+        }
+        // A filter typed in Inbox has no meaning in Saved, and leaving it set would greet the
+        // just-selected section with "No matches", which reads as a bug. `showingSaved` is the
+        // host's binding, so this fires for both the phone toggle and the sidebar rows.
+        .onChange(of: showingSaved) { _, _ in search = "" }
         // Paperclip → a Telegram-style attach sheet picks the source, so we open the
         // RIGHT system picker. The picker is opened in the sheet's onDismiss (via
         // `pendingPicker`), not inline — presenting a sheet while another dismisses
@@ -338,6 +387,7 @@ struct GramView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Palette.hairlineQuiet)
+            searchFieldIfFilterable
             content
             bannerView
             composer
@@ -355,10 +405,34 @@ struct GramView: View {
     /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
         VStack(spacing: 0) {
+            searchFieldIfFilterable
             content
             bannerView
             composer
         }
+    }
+
+    /// The message filter, pinned ABOVE the scroll in both layouts (it must not scroll away),
+    /// copying the agents list's field verbatim except for the binding and placeholder so the
+    /// two search surfaces in the app look and behave identically.
+    private var searchField: some View {
+        TextField("Search messages", text: $search)
+            .font(Typography.app(15)).foregroundStyle(Palette.text)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
+    }
+
+    /// The field, but only where there is something to filter. `content` renders a spinner while
+    /// loading and an error card (with a Retry) when the daemon has no gram, and a search box
+    /// pinned above either of those is a live control over nothing. The agents list's field sits
+    /// above an EMPTY LIST, never above an error state.
+    @ViewBuilder
+    private var searchFieldIfFilterable: some View {
+        if showingSaved || phase == .loaded { searchField }
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -366,7 +440,7 @@ struct GramView: View {
     /// (empty inbox, pre-deploy daemon, or a loaded list alike).
     @ViewBuilder
     private var bannerView: some View {
-        if let text = sendError ?? refreshNote {
+        if let text = sendError ?? markAllNote ?? refreshNote {
             Text(text)
                 .font(Typography.app(12))
                 .foregroundStyle(Palette.died)
@@ -399,6 +473,19 @@ struct GramView: View {
                 Image(systemName: showingSaved ? "bookmark.fill" : "bookmark")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(showingSaved ? Palette.brand : Palette.textDim)
+            }
+            // Read all — only while the Inbox is showing (Saved has no unread concept) and
+            // something is actually unread, so it never sits there as a no-op control.
+            if !showingSaved, unreadCount > 0 {
+                Button {
+                    Task { await markAllRead() }
+                } label: {
+                    Image(systemName: "envelope.open")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                }
+                .disabled(markingAllRead)
+                .accessibilityLabel("Read all")
             }
             if !showingSaved {
                 Button {
@@ -435,6 +522,27 @@ struct GramView: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
+    /// Shown when the list HAS rows but the active search matches none of them. A distinct
+    /// state from "nothing here yet": a blank scroll after typing reads as an empty inbox,
+    /// which is the bug the agents list already avoids the same way.
+    private var noMatches: some View {
+        centered {
+            VStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Palette.textFaint)
+                Text("No matches")
+                    .font(Typography.app(15, .medium))
+                    .foregroundStyle(Palette.textDim)
+                Text("Nothing in this list matches “\(search)”.")
+                    .font(Typography.app(13))
+                    .foregroundStyle(Palette.textFaint)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 32)
+        }
+    }
+
     /// The Saved section: locally-kept copies of bookmarked messages. Rendered from the local
     /// store (independent of the poll), so a saved message survives even after the original is
     /// deleted from the server.
@@ -456,10 +564,12 @@ struct GramView: View {
                 }
                 .padding(.horizontal, 32)
             }
+        } else if visibleSaved.isEmpty {
+            noMatches
         } else {
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    ForEach(savedGrams.saved) { s in
+                    ForEach(visibleSaved) { s in
                         SavedGramRow(
                             saved: s,
                             isDownloadingFile: downloadingFileFor == s.id,
@@ -516,11 +626,18 @@ struct GramView: View {
                 }
                 .padding(.horizontal, 32)
             }
+        // Must sit ABOVE `case .loaded:` — Swift evaluates cases in order, so below it this
+        // is unreachable. `!messages.isEmpty` is load-bearing: an EMPTY inbox showing the setup
+        // card falls through to `case .loaded:` (the case above needs `!shouldShowSetupCard`),
+        // and without it one keystroke would replace the only affordance telling the owner how
+        // to give their agents gram with "No matches" about a list that never had rows.
+        case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
+            noMatches
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
                     if shouldShowSetupCard { setupCard }
-                    ForEach(messages) { message in
+                    ForEach(visibleMessages) { message in
                         GramRow(
                             message: message,
                             isDownloadingFile: downloadingFileFor == message.id,
@@ -1320,6 +1437,64 @@ struct GramView: View {
                 // Leave it unread; the next poll re-surfaces it.
             }
         }
+    }
+
+    /// Marks EVERY unread message read, ignoring any active search — the button says "Read all"
+    /// and the badge must reach zero, so marking only the filtered matches would leave a
+    /// non-zero badge with no visible cause. Serial, not a TaskGroup: the daemon has no bulk
+    /// mark-read (`gram.mark_read` takes one id), so a serial loop is both the existing idiom
+    /// and the one that cannot flood a forwarded SSH connection.
+    private func markAllRead() async {
+        guard !markingAllRead else { return }
+        markingAllRead = true
+        defer { markingAllRead = false }
+        markAllNote = nil
+        // Snapshot the ids first: `serverMessages` is mutated inside the loop and a poll may
+        // replace it mid-pass, so iterating the live array could skip or repeat a message.
+        var pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        // Ids this pass actually marked, re-applied after the loop: `load` REPLACES
+        // `serverMessages` wholesale, so a poll landing mid-pass reverts the flips written
+        // below and the badge would still show a count after a fully successful pass.
+        var marked: Set<String> = []
+        var attempted = 0
+        var failed = 0
+        // Two passes: an id a row's own `onAppear` had in flight when we first reached it is
+        // retried once, by which time that Task has cleared its entry — otherwise "Read all"
+        // could silently leave it unread if that Task's own call failed (its catch is a no-op).
+        for _ in 0..<2 {
+            var stillInFlight: [String] = []
+            for id in pending {
+                // Reusing the existing in-flight set is what stops a duplicate `gram.mark_read`.
+                guard !markingRead.contains(id) else { stillInFlight.append(id); continue }
+                // Someone else's pass already read it; nothing left to do for this id.
+                guard serverMessages.first(where: { $0.id == id })?.isUnread ?? false else { continue }
+                markingRead.insert(id)
+                attempted += 1
+                do {
+                    try await client.gramMarkRead(id: id)
+                    marked.insert(id)
+                    if let index = serverMessages.firstIndex(where: { $0.id == id }) {
+                        serverMessages[index].readByOwner = true
+                    }
+                } catch {
+                    failed += 1
+                }
+                markingRead.remove(id)
+            }
+            pending = stillInFlight
+            if pending.isEmpty { break }
+        }
+        // Whatever array is current now, the ids we confirmed read are read. Ids still in flight
+        // elsewhere are left to their own Task, which flips them on success.
+        for index in serverMessages.indices where marked.contains(serverMessages[index].id) {
+            serverMessages[index].readByOwner = true
+        }
+        unread?.count = serverMessages.filter { $0.isUnread }.count
+        // Partial failure is reported, not swallowed: the badge will still show a count and the
+        // reader needs to know why. Its OWN slot, not `refreshNote` — the 6-second poll clears
+        // that one unconditionally on success, so the explanation would outlive the badge by
+        // seconds at most. `sendError` carries the same reasoning (see its declaration).
+        markAllNote = failed == 0 ? nil : "\(failed) of \(attempted) could not be marked read."
     }
 }
 
