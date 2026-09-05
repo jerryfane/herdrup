@@ -535,18 +535,20 @@ public actor HerdrClient {
     /// the connection closed, so the reply cannot be correlated to the attempt.
     public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
         guard let citadel = transport as? CitadelTransport else { return nil }
-        // Three cache states, not two. A ping that SUCCEEDS is cached either way, so a
-        // ten-file send pays one probe even against a daemon that does not serve the
-        // method; a ping that FAILS caches nothing, so a transient error cannot pin
-        // this client to the per-chunk path for its whole lifetime. (`??` takes a
-        // non-async autoclosure, so the probe cannot be inlined into it.)
+        // Three cache states, not two, and the probe is NOT written with `try?`:
+        // `serverCapabilities()` both throws AND returns an Optional, so `try?`
+        // flattens "the ping failed" into the same nil as "the daemon sent no
+        // capabilities" — which would cache a transient error as `unsupported` and pin
+        // this client to the per-chunk path for its whole lifetime, the exact outcome
+        // the `unknown` state exists to prevent. A ping that SUCCEEDS is cached either
+        // way, so a ten-file send pays one probe even against an old daemon; a ping
+        // that THROWS leaves the cache `unknown` and is re-probed on the next upload.
         if case .unknown = streamCapability {
-            if let probed = try? await serverCapabilities() {
-                streamCapability = probed.gramUploadStream ? .supported : .unsupported
-            } else {
-                // A daemon that answers `ping` with no capabilities object at all is an
-                // old one: cache that as unsupported rather than re-probing per file.
-                streamCapability = .unsupported
+            do {
+                let probed = try await serverCapabilities()
+                streamCapability = probed?.gramUploadStream == true ? .supported : .unsupported
+            } catch {
+                return nil
             }
         }
         guard case .supported = streamCapability else { return nil }
@@ -675,22 +677,39 @@ public actor HerdrClient {
                 await onProgress?(offset, max(total, offset))
             }
         }
-        // One terminal report, so a determinate bar always lands on 100% — including
-        // for a file that SHRANK after the stat, where `offset < total` at EOF.
-        if lastReported != offset {
-            await onProgress?(offset, max(total, offset))
+        // One terminal report at the bytes ACTUALLY read, so a determinate bar always
+        // lands on 100%. `(offset, offset)`, not `max(total, offset)`: a file that
+        // SHRANK after the stat would otherwise leave the bar at `offset/total` — 50%
+        // for a file half the stat'd size — and a shrink whose last chunk happens to
+        // land on `reportStep` would emit no terminal report at all.
+        if lastReported != offset || total != offset {
+            await onProgress?(offset, offset)
+        }
+        // The daemon frees its single-writer claim on the `upload_id` only when it
+        // observes EOF on the upload connection, and it REFUSES a `gram.post` that
+        // would finalize an upload a stream still owns. The caller posts immediately
+        // after this returns, over the already-warm command connection, so returning
+        // before the teardown completes makes that post race the claim release and
+        // fail with `upload_in_progress` after a fully successful upload.
+        if streaming, let channel {
+            await channel.closeAndWait()
         }
         return uploadID
     }
 
     /// A streaming-open failure the caller must NOT retry per-chunk, or nil when
-    /// falling back is safe. Only a daemon-side REJECTION is fatal; transport and
-    /// capability failures are exactly what the fallback exists for.
+    /// falling back is safe. Only a daemon-side REJECTION of the UPLOAD is fatal;
+    /// transport, capability and availability failures are what the fallback exists
+    /// for, because on those paths the daemon read no frame and staging is untouched.
     static func fatalStreamOpenError(_ error: Error) -> Error? {
         guard case GramUploadChannel.ChannelError.remoteError(let api) = error else { return nil }
-        // `invalid_request` is the answer an older daemon gives to an unknown
-        // method, so it means "no such method here", not "your upload is bad".
-        return api.code == "invalid_request" ? nil : api
+        // `invalid_request`: an older daemon's answer to an unknown method.
+        // `server_unavailable`: the open handshake timed out waiting on the daemon's
+        // single-threaded app loop (5 s), or the daemon is shutting down. Neither
+        // says anything about the upload, so both fall back rather than failing the
+        // send — a busy app thread must not abort a whole batch.
+        let recoverable = ["invalid_request", "server_unavailable"]
+        return recoverable.contains(api.code) ? nil : api
     }
 
     struct GramGetFileParams: Encodable { let id: String }

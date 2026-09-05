@@ -171,12 +171,43 @@ public actor GramUploadChannel {
     /// Tears the channel down: finishing the frame stream returns from `withExec`,
     /// closing the SSH channel (the remote bridge then sees stdin EOF and exits,
     /// which is the daemon's clean end-of-upload signal). Idempotent.
+    ///
+    /// Does NOT wait for that teardown to complete. Use [`closeAndWait`] when the
+    /// next action depends on the daemon having observed the close.
     public func close() {
         live = false
         framesCont?.finish()
         framesCont = nil
         runner?.cancel()
         resumeAck(.failure(ChannelError.closedBeforeFrameAck))
+    }
+
+    /// Closes the channel and waits until the SSH session is actually gone.
+    ///
+    /// The daemon releases its single-writer claim on the `upload_id` only when it
+    /// observes EOF on this connection, and it now REFUSES a `gram.post` that would
+    /// finalize an upload a stream still owns. So an upload followed by a post must
+    /// order the two: returning while the teardown is still in flight makes the post
+    /// race the claim release and fail with `upload_in_progress` after a completely
+    /// successful upload.
+    ///
+    /// `nonisolated` on purpose: awaiting the runner must NOT hold this actor, or the
+    /// runner's own calls back into it (`handleLine`, `markDead`) could never land.
+    /// The runner is not cancelled here — the stream finishing is what unwinds
+    /// `withExec` gracefully, and cancelling could cut the SSH close short.
+    public nonisolated func closeAndWait() async {
+        let runner = await beginGracefulClose()
+        await runner?.value
+    }
+
+    private func beginGracefulClose() -> Task<Void, Never>? {
+        live = false
+        framesCont?.finish()
+        framesCont = nil
+        resumeAck(.failure(ChannelError.closedBeforeFrameAck))
+        let pending = runner
+        runner = nil
+        return pending
     }
 
     // MARK: - internals
@@ -203,9 +234,17 @@ public actor GramUploadChannel {
                             }
                         }
                     } catch {
-                        // stdout closed/errored: the channel is done; the writer
-                        // loop below unwinds when its stream finishes.
+                        // stdout closed/errored.
                     }
+                    // The reader is the ONLY observer of the remote side, so it must
+                    // tear the actor down itself. Nothing else can: the writer loop
+                    // below is parked on `frameStream`, which only `markDead`/`close`
+                    // finish, and the caller's `defer`-close cannot run while it is
+                    // suspended in `sendChunk` awaiting an ack. Without this, a daemon
+                    // that closes the channel with an ack outstanding deadlocks the
+                    // upload permanently — the composer stays `sending` and
+                    // undismissable until the app is force-quit.
+                    await self?.markDead()
                 }
                 defer { reader.cancel() }
                 for await buffer in frameStream {

@@ -586,6 +586,66 @@ final class MockWireFixtureTests: XCTestCase {
                 GramUploadChannel.ChannelError.remoteError(APIError(code: code, message: "no")))
             XCTAssertEqual((fatal as? APIError)?.code, code, "\(code) must not fall back")
         }
+
+        // `server_unavailable` is the open handshake timing out on the daemon's
+        // single-threaded app loop, or a shutdown. The daemon read no frame, so the
+        // fallback must complete the send rather than aborting the whole batch.
+        XCTAssertNil(
+            HerdrClient.fatalStreamOpenError(
+                GramUploadChannel.ChannelError.remoteError(
+                    APIError(
+                        code: "server_unavailable",
+                        message: "timed out waiting for app response after 5000 ms"))),
+            "an app-dispatch timeout must fall back, not fail the send")
+    }
+
+    /// A file that SHRANK between the stat and the read must still finish at 100%.
+    /// The stat is the only size the uploader has up front, so a bar driven by it
+    /// would stop short — and if the last chunk lands exactly on `reportStep`, the
+    /// throttle's own bookkeeping would emit no terminal report at all.
+    func testGramUploadFromDiskProgressEndsAtTheBytesActuallyRead() async throws {
+        final class Shrinker: HerdrTransport, @unchecked Sendable {
+            let url: URL
+            let keep: Int
+            private var truncated = false
+            init(url: URL, keep: Int) {
+                self.url = url
+                self.keep = keep
+            }
+            func roundTrip(_ requestLine: String) async throws -> String {
+                if !truncated {
+                    truncated = true
+                    // Shrink the file after its first chunk has been read, which is
+                    // exactly the window the stat cannot see.
+                    let handle = try FileHandle(forWritingTo: url)
+                    try handle.truncate(atOffset: UInt64(keep))
+                    try handle.close()
+                }
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let chunkBytes = HerdrClient.gramUploadChunkBytes
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-shrink-\(UUID().uuidString).bin")
+        try Data(repeating: 4, count: chunkBytes * 4).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reports = Reports()
+        _ = try await HerdrClient(transport: Shrinker(url: url, keep: chunkBytes * 2))
+            .gramUploadFile(fileURL: url) { sent, total in
+                reports.append(sent: sent, total: total)
+            }
+
+        let observed = reports.snapshot()
+        let last = try XCTUnwrap(observed.last)
+        XCTAssertEqual(
+            last.sent, last.total,
+            "the final report must land on 100%, got \(last.sent)/\(last.total)")
+        XCTAssertLessThan(last.sent, chunkBytes * 4, "the file shrank, so fewer bytes were read")
+        XCTAssertEqual(observed.map(\.sent), observed.map(\.sent).sorted(), "progress must be monotonic")
     }
 }
 
