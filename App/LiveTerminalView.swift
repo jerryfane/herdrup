@@ -331,6 +331,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Consecutive failures for the CURRENT target, so the drain's self-retry
         /// backs off and is capped; reset whenever a new target is requested.
         private var resizeRetries = 0
+        /// How long a resize target must stand still before it is sent to the daemon.
+        ///
+        /// Long enough to swallow an animated or dragged width sweep (one `sizeChanged`
+        /// per frame), short enough that a deliberate single resize still feels
+        /// immediate — and short enough not to hold up teardown, which awaits this task.
+        static let resizeSettleNanoseconds: UInt64 = 140_000_000
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
@@ -1534,6 +1540,17 @@ struct LiveTerminalView: UIViewRepresentable {
             guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
             let cell = cellPixels()
             resizeTask = Task { @MainActor [weak self] in
+                // SETTLE FIRST. A layout change that sweeps through widths — a sidebar
+                // collapse or divider drag, a keyboard raise, a rotation — fires
+                // `sizeChanged` per frame, and without this each distinct width bought
+                // its own `set_pty_size` round-trip while the emulator reflowed to
+                // match. The loop below always re-reads `desired`, so one sleep turns a
+                // burst into a single resize at the width the layout ended on.
+                //
+                // A cancelled sleep is not a reason to send: the `while` re-checks
+                // `Task.isCancelled` immediately after, so teardown still exits without
+                // issuing a `lock:true`.
+                try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
                 // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
                 // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
                 // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then

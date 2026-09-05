@@ -1504,6 +1504,15 @@ struct TerminalHomeView: View {
     /// only until relaunch, which is wrong for a preference set deliberately to give
     /// the terminal full width.
     @AppStorage("ui.sidebarMinimized") private var sidebarMinimized = false
+    /// The sidebar's width, remembered across launches.
+    ///
+    /// `navigationSplitViewColumnWidth` takes an `ideal` but reports nothing back, and
+    /// there is no SwiftUI hook for "the user dragged the divider" — so the column
+    /// measures itself (see `iPadLayout`) and the settled value is stored here.
+    @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 320
+    /// The bounds the modifier enforces. Kept as one constant so the stored width, the
+    /// clamp and the modifier cannot drift apart.
+    private static let sidebarWidthRange: ClosedRange<CGFloat> = 250...460
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -1777,12 +1786,28 @@ struct TerminalHomeView: View {
                     }
                 }
             }
-            .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 460)
+            // Remembered width. SwiftUI exposes no way to READ a divider drag, so the
+            // column measures itself and feeds the settled value back as `ideal` on the
+            // next launch. Clamped to the same min/max the modifier enforces, so a
+            // stored value can never put the sidebar outside its own bounds.
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in
+                        recordSidebarWidth(width)
+                    }
+                }
+            }
+            .navigationSplitViewColumnWidth(
+                min: Self.sidebarWidthRange.lowerBound,
+                ideal: sidebarWidth,
+                max: Self.sidebarWidthRange.upperBound)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
             HStack(spacing: 0) {
                 // The minimised sidebar, beside the detail content rather than over it.
-                if sidebarMinimized { sidebarRail.transition(.move(edge: .leading)) }
+                // No transition: a sliding rail animates the detail column's width, and
+                // every intermediate width reflows the live terminal (see `toggleSidebar`).
+                if sidebarMinimized { sidebarRail }
                 detailColumn
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -2030,8 +2055,28 @@ struct TerminalHomeView: View {
         .help(hint)
     }
 
+    /// Records a measured sidebar width, ignoring anything that is not a real resize.
+    ///
+    /// Filters three cases that would corrupt the stored value: a minimised sidebar
+    /// (the column collapses toward zero), a width outside the modifier's own bounds
+    /// (transient layout passes report those), and sub-point jitter, which would
+    /// otherwise write to `AppStorage` on every layout.
+    private func recordSidebarWidth(_ width: CGFloat) {
+        guard !sidebarMinimized else { return }
+        guard Self.sidebarWidthRange.contains(width) else { return }
+        guard abs(width - CGFloat(sidebarWidth)) >= 1 else { return }
+        sidebarWidth = Double(width)
+    }
+
+    /// Toggles the sidebar WITHOUT animating it.
+    ///
+    /// An animated width change is not cosmetic here: the detail column holds a live
+    /// terminal, and every intermediate width makes SwiftTerm reflow the grid and fire
+    /// `sizeChanged` -> `sendPTYSize`, so one animated collapse costs dozens of
+    /// reflows and a `set_pty_size` round-trip for each distinct width. That is the
+    /// visible re-scrolling/re-wrapping churn. One step = one reflow.
     private func toggleSidebar() {
-        withAnimation { sidebarMinimized.toggle() }
+        sidebarMinimized.toggle()
     }
 
     /// The minimised sidebar: a 64pt icon rail that keeps the section badges and the
@@ -2078,7 +2123,7 @@ struct TerminalHomeView: View {
     ) -> some View {
         Button {
             selectedTab = tab
-            withAnimation { sidebarMinimized = false }
+            sidebarMinimized = false     // unanimated: see `toggleSidebar`
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 16, weight: .medium))
