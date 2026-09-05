@@ -193,21 +193,67 @@ public actor GramUploadChannel {
     ///
     /// `nonisolated` on purpose: awaiting the runner must NOT hold this actor, or the
     /// runner's own calls back into it (`handleLine`, `markDead`) could never land.
-    /// The runner is not cancelled here — the stream finishing is what unwinds
-    /// `withExec` gracefully, and cancelling could cut the SSH close short.
+    ///
+    /// BOUNDED, and the shape of that bound matters. The runner finishes only once
+    /// NIOSSH succeeds its close promise, which it does only when the PEER's
+    /// CHANNEL_CLOSE arrives — there is no timer on that path, and cancelling a Task
+    /// does NOT interrupt an await on a NIO promise. So the deadline must not be a
+    /// task group: `group.cancelAll()` cannot make a child awaiting `runner.value`
+    /// return, and the group's scope waits for every child, which would leave this
+    /// exactly as unbounded as a bare `await runner.value`. Instead both observers
+    /// are UNSTRUCTURED and signal a one-shot gate, so this returns on the deadline
+    /// whatever the runner is doing. A half-open TCP (cell handoff, Wi-Fi drop, NAT
+    /// rebind) would otherwise park here for the kernel's whole retransmit budget and
+    /// wedge the composer exactly as the deadlocking reader used to. Waiting longer
+    /// buys nothing anyway: the daemon frees its claim when the socket dies.
     public nonisolated func closeAndWait() async {
-        let runner = await beginGracefulClose()
-        await runner?.value
+        guard let runner = await beginGracefulClose() else { return }
+        let gate = CloseGate()
+        Task {
+            await runner.value
+            await gate.signal()
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: Self.closeGraceNanoseconds)
+            runner.cancel()
+            await gate.signal()
+        }
+        await gate.wait()
     }
 
+    /// One-shot rendezvous: whichever of the two observers finishes first releases
+    /// the waiter, and the other's later signal is dropped.
+    private actor CloseGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var signalled = false
+
+        func wait() async {
+            if signalled { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func signal() {
+            guard !signalled else { return }
+            signalled = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    /// How long a close may wait for the SSH session to go away before the runner is
+    /// cancelled. Generous for a live link (the frames are already acked, so this is
+    /// just channel teardown) and short enough that a dead link cannot hold the UI.
+    private static let closeGraceNanoseconds: UInt64 = 5 * 1_000_000_000
+
+    /// Finishes the frame stream and hands back the runner to await. The runner is
+    /// deliberately NOT nilled: `close()` must keep something to cancel, since
+    /// `Task<Void, Never>.value` ignores the awaiting task's own cancellation.
     private func beginGracefulClose() -> Task<Void, Never>? {
         live = false
         framesCont?.finish()
         framesCont = nil
         resumeAck(.failure(ChannelError.closedBeforeFrameAck))
-        let pending = runner
-        runner = nil
-        return pending
+        return runner
     }
 
     // MARK: - internals

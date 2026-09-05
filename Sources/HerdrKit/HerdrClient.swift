@@ -599,6 +599,12 @@ public actor HerdrClient {
         return uploadID
     }
 
+    /// A fresh `upload_id`. The daemon keys its staging file and its single-writer
+    /// claim on this, and validates it as one safe path component.
+    static func mintUploadID() -> String {
+        "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    }
+
     /// Uploads a file's bytes FROM DISK and returns the `upload_id` to attach to a
     /// `gramPost`.
     ///
@@ -614,7 +620,7 @@ public actor HerdrClient {
         fileURL: URL,
         onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
     ) async throws -> String {
-        let uploadID = "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var uploadID = Self.mintUploadID()
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         let total = (attributes[.size] as? NSNumber)?.intValue ?? 0
 
@@ -640,6 +646,14 @@ public actor HerdrClient {
                 // writer on the same upload_id.
                 await channel.close()
                 if let fatal = Self.fatalStreamOpenError(error) { throw fatal }
+                // Fall back under an id the daemon has NEVER seen. It takes its
+                // single-writer claim at OPEN — before it asks the app anything — and
+                // refuses a per-chunk write while that claim is held, so reusing this
+                // id can lose a race with the claim's release and fail the send with
+                // `upload_in_progress` for a reason unrelated to the file. Nothing
+                // outside this function keys on the id: the caller passes whatever is
+                // returned straight to `gramPost(attachment:)`.
+                uploadID = Self.mintUploadID()
             }
         }
         defer { if let channel { Task { await channel.close() } } }
