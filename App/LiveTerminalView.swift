@@ -331,6 +331,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Consecutive failures for the CURRENT target, so the drain's self-retry
         /// backs off and is capped; reset whenever a new target is requested.
         private var resizeRetries = 0
+        /// How long a resize target must stand still before it is sent to the daemon.
+        ///
+        /// Long enough to swallow an animated or dragged width sweep (one `sizeChanged`
+        /// per frame), short enough that a deliberate single resize still feels
+        /// immediate — and short enough not to hold up teardown, which awaits this task.
+        static let resizeSettleNanoseconds: UInt64 = 140_000_000
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
@@ -1538,8 +1544,38 @@ struct LiveTerminalView: UIViewRepresentable {
                 // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
                 // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then
                 // proceeds to `lock:false`.
-                while let self, !Task.isCancelled, self.foreground,
+                while let self, !Task.isCancelled, !self.stopped, self.foreground,
                       self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
+                    // SETTLE EACH ITERATION, not once per drain, and compare the target
+                    // ACROSS the sleep. A layout change that sweeps through widths — the
+                    // split view's own column animation (~0.3s, which it runs whether or
+                    // not WE animate), a divider drag, a keyboard raise, a rotation —
+                    // fires `sizeChanged` per frame.
+                    //
+                    // Sleeping alone would only rate-limit: the post-sleep check compares
+                    // the target against the last COMMITTED size, so a width still moving
+                    // every frame would be transmitted just as readily as a stationary
+                    // one, and a 0.3s animation would still ship one or two intermediate
+                    // widths. Recording the target BEFORE the sleep and requiring it to
+                    // be unchanged after is what makes "we only transmit a width that has
+                    // stood still" true rather than approximate. A moving target loops
+                    // instead of sending, so a long drag transmits once, on release.
+                    let before = (self.desiredCols, self.desiredRows)
+                    try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
+                    // Re-check everything the `while` checked: the sleep is a window in
+                    // which teardown can begin (`stopped`), the pane can be hidden, or
+                    // the target can reach `lastSent` some other way. A cancelled sleep
+                    // throws and is swallowed, so this guard — not the sleep — is what
+                    // stops a `lock:true` escaping after `stop()`.
+                    guard !Task.isCancelled, !self.stopped, self.foreground,
+                          self.desiredCols != self.lastSentCols
+                              || self.desiredRows != self.lastSentRows
+                    else { break }
+                    // Still moving: wait for it to stop rather than spending a
+                    // round-trip (and an agent-visible reflow) on a width in transit.
+                    // Convergence is unaffected — the `while` condition still holds, so
+                    // the next iteration re-settles against the newer target.
+                    guard before == (self.desiredCols, self.desiredRows) else { continue }
                     let c = self.desiredCols        // always drive toward the LATEST target
                     let r = self.desiredRows
                     do {

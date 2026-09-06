@@ -1493,6 +1493,46 @@ struct TerminalHomeView: View {
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
+    ///
+    /// There is deliberately no fully-hidden state. Hiding the column outright loses
+    /// the section badges and the activity counts and leaves nothing to click, so the
+    /// only way back was ⌘K on a hardware keyboard; the rail keeps a compact signal
+    /// and a one-click way back, which makes a third state pure surface area.
+    ///
+    /// Persisted because `columnVisibility` is `@State`: on its own the choice lasts
+    /// only until relaunch, which is wrong for a preference set deliberately to give
+    /// the terminal full width.
+    @AppStorage("ui.sidebarMinimized") private var sidebarMinimized = false
+    /// The sidebar's width, remembered across launches.
+    ///
+    /// `navigationSplitViewColumnWidth` takes an `ideal` but reports nothing back, and
+    /// there is no SwiftUI hook for "the user dragged the divider" — so the column
+    /// measures itself (see `iPadLayout`) and the settled value is stored here.
+    @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 320
+    /// The column's last MEASURED width, pre-persistence. Debounced into `sidebarWidth`
+    /// so a transient layout value cannot become the stored preference (it would also
+    /// become the new `ideal`, which is what makes a bad sample stick).
+    @State private var measuredSidebarWidth: CGFloat = 0
+    /// When `measuredSidebarWidth` last changed. The pre-collapse commit in
+    /// `toggleSidebar` bypasses the debounce, so it needs its own way to tell a width
+    /// the owner settled on from one the split view is sweeping through.
+    @State private var measuredSidebarWidthAt = Date.distantPast
+    /// How still a measurement must be for the PRE-COLLAPSE commit to trust it.
+    ///
+    /// During the split view's own column animation a new sample arrives roughly every
+    /// frame (~16ms); after a divider drag the owner still has to reach the toggle,
+    /// which takes far longer. 50ms separates those two cases cleanly, and unlike
+    /// `sidebarWidthSettle` this is not a wait — it is a freshness test on a value
+    /// that already exists.
+    private static let sidebarWidthStillFor: TimeInterval = 0.05
+    /// How long a measured width must hold still before it is persisted. Comfortably
+    /// longer than the split view's own column animation, so a minimise/expand sweep
+    /// commits once, at the width it ended on.
+    private static let sidebarWidthSettle: UInt64 = 500_000_000
+    /// The bounds the modifier enforces. Kept as one constant so the stored width, the
+    /// clamp and the modifier cannot drift apart.
+    private static let sidebarWidthRange: ClosedRange<CGFloat> = 250...460
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -1766,10 +1806,81 @@ struct TerminalHomeView: View {
                     }
                 }
             }
-            .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 460)
+            // Remembered width. SwiftUI exposes no way to READ a divider drag, so the
+            // column measures itself and feeds the settled value back as `ideal` on the
+            // next launch. Clamped to the same min/max the modifier enforces, so a
+            // stored value can never put the sidebar outside its own bounds.
+            //
+            // DEBOUNCED, because the stored value also drives `ideal` below and that
+            // makes an intermediate measurement SELF-FULFILLING: persist 250 mid-sweep
+            // and `ideal` retargets to 250, so the column settles at a width the owner
+            // never chose and every later launch opens there. The measurement lands in
+            // `@State` immediately (cheap, no persistence) and only reaches `AppStorage`
+            // once it has stopped moving for `sidebarWidthSettle`.
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in
+                        measuredSidebarWidth = width
+                        measuredSidebarWidthAt = Date()
+                    }
+                }
+            }
+            // `task(id:)` IS the debounce: a new measurement cancels the pending commit
+            // and restarts the wait, so only a width that survives the interval is kept.
+            .task(id: measuredSidebarWidth) {
+                try? await Task.sleep(nanoseconds: Self.sidebarWidthSettle)
+                guard !Task.isCancelled else { return }
+                recordSidebarWidth(measuredSidebarWidth)
+            }
+            .navigationSplitViewColumnWidth(
+                min: Self.sidebarWidthRange.lowerBound,
+                ideal: sidebarWidth,
+                max: Self.sidebarWidthRange.upperBound)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
-            ZStack {
+            HStack(spacing: 0) {
+                // Keyed on `columnVisibility`, the LAYOUT TRUTH, not on the persisted
+                // preference: iPadOS collapses this column on its own (rotation, Stage
+                // Manager, any transition it cannot honour at `.balanced`), and when it
+                // does, the rail must still appear or there is no way back at all.
+                //
+                // No transition: a sliding rail animates the detail column's width, and
+                // every intermediate width reflows the live terminal (see `toggleSidebar`).
+                if columnVisibility == .detailOnly { sidebarRail }
+                detailColumn
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .navigationSplitViewStyle(.balanced)
+        // The split's own sidebar carries the FULL list; minimising hides that column and
+        // hands its job to the rail.
+        //
+        // ONE-WAY on purpose. The preference -> layout edge restores the owner's choice at
+        // launch. The reverse edge (layout -> preference) is deliberately absent: this
+        // binding is written by iPadOS itself, and a handler cannot tell an owner gesture
+        // from a system layout decision. Persisting the latter meant one system collapse
+        // (a rotation, a Stage Manager resize) silently rewrote a durable preference, and
+        // since only an explicit expand clears it, the app would then open on the rail
+        // forever with no record that the owner ever asked for it. `sidebarMinimized` is
+        // now written ONLY by `toggleSidebar` and `railSectionButton` - real gestures.
+        .onChange(of: sidebarMinimized, initial: true) { _, minimized in
+            columnVisibility = minimized ? .detailOnly : .all
+        }
+        .tint(Palette.brand)
+        // Hardware-keyboard shortcuts (iPad): ⌘K minimises/expands the sidebar, ⌘/ opens the
+        // shortcut reference. Hidden zero-size buttons carry the key bindings.
+        .background { keyboardShortcuts }
+        .sheet(isPresented: $showShortcuts) {
+            ShortcutsSheet(onClose: { showShortcuts = false })
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+        )
+    }
+
+    /// The detail column's content, factored out so the rail can sit beside it.
+    private var detailColumn: some View {
+        ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
                 // Base layer: the switch renders Gram / Settings / Call and the agents
                 // placeholder. The terminal container is deliberately NOT in here — it is the
@@ -1811,28 +1922,13 @@ struct TerminalHomeView: View {
                     onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                     .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
                     .allowsHitTesting(selectedTab == .agents && frontID != nil)
-            }
-            .toolbar(.hidden, for: .navigationBar)
         }
-        .navigationSplitViewStyle(.balanced)
-        .tint(Palette.brand)
-        // Hardware-keyboard shortcuts (iPad): ⌘K collapses/shows the sidebar, ⌘/ opens the
-        // shortcut reference. Hidden zero-size buttons carry the key bindings.
-        .background { keyboardShortcuts }
-        .sheet(isPresented: $showShortcuts) {
-            ShortcutsSheet(onClose: { showShortcuts = false })
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
-        }
-        )
     }
 
     /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
     private var keyboardShortcuts: some View {
         ZStack {
-            Button("Toggle sidebar") {
-                withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
-            }
+            Button("Toggle sidebar") { toggleSidebar() }
             .keyboardShortcut("k", modifiers: .command)
             Button("Shortcuts") { showShortcuts = true }
                 .keyboardShortcut("/", modifiers: .command)
@@ -1977,12 +2073,189 @@ struct TerminalHomeView: View {
             sectionButton(.gram, "Gram", "bubble.left.and.bubble.right", badge: gramUnread.count)
             sectionButton(.call, "Call", "phone")
             sectionButton(.settings, "Settings", "gearshape")
+            sidebarToggleButton(
+                icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
         }
         .padding(5)
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
     }
 
+    /// The minimise / restore control. ⌘K was the only trigger before, bound to a
+    /// zero-opacity button, and the navigation bar is hidden in both columns — so on
+    /// an iPad without a hardware keyboard, or on the Mac build where a click is the
+    /// expected gesture, there was nothing to hit.
+    private func sidebarToggleButton(icon: String, hint: String, minimize: Bool) -> some View {
+        Button { toggleSidebar() } label: {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.textFaint)
+                .frame(width: 34, height: 34)
+                .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(minimize ? "Minimise sidebar" : "Expand sidebar")
+        .help(hint)
+    }
+
+    /// Records a measured sidebar width, ignoring anything that is not a real resize.
+    ///
+    /// Filters three cases that would corrupt the stored value: a column that is not
+    /// actually open (it collapses toward zero), a width outside the modifier's own
+    /// bounds (transient layout passes report those), and sub-point jitter, which would
+    /// otherwise write to `AppStorage` on every layout.
+    ///
+    /// The first guard reads `columnVisibility`, the LAYOUT, not the persisted
+    /// preference: after a layout-initiated collapse the preference still says
+    /// "expanded", so guarding on it would admit the collapse sweep's own widths.
+    private func recordSidebarWidth(_ width: CGFloat) {
+        guard columnVisibility != .detailOnly else { return }
+        guard Self.sidebarWidthRange.contains(width) else { return }
+        guard abs(width - CGFloat(sidebarWidth)) >= 1 else { return }
+        sidebarWidth = Double(width)
+    }
+
+    /// Minimises or expands the sidebar, WITHOUT animating it.
+    ///
+    /// An animated width change is not cosmetic here: the detail column holds a live
+    /// terminal, and every intermediate width makes SwiftTerm reflow the grid and fire
+    /// `sizeChanged` -> `sendPTYSize`, so one animated collapse costs dozens of
+    /// reflows and a `set_pty_size` round-trip for each distinct width. That is the
+    /// visible re-scrolling/re-wrapping churn. One step = one reflow.
+    ///
+    /// Intent is read from the LAYOUT and both variables are written directly. Deriving
+    /// it from the preference instead (`sidebarMinimized.toggle()`) desyncs the moment
+    /// iPadOS collapses the column itself: the flag still says "expanded", so a tap
+    /// meaning "expand" computed "minimise", the `onChange` re-applied the state the
+    /// layout was already in, and the control did nothing — while persisting
+    /// "minimised", which is the durable corruption removing the layout->preference
+    /// edge was meant to prevent. Setting `columnVisibility` here rather than relying
+    /// on the `onChange` is required: when the flag already equals the new value, that
+    /// handler does not fire at all.
+    private func toggleSidebar() {
+        let minimize = columnVisibility != .detailOnly
+        // Commit any pending measurement before collapsing: the debounce is 500ms, and
+        // a drag followed straight away by a minimise would otherwise lose the width
+        // the owner just chose. Runs while the column is still open, so the layout
+        // guard in `recordSidebarWidth` passes.
+        //
+        // Only a STILL measurement, though. This path bypasses the debounce, and the
+        // split view sweeps intermediate widths through `measuredSidebarWidth` during
+        // its own ~0.3s column animation — so minimising again inside that window (⌘K
+        // key repeat, an impatient double-tap) would otherwise persist a width the
+        // owner never chose, and because the stored value feeds `ideal` the column
+        // would then open there on every later launch. That is exactly the
+        // self-fulfilling corruption the debounce exists to prevent, and bypassing it
+        // must not reopen the hole.
+        if minimize,
+           Date().timeIntervalSince(measuredSidebarWidthAt) >= Self.sidebarWidthStillFor {
+            recordSidebarWidth(measuredSidebarWidth)
+        }
+        sidebarMinimized = minimize
+        columnVisibility = minimize ? .detailOnly : .all
+    }
+
+    /// The minimised sidebar: a 64pt icon rail that keeps the section badges and the
+    /// activity counts visible and is one click from expanding.
+    ///
+    /// It lives in the DETAIL column rather than as a narrow sidebar column on
+    /// purpose. `NavigationSplitView` enforces its own minimum sidebar width on iPad,
+    /// so a 64pt column is not reliably honoured, and a control whose width the
+    /// platform may override is not something to ship untested on a device. Rendering
+    /// the rail ourselves is exact on both platforms.
+    private var sidebarRail: some View {
+        let activity = fullList.activityContent
+        return VStack(spacing: 6) {
+            sidebarToggleButton(
+                icon: "sidebar.left", hint: "Expand sidebar (⌘K)", minimize: false)
+                .padding(.bottom, 2)
+            railSectionButton(.agents, "Agents", "square.grid.2x2.fill")
+            railSectionButton(.gram, "Gram", "bubble.left.and.bubble.right",
+                              badge: gramUnread.count)
+            railSectionButton(.call, "Call", "phone")
+            railSectionButton(.settings, "Settings", "gearshape")
+            // Gated on the same condition as the counts below it: a separator with
+            // nothing on its far side is precisely the zero-value noise those counts
+            // are suppressed to avoid, and the quiet state is the COMMON rendering.
+            if fullList.needsYouCount > 0 || activity.workingCount > 0 {
+                Divider().overlay(Palette.hairlineQuiet)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+            }
+            // The counts are the reason to minimise rather than hide. `needsYou` is the
+            // ROSTER's STRICT count (`AgentList.needsYouCount`), deliberately NOT
+            // `activityContent.needsYouCount`: that one folds `.unrecognised` rows into
+            // the total for the section-less Live Activity, so it would print a BIGGER
+            // number than the expanded header this rail stands in for
+            // (`headerSubtitle` -> `needsYouSummary` -> the strict count). One
+            // unrecognised agent and the two surfaces disagree one click apart.
+            //
+            // The same fold is why the wording spec hedges unrecognised agents as
+            // "N may need you": they are unconfirmed, not facts. A bare number cannot
+            // carry that hedge, so the rail shows only what IS confirmed and leaves the
+            // maybes to the header, which has room to say so.
+            railCount(fullList.needsYouCount, tone: Palette.waiting, label: "need you")
+            railCount(activity.workingCount, tone: Palette.working, label: "working")
+            Spacer()
+        }
+        .frame(width: 64)
+        .padding(.top, 12)
+        .background(Palette.ground)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Palette.hairlineQuiet).frame(width: 0.5).ignoresSafeArea()
+        }
+    }
+
+    /// A rail section icon. Tapping selects the section AND expands, which is the
+    /// predictable reading of a click on a minimised menu; the chevron above expands
+    /// without changing section.
+    private func railSectionButton(
+        _ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0
+    ) -> some View {
+        Button {
+            selectedTab = tab
+            // Both variables, for the same reason `toggleSidebar` writes both: the rail
+            // is only on screen when the LAYOUT is collapsed, which the preference may
+            // not reflect, and `onChange` does not fire when the flag is already false.
+            sidebarMinimized = false
+            columnVisibility = .all      // unanimated: see `toggleSidebar`
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .medium))
+                .overlay(alignment: .topTrailing) {
+                    if badge > 0 {
+                        Circle().fill(Palette.waiting).frame(width: 7, height: 7).offset(x: 6, y: -2)
+                    }
+                }
+                .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textFaint)
+                .frame(width: 40, height: 36)
+                .background(selectedTab == tab ? Palette.surfaceRaised : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(label)
+    }
+
+    /// One activity count. Rendered only when non-zero: a rail of zeroes is noise, and
+    /// "nothing needs you" is already the expanded header's job.
+    @ViewBuilder
+    private func railCount(_ count: Int, tone: Color, label: String) -> some View {
+        if count > 0 {
+            VStack(spacing: 2) {
+                Circle().fill(tone).frame(width: 6, height: 6)
+                Text("\(count)")
+                    .font(Typography.machine(13, .semibold))
+                    .foregroundStyle(Palette.text)
+            }
+            .frame(width: 40)
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(count) \(label)")
+        }
+    }
+
+    /// The sidebar's own section button (expanded state), unchanged.
     private func sectionButton(_ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0) -> some View {
         Button { selectedTab = tab } label: {
             VStack(spacing: 3) {
