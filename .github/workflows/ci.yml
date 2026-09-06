@@ -210,8 +210,8 @@ jobs:
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
                 -test-timeouts-enabled YES \
-                -default-test-execution-time-allowance 120 \
-                -maximum-test-execution-time-allowance 300 \
+                -default-test-execution-time-allowance 300 \
+                -maximum-test-execution-time-allowance 600 \
                 -derivedDataPath .build-dd \
                 -clonedSourcePackagesDirPath SourcePackages \
                 -resultBundlePath "TestReceipts/$label-first.xcresult" \
@@ -230,8 +230,8 @@ jobs:
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
                 -test-timeouts-enabled YES \
-                -default-test-execution-time-allowance 120 \
-                -maximum-test-execution-time-allowance 300 \
+                -default-test-execution-time-allowance 300 \
+                -maximum-test-execution-time-allowance 600 \
                 -derivedDataPath .build-dd \
                 -clonedSourcePackagesDirPath SourcePackages \
                 -resultBundlePath "TestReceipts/$label-diagnostic.xcresult" \

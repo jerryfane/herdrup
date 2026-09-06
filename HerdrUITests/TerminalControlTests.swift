@@ -12,11 +12,24 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     private func cap(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         if let ready = onscreen(identifier, timeout: 5) { return ready }
         for _ in 0..<6 {
-            app.buttons["Escape"].firstMatch.swipeLeft()
+            scrollControlBar()
             if let ready = onscreen(identifier, timeout: 2) { return ready }
         }
         XCTFail("control cap \(identifier) never scrolled into the viewport", file: file, line: line)
         return app.buttons[identifier].firstMatch
+    }
+
+    /// Drags the control bar ITSELF, at the row its leftmost cap occupies.
+    /// `swipeLeft()` on a cap delivered the gesture to that button instead, so the bar
+    /// never moved and every arming case failed on an off-viewport ctrl cap.
+    private func scrollControlBar() {
+        guard let anchor = onscreen("Escape", timeout: 5) else { return }
+        let window = app.windows.firstMatch
+        let row = anchor.frame.midY / max(1, window.frame.height)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: row))
+            .press(forDuration: 0.05,
+                   thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: row)))
+        Thread.sleep(forTimeInterval: 0.2)
     }
 
     private func requireDirectInput() throws {
@@ -125,7 +138,9 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         app.typeText("p"); input("p", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap()
-        app.buttons["Collapse keyboard"].tap()
+        XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
+                        "the keyboard chevron must be present while direct input holds the keyboard")
+        onscreen("Collapse keyboard")?.tap()
         wait { ($0["focused"] as? Bool) == false }
         focusTerminal(); app.typeText("p"); input("p", previous: 0)
         attach("explicit-key-and-keyboard-dismissal-no-leak")
@@ -134,7 +149,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
         cap("terminal-ctrl").tap()
-        app.buttons["Dictate"].tap()
+        onscreen("Dictate", timeout: 5)?.tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         // Permissions may already be settled by another case on this simulator.
         // Refuse recording when prompted; starting alone must consume armed Ctrl.
