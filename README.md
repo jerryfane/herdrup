@@ -18,6 +18,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   *stopped*. Colour is meaning, not decoration — the one signal that matters reads instantly.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
+  Resizing preserves the logical history position; live followers stay at the tail. The on-screen
+  Ctrl key arms one native terminal chord in direct input, or a control character in the reply field.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
 
@@ -54,11 +56,22 @@ xcodebuild -scheme Herdr -destination 'generic/platform=iOS Simulator' build
 # The protocol layer, HerdrKit — builds and tests on Linux and macOS
 swift build
 swift test          # live tests run when a herdr socket + sshd are present; skip otherwise
+
+# The vendored terminal core — also Linux-buildable
+swift test --package-path Vendor/SwiftTerm
 ```
 
 `HerdrKit` contains no UIKit or SwiftUI, so it stays Linux-buildable and can be exercised against a real
 herdr server; the iOS app consumes it unchanged. Floors: macOS 14+, iOS 17+ (declared in `Package.swift`
 — macOS 14 because Citadel requires it).
+
+SwiftTerm is vendored at [`Vendor/SwiftTerm`](Vendor/SwiftTerm), based on upstream v1.15.0,
+commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain a logical viewport cell
+through reflow, keep terminal modes during geometry/font commits, and expose managed-size and
+completed-paint hooks. The app commits geometry only from ordered stream frames; a short retained
+frame covers resize transitions without stretching text or restarting the stream. For unmarked output,
+reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
+CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
 
 ## Architecture
 

@@ -20,6 +20,13 @@ private final class ResumeGate: @unchecked Sendable {
     }
 }
 
+private struct TerminalGeometryTarget: Equatable {
+    let cols: Int
+    let rows: Int
+    let cellWidthPx: UInt32
+    let cellHeightPx: UInt32
+}
+
 /// A live SwiftTerm terminal for a herdr pane (#40). It consumes
 /// `client.streamTerminal(pane:)` — herdr's raw PTY byte firehose — and feeds the
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
@@ -99,16 +106,22 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Shared with the host so it can ask whether this pane's stream is alive before
     /// deciding to remount on foreground. Written by the Coordinator, read by the host.
     var liveness: StreamLiveness? = nil
+    /// The host's one-shot Ctrl toggle, shared so a Ctrl tap applies to whichever
+    /// input path is active: the reply field (`handleReplyChange`) or, now, direct
+    /// typing into the terminal, where SwiftTerm's own `controlModifier` does the
+    /// encoding and reports back when it was consumed.
+    @Binding var controlArmed: Bool
     /// The host's own copy of the stuck-stream threshold, so it judges staleness by the
     /// same rule the watchdog reconnects on rather than a second, drifting number.
     static var streamStuckTimeout: TimeInterval { Coordinator.streamStuckTimeout }
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
-    func makeUIView(context: Context) -> ReadOnlyTerminalView {
+    func makeUIView(context: Context) -> TerminalSurfaceView {
         context.coordinator.paneFontSize =
             min(max(fontSize, Coordinator.minFontSize), Coordinator.maxFontSize)
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
+        let surface = TerminalSurfaceView(terminal: view)
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
@@ -120,14 +133,20 @@ struct LiveTerminalView: UIViewRepresentable {
         // host's `@State` survives, so defaulting them replays the last jump as a second
         // Ctrl+End and mis-dedupes the tail callback.
         context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail)
-        context.coordinator.attach(view)
-        return view
+        context.coordinator.attach(surface)
+        return surface
     }
 
-    func updateUIView(_ uiView: ReadOnlyTerminalView, context: Context) {
+    func updateUIView(_ uiView: TerminalSurfaceView, context: Context) {
+        let terminalView = uiView.terminal
         context.coordinator.onNavigate = onNavigate
         context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        // Live accessors, refreshed every pass: a captured Bool would be a snapshot of
+        // the state as it was when this body ran, which is exactly the race that makes
+        // an immediate keypress after a Ctrl tap miss the modifier.
+        context.coordinator.controlArmedGetter = { controlArmed }
+        context.coordinator.controlArmedSetter = { controlArmed = $0 }
         // A remount builds a fresh Coordinator while the host's box survives, so re-point
         // it every pass rather than only at mount.
         context.coordinator.liveness = liveness
@@ -136,6 +155,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
         context.coordinator.setForeground(isForeground)
+        context.coordinator.directFocusIntended = wantsTerminalKeyFocus
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         // Drive terminal responder ownership from SwiftUI intent.
         //
@@ -158,9 +178,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // Only a FOREGROUND pane mid-selection keeps its responder, which is what stops a
         // SwiftUI body pass from hiding the Copy menu.
         if wantsTerminalKeyFocus {
-            if !uiView.isFirstResponder { _ = uiView.becomeFirstResponder() }
+            if !terminalView.isFirstResponder { _ = terminalView.becomeFirstResponder() }
         } else {
-            if !isForeground { uiView.clearSelection() }
+            if !isForeground { terminalView.clearSelection() }
             // THE SELECTION GUARD MUST NOT OUTRANK AN EXPLICIT COLLAPSE, and it did.
             //
             // `!uiView.hasActiveSelection` exists so an incidental SwiftUI body pass cannot yank
@@ -197,10 +217,12 @@ struct LiveTerminalView: UIViewRepresentable {
             // Consumed HERE rather than beside `performJumpToTail`, so a pass that re-requests
             // focus cannot silently eat a collapse it was never going to act on.
             let deliberateCollapse = context.coordinator.consumeCollapse(ifTokenChanged: collapseToken)
-            if uiView.isFirstResponder, !isForeground || deliberateCollapse || !uiView.hasActiveSelection {
-                uiView.resignFirstResponder()
-                // A READING FROM THE ONE PATH NO GESTURE HANDLER COVERS. Every other probe publish
-                // sits in a tap handler; this resign happens during a SwiftUI update, so without
+            if terminalView.isFirstResponder, !isForeground || deliberateCollapse || !terminalView.hasActiveSelection {
+                terminalView.resignFirstResponder()
+                // Losing the keyboard is an explicit dismissal: an armed one-shot must not
+                // survive to modify whatever is typed next, in this pane or another.
+                context.coordinator.cancelArmedControl()
+                // A DEBUG-only probe so a UI test can observe WHICH branch resigned. Without
                 // this call `fr` would only ever be sampled at gesture time and the collapse would
                 // stay unobservable — which is precisely how the inert first mechanism escaped.
                 // Compiled out in Release and inert without the mock env var.
@@ -208,10 +230,100 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
         context.coordinator.applyFont(size: fontSize)
+        // After the focus decision above, so the native modifier matches the input path
+        // that is actually live.
+        context.coordinator.applyControlModifier()
     }
 
-    static func dismantleUIView(_ uiView: ReadOnlyTerminalView, coordinator: Coordinator) {
+    static func dismantleUIView(_ uiView: TerminalSurfaceView, coordinator: Coordinator) {
         coordinator.stop()
+    }
+
+    /// Holds the terminal and, during a resize, the retained frame that covers it.
+    ///
+    /// The terminal object, its first responder, its gestures, its delegate and its
+    /// stream are the SAME objects across every resize: only this container's bounds
+    /// change. The cover is a sibling view, so it can never be mistaken for terminal
+    /// content, and the capture happens HERE - before the terminal's frame is
+    /// assigned - because after that assignment the old rendering is already gone.
+    final class TerminalSurfaceView: UIView {
+        let terminal: ReadOnlyTerminalView
+        /// Where the retained frame is pinned while the geometry changes. A tail
+        /// follower reads the newest line at the bottom; a history reader reads from
+        /// the top. Nothing is ever scaled: text does not stretch.
+        enum CoverAnchor { case topLeft, bottomLeft }
+
+        /// Called immediately before the terminal's frame changes, so the owner can
+        /// retain the current frame. Returns nothing: covering is the owner's choice.
+        var onGeometryWillChange: (() -> Void)?
+
+        private var cover: UIView?
+        private var coverContent: UIView?
+        private var coverAnchor: CoverAnchor = .bottomLeft
+
+        var isCovered: Bool { cover != nil }
+
+        init(terminal: ReadOnlyTerminalView) {
+            self.terminal = terminal
+            super.init(frame: .zero)
+            clipsToBounds = true
+            backgroundColor = terminal.nativeBackgroundColor
+            addSubview(terminal)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            if terminal.frame != bounds {
+                onGeometryWillChange?()
+                terminal.frame = bounds
+            }
+            layoutCover()
+        }
+
+        /// Snapshot of the terminal exactly as it is on screen right now, or nil when
+        /// UIKit has nothing to hand back (no first paint yet).
+        func captureTerminalFrame() -> UIView? {
+            guard terminal.bounds.width > 0, terminal.bounds.height > 0 else { return nil }
+            return terminal.snapshotView(afterScreenUpdates: false)
+        }
+
+        func installCover(_ content: UIView, anchor: CoverAnchor) {
+            removeCover()
+            let container = UIView(frame: bounds)
+            container.clipsToBounds = true
+            container.backgroundColor = terminal.nativeBackgroundColor
+            container.isUserInteractionEnabled = false
+            container.isAccessibilityElement = false
+            container.accessibilityElementsHidden = true
+            content.isUserInteractionEnabled = false
+            container.addSubview(content)
+            addSubview(container)
+            cover = container
+            coverContent = content
+            coverAnchor = anchor
+            layoutCover()
+        }
+
+        func removeCover() {
+            cover?.removeFromSuperview()
+            cover = nil
+            coverContent = nil
+        }
+
+        private func layoutCover() {
+            guard let cover, let content = coverContent else { return }
+            cover.frame = bounds
+            let size = content.bounds.size
+            switch coverAnchor {
+            case .topLeft:
+                content.frame = CGRect(x: 0, y: 0, width: size.width, height: size.height)
+            case .bottomLeft:
+                content.frame = CGRect(x: 0, y: bounds.height - size.height,
+                                       width: size.width, height: size.height)
+            }
+        }
     }
 
     /// A `TerminalView` that accepts terminal input on iPhone and on iPad with a
@@ -259,6 +371,44 @@ struct LiveTerminalView: UIViewRepresentable {
             inputAccessoryView = nil
         }
 
+        // MARK: - one-shot Ctrl for direct typing
+
+        /// Called immediately before UIKit-inserted text reaches SwiftTerm's encoder,
+        /// with the text and whether the insertion is an IME composition commit. The
+        /// Coordinator decides whether the armed modifier applies to it.
+        var onWillInsertText: ((String, Bool) -> Void)?
+        /// Called when the user does something that is definitely not a Ctrl chord.
+        var onCancelControl: (() -> Void)?
+        var onUserInteraction: (() -> Void)?
+
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            if event?.type == .touches { onUserInteraction?() }
+            return super.hitTest(point, with: event)
+        }
+
+        /// Refreshing the native modifier HERE, not on a SwiftUI pass, is what makes
+        /// "tap Ctrl, immediately type p" work: SwiftUI may not have delivered the
+        /// binding change yet when the key arrives. Encoding itself stays SwiftTerm's
+        /// job (legacy control bytes or negotiated Kitty CSI-u), so the pane receives
+        /// exactly one properly encoded chord.
+        override func insertText(_ text: String) {
+            onWillInsertText?(text, markedTextRange != nil)
+            super.insertText(text)
+        }
+
+        /// A paste is not a chord: it must arrive verbatim, and it must not leave the
+        /// modifier armed for the next keystroke.
+        override func paste(_ sender: Any?) {
+            onCancelControl?()
+            super.paste(sender)
+        }
+
+        override func deleteBackward() {
+            onCancelControl?()
+            super.deleteBackward()
+        }
+
+
         /// EMULATOR REPLIES ARE NOT USER INPUT, and this pane is never the primary viewer
         /// of its PTY, so it must not answer the host.
         ///
@@ -303,40 +453,125 @@ struct LiveTerminalView: UIViewRepresentable {
         /// can resolve as federated AFTER the view first mounts.
         var isFederated = false
         private weak var view: ReadOnlyTerminalView?
+        /// The container that owns the terminal and the resize cover. Same object for
+        /// this coordinator's whole life; the terminal is never rebuilt for a resize.
+        private weak var surface: TerminalSurfaceView?
         private var streamTask: Task<Void, Never>?
         /// The single serialized resize drain, if running. Only ever ONE at a time —
         /// it awaits each set_pty_size before the next (so remote resizes can't
         /// complete out of order) and loops until `desired == lastSent`. Cancelled on
         /// teardown.
         private var resizeTask: Task<Void, Never>?
-        /// The grid we WANT the PTY at — the latest size `sendPTYSize` was asked for.
-        /// The drain drives `lastSent` toward this. Dedup is measured against THIS
-        /// (the target), never the last committed size, so a request matching the
-        /// committed size while a DIFFERENT resize is in flight is not wrongly dropped.
-        private var desiredCols = 0
-        private var desiredRows = 0
-        /// Last geometry the server CONFIRMED (committed only after a successful
-        /// set_pty_size). The drain stops once this equals `desired`.
-        private var lastSentCols = 0
-        private var lastSentRows = 0
+        /// The grid this view WANTS the PTY at, together with the cell metrics that
+        /// produced it, so a font change at an unchanged grid is still a new target.
+        /// The drain drives `confirmedTarget` toward this. Dedup is measured against
+        /// THIS, never the committed size, so a request matching the committed size
+        /// while a DIFFERENT resize is in flight is not wrongly dropped.
+        private var desiredTarget: TerminalGeometryTarget?
+        /// When `desiredTarget` last CHANGED. The drain waits for a real quiet window
+        /// measured from here (monotonic), instead of comparing two endpoint samples -
+        /// a sweep that returns to an earlier width is movement, not stillness.
+        private var desiredTargetChangedAt: ContinuousClock.Instant?
+        /// Bumped on every new target, so a response can be told apart from the one
+        /// belonging to a target the user has already superseded.
+        private var targetGeneration = 0
+        /// The target of the `set_pty_size` call currently in flight, if any.
+        private var inflightTarget: TerminalGeometryTarget?
+        /// Last target the server CONFIRMED (committed only after a successful
+        /// set_pty_size). The drain stops once this equals `desiredTarget`.
+        private var confirmedTarget: TerminalGeometryTarget?
         /// The EFFECTIVE winsize the daemon actually applied, from the `set_pty_size`
-        /// response (#137). Under the width-lease arbiter this can EXCEED what this view
-        /// requested — a wider co-viewer's lease wins — so it is recorded for truth but
-        /// deliberately NOT fed back into `lastSent`: driving the drain toward the
-        /// arbiter's width would re-send forever, fighting the arbiter. The view still
-        /// RENDERS the applied (wider) grid because SwiftTerm reflows to the server cols
-        /// carried on the `pane.stream` itself; this is the coordinator's copy of that truth.
-        private var appliedCols = 0
-        private var appliedRows = 0
+        /// response (#137), plus the target generation it answered. Under the
+        /// width-lease arbiter this can EXCEED what this view requested — a wider
+        /// co-viewer's lease wins — so it is recorded for truth but deliberately NOT
+        /// fed back into `confirmedTarget`: driving the drain toward the arbiter's
+        /// width would re-send forever, fighting the arbiter. The view still RENDERS
+        /// the applied (wider) grid because the authoritative cols/rows arrive on
+        /// `pane.stream` itself; this is the coordinator's copy of that truth.
+        private var responseGeometry: (cols: Int, rows: Int)?
+        private var responseGeneration = -1
+        /// The grid the STREAM has actually applied to the emulator, in stream order.
+        /// This - not a response, and never a local target - is what is on screen.
+        private var streamAppliedGeometry: (cols: Int, rows: Int)?
+        /// Bumped whenever the stream commits geometry, so a completed paint can be
+        /// matched to the grid it was painted at.
+        private var streamGeometryRevision = 0
+        /// A lease keepalive in flight. It is NOT a target change: the drain waits for
+        /// it so the two never overlap on the wire.
+        private var keepaliveTask: Task<Void, Never>?
         /// Consecutive failures for the CURRENT target, so the drain's self-retry
         /// backs off and is capped; reset whenever a new target is requested.
         private var resizeRetries = 0
         /// How long a resize target must stand still before it is sent to the daemon.
         ///
-        /// Long enough to swallow an animated or dragged width sweep (one `sizeChanged`
+        /// Long enough to swallow an animated or dragged width sweep (one proposal
         /// per frame), short enough that a deliberate single resize still feels
         /// immediate — and short enough not to hold up teardown, which awaits this task.
-        static let resizeSettleNanoseconds: UInt64 = 140_000_000
+        static let resizeSettleDuration: Duration = .milliseconds(140)
+        /// How long the presentation waits for new output to stop before it treats the
+        /// current frame as the finished one (used only when the agent does not mark
+        /// its frames with DEC 2026).
+        static let presentationQuietDuration: Duration = .milliseconds(250)
+        /// Hard ceiling on holding a retained frame: after this the reader sees the
+        /// real, authoritative grid whatever the agent did or did not redraw.
+        static let presentationDeadlineDuration: Duration = .seconds(1)
+
+        // MARK: - resize presentation
+        //
+        // A resize is not one event: the local fit is proposed, the daemon commits a
+        // grid, the stream carries that grid in order with the output it applies to,
+        // and only then does the agent redraw. Showing every intermediate state means
+        // showing text reflowing through sizes nobody asked for, so the last complete
+        // frame is retained over the terminal until the new one is genuinely ready.
+
+        /// Why the geometry is changing, which decides what "settled" means.
+        private enum PresentationReason { case local, server }
+
+        /// A completed paint, tagged with everything that must still hold for it to
+        /// count as the finished frame for the current burst.
+        private struct DrawToken: Equatable {
+            var presentationGeneration: Int
+            var targetGeneration: Int
+            var streamGeometryRevision: Int
+            var cellSize: CGSize
+            var alternate: Bool
+        }
+
+        private var presentationGeneration = 0
+        private var presentationActive = false
+        /// Set when this burst is finished with: no late acknowledgment, marker or
+        /// gesture may cover the same geometry again.
+        private var presentationClosed = false
+        private var presentationReason: PresentationReason = .local
+        private var presentationStartedOnNormalBuffer = true
+        private var presentationSyncEnded = false
+        private var presentationGeometrySettled = false
+        private var presentationDeadlineTask: Task<Void, Never>?
+        private var presentationRevealTask: Task<Void, Never>?
+        private var pendingSafeRepaint = false
+        private var lastCompleteDraw: DrawToken?
+        private var backingDrawComplete = false
+        private var lastStreamDataAt: ContinuousClock.Instant?
+        private var geometryEligibleAt: ContinuousClock.Instant?
+        private var presentationDeadlineReached = false
+        private var synchronizedBatchBegan = false
+        /// While a burst is on screen the host keeps the tail state it had, so a
+        /// transient UIKit clamp or a borrowed alternate screen is not published as if
+        /// the reader had decided something.
+        private var tailPublishHeld = false
+
+        // MARK: - one-shot Ctrl
+
+        /// Live accessors for the host's `ctrlArmed` state, refreshed every SwiftUI
+        /// pass so an immediate keystroke cannot read a stale snapshot.
+        var controlArmedGetter: (() -> Bool)?
+        var controlArmedSetter: ((Bool) -> Void)?
+        /// True while THIS code is writing `controlModifier`, so SwiftTerm's reset
+        /// notification for our own write is not mistaken for the user's chord being
+        /// consumed (which would clear a modifier the reply field still needs).
+        private var applyingControlModifier = false
+        private var controlResetObserver: NSObjectProtocol?
+        var directFocusIntended = false
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
@@ -350,7 +585,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Set in `stop()` so a LATE async `sizeChanged` callback (SwiftTerm
         /// dispatches them asynchronously) cannot start a NEW `lock:true` resize
         /// AFTER we've released geometry ownership — which would re-pin the pane and
-        /// defeat the release (review HIGH). Once stopped, `sendPTYSize` is inert.
+        /// defeat the release. Once stopped, `requestGeometry` is inert.
         private var stopped = false
 
         /// KVO token for the terminal's `contentOffset`, which is the only signal a FINGER scroll
@@ -438,7 +673,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// awaiting an in-flight `lock:true` — is skipped if a NEWER coordinator has since
         /// claimed the same pane. Without it a fast A→B→A swap can leave the pane you are
         /// LOOKING at unlocked: the outgoing coordinator's release lands after the newcomer's
-        /// `lock:true`, and `sendPTYSize`'s dedup then never re-locks it. Accessed only on the
+        /// `lock:true`, and target dedup then never re-locks it. Accessed only on the
         /// main actor (attach/stop) except the post-await read in `releaseGeometryOwnership`,
         /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
         private static var geometryGeneration: [String: Int] = [:]
@@ -454,7 +689,7 @@ struct LiveTerminalView: UIViewRepresentable {
         private var foreground = true
         /// True between a re-show (`setForeground(true)`) and its deferred re-lock completing —
         /// i.e. while we're awaiting the in-flight background `lock:false` before re-taking the
-        /// lock. During this window EVERY `sendPTYSize` caller (including `sizeChanged`) must NOT
+        /// lock. During this window EVERY geometry request must NOT
         /// start a drain, or a `lock:true` could race the still-in-flight `lock:false` on a
         /// separate SSH channel and leave the VISIBLE pane unlocked. The deferred re-lock clears
         /// it and then drives toward the LIVE grid.
@@ -479,8 +714,8 @@ struct LiveTerminalView: UIViewRepresentable {
         static let defaultFontSize: CGFloat = 12.5
         /// Terminal font size in points, driven by the `terminal.fontSize` preference.
         /// Instance (not static) so it can change at runtime: setting `view.font` from
-        /// `applyFont` flows through SwiftTerm's resetFont → resize → sizeChanged →
-        /// sendPTYSize, which re-locks the PTY at the new column count.
+        /// `applyFont` flows through SwiftTerm's resetFont → sizeChangeRequestHandler
+        /// → requestGeometry, which re-locks the PTY at the new grid and cell metrics.
         var paneFontSize: CGFloat = 12.5
         var paneFont: UIFont {
             UIFont(name: "IBMPlexMono", size: paneFontSize)
@@ -488,12 +723,16 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// Apply a new terminal font size (clamped to [minFontSize, maxFontSize]).
-        /// A no-op if unchanged; otherwise setting `view.font` drives the full
-        /// re-layout (cell recompute → grid resize → sizeChanged → sendPTYSize).
+        /// A no-op if unchanged; otherwise setting `view.font` recomputes the cell
+        /// metrics and PROPOSES a grid (`sizeChangeRequestHandler`), which this
+        /// coordinator turns into a `set_pty_size`. The emulator is not resized here:
+        /// the authoritative grid still arrives in band, so the reader sees the old
+        /// frame until the new one is ready rather than text reflowing under them.
         func applyFont(size: CGFloat) {
             let clamped = min(max(size, Self.minFontSize), Self.maxFontSize)
             guard clamped != paneFontSize else { return }
             paneFontSize = clamped
+            beginResizePresentation(reason: .local)
             view?.font = paneFont
         }
 
@@ -518,9 +757,60 @@ struct LiveTerminalView: UIViewRepresentable {
             self.paneID = paneID
         }
 
-        func attach(_ view: ReadOnlyTerminalView) {
+        func attach(_ surface: TerminalSurfaceView) {
+            let view = surface.terminal
             self.view = view
+            self.surface = surface
             view.terminalDelegate = self
+            #if DEBUG
+            MainActor.assumeIsolated {
+                TerminalInteractionHarness.register(paneID: paneID, view: view,
+                    requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
+                    isCovered: { [weak surface] in surface?.isCovered ?? false },
+                    isForeground: { [weak self] in self?.foreground ?? false })
+            }
+            #endif
+            // THIS coordinator owns the grid: SwiftTerm must propose, never commit.
+            // Installed BEFORE the stream starts, so the very first layout pass cannot
+            // reflow the emulator to a locally guessed size ahead of the daemon's.
+            view.sizeChangeRequestHandler = { [weak self] cols, rows in
+                self?.requestGeometry(cols: cols, rows: rows)
+            }
+            view.synchronizedOutputChangeHandler = { [weak self] active in
+                self?.noteSynchronizedOutput(active: active)
+            }
+            view.displayCompletedHandler = { [weak self] complete in
+                self?.noteDisplayCompleted(complete: complete)
+                #if DEBUG
+                if let self, let view = self.view {
+                    MainActor.assumeIsolated {
+                        TerminalInteractionHarness.painted(paneID: self.paneID, view: view,
+                                                           cellSize: view.cellSize, complete: complete)
+                    }
+                }
+                #endif
+            }
+            // The container tells us a frame change is imminent, while the current
+            // rendering is still on screen and can be retained.
+            surface.onGeometryWillChange = { [weak self] in
+                self?.beginResizePresentation(reason: .local)
+            }
+            view.onWillInsertText = { [weak self] text, composing in
+                self?.prepareForInsertedText(text, composing: composing)
+            }
+            view.onCancelControl = { [weak self] in
+                self?.cancelArmedControl()
+                self?.userTookControl()
+            }
+            view.onUserInteraction = { [weak self] in self?.userTookControl() }
+            // SwiftTerm posts this when it CONSUMES the one-shot control modifier while
+            // encoding a key. `object: view` and no queue: the clear must land on this
+            // main-thread turn, before the next key is encoded.
+            controlResetObserver = NotificationCenter.default.addObserver(
+                forName: .terminalViewControlModifierReset, object: view, queue: nil) { [weak self] _ in
+                    guard let self, !self.stopped, !self.applyingControlModifier else { return }
+                    self.controlArmedSetter?(false)
+                }
             // Turn the VIEW's touch→mouse-byte conversion OFF unconditionally. Two reasons:
             // (1) under key drive a tap SwiftTerm turned into a mouse report could leak bytes to
             // the PTY (`send` FORWARDS output there); (2) in the read-only case it lets a tap or
@@ -550,8 +840,15 @@ struct LiveTerminalView: UIViewRepresentable {
                     _ = view.becomeFirstResponder()
                 })
             keyboardObservers.append(
-                NotificationCenter.default.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { [weak view] _ in
+                NotificationCenter.default.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { [weak self, weak view] _ in
+                    self?.cancelArmedControl()
                     view?.resignFirstResponder()
+                })
+            keyboardObservers.append(
+                NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification,
+                                                       object: nil, queue: .main) { [weak self] _ in
+                    self?.cancelArmedControl()
+                    self?.finishPresentation()
                 })
             // Claim geometry ownership for this pane (see geometryGeneration): the newest
             // attach wins, and an older coordinator's delayed release checks this before
@@ -571,8 +868,8 @@ struct LiveTerminalView: UIViewRepresentable {
                 await Self.geometryReleaseTask[pane]?.value   // let a prior coordinator's release land first
                 guard let self, !self.stopped, self.myGeometryGeneration == gen else { return }
                 self.relockPending = false
-                if self.desiredCols >= 4, self.desiredRows >= 2 {
-                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)
+                if let target = self.desiredTarget, target.cols >= 4, target.rows >= 2 {
+                    self.startGeometryDrain()
                 }
             }
             // A dedicated pan that scrolls the AGENT (see handleScrollPan) — for the
@@ -707,6 +1004,9 @@ struct LiveTerminalView: UIViewRepresentable {
             // `setForeground` now runs BEFORE `performJumpToTail`: guarding on a flag this
             // pass has not yet written would guard nothing.
             guard !stopped, foreground, let view else { return }
+            // The reader asked for the newest output: whatever a resize was about to
+            // reveal must not put them back where they were.
+            userTookControl()
             let term = view.getTerminal()
             if term.isCurrentBufferAlternate || term.mouseMode != .off {
                 // Report the tail ONLY once the send has actually landed. Reporting up
@@ -724,12 +1024,12 @@ struct LiveTerminalView: UIViewRepresentable {
                     }
                 }
             } else {
-                // animated:false — an animated jump is cancelled mid-flight on a streaming
-                // pane (SwiftTerm's updateScroller writes the offset back and leaves
-                // userScrolling stuck true). A direct set runs contentOffset's didSet →
-                // syncYDispFromContentOffset synchronously and re-engages auto-follow.
-                let maxY = max(0, view.contentSize.height - view.bounds.height)
-                view.setContentOffset(CGPoint(x: 0, y: maxY), animated: false)
+                // SwiftTerm's own explicit scroll: it clears the manual-scrolling state
+                // (so auto-follow re-engages), reconciles the offset even when the row is
+                // unchanged, and drops the logical resize anchor. Writing contentOffset
+                // directly used to be necessary; it no longer is, and it left the library
+                // guessing whether the offset came from a gesture.
+                view.scrollTo(row: Int.max)
                 // Synchronous and cannot fail, so the tail is true right now.
                 reportTailState(atTail: true)
             }
@@ -789,6 +1089,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// buffer-IDENTITY check, not a heuristic, so it cannot transiently lie on a normal
         /// buffer — verified in the pinned SwiftTerm 1.15.0 by review.
         private func reportTailState(atTail: Bool) {
+            // While a retained frame is on screen the reader has decided nothing: the
+            // clamps UIKit performs mid-resize, and a temporarily borrowed alternate
+            // screen, are not user intent. The actual state is published on reveal.
+            guard !tailPublishHeld else { return }
             var atTail = atTail
             if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
             guard atTail != lastReportedAtTail else { return }
@@ -1048,8 +1352,32 @@ struct LiveTerminalView: UIViewRepresentable {
 
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
+            #if DEBUG
+            if let view {
+                MainActor.assumeIsolated {
+                    TerminalInteractionHarness.unregister(paneID: paneID, view: view)
+                }
+            }
+            #endif
             offsetObservation?.invalidate() // no tail-state publish from a torn-down pane
             offsetObservation = nil
+            // Presentation first: a torn-down pane must never be left under a retained
+            // frame, and no late reveal or deadline may touch a replaced view.
+            finishPresentation()
+            if let observer = controlResetObserver {
+                // Removed BEFORE the native reset below, so our own write cannot be read
+                // as the user's chord being consumed.
+                NotificationCenter.default.removeObserver(observer)
+                controlResetObserver = nil
+            }
+            cancelArmedControl()
+            view?.sizeChangeRequestHandler = nil
+            view?.synchronizedOutputChangeHandler = nil
+            view?.displayCompletedHandler = nil
+            view?.onWillInsertText = nil
+            view?.onCancelControl = nil
+            view?.onUserInteraction = nil
+            surface?.onGeometryWillChange = nil
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
             view?.isScrollEnabled = true    // restore native scroll if we disabled it mid-drag
                                             // (stop() also runs on .exited while on screen)
@@ -1079,7 +1407,7 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// RELEASE the phone's geometry lock (Fix A) when the terminal view closes,
         /// so a co-viewing desktop reclaims its own width. While the view is open we
-        /// take ownership with `lock:true` (see `sendPTYSize`) so the shared PTY —
+        /// take ownership with `lock:true` through the geometry drain so the shared PTY —
         /// and therefore the agent's TUI — lays out at the phone's width and fits
         /// crisply; on teardown we fire ONE best-effort `lock:false` at the last
         /// known size to hand ownership back. Fire-and-forget: errors are ignored
@@ -1093,17 +1421,20 @@ struct LiveTerminalView: UIViewRepresentable {
         /// hand the drain off and AWAIT it first, so its last `lock:true` round-trip
         /// completes before we send the releasing `lock:false`.
         private func releaseGeometryOwnership() {
-            let cols = lastSentCols > 0 ? lastSentCols : desiredCols
-            let rows = lastSentRows > 0 ? lastSentRows : desiredRows
+            let target = confirmedTarget ?? desiredTarget
             let inflight = resizeTask
             resizeTask = nil
+            let keepalive = keepaliveTask
+            keepaliveTask = nil
             // Leave any existing registry entry in place on this early bail (a pane that never
             // laid out): an older release may still be in flight, and its entry is the only handle
             // a future re-lock has to await it.
-            guard cols >= 4, rows >= 2 else { return }
+            guard let target, target.cols >= 4, target.rows >= 2 else { return }
+            let cols = target.cols
+            let rows = target.rows
             // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
             // same-generation release — stop() after a hide, or stop()'s .exited+dismantle double
-            // call — is a no-op: after a hide the drain is already nil'd and sendPTYSize is gated,
+            // call — is a no-op: after stop the drain is handed off and new requests are gated,
             // so there is nothing left to release, and skipping it prevents both a redundant
             // lock:false and the prune-clobber of a newer chained release's registry handle.
             guard releasedGeneration != myGeometryGeneration else { return }
@@ -1121,6 +1452,7 @@ struct LiveTerminalView: UIViewRepresentable {
             Self.geometryReleaseTask[pane] = Task.detached {
                 await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
+                await keepalive?.value
                 // If a newer coordinator OR a re-show claimed this pane while we awaited, it owns
                 // the lock now — releasing would unlock a pane still on screen. Bail so its
                 // lock:true stands. (And if this release DID commit before the re-show bumped the
@@ -1149,7 +1481,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// guaranteed to be the LAST geometry op even when a TEARDOWN-INITIATED `lock:false` is
         /// still in flight for this pane: (1) bumping `geometryGeneration` makes a not-yet-sent
         /// `lock:false` bail on its generation guard; (2) `relockPending` makes EVERY
-        /// `sendPTYSize` caller (the re-assert itself AND any `sizeChanged` in the window) defer
+        /// geometry request (the re-assert itself AND any fitting proposal in the window) defer
         /// while we await that release, so no `lock:true` can race it; the deferred re-assert then
         /// drives toward the LIVE grid. Different panes own different PTYs + generation keys, so
         /// releases/retakes across panes never contend.
@@ -1160,33 +1492,42 @@ struct LiveTerminalView: UIViewRepresentable {
                 let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
                 Self.geometryGeneration[paneID] = gen
                 myGeometryGeneration = gen
-                // DEFEAT sendPTYSize's dedup so the re-assert genuinely re-sends. This is required
+                // DEFEAT the drain's dedup so the re-assert genuinely re-sends. This is required
                 // for correctness now that a hide no longer releases: if the lease LAPSED on the
-                // daemon TTL while this pane was hidden, `lastSent` is stale-but-EQUAL to `desired`,
-                // so without zeroing here the dedup would skip the re-lock and leave the pane at
-                // whatever width the TUI reclaimed. Re-asserting when the lease did NOT lapse is
-                // free: it resolves to the same size and the daemon returns early on an unchanged
-                // winsize, so it cannot cause the redraw this whole path exists to avoid.
-                lastSentCols = 0
-                lastSentRows = 0
-                relockPending = true            // hold off ALL sendPTYSize until any teardown release lands
+                // daemon TTL while this pane was hidden, the confirmed target is stale-but-EQUAL
+                // to the desired one, so without clearing it here the dedup would skip the
+                // re-lock and leave the pane at whatever width the TUI reclaimed. Re-asserting
+                // when the lease did NOT lapse is free: it resolves to the same size and the
+                // daemon returns early on an unchanged winsize, so it cannot cause the redraw
+                // this whole path exists to avoid.
+                confirmedTarget = nil
+                relockPending = true            // defer requests until any teardown release lands
                 // Populated only by `stop()` now, so on a normal re-front this is nil and the await
                 // below is a no-op; it still orders a re-front that races a teardown release.
                 let pending = Self.geometryReleaseTask[paneID]
                 Task { @MainActor [weak self] in
-                    // Re-fronting a keep-mounted pane whose geometry changed while hidden can leave
-                    // stale/overlapping cells visible until the resize round-trip lands — repaint now
-                    // (main-actor Task, so the @MainActor forceFullRepaint is called safely).
+                    // Re-fronting a keep-mounted pane whose geometry changed while hidden can
+                    // leave the scroller and the cursor reconciled against the wrong metrics.
+                    // Committing the CURRENT stream-applied grid (a same-size commit: no core
+                    // reflow) reconciles them and queues one safe repaint - unlike the old
+                    // unconditional full repaint, it cannot paint a grid the stream has not
+                    // applied yet.
                     if let self, let view = self.view, self.foreground, !self.stopped {
-                        self.forceFullRepaint(view)
+                        let terminal = view.getTerminal()
+                        let grid = self.streamAppliedGeometry ?? (cols: terminal.cols, rows: terminal.rows)
+                        view.applyTerminalSize(cols: grid.cols, rows: grid.rows)
                     }
                     await pending?.value        // let any committed lock:false land FIRST
                     guard let self, self.foreground, !self.stopped,
                           self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
                     self.relockPending = false
-                    self.sendPTYSize(cols: self.desiredCols, rows: self.desiredRows)   // re-take lock:true at the LIVE grid, now last
+                    // Re-take lock:true at THIS pane's own local fit, now last. A hidden pane
+                    // kept proposing its fit into `desiredTarget` without sending it.
+                    self.startGeometryDrain()
                 }
             } else {
+                finishPresentation()
+                cancelArmedControl()
                 relockPending = false           // a hide cancels any pending re-lock intent
                 // DELIBERATELY NO RELEASE HERE. A `lock:false` would drop the last width lease,
                 // and the daemon then stops forcing a size on purpose (`effective_pty_size` -> None,
@@ -1255,6 +1596,7 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         private func start() {
+            discardPresentationReadiness()
             streamTask?.cancel()
             sawExited = false
             // Cleared with `sawExited`, and for the same reason: a refusal is permanent for
@@ -1304,11 +1646,12 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// PTY width-lease keep-alive (#137). A stable-size foreground view fires no fresh
-        /// `sizeChanged`, so without this its lease would lapse at the daemon's 5-minute TTL
-        /// and a co-viewing desktop would reclaim the width. Every `heartbeatIntervalNanos`
-        /// we re-assert the current COMMITTED size (defeating `sendPTYSize`'s dedup so the
-        /// same size actually re-sends), which the drain delivers as a fresh `lock:true`
-        /// carrying our `viewerID` + TTL. Only a FOREGROUND, non-relocking, idle-drain view
+        /// `set_pty_size` proposal, so without this its lease would lapse at the daemon's
+        /// 5-minute TTL and a co-viewing desktop would reclaim the width. Every
+        /// `heartbeatIntervalNanos` we RE-ASSERT the committed tuple as a keepalive: it is
+        /// explicitly NOT a geometry change, so it does not clear committed state, bump the
+        /// target generation, start a resize presentation or make the reader wait behind a
+        /// retained frame. Only a FOREGROUND, non-relocking, idle-drain view
         /// with a committed size refreshes, and the foreground half of that is now
         /// LOAD-BEARING POLICY rather than bookkeeping: a hidden pane KEEPS its lease (a hide no
         /// longer releases — see `setForeground`) and deliberately stops refreshing it, so the
@@ -1323,12 +1666,23 @@ struct LiveTerminalView: UIViewRepresentable {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanos)
                     guard let self, !self.stopped else { return }
+                    // Nothing unsettled: no drain, no request in flight, no target waiting
+                    // to be sent, and no resize on screen. A keepalive must never overtake
+                    // or duplicate a real geometry change.
                     guard self.foreground, !self.relockPending, self.resizeTask == nil,
-                          self.lastSentCols >= 4, self.lastSentRows >= 2 else { continue }
-                    let cols = self.lastSentCols, rows = self.lastSentRows
-                    self.lastSentCols = 0        // defeat sendPTYSize's dedup so the same size re-sends
-                    self.lastSentRows = 0
-                    self.sendPTYSize(cols: cols, rows: rows)
+                          self.inflightTarget == nil, !self.presentationActive,
+                          let target = self.confirmedTarget, self.desiredTarget == target,
+                          target.cols >= 4, target.rows >= 2 else { continue }
+                    let task = Task { @MainActor [weak self] in
+                        guard let self, !self.stopped, self.foreground else { return }
+                        _ = try? await self.client.setPTYSize(
+                            pane: self.paneID, cols: target.cols, rows: target.rows,
+                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                            lock: true, viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
+                    }
+                    self.keepaliveTask = task
+                    await task.value
+                    self.keepaliveTask = nil
                 }
             }
         }
@@ -1367,7 +1721,7 @@ struct LiveTerminalView: UIViewRepresentable {
             switch event {
             case .started(let started):
                 // Align the emulator to the pane's real geometry the ack carries.
-                resizeEmulator(cols: started.cols, rows: started.rows, in: view)
+                applyStreamGeometry(cols: started.cols, rows: started.rows, in: view)
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
@@ -1387,7 +1741,10 @@ struct LiveTerminalView: UIViewRepresentable {
                     }
                     // Size the grid to the reset's geometry FIRST (was previously between clear+seed),
                     // so nothing later in THIS reset can truncate freshly-fed history.
-                    resizeEmulator(cols: cols, rows: rows, in: view)
+                    applyStreamGeometry(cols: cols, rows: rows, in: view)
+                    // A keyframe replaces the screen: whatever a pending resize was waiting
+                    // to reveal describes a screen that no longer exists.
+                    discardPresentationReadiness()
                     if firstReset {
                         // History ABOVE the seed: feed it now so its lines scroll into SwiftTerm's
                         // scrollback; the ESC[2J below then erases only the overlapping VISIBLE rows
@@ -1408,14 +1765,19 @@ struct LiveTerminalView: UIViewRepresentable {
                     // already collapsed the backlog into this keyframe).
                     view.feed(byteArray: Self.clearSequence[...])
                     if !data.isEmpty { feedFiltered(data, into: view) }
+                    noteStreamData()
                 case .data(_, _, let data):
+                    noteStreamData()
                     if !data.isEmpty { feedFiltered(data, into: view) }
                 case .resize(_, _, let cols, let rows):
-                    resizeEmulator(cols: cols, rows: rows, in: view)
+                    applyStreamGeometry(cols: cols, rows: rows, in: view)
                 case .ping:
                     break   // heartbeat only
                 case .exited:
                     sawExited = true
+                    // The pane is gone: the error notice must be reachable, never behind
+                    // a retained frame.
+                    finishPresentation()
                     view.feed(byteArray: Self.exitedNotice[...])
                     stop()
                 }
@@ -1439,6 +1801,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // watchdog/refresh restart, or replaced by a newer start()) ending here must be ignored,
             // or it double-reconnects and double-counts the backoff.
             guard run == streamRunID else { return }
+            finishPresentation()
             // An `exited` frame already painted the terminal's final state (the process ended, so
             // reconnecting would only re-show that). A deliberate stop() (back out / teardown) or a
             // torn-down view must not reconnect either.
@@ -1462,146 +1825,160 @@ struct LiveTerminalView: UIViewRepresentable {
 
         // MARK: geometry
 
-        /// Aligns the emulator grid to the server's authoritative PTY size so the
-        /// byte stream lays out correctly. Does NOT call set_pty_size — driving the
-        /// server is the VIEW's job (see `sizeChanged`), and echoing the server's
-        /// own size back would be a needless round-trip.
-        @MainActor
-        private func resizeEmulator(cols: Int, rows: Int, in view: ReadOnlyTerminalView) {
-            view.getTerminal().resize(cols: max(4, cols), rows: max(2, rows))
-            // A server-driven resize reflows the emulator grid but — unlike a `.data` feed —
-            // never triggers the view to repaint, so the next feed can paint new cells OVER stale
-            // ones (the "overdraw" bug that previously only a manual refresh cleared). Force a
-            // display-only full repaint at the new geometry. Purely display-side (see helper).
-            forceFullRepaint(view)
-        }
-
-        /// Repaint the entire visible grid from the current buffer, without changing content or
-        /// clearing. `updateFullScreen()` marks every row dirty (no content change); `setNeedsDisplay()`
-        /// drives the iOS view's `draw(_:)` over the full bounds, which renders cells from the buffer
-        /// via CoreText. Both are public SwiftTerm / UIKit APIs. DISPLAY-ONLY — never calls
-        /// `set_pty_size` and never touches `desiredCols`/`lastSentCols`/`relockPending`, so the PTY
-        /// width-lock is untouched.
-        @MainActor
-        private func forceFullRepaint(_ view: ReadOnlyTerminalView) {
-            view.getTerminal().updateFullScreen()
-            view.setNeedsDisplay()
-        }
-
-        /// The view laid out (first appearance, rotation, keyboard) and computed a
-        /// new grid from its pixels + the mono cell metrics. Tell the server so the
-        /// PTY — and therefore the stream — lays out at the phone's width. NOTE this
-        /// resizes the SHARED PTY (see `sendPTYSize`): one winsize per pane, so a
-        /// co-viewing desktop reflows to the phone's grid until it re-asserts.
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // Counted for the UI-test probe only: SwiftTerm's `processSizeChange` clears any
-            // active selection on a rows/cols change, so a resize landing AFTER a word select
-            // silently destroys it. The count lets a test say "the selection was wiped" rather
-            // than "no selection appeared", which are different bugs with different fixes.
-            resizeCount += 1
-            sendPTYSize(cols: newCols, rows: newRows)
-        }
-
-        /// Main-thread only (called from the UIKit layout callback above). Records the
-        /// desired PTY grid and ensures the drain converges to it.
+        /// Commits the server's authoritative grid to the emulator, in stream order,
+        /// so the bytes that follow lay out at the size they were produced for.
         ///
-        /// The model is `desired` vs `lastSent`: `sendPTYSize` records the newest
-        /// target; a single serialized drain drives the server toward it and stops
-        /// only when `lastSent == desired`. Because at most ONE `set_pty_size` is ever
-        /// in flight (the drain awaits each before the next), two resizes can never
-        /// complete server-side out of order. Dedup is measured against `desired` (the
-        /// target we're driving toward), NOT `lastSent` — so a request that matches
-        /// the committed size while a different resize is in flight still supersedes
-        /// it. A failed target is retried by the drain itself (0.5s backoff, capped)
-        /// so convergence never depends on a future layout callback. `lock:true`
-        /// (Fix A) PINS the shared PTY to the phone's fit so the agent's TUI stops
-        /// overflowing the screen width; `releaseGeometryOwnership` hands ownership
-        /// back with a `lock:false` on teardown so the desktop reclaims its width.
-        private func sendPTYSize(cols: Int, rows: Int) {
+        /// This is the ONLY place the emulator is resized. A local fit is never
+        /// applied here (it is only proposed to the daemon), and the `set_pty_size`
+        /// response is not applied either: it arrives on a different operation and is
+        /// not an ordering barrier for the stream bytes before it.
+        @MainActor
+        private func applyStreamGeometry(cols: Int, rows: Int, in view: ReadOnlyTerminalView) {
+            let newCols = max(4, cols)
+            let newRows = max(2, rows)
+            let terminal = view.getTerminal()
+            let changed = newCols != terminal.cols || newRows != terminal.rows
+            if changed, foreground, !presentationActive, !isOurGeometry(cols: newCols, rows: newRows) {
+                // Somebody else (a co-viewer's lease, the agent's own request) changed
+                // the grid. Same cover/reveal treatment, but no reciprocal request.
+                beginResizePresentation(reason: .server)
+            }
+            // A same-size commit is deliberate and cheap: it reconciles the scroller and
+            // the cursor with the current font metrics and queues one synchronization-aware
+            // repaint, without a second core reflow.
+            synchronizedBatchBegan = false
+            presentationSyncEnded = false
+            lastCompleteDraw = nil
+            if changed { resizeCount += 1 }
+            view.applyTerminalSize(cols: newCols, rows: newRows)
+            streamAppliedGeometry = (cols: newCols, rows: newRows)
+            streamGeometryRevision += 1
+            if presentationActive, presentationReason == .server, changed {
+                armPresentationDeadline(after: Self.presentationDeadlineDuration)
+            }
+            evaluateGeometrySettled()
+        }
+
+        /// Whether this grid is one we asked for (so a cover is already up for it).
+        private func isOurGeometry(cols: Int, rows: Int) -> Bool {
+            if resizeTask != nil || inflightTarget != nil { return true }
+            // Once the expected marker has arrived, the same dimensions in a later
+            // unsolicited change are not permanently classified as our old request.
+            if responseGeneration == targetGeneration, let response = responseGeometry,
+               let applied = streamAppliedGeometry, response != applied {
+                return response.cols == cols && response.rows == rows
+            }
+            return false
+        }
+
+        /// Unmanaged/public view commits may still notify the delegate. Managed fits
+        /// arrive through `sizeChangeRequestHandler`; authoritative stream commits
+        /// are counted at their application site and never originate a new request.
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // Counted for the UI-test probe only: a grid change clears any active
+            // selection, so a resize landing AFTER a word select silently destroys it.
+            // The count lets a test say "the selection was wiped" rather than "no
+            // selection appeared", which are different bugs with different fixes.
+            resizeCount += 1
+        }
+
+        /// Main-thread only (called from SwiftTerm's layout/font proposal). Records the
+        /// grid this view wants and ensures the drain converges to it.
+        ///
+        /// The model is `desiredTarget` vs `confirmedTarget`: this records the newest
+        /// target; a single serialized drain drives the server toward it and stops only
+        /// when they are equal. Because at most ONE `set_pty_size` is ever in flight
+        /// (the drain awaits each before the next), two resizes can never complete
+        /// server-side out of order. Dedup is measured against the TARGET, not the
+        /// confirmed size, so a request that matches the committed size while a
+        /// different resize is in flight still supersedes it. `lock:true` PINS the
+        /// shared PTY to the phone's fit; `releaseGeometryOwnership` hands ownership
+        /// back with a `lock:false` on teardown.
+        private func requestGeometry(cols: Int, rows: Int) {
             guard !stopped else { return }   // teardown began — no new lock:true (review HIGH)
+            #if DEBUG
+            let (cols, rows) = MainActor.assumeIsolated {
+                TerminalInteractionHarness.fit(paneID: paneID, cols: cols, rows: rows)
+            }
+            #endif
             guard cols >= 4, rows >= 2 else { return }
-            // Redundant ONLY if we are already driving toward (or sitting at) this
-            // exact size: same as the current target with a drain in flight, or same
-            // as the confirmed size with no drain. A size we gave up on (target set
-            // but never reached, no drain) is NOT redundant — it restarts the drain.
-            if cols == desiredCols, rows == desiredRows,
-               resizeTask != nil || (cols == lastSentCols && rows == lastSentRows) {
+            let cell = cellPixels()
+            let priorChange = desiredTargetChangedAt
+            let target = TerminalGeometryTarget(cols: cols, rows: rows,
+                                                cellWidthPx: cell.width, cellHeightPx: cell.height)
+            // A repeat of the target we are already driving toward (or sitting at with a
+            // drain running) is noise from another layout pass.
+            if target == desiredTarget, resizeTask != nil || target == confirmedTarget {
                 return
             }
-            desiredCols = cols
-            desiredRows = rows
+            desiredTarget = target
+            desiredTargetChangedAt = ContinuousClock.now
+            targetGeneration += 1
             resizeRetries = 0        // a new target gets a fresh retry budget
+            presentationGeometrySettled = false
+            geometryEligibleAt = nil
+            presentationSyncEnded = false
+            synchronizedBatchBegan = false
+            lastCompleteDraw = nil
+            if presentationClosed, resizeTask == nil,
+               priorChange.map({ ContinuousClock.now - $0 >= Self.resizeSettleDuration }) ?? true {
+                presentationClosed = false
+            }
+            // The retained frame belongs to the burst, not to one proposal: an animated
+            // sweep proposes many grids and covers once.
+            beginResizePresentation(reason: .local)
+            armPresentationDeadline(after: Self.resizeSettleDuration + Self.presentationDeadlineDuration)
             // A backgrounded pane (or one whose re-lock is still awaiting the in-flight release,
             // `relockPending`) TRACKS the latest grid above but does not start a drain: a hidden
             // pane would re-pin a co-viewing desktop, and a `lock:true` sent during the release
-            // window could race the `lock:false` and strand the visible pane unlocked. The
-            // deferred re-lock re-sends at the LIVE grid once the release lands.
+            // window could race the `lock:false` and strand the visible pane unlocked.
             guard foreground, !relockPending else { return }
-            guard resizeTask == nil else { return }   // a drain is running; it re-reads `desired`
-            let cell = cellPixels()
+            startGeometryDrain()
+        }
+
+        /// The single serialized drain. At most one `set_pty_size` in flight, and a
+        /// target must stand still for `resizeSettleDuration` before it is sent.
+        private func startGeometryDrain() {
+            guard !stopped, foreground, !relockPending, resizeTask == nil else { return }
+            guard let first = desiredTarget, first != confirmedTarget else { return }
             resizeTask = Task { @MainActor [weak self] in
-                // `self.foreground` in the condition: if this pane is backgrounded mid-drain (a
-                // keep-mounted hide), STOP driving `lock:true` — a hidden pane must never re-pin a
-                // co-viewing desktop. releaseGeometryOwnership awaits this task, so it then
-                // proceeds to `lock:false`.
+                // A lease keepalive already on the wire finishes first, so the two never
+                // overlap: the keepalive is not a geometry change and must not be treated
+                // as one, but it still owns the single in-flight slot while it runs.
+                await self?.keepaliveTask?.value
                 while let self, !Task.isCancelled, !self.stopped, self.foreground,
-                      self.desiredCols != self.lastSentCols || self.desiredRows != self.lastSentRows {
-                    // SETTLE EACH ITERATION, not once per drain, and compare the target
-                    // ACROSS the sleep. A layout change that sweeps through widths — the
-                    // split view's own column animation (~0.3s, which it runs whether or
-                    // not WE animate), a divider drag, a keyboard raise, a rotation —
-                    // fires `sizeChanged` per frame.
-                    //
-                    // Sleeping alone would only rate-limit: the post-sleep check compares
-                    // the target against the last COMMITTED size, so a width still moving
-                    // every frame would be transmitted just as readily as a stationary
-                    // one, and a 0.3s animation would still ship one or two intermediate
-                    // widths. Recording the target BEFORE the sleep and requiring it to
-                    // be unchanged after is what makes "we only transmit a width that has
-                    // stood still" true rather than approximate. A moving target loops
-                    // instead of sending, so a long drag transmits once, on release.
-                    let before = (self.desiredCols, self.desiredRows)
-                    try? await Task.sleep(nanoseconds: Self.resizeSettleNanoseconds)
-                    // Re-check everything the `while` checked: the sleep is a window in
-                    // which teardown can begin (`stopped`), the pane can be hidden, or
-                    // the target can reach `lastSent` some other way. A cancelled sleep
-                    // throws and is swallowed, so this guard — not the sleep — is what
-                    // stops a `lock:true` escaping after `stop()`.
+                      let target = self.desiredTarget, target != self.confirmedTarget {
+                    // A TRUE quiet window, measured monotonically from the last change.
+                    // Comparing two endpoint samples called a sweep that returned to an
+                    // earlier width "still", and sent mid-gesture.
+                    if let changedAt = self.desiredTargetChangedAt {
+                        let quiet = ContinuousClock.now - changedAt
+                        if quiet < Self.resizeSettleDuration {
+                            try? await Task.sleep(for: Self.resizeSettleDuration - quiet)
+                            continue   // re-read: a newer target may have arrived meanwhile
+                        }
+                    }
                     guard !Task.isCancelled, !self.stopped, self.foreground,
-                          self.desiredCols != self.lastSentCols
-                              || self.desiredRows != self.lastSentRows
-                    else { break }
-                    // Still moving: wait for it to stop rather than spending a
-                    // round-trip (and an agent-visible reflow) on a width in transit.
-                    // Convergence is unaffected — the `while` condition still holds, so
-                    // the next iteration re-settles against the newer target.
-                    guard before == (self.desiredCols, self.desiredRows) else { continue }
-                    let c = self.desiredCols        // always drive toward the LATEST target
-                    let r = self.desiredRows
+                          self.desiredTarget == target else { continue }
+                    self.inflightTarget = target
+                    let generation = self.targetGeneration
                     do {
-                        // lock:true carries THIS view's viewerID + a lease TTL (#137): the
-                        // daemon width-lease is keyed on the viewerID and refreshed by every
-                        // such send (the heartbeat re-sends this same size under the TTL).
                         let applied = try await self.client.setPTYSize(
-                            pane: self.paneID, cols: c, rows: r,
-                            cellWidthPx: cell.width, cellHeightPx: cell.height, lock: true,
-                            viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
-                        self.lastSentCols = c        // confirmed: OUR request is committed
-                        self.lastSentRows = r
-                        // The arbiter's EFFECTIVE size (a wider co-viewer can exceed our
-                        // request). Recorded for truth but NOT written back into lastSent —
-                        // converging the drain on it would re-send forever, fighting the arbiter.
-                        self.appliedCols = applied.cols
-                        self.appliedRows = applied.rows
+                            pane: self.paneID, cols: target.cols, rows: target.rows,
+                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                            lock: true, viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
+                        self.inflightTarget = nil
+                        self.confirmedTarget = target       // confirmed: OUR request is committed
+                        self.responseGeometry = (cols: applied.cols, rows: applied.rows)
+                        self.responseGeneration = generation
                         self.resizeRetries = 0
+                        self.noteGeometryResponse()
                     } catch {
+                        self.inflightTarget = nil
                         if Task.isCancelled { break }
-                        // If `desired` still equals what we just tried, it is the same
-                        // target failing: back off, capped, then give up (a later
-                        // sendPTYSize restarts a fresh drain). If `desired` changed
-                        // during the await, the loop simply converges to the new one
-                        // with the fresh budget sendPTYSize already reset.
-                        if self.desiredCols == c, self.desiredRows == r {
+                        // Retry only while this is still the target; a newer one restarts
+                        // the loop with its own budget.
+                        if self.desiredTarget == target {
                             if self.resizeRetries >= 3 { break }
                             self.resizeRetries += 1
                             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -1615,8 +1992,216 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
+        /// The daemon answered a request of ours. This records the effective geometry
+        /// and lease result; it is NOT an instruction to reflow — the same grid arrives
+        /// in band, in order with the output it applies to.
+        private func noteGeometryResponse() {
+            if let response = responseGeometry, let applied = streamAppliedGeometry,
+               applied == response, let view {
+                // Already at this grid (a font-only change, or a size the stream had
+                // reported before the answer): reconcile metrics, no marker needed.
+                view.applyTerminalSize(cols: applied.cols, rows: applied.rows)
+            }
+            evaluateGeometrySettled()
+        }
+
+        // MARK: retained-frame presentation
+
+        private func currentDrawToken() -> DrawToken? {
+            guard let view else { return nil }
+            return DrawToken(presentationGeneration: presentationGeneration,
+                             targetGeneration: targetGeneration,
+                             streamGeometryRevision: streamGeometryRevision,
+                             cellSize: view.cellSize,
+                             alternate: view.getTerminal().isCurrentBufferAlternate)
+        }
+
+        private func beginResizePresentation(reason: PresentationReason) {
+            guard !stopped, foreground else { return }
+            if presentationActive {
+                if reason == .local { presentationReason = .local }
+                return
+            }
+            // A gesture closes the entire in-flight burst, including its late markers.
+            // Only a later, stationary-to-moving transition can retain another frame.
+            if presentationClosed {
+                guard resizeTask == nil, inflightTarget == nil,
+                      desiredTargetChangedAt.map({ ContinuousClock.now - $0 >= Self.resizeSettleDuration }) ?? true
+                else { return }
+            }
+            presentationGeneration += 1
+            presentationActive = true
+            presentationClosed = false
+            presentationReason = reason
+            presentationStartedOnNormalBuffer = !(view?.getTerminal().isCurrentBufferAlternate ?? false)
+            presentationGeometrySettled = false
+            geometryEligibleAt = nil
+            presentationSyncEnded = false
+            synchronizedBatchBegan = false
+            presentationDeadlineReached = false
+            lastCompleteDraw = nil
+            pendingSafeRepaint = false
+            tailPublishHeld = true
+            if backingDrawComplete, let surface, let image = surface.captureTerminalFrame() {
+                surface.installCover(image, anchor: lastReportedAtTail ? .bottomLeft : .topLeft)
+            }
+            armPresentationDeadline(after: Self.presentationDeadlineDuration)
+        }
+
+        private func armPresentationDeadline(after delay: Duration) {
+            guard presentationActive else { return }
+            presentationDeadlineTask?.cancel()
+            presentationDeadlineReached = false
+            let generation = presentationGeneration
+            let target = targetGeneration
+            presentationDeadlineTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: delay) } catch { return }
+                guard let self, self.presentationActive,
+                      self.presentationGeneration == generation, self.targetGeneration == target else { return }
+                self.presentationDeadlineReached = true
+                self.evaluatePresentationReveal()
+            }
+        }
+
+        private func evaluateGeometrySettled() {
+            guard presentationActive else { return }
+            let settled: Bool
+            if presentationReason == .server {
+                settled = streamAppliedGeometry != nil
+            } else if let response = responseGeometry, let applied = streamAppliedGeometry {
+                settled = responseGeneration == targetGeneration && confirmedTarget == desiredTarget && response == applied
+            } else {
+                settled = false
+            }
+            if settled && !presentationGeometrySettled {
+                geometryEligibleAt = ContinuousClock.now
+            }
+            presentationGeometrySettled = settled
+            evaluatePresentationReveal()
+        }
+
+        private func noteStreamData() {
+            lastStreamDataAt = ContinuousClock.now
+            // A completed backing image is not proof of the bytes now being parsed.
+            lastCompleteDraw = nil
+            pendingSafeRepaint = false
+            if presentationActive { scheduleQuietReveal() }
+        }
+
+        private func noteSynchronizedOutput(active: Bool) {
+            guard presentationActive else { return }
+            if active {
+                synchronizedBatchBegan = true
+                presentationSyncEnded = false
+                lastCompleteDraw = nil
+            } else if synchronizedBatchBegan {
+                presentationSyncEnded = true
+            }
+            evaluatePresentationReveal()
+        }
+
+        private func noteDisplayCompleted(complete: Bool) {
+            backingDrawComplete = complete
+            pendingSafeRepaint = false
+            lastCompleteDraw = complete ? currentDrawToken() : nil
+            evaluatePresentationReveal()
+        }
+
+        private func scheduleQuietReveal() {
+            guard presentationActive else { return }
+            presentationRevealTask?.cancel()
+            let generation = presentationGeneration
+            presentationRevealTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: Self.presentationQuietDuration) } catch { return }
+                guard let self, self.presentationGeneration == generation else { return }
+                self.presentationRevealTask = nil
+                self.evaluatePresentationReveal()
+            }
+        }
+
+        private func evaluatePresentationReveal() {
+            guard presentationActive, !stopped, let view else { return }
+            guard presentationGeometrySettled || presentationDeadlineReached else { return }
+            let terminal = view.getTerminal()
+            guard !terminal.synchronizedOutputActive else { return }
+            if !presentationDeadlineReached, presentationStartedOnNormalBuffer,
+               terminal.isCurrentBufferAlternate { return }
+            let eligibleAt = geometryEligibleAt ?? ContinuousClock.now
+            let quietStart = max(lastStreamDataAt ?? eligibleAt, eligibleAt)
+            let ready = presentationDeadlineReached || presentationSyncEnded
+                || ContinuousClock.now - quietStart >= Self.presentationQuietDuration
+            guard ready else { scheduleQuietReveal(); return }
+            if let draw = lastCompleteDraw, draw == currentDrawToken() {
+                finishPresentation()
+            } else if !pendingSafeRepaint {
+                // Reconcile and schedule through the library's synchronization gate,
+                // including the no-output/deadline case. Never force DEC 2026 to end.
+                pendingSafeRepaint = true
+                view.applyTerminalSize(cols: terminal.cols, rows: terminal.rows)
+            }
+        }
+
+        private func finishPresentation() {
+            presentationDeadlineTask?.cancel()
+            presentationDeadlineTask = nil
+            presentationRevealTask?.cancel()
+            presentationRevealTask = nil
+            let wasActive = presentationActive
+            presentationActive = false
+            presentationClosed = true
+            tailPublishHeld = false
+            surface?.removeCover()
+            if wasActive, !stopped, let view {
+                let maxOffset = max(0, view.contentSize.height - view.bounds.height)
+                reportTailState(atTail: view.contentOffset.y >= maxOffset - 1)
+            }
+        }
+
+        private func discardPresentationReadiness() {
+            finishPresentation()
+            presentationGeneration += 1
+            backingDrawComplete = false
+            lastCompleteDraw = nil
+            lastStreamDataAt = nil
+        }
+
+        private func userTookControl() {
+            if presentationActive { finishPresentation() }
+        }
+
+        // MARK: native one-shot Ctrl
+
+        func applyControlModifier() {
+            guard let view else { return }
+            applyingControlModifier = true
+            defer { applyingControlModifier = false }
+            view.controlModifier = !stopped && foreground && directFocusIntended
+                && view.isFirstResponder && view.keyDriveEnabled && (controlArmedGetter?() ?? false)
+        }
+
+        func cancelArmedControl() {
+            if controlArmedGetter?() == true { controlArmedSetter?(false) }
+            applyingControlModifier = true
+            view?.controlModifier = false
+            applyingControlModifier = false
+        }
+
+        private func prepareForInsertedText(_ text: String, composing: Bool) {
+            userTookControl()
+            guard !composing, text.unicodeScalars.count == 1, let character = text.first,
+                  InputRouter.controlByte(for: character) != nil else {
+                cancelArmedControl()
+                return
+            }
+            applyControlModifier()
+        }
+
         /// Cell size from the actual mono font — the DPI hint the server stores.
         private func cellPixels() -> (width: UInt32, height: UInt32) {
+            if let view {
+                let cell = view.cellSize
+                return (UInt32(max(1, cell.width.rounded())), UInt32(max(1, cell.height.rounded())))
+            }
             let attrs: [NSAttributedString.Key: Any] = [.font: paneFont]
             let advance = ("W" as NSString).size(withAttributes: attrs).width
             let lineHeight = paneFont.lineHeight
@@ -1635,6 +2220,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // responder for a moment, so first-responder alone would let a keystroke reach
             // an agent nobody is looking at.
             guard !stopped, foreground, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
+            userTookControl()
             enqueueInput(String(decoding: data, as: UTF8.self))
         }
 
