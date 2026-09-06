@@ -5,21 +5,18 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     private var reply: XCUIElement { app.textFields["type a reply…"] }
 
     /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
-    /// the ctrl cap starts beyond its right edge: the first CI run failed seven cases
-    /// with "activation point invalid" because the test tapped an off-viewport
-    /// element. A reader scrolls the bar to reach that cap, so the test does too, and
-    /// then asserts the cap really is reachable rather than tapping blind.
-    private func cap(_ identifierOrLabel: String) -> XCUIElement {
-        let byID = app.buttons[identifierOrLabel].firstMatch
-        let element = byID.exists ? byID : app.buttons.matching(NSPredicate(
-            format: "label == %@", identifierOrLabel)).firstMatch
-        XCTAssertTrue(element.waitForExistence(timeout: 5), "no control cap \(identifierOrLabel)")
-        for _ in 0..<5 where !element.isHittable {
+    /// the ctrl cap sits beyond its right edge: eight cases failed with "activation
+    /// point invalid" for tapping an off-viewport element, and asking `isHittable`
+    /// about such an element RAISES that same error instead of answering false. So
+    /// scroll the bar the way a reader does and judge reachability by frame geometry.
+    private func cap(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        if let ready = onscreen(identifier, timeout: 5) { return ready }
+        for _ in 0..<6 {
             app.buttons["Escape"].firstMatch.swipeLeft()
+            if let ready = onscreen(identifier, timeout: 2) { return ready }
         }
-        XCTAssertTrue(element.isHittable,
-                      "control cap \(identifierOrLabel) is unreachable at \(element.frame)")
-        return element
+        XCTFail("control cap \(identifier) never scrolled into the viewport", file: file, line: line)
+        return app.buttons[identifier].firstMatch
     }
 
     private func requireDirectInput() throws {

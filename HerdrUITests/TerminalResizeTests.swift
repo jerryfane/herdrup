@@ -40,18 +40,58 @@ class TerminalInteractionTestCase: XCTestCase {
         return probe()
     }
 
-    /// Fixture commands are plain buttons in the harness bar. Waiting for
-    /// `isHittable`, not mere existence, is deliberate: an element that exists with no
-    /// usable geometry is exactly what silently consumed a full iPad CI run.
+    /// A usable element, chosen and checked by GEOMETRY.
+    ///
+    /// `isHittable` is not usable here: on an element parked outside its scroll
+    /// viewport it raises "Activation point invalid" instead of returning false, which
+    /// failed eight cases outright. Two mounted panes also publish the same pane
+    /// identifiers, so a bare query can match a hidden twin ("Multiple matching
+    /// elements found"). Both are answered by taking the first match whose frame lies
+    /// inside the app window.
+    func onscreen(_ identifier: String, timeout: TimeInterval = 10) -> XCUIElement? {
+        // Identifier OR label: production keycaps carry only an accessibility label.
+        let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
+                                                       identifier, identifier))
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let window = app.windows.firstMatch.frame.insetBy(dx: -1, dy: -1)
+            for index in 0..<matches.count {
+                let candidate = matches.element(boundBy: index)
+                let frame = candidate.frame
+                if frame.width > 0, frame.height > 0, window.contains(frame) { return candidate }
+            }
+        } while Date() < deadline
+        return nil
+    }
+
+    /// Fixture commands are plain buttons in the harness bar, so one laid-out tap is
+    /// enough — no popover to present and nothing to scroll.
     func command(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
-        let item = app.buttons["fixture-" + name]
-        XCTAssertTrue(item.waitForExistence(timeout: 10), "Missing fixture command \(name)",
-                      file: file, line: line)
-        let hittable = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in item.isHittable },
-                                                 object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [hittable], timeout: 10), .completed,
-                       "Fixture command \(name) is not hittable: \(item.frame)", file: file, line: line)
+        guard let item = onscreen("fixture-" + name) else {
+            XCTFail("Fixture command \(name) never became usable", file: file, line: line)
+            return
+        }
         item.tap()
+    }
+
+    /// Opens a real menu and taps one of its items. A menu item that has not been
+    /// presented sits in the tree with an infinite frame, so this waits for actual
+    /// geometry and re-opens once rather than tapping into nothing.
+    func menuItem(_ menu: String, _ item: String,
+                  file: StaticString = #filePath, line: UInt = #line) {
+        for attempt in 0..<2 {
+            guard let control = onscreen(menu) else { continue }
+            control.tap()
+            if let entry = onscreen(item, timeout: 5) {
+                entry.tap()
+                return
+            }
+            if attempt == 0 {
+                // Dismiss a popover that opened without usable items.
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
+            }
+        }
+        XCTFail("menu \(menu) never offered a usable \(item)", file: file, line: line)
     }
 
     func settled(cols: Int? = nil, rows: Int? = nil) {
@@ -109,24 +149,22 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         guard probe()["iPad"] as? Bool == true else {
             throw XCTSkip("Actual sidebar/orientation receipt runs on the iPad destination; iPhone uses exact-grid sweeps")
         }
-        XCTAssertTrue(app.buttons["terminal-sidebar-toggle"].firstMatch.exists,
-                      "The iPad receipt must exercise the actual sidebar")
+        XCTAssertNotNil(onscreen("terminal-sidebar-toggle", timeout: 5),
+                        "The iPad receipt must exercise the actual sidebar")
         command("natural"); settled()
         command("history"); anchor()
         let opens = probe()["opens"] as? Int
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
-            app.buttons["terminal-sidebar-toggle"].firstMatch.tap()
+            onscreen("terminal-sidebar-toggle")?.tap()
             settled(); anchor(); attach("sidebar-\(orientation.rawValue)")
             XCUIDevice.shared.orientation = orientation
             settled(); anchor(); attach("orientation-\(orientation.rawValue)")
-            app.buttons["terminal-sidebar-toggle"].firstMatch.tap()
+            onscreen("terminal-sidebar-toggle")?.tap()
             settled(); anchor()
         }
-        app.buttons["terminal-actions"].tap()
-        app.buttons["terminal-font-increase"].tap()
+        menuItem("terminal-actions", "terminal-font-increase")
         settled(); anchor(); attach("larger-font-history")
-        app.buttons["terminal-actions"].tap()
-        app.buttons["terminal-font-decrease"].tap()
+        menuItem("terminal-actions", "terminal-font-decrease")
         settled(); anchor()
         XCTAssertEqual(probe()["opens"] as? Int, opens)
     }
@@ -260,9 +298,14 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         launch("resize")
         command("history"); anchor()
         command("delayed"); command("120x24")
-        let from = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.35))
-        let to = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.7))
-        from.press(forDuration: 0.05, thenDragTo: to)
+        // Three drags with a beat between them, the gesture ScrollTests already proves
+        // moves this terminal; one flick can land inside the scroll view's slop.
+        for _ in 0..<3 {
+            let from = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.35))
+            let to = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.75))
+            from.press(forDuration: 0.05, thenDragTo: to)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
         wait { ($0["covered"] as? Bool) == false && ($0["markerRow"] as? Int) != 0 }
         settled(cols: 120)
         XCTAssertNotEqual(probe()["markerRow"] as? Int, 0, "Late reveal restored the stale history anchor")
