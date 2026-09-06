@@ -309,6 +309,8 @@ struct RootView: View {
     private func mockView(_ mode: ScreenshotMock) -> some View {
         let mockClient = HerdrClient(transport: MockTransport())
         switch mode {
+        case .resize, .control:
+            TerminalInteractionRoot(control: mode == .control)
         case .onboarding:
             ConnectView { _ in }
         case .pairingGuidance:
@@ -2096,6 +2098,7 @@ struct TerminalHomeView: View {
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
         .accessibilityLabel(minimize ? "Minimise sidebar" : "Expand sidebar")
+        .accessibilityIdentifier("terminal-sidebar-toggle")
         .help(hint)
     }
 
@@ -2352,6 +2355,25 @@ struct TerminalHomeView: View {
             }
             }
         }
+        #if DEBUG
+        .onAppear {
+            guard ScreenshotMock.mode == .resize, slots.isEmpty else { return }
+            let fixtures = TerminalInteractionHarness.agents
+            for fixture in fixtures.reversed() {
+                open(PaneSlot(paneID: fixture.paneID, title: fixture.displayName,
+                              agent: fixture, initialReply: "", siblings: fixtures))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TerminalInteractionHarness.navigateNotification)) { note in
+            guard ScreenshotMock.mode == .resize else { return }
+            if note.object as? String == "close" {
+                if let frontID { slots.removeAll { $0.paneID == frontID } }
+                frontID = slots.last?.paneID
+            } else if let slot = slots.first(where: { $0.paneID != frontID }) {
+                open(slot)
+            }
+        }
+        #endif
         // Connect-scoped lifecycle, attached to the PERSISTENT ROOT, not a tab: a
         // TabView re-runs a tab's .task / .onAppear every time that tab re-appears, so
         // keeping these here fires load / fork-probe / first-run / deep-links ONCE per
@@ -3783,9 +3805,8 @@ struct TerminalPaneContent: View {
     /// The live terminal's stream-liveness box. A `@State` reference type, so it SURVIVES
     /// a `streamGen` remount and keeps reading the same stream's evidence across one.
     @State private var terminalLiveness = StreamLiveness()
-    /// STICKY Ctrl modifier: tapping the `ctrl` cap arms it; the next character
-    /// typed in the reply field is then sent as its control byte (and consumed, not
-    /// added to the message), and the modifier disarms. See `handleReplyChange`.
+    /// One-shot Ctrl shared by direct terminal input and the reply field. Native
+    /// encoding owns direct chords; `handleReplyChange` owns reply-field chords.
     @State private var ctrlArmed = false
     /// True while dictating into the reply: disables the field (so typing can't be
     /// overwritten by the next partial) and suppresses the ctrl-chord interception (so a
@@ -3930,9 +3951,11 @@ struct TerminalPaneContent: View {
                                  isFederated: agent?.machineID != nil,
                                  // Read on foreground to tell a suspended stream from a
                                  // still-running one; see the scenePhase handler below.
-                                 liveness: terminalLiveness)
+                                 liveness: terminalLiveness,
+                                 controlArmed: $ctrlArmed)
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
+                    .accessibilityIdentifier("terminal-surface")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
@@ -3946,9 +3969,11 @@ struct TerminalPaneContent: View {
                     // select). An OVERLAY, not a gesture, for the reason stated above:
                     // only the pill itself hit-tests, taps elsewhere reach the terminal.
                     .overlay(alignment: .bottomTrailing) {
-                        if !terminalAtTail { jumpToLatestPill }
+                        ZStack {
+                            if !terminalAtTail { jumpToLatestPill }
+                        }
+                        .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                     }
-                    .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
@@ -3974,10 +3999,12 @@ struct TerminalPaneContent: View {
         .onChange(of: isForeground) { _, nowFront in
             if nowFront { Task { await refresh() }
             } else {
+                ctrlArmed = false
                 replyFocused = false
                 terminalInputFocused = false
             }
         }
+        .onDisappear { ctrlArmed = false }
         // When the app returns to the foreground, reseed the FRONT pane the same way the
         // header refresh button does (bump streamGen → remount → startBackfill() reads the
         // durable current screen + scrollback) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
@@ -3999,6 +4026,7 @@ struct TerminalPaneContent: View {
         // Gated on isForeground so only the visible pane pays a reseed; hidden keep-mounted
         // panes reseed when next front.
         .onChange(of: scenePhase) { _, phase in
+            if phase != .active { ctrlArmed = false }
             switch phase {
             case .background:
                 wasBackgrounded = true
@@ -4144,9 +4172,11 @@ struct TerminalPaneContent: View {
                 Button {
                     terminalFontSize = min(terminalFontSize + 1, 24)
                 } label: { Label("Increase", systemImage: "textformat.size.larger") }
+                .accessibilityIdentifier("terminal-font-increase")
                 Button {
                     terminalFontSize = max(terminalFontSize - 1, 9)
                 } label: { Label("Decrease", systemImage: "textformat.size.smaller") }
+                .accessibilityIdentifier("terminal-font-decrease")
                 Button {
                     terminalFontSize = 12.5
                 } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
@@ -4172,6 +4202,7 @@ struct TerminalPaneContent: View {
                 .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
         }
+        .accessibilityIdentifier("terminal-actions")
     }
 
     /// Shown only while the pane is scrolled away from its newest output, so it is out
@@ -4335,7 +4366,7 @@ struct TerminalPaneContent: View {
     }
 
     private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
-        Button { send(.key(key)) } label: {
+        Button { ctrlArmed = false; send(.key(key)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
@@ -4357,7 +4388,7 @@ struct TerminalPaneContent: View {
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
     private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
-        Button { send(.rawSequence(sequence)) } label: {
+        Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? "").font(Typography.machine(12)) }
@@ -4371,10 +4402,9 @@ struct TerminalPaneContent: View {
         .accessibilityLabel(Text(label ?? symbol ?? "key"))
     }
 
-    /// The sticky Ctrl toggle. Tap to arm (it highlights in the working blue); the
-    /// next character typed in the reply field is consumed and sent as its control
-    /// byte (see `handleReplyChange`), then it disarms. Tapping again while armed
-    /// cancels it.
+    /// One-shot Ctrl for direct terminal input and the reply field. Native terminal
+    /// encoding owns direct chords; `handleReplyChange` owns reply-field chords.
+    /// Tapping twice cancels without sending input.
     private var ctrlCap: some View {
         Button { ctrlArmed.toggle() } label: {
             Text("ctrl").font(Typography.machine(12))
@@ -4386,6 +4416,7 @@ struct TerminalPaneContent: View {
         }
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
+        .accessibilityIdentifier("terminal-ctrl")
     }
 
     private var replyBar: some View {
@@ -4414,6 +4445,7 @@ struct TerminalPaneContent: View {
                     // pane consumes the token exactly once, so there is nothing to leak into
                     // unrelated passes and no async hop that can race the pass it was meant for.
                     terminalCollapseToken += 1
+                    ctrlArmed = false
                     replyFocused = false
                     terminalInputFocused = false
                 } label: {
@@ -6685,13 +6717,15 @@ struct PagingTestHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
         let arg = ProcessInfo.processInfo.arguments.contains("-herdrScreenshotMock")
         guard env != nil || arg else { return nil }
         switch env {
+        case "resize": return .resize
+        case "control": return .control
         case "onboarding": return .onboarding
         case "pairing-guidance": return .pairingGuidance
         case "rosterstress": return .rosterStress
@@ -6747,8 +6781,12 @@ struct MockTransport: HerdrTransport {
     var backfill = false
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
+    var interactionDriver: TerminalInteractionDriver?
 
     func roundTrip(_ requestLine: String) async throws -> String {
+        if let interactionDriver {
+            return try await interactionDriver.roundTrip(requestLine)
+        }
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
@@ -6770,6 +6808,7 @@ struct MockTransport: HerdrTransport {
     }
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+        if let interactionDriver { return interactionDriver.stream(requestLine) }
         // `pane.stream` (the live terminal): reply with the stream_started ack, then a reset
         // seed, then STAY OPEN — so the DEBUG pane shows a rendered SwiftTerm terminal, not an
         // empty one. The scrollback seed (UI test) feeds 200 lines so there is real history to

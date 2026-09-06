@@ -46,17 +46,21 @@ packages:
   # (PR #587: contentOffset override + syncYDispFromContentOffset + terminal.userScrolling).
   # No app-side workaround exists (proven by ~7 builds); the fix is this upgrade.
   #
-  # METAL: v1.12.0+ bundles `Apple/Metal/Shaders.metal` UNCONDITIONALLY (v1.15.0
-  # Package.swift `.process("Apple/Metal/Shaders.metal")`; the GITHUB_ACTIONS check
-  # only gates benchmarks now — no shader opt-out). Xcode 26 makes the Metal
-  # shader-compiler toolchain a separate download; both CI and the local buildbox run
+  # VENDORED (was a remote `exactVersion: 1.15.0` pin): resizing correctly is an
+  # emulator-level change — reflow must carry the reading position, and a resize
+  # must not soft-reset the terminal — so `Vendor/SwiftTerm` is upstream
+  # migueldeicaza/SwiftTerm at dd2fb8ac5b861e7bf617c872895e338f38165648 (tag
+  # v1.15.0, byte-identical to the previous pin) plus the app's own fixes. Same
+  # module and product name, so target dependencies below are unchanged.
+  #
+  # METAL: v1.12.0+ bundles `Apple/Metal/Shaders.metal` UNCONDITIONALLY (the
+  # vendored Package.swift keeps upstream's `.process("Apple/Metal/Shaders.metal")`;
+  # there is no shader opt-out). Xcode 26 makes the Metal shader-compiler toolchain a
+  # separate download; both CI and the local buildbox run
   # `xcodebuild -downloadComponent MetalToolchain` so `CompileMetalFile` succeeds. We
   # still use CoreText at runtime — the shader is compiled but unused.
-  # iOS floor is under the app's. xcodegen's key is `exactVersion` (SwiftPM's
-  # `exact:` is Package.swift syntax and xcodegen rejects it).
   SwiftTerm:
-    url: https://github.com/migueldeicaza/SwiftTerm.git
-    exactVersion: "1.15.0"
+    path: Vendor/SwiftTerm
 
 targets:
   Herdr:
