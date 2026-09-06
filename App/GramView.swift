@@ -82,6 +82,10 @@ struct GramView: View {
     @State private var sendError: String?
     /// A non-fatal refresh failure while messages are already shown.
     @State private var refreshNote: String?
+    /// Consecutive failed loads, reset by any success. Drives the poll backoff: a
+    /// warm cache keeps `phase == .loaded` through a failure, so `phase` alone can no
+    /// longer tell a healthy poll from a failing one.
+    @State private var loadFailures = 0
     @State private var isLoading = false
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
@@ -606,9 +610,24 @@ struct GramView: View {
         }
     }
 
+    /// `phase`, corrected for a warm store.
+    ///
+    /// `phase` is `@State`, so on iPad it resets to `.loading` on every remount (the
+    /// page is rebuilt inside the detail column's `switch selectedTab`). `load()` puts
+    /// it right, but SwiftUI starts a `.task` only AFTER the first body evaluation, so
+    /// the body runs once with `.loading` and would flash a spinner over a list that
+    /// is already in hand. Deriving the render from the STORE removes the dependency
+    /// on when `.task` first runs, which is the difference between "renders the
+    /// previous list immediately" — what the design claims — and "within one
+    /// main-actor turn".
+    private var effectivePhase: LoadPhase {
+        if case .loading = phase, inboxStore.inbox.hasLoaded { return .loaded }
+        return phase
+    }
+
     @ViewBuilder
     private var inboxContent: some View {
-        switch phase {
+        switch effectivePhase {
         case .loading:
             centered { ProgressView().tint(Palette.textDim) }
         case .unavailable(let message):
@@ -976,12 +995,18 @@ struct GramView: View {
     /// without a manual refresh (the gram store has no event stream). Backs off when
     /// the server can't serve gram (a pre-deploy daemon), so a failing `gram.list`
     /// isn't hit every few seconds. Ends when the view goes away (task cancelled).
+    ///
+    /// The backoff is keyed on CONSECUTIVE FAILURES, not on `phase`. Keying it on
+    /// `.unavailable` stopped working once the store outlived the page: both catch
+    /// arms only escalate to `.unavailable` when there is nothing to show, so a
+    /// remount against a daemon that has lost gram now has a warm cache, keeps
+    /// `phase == .loaded`, and would retry every 6s forever over the SSH channel the
+    /// terminal shares — for exactly the case the cache was added to serve.
     private func pollLoop() async {
         await load(initial: true)
         while !Task.isCancelled {
-            let interval: UInt64
-            if case .unavailable = phase { interval = 30_000_000_000 } else { interval = 6_000_000_000 }
-            try? await Task.sleep(nanoseconds: interval)
+            // `.unavailable` implies a failure, so the counter alone covers both.
+            try? await Task.sleep(nanoseconds: loadFailures > 0 ? 30_000_000_000 : 6_000_000_000)
             if Task.isCancelled { break }
             await load(initial: false)
         }
@@ -1018,6 +1043,7 @@ struct GramView: View {
             let changed = inboxStore.inbox.apply(answer)
             phase = .loaded
             refreshNote = nil
+            loadFailures = 0
             // Nothing moved: the reconciliation below would compute the same result
             // from the same list, so skip it (the common case on a 6s poll).
             guard changed || !answer.isUnchanged else { return }
@@ -1032,6 +1058,7 @@ struct GramView: View {
             // it still returns (a poll that raced the delete), which stay suppressed.
             deletedIDs.formIntersection(serverIDs)
         } catch let error as APIError where error.code == "gram_unavailable" {
+            loadFailures += 1
             if messages.isEmpty {
                 phase = .unavailable("Gram isn't available on this server yet.")
             } else {
@@ -1041,6 +1068,7 @@ struct GramView: View {
             // A daemon predating the gram build answers an unknown-method error, NOT
             // `gram_unavailable`, so a first-load failure gets one honest message
             // covering both "not deployed yet" and "couldn't reach it", plus a Retry.
+            loadFailures += 1
             if messages.isEmpty {
                 phase = .unavailable(
                     "Gram isn't available on this server yet, or the messages couldn't load.")
