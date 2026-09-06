@@ -15,21 +15,25 @@ final class TerminalControlTests: TerminalInteractionTestCase {
             scrollControlBar()
             if let ready = onscreen(identifier, timeout: 2) { return ready }
         }
-        XCTFail("control cap \(identifier) never scrolled into the viewport", file: file, line: line)
+        XCTFail("control cap \(identifier) never scrolled into the viewport. \(elementDump())",
+                file: file, line: line)
         return app.buttons[identifier].firstMatch
     }
 
-    /// Drags the control bar ITSELF, at the row its leftmost cap occupies.
-    /// `swipeLeft()` on a cap delivered the gesture to that button instead, so the bar
-    /// never moved and every arming case failed on an off-viewport ctrl cap.
+    /// Drags the control bar ITSELF, in the leftmost cap's OWN coordinate space.
+    ///
+    /// `swipeLeft()` on a cap delivers the gesture to that button, so the bar never
+    /// moved. Normalized window coordinates were no better: the window query is not
+    /// guaranteed to be the main window, and a bad reference frame silently aims the
+    /// drag at nothing. Offsets past 1.0 are multiples of the anchor's own frame, so
+    /// this stays inside the bar's row by construction.
     private func scrollControlBar() {
-        guard let anchor = onscreen("Escape", timeout: 5) else { return }
-        let window = app.windows.firstMatch
-        let row = anchor.frame.midY / max(1, window.frame.height)
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: row))
+        let anchor = app.buttons["Escape"].firstMatch
+        guard anchor.exists else { return }
+        anchor.coordinate(withNormalizedOffset: CGVector(dx: 6.0, dy: 0.5))
             .press(forDuration: 0.05,
-                   thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: row)))
-        Thread.sleep(forTimeInterval: 0.2)
+                   thenDragTo: anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)))
+        Thread.sleep(forTimeInterval: 0.25)
     }
 
     private func requireDirectInput() throws {

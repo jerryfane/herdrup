@@ -47,21 +47,31 @@ class TerminalInteractionTestCase: XCTestCase {
     /// failed eight cases outright. Two mounted panes also publish the same pane
     /// identifiers, so a bare query can match a hidden twin ("Multiple matching
     /// elements found"). Both are answered by taking the first match whose frame lies
-    /// inside the app window.
+    /// inside the APPLICATION frame — the screen. A window query can return a window
+    /// that is not the main one, which would reject every element on the screen.
     func onscreen(_ identifier: String, timeout: TimeInterval = 10) -> XCUIElement? {
         // Identifier OR label: production keycaps carry only an accessibility label.
         let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
                                                        identifier, identifier))
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            let window = app.windows.firstMatch.frame.insetBy(dx: -1, dy: -1)
+            let visible = app.frame.insetBy(dx: -1, dy: -1)
             for index in 0..<matches.count {
                 let candidate = matches.element(boundBy: index)
                 let frame = candidate.frame
-                if frame.width > 0, frame.height > 0, window.contains(frame) { return candidate }
+                if frame.width > 0, frame.height > 0, visible.contains(frame) { return candidate }
             }
         } while Date() < deadline
         return nil
+    }
+
+    /// Every button with its identifier, label and frame. Attached to a reachability
+    /// failure so the next run explains itself instead of costing another CI round.
+    func elementDump() -> String {
+        let rows = app.buttons.allElementsBoundByIndex.map {
+            "\($0.identifier.isEmpty ? "-" : $0.identifier)|\($0.label)|\($0.frame)"
+        }
+        return "app=\(app.frame) buttons=[" + rows.joined(separator: " ") + "]"
     }
 
     /// Fixture commands are plain buttons in the harness bar, so one laid-out tap is
