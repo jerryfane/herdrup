@@ -2,8 +2,25 @@ import XCTest
 import UIKit
 
 final class TerminalControlTests: TerminalInteractionTestCase {
-    private var ctrl: XCUIElement { app.buttons["terminal-ctrl"].firstMatch }
     private var reply: XCUIElement { app.textFields["type a reply…"] }
+
+    /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
+    /// the ctrl cap starts beyond its right edge: the first CI run failed seven cases
+    /// with "activation point invalid" because the test tapped an off-viewport
+    /// element. A reader scrolls the bar to reach that cap, so the test does too, and
+    /// then asserts the cap really is reachable rather than tapping blind.
+    private func cap(_ identifierOrLabel: String) -> XCUIElement {
+        let byID = app.buttons[identifierOrLabel].firstMatch
+        let element = byID.exists ? byID : app.buttons.matching(NSPredicate(
+            format: "label == %@", identifierOrLabel)).firstMatch
+        XCTAssertTrue(element.waitForExistence(timeout: 5), "no control cap \(identifierOrLabel)")
+        for _ in 0..<5 where !element.isHittable {
+            app.buttons["Escape"].firstMatch.swipeLeft()
+        }
+        XCTAssertTrue(element.isHittable,
+                      "control cap \(identifierOrLabel) is unreachable at \(element.frame)")
+        return element
+    }
 
     private func requireDirectInput() throws {
         let state = wait { $0["keyDriveEnabled"] != nil }
@@ -20,7 +37,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     private func chord(_ text: String) {
-        ctrl.tap()
+        cap("terminal-ctrl").tap()
         // Deliberately no wait for a SwiftUI update between arming and typing.
         app.typeText(text)
     }
@@ -70,10 +87,10 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testTwoTapsCancelAndReplyFieldStillConsumesControl() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        ctrl.tap(); ctrl.tap(); app.typeText("p")
+        cap("terminal-ctrl").tap(); cap("terminal-ctrl").tap(); app.typeText("p")
         input("p", previous: 0)
         reply.tap()
-        ctrl.tap(); reply.typeText("p")
+        cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }
         XCTAssertFalse((reply.value as? String ?? "").hasSuffix("p"), "Reply chord leaked literal text into the draft")
         attach("reply-field-control-preserved")
@@ -82,23 +99,23 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     func testDeleteNonASCIICompositionAndPasteDisarm() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
         app.typeText("x")
-        ctrl.tap(); app.typeText(XCUIKeyboardKey.delete.rawValue)
+        cap("terminal-ctrl").tap(); app.typeText(XCUIKeyboardKey.delete.rawValue)
         input("", previous: 0)
         app.typeText("p"); input("p", previous: 0)
         chord("c"); input("")
-        ctrl.tap(); app.typeText("é")
+        cap("terminal-ctrl").tap(); app.typeText("é")
         input("é", previous: 0)
         app.typeText("p"); input("ép", previous: 0)
         chord("c"); input("")
-        ctrl.tap(); command("ime-commit")
+        cap("terminal-ctrl").tap(); command("ime-commit")
         input("日本", previous: 0)
         focusTerminal(); app.typeText("p"); input("日本p", previous: 0)
         chord("c"); input("")
-        ctrl.tap(); command("paste-batch")
+        cap("terminal-ctrl").tap(); command("paste-batch")
         input("paste-payload", previous: 0)
         focusTerminal(); app.typeText("p"); input("paste-payloadp", previous: 0)
         chord("c"); input("")
-        ctrl.tap(); command("batch-insert")
+        cap("terminal-ctrl").tap(); command("batch-insert")
         input("batch-payload", previous: 0)
         focusTerminal(); app.typeText("p"); input("batch-payloadp", previous: 0)
         attach("batch-composition-delete-and-next-key")
@@ -106,11 +123,11 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testExplicitKeycapAndKeyboardDismissalDisarm() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        ctrl.tap()
-        app.buttons["Tab"].tap()
+        cap("terminal-ctrl").tap()
+        cap("Tab").tap()
         app.typeText("p"); input("p", previous: 0)
         chord("c"); input("")
-        ctrl.tap()
+        cap("terminal-ctrl").tap()
         app.buttons["Collapse keyboard"].tap()
         wait { ($0["focused"] as? Bool) == false }
         focusTerminal(); app.typeText("p"); input("p", previous: 0)
@@ -119,7 +136,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        ctrl.tap()
+        cap("terminal-ctrl").tap()
         app.buttons["Dictate"].tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         // Permissions may already be settled by another case on this simulator.
@@ -138,7 +155,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testAppDeactivationDisarmsBeforeNextDirectKey() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        ctrl.tap()
+        cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
         app.activate()
         focusTerminal(); app.typeText("p"); input("p", previous: 0)
@@ -147,7 +164,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testPaneSwitchAndTypingDuringCoverDoNotLeakOrRearm() throws {
         launch("resize"); try requireDirectInput(); focusTerminal()
-        ctrl.tap(); command("switch")
+        cap("terminal-ctrl").tap(); command("switch")
         wait { ($0["pane"] as? String) == "ix:b" }
         focusTerminal(); app.typeText("p"); input("p", previous: 0)
         command("switch")

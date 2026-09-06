@@ -469,22 +469,38 @@ struct TerminalInteractionRoot: View {
     }
 }
 
+/// EVERY COMMAND IS ITS OWN LAID-OUT BUTTON, not a `Menu`.
+///
+/// The menu cost a whole CI round: on iPad its items stayed in the accessibility tree
+/// with `{{inf, inf}, {0, 0}}` frames, so `fixture-history` was findable and
+/// permanently unhittable, and every resize case died on its first command. A grid of
+/// real buttons has real geometry on both idioms, needs no popover presentation and no
+/// scrolling, so a fixture command can never be the flaky part of a receipt.
 private struct TerminalInteractionControls: View {
     @ObservedObject private var harness = TerminalInteractionHarness.shared
     private let ticks = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+    private static let commands =
+        ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
+         "reset", "server", "switch", "close", "bounce", "paste-batch", "batch-insert", "ime-commit"]
+        + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
+
     var body: some View {
-            HStack {
-                Menu("Fixture") {
-                    ForEach(["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
-                             "reset", "server", "switch", "close", "bounce", "paste-batch", "batch-insert", "ime-commit"] + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue), id: \.self) { command in
-                        Button(command) { harness.perform(command) }.accessibilityIdentifier("fixture-" + command)
-                    }
-                }.accessibilityIdentifier("terminal-fixture-menu")
-                Text("Terminal receipt").font(.system(size: 8))
-                    .accessibilityIdentifier("terminal-interaction-probe")
-                    .accessibilityLabel(harness.probe())
+        VStack(spacing: 2) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 6), spacing: 2) {
+                ForEach(Self.commands, id: \.self) { command in
+                    Button(command) { harness.perform(command) }
+                        .font(.system(size: 8))
+                        .frame(maxWidth: .infinity, minHeight: 18)
+                        .background(Color.white.opacity(0.12))
+                        .accessibilityIdentifier("fixture-" + command)
+                }
             }
-            .frame(maxWidth: .infinity).background(Color.black)
+            Text("Terminal receipt").font(.system(size: 8))
+                .accessibilityIdentifier("terminal-interaction-probe")
+                .accessibilityLabel(harness.probe())
+        }
+        .padding(.horizontal, 4).padding(.vertical, 2)
+        .frame(maxWidth: .infinity).background(Color.black)
         .onReceive(ticks) { _ in harness.tick() }
     }
 }

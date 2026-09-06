@@ -40,10 +40,17 @@ class TerminalInteractionTestCase: XCTestCase {
         return probe()
     }
 
-    func command(_ name: String) {
-        app.buttons["terminal-fixture-menu"].tap()
+    /// Fixture commands are plain buttons in the harness bar. Waiting for
+    /// `isHittable`, not mere existence, is deliberate: an element that exists with no
+    /// usable geometry is exactly what silently consumed a full iPad CI run.
+    func command(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
         let item = app.buttons["fixture-" + name]
-        XCTAssertTrue(item.waitForExistence(timeout: 3), "Missing fixture command \(name)")
+        XCTAssertTrue(item.waitForExistence(timeout: 10), "Missing fixture command \(name)",
+                      file: file, line: line)
+        let hittable = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in item.isHittable },
+                                                 object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [hittable], timeout: 10), .completed,
+                       "Fixture command \(name) is not hittable: \(item.frame)", file: file, line: line)
         item.tap()
     }
 
