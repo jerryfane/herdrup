@@ -62,7 +62,7 @@ jobs:
 
   build-and-uitest:
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -95,7 +95,9 @@ jobs:
       - name: Install XcodeGen
         # Skip Homebrew's auto-update (it re-indexes every formula on a cold runner,
         # a minute-plus of pure overhead) — we only need the already-bottled xcodegen.
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+        # coreutils supplies `gtimeout`, which bounds each test invocation below;
+        # macOS ships no `timeout` of its own.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen coreutils
 
       - name: Generate project
         run: xcodegen generate
@@ -180,6 +182,11 @@ jobs:
           set -o pipefail
           mkdir -p TestReceipts
           failed=0
+          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+          if [ -z "$TIMEOUT_BIN" ]; then
+            echo "::error::no timeout binary; per-suite budgets would be unenforceable"
+            exit 1
+          fi
           recorder=
           stop_recording() {
             if [ -n "$recorder" ]; then
@@ -190,24 +197,41 @@ jobs:
           }
           trap stop_recording EXIT
           run_suite() {
-            local label="$1" udid="$2"
-            shift 2
-            if ! xcodebuild test \
+            local label="$1" udid="$2" budget="$3"
+            shift 3
+            local status=0
+            # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the
+            # whole job budget and take the receipt upload down with it: that is
+            # exactly how the first run of this workflow ended with a cancelled step
+            # and no artifacts at all. Per-case allowances make xcodebuild itself
+            # fail a stuck test with diagnostics instead of blocking to the deadline.
+            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
+                -test-timeouts-enabled YES \
+                -default-test-execution-time-allowance 120 \
+                -maximum-test-execution-time-allowance 300 \
                 -derivedDataPath .build-dd \
                 -clonedSourcePackagesDirPath SourcePackages \
                 -resultBundlePath "TestReceipts/$label-first.xcresult" \
-                "$@" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "TestReceipts/$label-first.log" | xcbeautify; then
+                "$@" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "TestReceipts/$label-first.log" | xcbeautify || status=$?
+            if [ "$status" -ne 0 ]; then
               stop_recording
+              if [ "$status" -eq 124 ] || [ "$status" -eq 130 ]; then
+                # A timeout is a failure on its own evidence; a warm rerun would
+                # only spend the same budget again.
+                echo "::error::$label exceeded its ${budget} budget; see TestReceipts/$label-first.log"
+                return 1
+              fi
               echo "::error::$label first run failed; preserving it and collecting raw diagnostics"
-              # A warm diagnostic pass must never turn a cold-launch failure green.
-              # Separate paths retain the first bundle even when the retry fails too.
-              xcodebuild test \
+              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
+                -test-timeouts-enabled YES \
+                -default-test-execution-time-allowance 120 \
+                -maximum-test-execution-time-allowance 300 \
                 -derivedDataPath .build-dd \
                 -clonedSourcePackagesDirPath SourcePackages \
                 -resultBundlePath "TestReceipts/$label-diagnostic.xcresult" \
@@ -215,8 +239,7 @@ jobs:
               return 1
             fi
           }
-          # Whole suite includes Scroll/Selection/Paging and both new terminal suites.
-          run_suite iPhone "$IPHONE_UDID" -only-testing:HerdrUITests || failed=1
+          run_suite iPhone "$IPHONE_UDID" 40m -only-testing:HerdrUITests || failed=1
 
           xcrun simctl boot "$IPAD_UDID" || true
           xcrun simctl bootstatus "$IPAD_UDID" -b
@@ -224,14 +247,14 @@ jobs:
           xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad.mp4 \
             > TestReceipts/terminal-resize-iPad-video.log 2>&1 &
           recorder=$!
-          run_suite iPadResize "$IPAD_UDID" -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+          run_suite iPadResize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
           stop_recording
           if [ ! -s TestReceipts/terminal-resize-iPad.mp4 ]; then
             echo "::warning::iPad video unavailable; consult recording log and xcresult screenshots"
           fi
           # Existing coordinate/keyboard receipts keep their iPhone destination.
           # The new suites explicitly handle iPad's hardware-keyboard prerequisite.
-          run_suite iPadControl "$IPAD_UDID" -only-testing:HerdrUITests/TerminalControlTests || failed=1
+          run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
           exit "$failed"
 
       - name: Run UIKit SwiftTerm API regressions on both devices
@@ -256,10 +279,11 @@ jobs:
           PY
           )
           failed=0
+          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout)
           for device in iPhone iPad; do
             if [ "$device" = iPhone ]; then udid="$IPHONE_UDID"; else udid="$IPAD_UDID"; fi
             label="SwiftTermUIKit-$device"
-            if ! xcodebuild test -scheme "$SCHEME" \
+            if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test -scheme "$SCHEME" \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
                 -only-testing:SwiftTermTests/TerminalViewGeometryTests \
@@ -268,7 +292,7 @@ jobs:
                 CODE_SIGNING_ALLOWED=NO 2>&1 | tee "../../TestReceipts/$label-first.log" | xcbeautify; then
               failed=1
               echo "::error::$label first run failed; collecting raw diagnostics without erasing failure"
-              xcodebuild test -scheme "$SCHEME" \
+              "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test -scheme "$SCHEME" \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
                 -only-testing:SwiftTermTests/TerminalViewGeometryTests \

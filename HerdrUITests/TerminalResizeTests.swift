@@ -77,12 +77,15 @@ class TerminalInteractionTestCase: XCTestCase {
 }
 
 final class TerminalResizeTests: TerminalInteractionTestCase {
-    func testLogicalHistorySurvivesTenWidthCyclesAndHeightChange() {
+    // Three painted cycles here; the vendored core suite drives ten inside a long
+    // wrapped line, where a cycle costs microseconds instead of two app launches'
+    // worth of accessibility round trips.
+    func testLogicalHistorySurvivesWidthCyclesAndHeightChange() {
         launch("resize")
         command("history"); anchor()
         let original = probe()["top"] as? String
         attach("history-before-80")
-        for cycle in 0..<10 {
+        for cycle in 0..<3 {
             command("120x24"); settled(cols: 120, rows: 24); anchor()
             command("80x24"); settled(cols: 80, rows: 24); anchor()
             XCTAssertEqual(probe()["top"] as? String, original, "Cycle \(cycle) drifted to another logical cell")
@@ -91,7 +94,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         command("80x24"); settled(cols: 80, rows: 24); anchor()
         XCTAssertEqual(probe()["top"] as? String, original)
         XCTAssertEqual(probe()["opens"] as? Int, 1, "A resize must not replay/reset the stream")
-        attach("history-after-ten-cycles-and-height")
+        attach("history-after-cycles-and-height")
     }
 
     func testRealSidebarOrientationAndFontPreserveHistory() throws {
@@ -172,16 +175,16 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         command("history"); anchor()
         command("synchronized")
         command("120x24")
-        // Poll the actual presentation, retaining transition screenshots. A hidden
-        // incomplete backing draw may occur, but it must never be published as live.
-        let until = Date().addingTimeInterval(1.2)
-        var index = 0
-        repeat {
+        // Sample the actual presentation across the fixture's split redraw, retaining
+        // transition screenshots. A hidden incomplete backing draw may occur, but it
+        // must never be published as live. Fixed sampling: a spin loop attached dozens
+        // of full screenshots for one assertion.
+        for index in 0..<6 {
             let state = probe()
             XCTAssertFalse((state["visible"] as? String ?? "").contains("INCOMPLETE"))
             attach("split-frame-\(index)")
-            index += 1
-        } while Date() < until
+            if index < 5 { Thread.sleep(forTimeInterval: 0.15) }
+        }
         settled(cols: 120); anchor()
         XCTAssertEqual(probe()["alternate"] as? Bool, false)
         attach("normal-buffer-restored")
