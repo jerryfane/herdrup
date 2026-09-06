@@ -1514,6 +1514,18 @@ struct TerminalHomeView: View {
     /// so a transient layout value cannot become the stored preference (it would also
     /// become the new `ideal`, which is what makes a bad sample stick).
     @State private var measuredSidebarWidth: CGFloat = 0
+    /// When `measuredSidebarWidth` last changed. The pre-collapse commit in
+    /// `toggleSidebar` bypasses the debounce, so it needs its own way to tell a width
+    /// the owner settled on from one the split view is sweeping through.
+    @State private var measuredSidebarWidthAt = Date.distantPast
+    /// How still a measurement must be for the PRE-COLLAPSE commit to trust it.
+    ///
+    /// During the split view's own column animation a new sample arrives roughly every
+    /// frame (~16ms); after a divider drag the owner still has to reach the toggle,
+    /// which takes far longer. 50ms separates those two cases cleanly, and unlike
+    /// `sidebarWidthSettle` this is not a wait — it is a freshness test on a value
+    /// that already exists.
+    private static let sidebarWidthStillFor: TimeInterval = 0.05
     /// How long a measured width must hold still before it is persisted. Comfortably
     /// longer than the split view's own column animation, so a minimise/expand sweep
     /// commits once, at the width it ended on.
@@ -1809,6 +1821,7 @@ struct TerminalHomeView: View {
                 GeometryReader { proxy in
                     Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in
                         measuredSidebarWidth = width
+                        measuredSidebarWidthAt = Date()
                     }
                 }
             }
@@ -2125,8 +2138,20 @@ struct TerminalHomeView: View {
         // Commit any pending measurement before collapsing: the debounce is 500ms, and
         // a drag followed straight away by a minimise would otherwise lose the width
         // the owner just chose. Runs while the column is still open, so the layout
-        // guard above passes.
-        if minimize { recordSidebarWidth(measuredSidebarWidth) }
+        // guard in `recordSidebarWidth` passes.
+        //
+        // Only a STILL measurement, though. This path bypasses the debounce, and the
+        // split view sweeps intermediate widths through `measuredSidebarWidth` during
+        // its own ~0.3s column animation — so minimising again inside that window (⌘K
+        // key repeat, an impatient double-tap) would otherwise persist a width the
+        // owner never chose, and because the stored value feeds `ideal` the column
+        // would then open there on every later launch. That is exactly the
+        // self-fulfilling corruption the debounce exists to prevent, and bypassing it
+        // must not reopen the hole.
+        if minimize,
+           Date().timeIntervalSince(measuredSidebarWidthAt) >= Self.sidebarWidthStillFor {
+            recordSidebarWidth(measuredSidebarWidth)
+        }
         sidebarMinimized = minimize
         columnVisibility = minimize ? .detailOnly : .all
     }
@@ -2150,7 +2175,13 @@ struct TerminalHomeView: View {
                               badge: gramUnread.count)
             railSectionButton(.call, "Call", "phone")
             railSectionButton(.settings, "Settings", "gearshape")
-            Divider().overlay(Palette.hairlineQuiet).padding(.horizontal, 10).padding(.vertical, 4)
+            // Gated on the same condition as the counts below it: a separator with
+            // nothing on its far side is precisely the zero-value noise those counts
+            // are suppressed to avoid, and the quiet state is the COMMON rendering.
+            if fullList.needsYouCount > 0 || activity.workingCount > 0 {
+                Divider().overlay(Palette.hairlineQuiet)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+            }
             // The counts are the reason to minimise rather than hide. `needsYou` is the
             // ROSTER's STRICT count (`AgentList.needsYouCount`), deliberately NOT
             // `activityContent.needsYouCount`: that one folds `.unrecognised` rows into
