@@ -55,7 +55,16 @@ struct GramView: View {
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
     /// can never drop an optimistic post it hasn't caught up to.
-    @State private var serverMessages: [GramMessage] = []
+    /// The server snapshot, held in a store that OUTLIVES this view: on iPad the page
+    /// is destroyed whenever the section changes, and a view-local list meant every
+    /// return re-fetched the whole store behind a spinner. Accessed through
+    /// `serverMessages` below so the rest of the page reads unchanged.
+    @ObservedObject private var inboxStore = GramInboxStore.shared
+    /// The last server snapshot, newest first. Read-only: every mutation goes through
+    /// a `GramInbox` method so the digest is invalidated with the change (a locally
+    /// altered list must not be re-validated by a digest the daemon issued for the
+    /// list before it).
+    private var serverMessages: [GramMessage] { inboxStore.inbox.messages }
     @State private var pendingPosts: [GramMessage] = []
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
@@ -73,6 +82,10 @@ struct GramView: View {
     @State private var sendError: String?
     /// A non-fatal refresh failure while messages are already shown.
     @State private var refreshNote: String?
+    /// Consecutive failed loads, reset by any success. Drives the poll backoff: a
+    /// warm cache keeps `phase == .loaded` through a failure, so `phase` alone can no
+    /// longer tell a healthy poll from a failing one.
+    @State private var loadFailures = 0
     @State private var isLoading = false
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
@@ -597,9 +610,24 @@ struct GramView: View {
         }
     }
 
+    /// `phase`, corrected for a warm store.
+    ///
+    /// `phase` is `@State`, so on iPad it resets to `.loading` on every remount (the
+    /// page is rebuilt inside the detail column's `switch selectedTab`). `load()` puts
+    /// it right, but SwiftUI starts a `.task` only AFTER the first body evaluation, so
+    /// the body runs once with `.loading` and would flash a spinner over a list that
+    /// is already in hand. Deriving the render from the STORE removes the dependency
+    /// on when `.task` first runs, which is the difference between "renders the
+    /// previous list immediately" — what the design claims — and "within one
+    /// main-actor turn".
+    private var effectivePhase: LoadPhase {
+        if case .loading = phase, inboxStore.inbox.hasLoaded { return .loaded }
+        return phase
+    }
+
     @ViewBuilder
     private var inboxContent: some View {
-        switch phase {
+        switch effectivePhase {
         case .loading:
             centered { ProgressView().tint(Palette.textDim) }
         case .unavailable(let message):
@@ -967,12 +995,18 @@ struct GramView: View {
     /// without a manual refresh (the gram store has no event stream). Backs off when
     /// the server can't serve gram (a pre-deploy daemon), so a failing `gram.list`
     /// isn't hit every few seconds. Ends when the view goes away (task cancelled).
+    ///
+    /// The backoff is keyed on CONSECUTIVE FAILURES, not on `phase`. Keying it on
+    /// `.unavailable` stopped working once the store outlived the page: both catch
+    /// arms only escalate to `.unavailable` when there is nothing to show, so a
+    /// remount against a daemon that has lost gram now has a warm cache, keeps
+    /// `phase == .loaded`, and would retry every 6s forever over the SSH channel the
+    /// terminal shares — for exactly the case the cache was added to serve.
     private func pollLoop() async {
         await load(initial: true)
         while !Task.isCancelled {
-            let interval: UInt64
-            if case .unavailable = phase { interval = 30_000_000_000 } else { interval = 6_000_000_000 }
-            try? await Task.sleep(nanoseconds: interval)
+            // `.unavailable` implies a failure, so the counter alone covers both.
+            try? await Task.sleep(nanoseconds: loadFailures > 0 ? 30_000_000_000 : 6_000_000_000)
             if Task.isCancelled { break }
             await load(initial: false)
         }
@@ -983,25 +1017,48 @@ struct GramView: View {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        // Spinner only on the first load with nothing to show yet; a refresh keeps
-        // the current messages visible.
-        if initial && messages.isEmpty { phase = .loading }
+        // A warm cache means there is something to render RIGHT NOW, so leave
+        // `.loading` before touching the network.
+        //
+        // `phase` is `@State`, and on iPad this page is rebuilt inside the detail
+        // column's `switch selectedTab` — the same destruction that motivated moving
+        // the messages out of the view. So the phase resets to `.loading` on every
+        // section switch, and merely declining to SET `.loading` (as this guard used
+        // to) could not help: it was already `.loading` from the initialiser, and the
+        // spinner rendered over a list that was already in hand. The cache saved the
+        // bytes and none of the latency, which was the whole point.
+        //
+        // This also stops a failed refresh from spinning forever: both catch arms
+        // below escalate to `.unavailable` only when there is nothing to show, and
+        // otherwise leave `phase` alone — which, before this line, meant `.loading`
+        // for good, with a "Showing the last loaded messages" banner above an empty
+        // spinner and no Retry.
+        if inboxStore.inbox.hasLoaded, phase == .loading { phase = .loaded }
+        if initial && !inboxStore.inbox.hasLoaded && messages.isEmpty { phase = .loading }
         do {
-            let fetched = try await client.gramList()
-            serverMessages = fetched
+            // Conditional on the digest we hold. An unchanged store answers in a few
+            // hundred bytes; only a real change ships the list.
+            let answer = try await client.gramList(
+                ifUnchangedDigest: inboxStore.inbox.conditionalDigest)
+            let changed = inboxStore.inbox.apply(answer)
+            phase = .loaded
+            refreshNote = nil
+            loadFailures = 0
+            // Nothing moved: the reconciliation below would compute the same result
+            // from the same list, so skip it (the common case on a 6s poll).
+            guard changed || !answer.isUnchanged else { return }
             // Keep the tab badge in step with what we just loaded.
-            unread?.count = fetched.filter { $0.isUnread }.count
+            unread?.count = inboxStore.inbox.unreadCount
             // Drop optimistic posts the server now reflects; unconfirmed ones stay
             // visible via `messages` (gram.post writes synchronously, so any in-flight
             // load started BEFORE a post can no longer discard it).
-            let serverIDs = Set(fetched.map(\.id))
+            let serverIDs = Set(inboxStore.inbox.messages.map(\.id))
             pendingPosts.removeAll { serverIDs.contains($0.id) }
             // Retire delete-tombstones the server has confirmed gone; keep only those
             // it still returns (a poll that raced the delete), which stay suppressed.
             deletedIDs.formIntersection(serverIDs)
-            phase = .loaded
-            refreshNote = nil
         } catch let error as APIError where error.code == "gram_unavailable" {
+            loadFailures += 1
             if messages.isEmpty {
                 phase = .unavailable("Gram isn't available on this server yet.")
             } else {
@@ -1011,6 +1068,7 @@ struct GramView: View {
             // A daemon predating the gram build answers an unknown-method error, NOT
             // `gram_unavailable`, so a first-load failure gets one honest message
             // covering both "not deployed yet" and "couldn't reach it", plus a Retry.
+            loadFailures += 1
             if messages.isEmpty {
                 phase = .unavailable(
                     "Gram isn't available on this server yet, or the messages couldn't load.")
@@ -1532,7 +1590,7 @@ struct GramView: View {
                 // can't briefly resurrect the row; cleared in `load` once the server
                 // no longer returns it.
                 deletedIDs.insert(message.id)
-                serverMessages.removeAll { $0.id == message.id }
+                inboxStore.inbox.remove(id: message.id)
                 pendingPosts.removeAll { $0.id == message.id }
             } catch let error as APIError {
                 sendError = "Couldn't delete: \(error.message)"
@@ -1553,11 +1611,9 @@ struct GramView: View {
                 try await client.gramMarkRead(id: message.id)
                 // Flip the local copy only after the server confirms — an unread
                 // agent->owner message always lives in the server snapshot.
-                if let index = serverMessages.firstIndex(where: { $0.id == message.id }) {
-                    serverMessages[index].readByOwner = true
-                    // Reading a message clears it from the badge immediately.
-                    unread?.count = serverMessages.filter { $0.isUnread }.count
-                }
+                inboxStore.inbox.markRead(id: message.id)
+                // Reading a message clears it from the badge immediately.
+                unread?.count = inboxStore.inbox.unreadCount
             } catch {
                 // Leave it unread; the next poll re-surfaces it.
             }
@@ -1598,9 +1654,7 @@ struct GramView: View {
                 do {
                     try await client.gramMarkRead(id: id)
                     marked.insert(id)
-                    if let index = serverMessages.firstIndex(where: { $0.id == id }) {
-                        serverMessages[index].readByOwner = true
-                    }
+                    inboxStore.inbox.markRead(id: id)
                 } catch {
                     failed += 1
                 }
@@ -1611,10 +1665,8 @@ struct GramView: View {
         }
         // Whatever array is current now, the ids we confirmed read are read. Ids still in flight
         // elsewhere are left to their own Task, which flips them on success.
-        for index in serverMessages.indices where marked.contains(serverMessages[index].id) {
-            serverMessages[index].readByOwner = true
-        }
-        unread?.count = serverMessages.filter { $0.isUnread }.count
+        for id in marked { inboxStore.inbox.markRead(id: id) }
+        unread?.count = inboxStore.inbox.unreadCount
         // Partial failure is reported, not swallowed: the badge will still show a count and the
         // reader needs to know why. Its OWN slot, not `refreshNote` — the 6-second poll clears
         // that one unconditionally on success, so the explanation would outlive the badge by

@@ -77,8 +77,15 @@ final class ForkProbeTests: XCTestCase {
     }
 
     func testUndecodableSuccessLineIsIndeterminate() async {
-        // A 200-shaped line that doesn't decode to the result type throws a
-        // DecodingError (not an APIError) → the trailing catch → indeterminate.
+        // A 200-shaped line carrying no gram list must NOT read as a fork.
+        //
+        // The mechanism CHANGED with conditional fetch: `GramListResult.messages` is
+        // now optional (an unchanged answer omits it), so this line no longer fails to
+        // decode — it decodes with every field nil. The verdict comes from
+        // `probeFork`'s `guard ... .messages != nil`, NOT from a DecodingError reaching
+        // the trailing catch. Deleting that guard makes this test fail with `.isFork`,
+        // which is the point: an unconditional `gram.list` on the fork always carries
+        // messages, so their absence means the answer was not a gram list at all.
         let client = HerdrClient(transport: CannedTransport(line: #"{"id":"x","result":{"wrong":true}}"#))
         let r = await client.probeFork()
         XCTAssertEqual(r, .indeterminate)

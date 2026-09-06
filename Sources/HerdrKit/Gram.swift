@@ -90,9 +90,34 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     public var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000.0) }
 }
 
-/// `gram.list` result (`type: "gram_list"`). Only `messages` is decoded.
+/// `gram.list` result. `messages` is OPTIONAL because a conditional fetch that still
+/// matches answers `type: "gram_list_unchanged"`, which carries no messages at all —
+/// and because a daemon predating the digest sends neither `digest` nor that variant,
+/// in which case this decodes exactly as it always did.
 struct GramListResult: Decodable {
-    let messages: [GramMessage]
+    let messages: [GramMessage]?
+    let digest: String?
+    let storeID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case messages
+        case digest
+        case storeID = "store_id"
+    }
+}
+
+/// One `gram.list` answer, as the inbox model consumes it.
+public struct GramListAnswer: Sendable, Equatable {
+    /// The full list, or nil when the daemon said "unchanged" — NOT an empty inbox.
+    /// Keeping those two cases distinct is the whole point of the type: collapsing
+    /// them would blank the inbox on every successful conditional poll.
+    public let messages: [GramMessage]?
+    /// Fingerprint to send back as `ifUnchangedDigest`; nil on a daemon without it,
+    /// which simply means every poll stays unconditional.
+    public let digest: String?
+    public let storeID: String?
+
+    public var isUnchanged: Bool { messages == nil }
 }
 
 /// `gram.post` / `gram.send` / `gram.grab` result (`type` varies). Only the echoed

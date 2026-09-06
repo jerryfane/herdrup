@@ -378,10 +378,14 @@ public actor HerdrClient {
         let callerPaneID: String?
         let onlyQueue: Bool
         let unreadOnly: Bool
+        /// Omitted when nil, so an unconditional fetch sends the same JSON it always
+        /// did and a daemon without the feature sees no new field at all.
+        var ifUnchangedDigest: String?
         enum CodingKeys: String, CodingKey {
             case callerPaneID = "caller_pane_id"
             case onlyQueue = "only_queue"
             case unreadOnly = "unread_only"
+            case ifUnchangedDigest = "if_unchanged_digest"
         }
     }
 
@@ -389,10 +393,25 @@ public actor HerdrClient {
     /// first. The app is the owner, so it omits `caller_pane_id` (supplying one
     /// would select an agent view). `unreadOnly` narrows to unread agent->owner
     /// messages. Throws the server's `APIError` on an older server that lacks gram.
-    public func gramList(unreadOnly: Bool = false) async throws -> [GramMessage] {
-        try await call("gram.list",
-                       GramListParams(callerPaneID: nil, onlyQueue: false, unreadOnly: unreadOnly),
-                       as: GramListResult.self).messages
+    /// Reads the inbox. `ifUnchangedDigest` makes the fetch conditional: pass the
+    /// digest from the previous answer and a daemon that still has the same store
+    /// replies "unchanged" with no messages, which is the difference between a few
+    /// hundred bytes and the whole store on a 6-second poll.
+    ///
+    /// Needs no capability gate. `GramListParams` is not `deny_unknown_fields`, and a
+    /// daemon predating this (0.8.2, measured) IGNORES the field and returns the full
+    /// list — which decodes as a normal changed answer. An old daemon therefore behaves
+    /// exactly as before rather than erroring.
+    public func gramList(
+        unreadOnly: Bool = false, ifUnchangedDigest: String? = nil
+    ) async throws -> GramListAnswer {
+        let result = try await call(
+            "gram.list",
+            GramListParams(callerPaneID: nil, onlyQueue: false, unreadOnly: unreadOnly,
+                           ifUnchangedDigest: ifUnchangedDigest),
+            as: GramListResult.self)
+        return GramListAnswer(
+            messages: result.messages, digest: result.digest, storeID: result.storeID)
     }
 
     /// Whether the connected daemon is our fork or the upstream base.
@@ -416,7 +435,13 @@ public actor HerdrClient {
     /// missed one — the notice is only advisory).
     public func probeFork() async -> ForkProbe {
         do {
-            _ = try await gramList()
+            // A success line that decodes to NO messages is not proof of a fork. This
+            // probe sends no `ifUnchangedDigest`, and an unconditional `gram.list` on
+            // the fork always answers with a list — so nil means the line was not a
+            // gram-list answer at all (it decoded only because every field is
+            // optional), which is exactly the case that used to surface as a
+            // DecodingError before conditional fetch made `messages` optional.
+            guard try await gramList().messages != nil else { return .indeterminate }
             return .isFork
         } catch let error as APIError {
             if error.code == "gram_unavailable" {
