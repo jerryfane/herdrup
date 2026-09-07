@@ -156,6 +156,14 @@ class TerminalInteractionTestCase: XCTestCase {
         return "app=\(app.frame) buttons=[" + rows.joined(separator: " ") + "]"
     }
 
+    /// Text fields with their frames and enabled state, for a focus failure.
+    func fieldDump() -> String {
+        let rows = app.textFields.allElementsBoundByIndex.map {
+            "\($0.identifier.isEmpty ? "-" : $0.identifier)|\($0.placeholderValue ?? "-")|\($0.frame)|enabled=\($0.isEnabled)"
+        }
+        return "textFields=[" + rows.joined(separator: " ") + "] keyboards=\(app.keyboards.count)"
+    }
+
     /// Fixture commands are plain buttons in the harness bar, so one laid-out tap is
     /// enough — no popover to present and nothing to scroll.
     func command(_ name: String, file: StaticString = #filePath, line: UInt = #line) {

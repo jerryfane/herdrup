@@ -2,7 +2,10 @@ import XCTest
 import UIKit
 
 final class TerminalControlTests: TerminalInteractionTestCase {
-    private var reply: XCUIElement { app.textFields["type a reply…"] }
+    /// The pane's only text field. Matched positionally rather than by placeholder:
+    /// the placeholder match can resolve to the label rather than the editable field,
+    /// and a tap on that does not move focus.
+    private var reply: XCUIElement { app.textFields.firstMatch }
 
     /// Whether the ctrl one-shot is armed, read from the production cap's own
     /// accessibility label. Idiom-independent, and the only observable that survives a
@@ -92,9 +95,12 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         // The production chevron is gated on `replyFocused`, so its presence is the
         // app's own statement that this field owns the input.
         for attempt in 0..<3 {
-            reply.tap()
+            // Tap INSIDE the text, not at the element's centre: the centre of a SwiftUI
+            // TextField row can land on padding that does not begin editing.
+            reply.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
             if onscreen("Collapse keyboard", timeout: 5) != nil { break }
-            XCTAssertNotEqual(attempt, 2, "the reply field never took focus. \(elementDump())")
+            XCTAssertNotEqual(attempt, 2,
+                              "the reply field never took focus. \(elementDump()) \(fieldDump())")
         }
         let draft = reply.value as? String
         cap("terminal-ctrl").tap(); reply.typeText("p")
