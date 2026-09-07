@@ -2391,6 +2391,25 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
            let pendingEvent,
            let kittyEvent = kittyTextEvent(from: pendingEvent.key, eventType: pendingEvent.eventType, text: text) {
             event = kittyEvent
+        } else if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first,
+                  scalar.value >= 0x20, scalar.value != 0x7f {
+            // herdr: REPORT THE CHARACTER AS ITS OWN KEY when no physical key event
+            // backs this insertion (software keyboard, dictation, IME commit of one
+            // scalar). With `.none` the encoder emits key code 0 — `ESC[0u` — so under
+            // report-all-keys an agent received a keystroke it could not identify and
+            // the character was simply lost. A real keyboard producing this character
+            // reports its codepoint, so that is what we report.
+            //
+            // The non-report-all path is unchanged: `text` is still carried, so a
+            // terminal that only negotiated disambiguation keeps receiving raw UTF-8.
+            let modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
+            event = KittyKeyEvent(key: .unicode(scalar.value),
+                                  modifiers: modifiers,
+                                  eventType: .press,
+                                  text: text,
+                                  shiftedKey: nil,
+                                  baseLayoutKey: nil,
+                                  composing: kittyIsComposing)
         } else {
             let modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
             event = kittyTextEventFromText(text, modifiers: modifiers, eventType: .press)

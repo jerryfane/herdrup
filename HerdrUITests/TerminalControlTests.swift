@@ -56,6 +56,15 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     /// leaked" when nothing was ever delivered.
     private func typeDirect(_ text: String) {
         wait { ($0["focused"] as? Bool) == true }
+        // AND A KEYBOARD MUST ACTUALLY BE UP. Returning from dictation left the
+        // terminal first responder with no keyboard, so the keystroke went nowhere and
+        // the fixture received no bytes at all — indistinguishable, from the outside,
+        // from a modifier that ate the key.
+        if !app.keyboards.element.exists {
+            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+            XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 5),
+                          "direct input needs the software keyboard. \(elementDump())")
+        }
         app.typeText(text)
     }
 
@@ -63,8 +72,19 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     /// so `typeText` cannot fail with "neither element nor any descendant has keyboard
     /// focus".
     private func focusReply() {
-        reply.tap()
-        wait { ($0["focused"] as? Bool) == false }
+        // One tap does not always move SwiftUI focus while the terminal holds the
+        // keyboard, and typing then fails with "neither element nor any descendant has
+        // keyboard focus". Retry the tap until the terminal reports it gave the
+        // responder up, which is the state the reply path needs.
+        for attempt in 0..<3 {
+            reply.tap()
+            let handed = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate { [weak self] _, _ in
+                    (self?.probe()["focused"] as? Bool) == false
+                }, object: nil)], timeout: 5)
+            if handed == .completed { break }
+            XCTAssertNotEqual(attempt, 2, "the reply field never took the keyboard. \(elementDump())")
+        }
         XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 5),
                       "the reply field must hold the keyboard for a reply-path chord")
     }
