@@ -4373,7 +4373,7 @@ struct TerminalPaneContent: View {
     }
 
     private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
-        Button { ctrlArmed = false; userInputToken += 1; send(.key(key)) } label: {
+        Button { ctrlArmed = false; send(.key(key)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
@@ -4395,7 +4395,7 @@ struct TerminalPaneContent: View {
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
     private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
-        Button { ctrlArmed = false; userInputToken += 1; send(.rawSequence(sequence)) } label: {
+        Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? "").font(Typography.machine(12)) }
@@ -4612,6 +4612,11 @@ struct TerminalPaneContent: View {
     /// Routes a reader action through InputRouter, then executes the plan. A
     /// refusal is shown, never a silent no-op; a rejection surfaces a clear reason.
     private func send(_ action: InputAction) {
+        // EVERY EXPLICIT HOST-SIDE INPUT cancels a retained resize frame, not just the
+        // control-bar caps: this funnel also carries the reply submit, the saved-prompt
+        // send and the raw sequences. The automatic pre-fill delivery is excluded on
+        // purpose — nobody touched anything, so there is no user act to honour.
+        if !autoDelivering { userInputToken += 1 }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
         Task {

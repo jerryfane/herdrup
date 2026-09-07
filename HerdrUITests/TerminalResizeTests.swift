@@ -396,10 +396,24 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         launch("resize")
         command("history"); anchor()
         let before = probe()["previous"] as? Int ?? 0
+        // Reach the cap FIRST, so the scroll that reveals it is not part of the timed
+        // window below.
+        let keycap = cap("^P")
         command("delayed"); command("120x24")
-        // ^P is a raw-sequence cap: one control byte, one observable history step.
-        cap("^P").tap()
-        wait { ($0["covered"] as? Bool) == false && ($0["previous"] as? Int) == before + 1 }
+        // THE COVER MUST BE UP BEFORE THE TAP, or this case would pass on a build with
+        // no cancellation at all: the quiet/deadline path removes the frame within
+        // about a second anyway. Review flagged exactly that.
+        wait(timeout: 5) { ($0["covered"] as? Bool) == true }
+        keycap.tap()
+        // And it must go NOW, not by the deadline. The deadline is 140 ms of settle
+        // plus one second; a 600 ms ceiling can only be met by the input cancelling it.
+        var cleared = false
+        let start = Date()
+        while Date().timeIntervalSince(start) < 0.6 {
+            if (probe()["covered"] as? Bool) == false { cleared = true; break }
+        }
+        XCTAssertTrue(cleared, "the keycap did not cancel the retained frame: \(probe())")
+        wait { ($0["previous"] as? Int) == before + 1 }
         attach("keycap-cancels-cover")
         settled(cols: 120)
         XCTAssertEqual(probe()["previous"] as? Int, before + 1,

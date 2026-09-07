@@ -501,6 +501,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// `pane.stream` itself; this is the coordinator's copy of that truth.
         private var responseGeometry: (cols: Int, rows: Int)?
         private var responseGeneration = -1
+        /// Whether `responseGeometry` still describes a grid the stream has NOT yet
+        /// applied. Once its marker lands the claim is spent, so a later unsolicited
+        /// resize back to those dimensions is treated as the server's, and covered.
+        private var responseAwaitingMarker = false
         /// The grid the STREAM has actually applied to the emulator, in stream order.
         /// This - not a response, and never a local target - is what is on screen.
         private var streamAppliedGeometry: (cols: Int, rows: Int)?
@@ -1879,6 +1883,9 @@ struct LiveTerminalView: UIViewRepresentable {
             view.applyTerminalSize(cols: newCols, rows: newRows)
             streamAppliedGeometry = (cols: newCols, rows: newRows)
             streamGeometryRevision += 1
+            if let response = responseGeometry, response == (cols: newCols, rows: newRows) {
+                responseAwaitingMarker = false   // the request's marker has now landed
+            }
             if presentationActive, presentationReason == .server, changed {
                 armPresentationDeadline(after: Self.presentationDeadlineDuration)
             }
@@ -1886,15 +1893,18 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// Whether this grid is one we asked for (so a cover is already up for it).
+        ///
+        /// OWNERSHIP EXPIRES WHEN ITS MARKER LANDS, and it must: review found that a
+        /// local move A→B left `responseGeometry` at A while the stream sat at B, so a
+        /// LATER unsolicited return to A still matched "response != applied" and was
+        /// classified as ours — the server reflow B→A then ran with no cover at all.
+        /// `responseAwaitingMarker` is cleared the moment the stream applies the grid
+        /// the response promised, so only a genuinely pending request can claim it.
         private func isOurGeometry(cols: Int, rows: Int) -> Bool {
             if resizeTask != nil || inflightTarget != nil { return true }
-            // Once the expected marker has arrived, the same dimensions in a later
-            // unsolicited change are not permanently classified as our old request.
-            if responseGeneration == targetGeneration, let response = responseGeometry,
-               let applied = streamAppliedGeometry, response != applied {
-                return response.cols == cols && response.rows == rows
-            }
-            return false
+            guard responseAwaitingMarker, responseGeneration == targetGeneration,
+                  let response = responseGeometry else { return false }
+            return response.cols == cols && response.rows == rows
         }
 
         /// Unmanaged/public view commits may still notify the delegate. Managed fits
@@ -1997,6 +2007,8 @@ struct LiveTerminalView: UIViewRepresentable {
                         self.confirmedTarget = target       // confirmed: OUR request is committed
                         self.responseGeometry = (cols: applied.cols, rows: applied.rows)
                         self.responseGeneration = generation
+                        self.responseAwaitingMarker =
+                            self.streamAppliedGeometry.map { $0 != (cols: applied.cols, rows: applied.rows) } ?? true
                         self.resizeRetries = 0
                         self.noteGeometryResponse()
                     } catch {
