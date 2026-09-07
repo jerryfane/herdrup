@@ -2034,10 +2034,33 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                              backspaceSendsControlH: backspaceSendsControlH)
     }
 
+    /// Whether the EMBEDDER's one-shot control is armed (the on-screen ctrl cap), as
+    /// opposed to a physically held Ctrl key.
+    ///
+    /// `pressesBegan` used to consult only `key.modifierFlags`, so on a hardware
+    /// keyboard the one-shot could not work at all: tapping the cap armed this flag and
+    /// the next physical key was encoded as if nothing were armed. Reported from a
+    /// device, where every keystroke arrives through this path rather than `insertText`.
+    /// Set when the legacy hardware branch encoded a key from the one-shot, so the
+    /// repeat timer below is skipped for it.
+    private var oneShotEncodedKey = false
+
+    var oneShotControlArmed: Bool {
+        terminalAccessory?.controlModifier ?? controlModifier ?? false
+    }
+
+    /// Spends the one-shot after it has been applied to a physical key. A physically
+    /// held Ctrl is not a one-shot and must survive.
+    private func consumeOneShotControl(physicalControl: Bool) {
+        guard !physicalControl else { return }
+        terminalAccessory?.controlModifier = false
+        controlModifier = false
+    }
+
     private func kittyModifiers(from key: UIKey, includeOption: Bool) -> KittyKeyboardModifiers {
         var modifiers: KittyKeyboardModifiers = []
         if key.modifierFlags.contains(.shift) { modifiers.insert(.shift) }
-        if key.modifierFlags.contains(.control) { modifiers.insert(.ctrl) }
+        if key.modifierFlags.contains(.control) || oneShotControlArmed { modifiers.insert(.ctrl) }
         if includeOption, key.modifierFlags.contains(.alternate) { modifiers.insert(.alt) }
         if key.modifierFlags.contains(.command) { modifiers.insert(.super) }
         if key.modifierFlags.contains(.alphaShift) { modifiers.insert(.capsLock) }
@@ -2752,9 +2775,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     }
                     continue
                 }
-                if key.modifierFlags.contains(.control) || (optionAsMetaKey && key.modifierFlags.contains(.alternate)) {
+                if key.modifierFlags.contains(.control) || oneShotControlArmed
+                    || (optionAsMetaKey && key.modifierFlags.contains(.alternate)) {
+                    let physicalControl = key.modifierFlags.contains(.control)
                     if let kittyEvent = kittyTextEvent(from: key, eventType: .press),
                        sendKittyEvent(kittyEvent) {
+                        // Spend the one-shot as soon as it has encoded one key, and do
+                        // not install the repeat timer for it: a one-shot repeating is a
+                        // chord the reader never asked for.
+                        let wasOneShot = physicalControl == false && oneShotControlArmed
+                        consumeOneShotControl(physicalControl: physicalControl)
+                        if wasOneShot {
+                            didHandleEvent = true
+                            keyRepeat?.invalidate()
+                            continue
+                        }
                         didHandleEvent = true
                         let modifiers = kittyEvent.modifiers
                         keyRepeat?.invalidate()
@@ -2899,16 +2934,27 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 } else if (key.modifierFlags.contains (.alternate) && optionAsMetaKey) || metaModifier {
                     data = .text("\u{1b}\(key.charactersIgnoringModifiers)")
                     metaModifier = false
-                } else if key.modifierFlags.contains (.control) {
+                } else if key.modifierFlags.contains (.control) || oneShotControlArmed {
+                    let physicalControl = key.modifierFlags.contains (.control)
                     let controlBytes = applyControlToEventCharacters(key.charactersIgnoringModifiers)
                     if !controlBytes.isEmpty {
                         data = .bytes(controlBytes)
+                        // A one-shot is spent by the key it encoded; a held Ctrl is not.
+                        consumeOneShotControl(physicalControl: physicalControl)
+                        if !physicalControl { oneShotEncodedKey = true }
                     }
                 }
             }
             if let sendableData = data {
                 didHandleEvent = true
                 keyRepeat?.invalidate()
+                if oneShotEncodedKey {
+                    // No repeat timer for a one-shot: holding the key must not resend a
+                    // chord the reader armed exactly once.
+                    oneShotEncodedKey = false
+                    sendData (data: sendableData)
+                    continue
+                }
                 keyRepeat = Timer (fire: Date(timeInterval: 0.4, since: Date()),
                                    interval: 0.1,
                                    repeats: true) { timer in
