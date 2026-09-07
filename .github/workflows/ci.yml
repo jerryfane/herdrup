@@ -25,7 +25,16 @@ on:
       - "docs/**"
       - ".github/ISSUE_TEMPLATE/**"
       - "LICENSE"
+  # A FOCUSED DISPATCH MODE, so one suite can be iterated without paying for the full
+  # matrix: `only_suite` runs just that class on the iPhone destination and skips the
+  # iPad rounds and the package regressions. A PR run is unaffected — the automatic
+  # trigger carries no inputs, so the full matrix remains the gate.
   workflow_dispatch:
+    inputs:
+      only_suite:
+        description: "Run only this HerdrUITests class on iPhone (e.g. TerminalControlTests). Empty runs the full matrix."
+        required: false
+        default: ""
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -239,6 +248,13 @@ jobs:
               return 1
             fi
           }
+          FOCUS="${{ github.event.inputs.only_suite }}"
+          if [ -n "$FOCUS" ]; then
+            echo "::notice::focused dispatch: HerdrUITests/$FOCUS on iPhone only"
+            run_suite "iPhone-$FOCUS" "$IPHONE_UDID" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
+            exit "$failed"
+          fi
+          # Whole suite includes Scroll/Selection/Paging and both new terminal suites.
           run_suite iPhone "$IPHONE_UDID" 40m -only-testing:HerdrUITests || failed=1
 
           xcrun simctl boot "$IPAD_UDID" || true
@@ -259,7 +275,7 @@ jobs:
 
       - name: Run UIKit SwiftTerm API regressions on both devices
         # Still collect API evidence when an interaction assertion failed.
-        if: ${{ !cancelled() && steps.simulators.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.simulators.outcome == 'success' && github.event.inputs.only_suite == '' }}
         working-directory: Vendor/SwiftTerm
         run: |
           set -o pipefail
