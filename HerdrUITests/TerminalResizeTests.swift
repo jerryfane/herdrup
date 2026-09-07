@@ -103,7 +103,7 @@ class TerminalInteractionTestCase: XCTestCase {
         Thread.sleep(forTimeInterval: 0.25)
     }
 
-    private func requireDirectInput() throws {
+    func requireDirectInput() throws {
         let state = wait { $0["keyDriveEnabled"] != nil }
         if state["iPad"] as? Bool == true && state["keyDriveEnabled"] as? Bool == false {
             throw XCTSkip("iPad direct input requires an attached hardware keyboard; production keyDriveEnabled is false. No simulator bypass is installed; physical-keyboard receipt remains unverified.")
@@ -111,7 +111,7 @@ class TerminalInteractionTestCase: XCTestCase {
         XCTAssertEqual(state["keyDriveEnabled"] as? Bool, true, "iPhone direct input must remain eligible")
     }
 
-    private func focusTerminal() {
+    func focusTerminal() {
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
         wait { ($0["focused"] as? Bool) == true }
@@ -121,7 +121,7 @@ class TerminalInteractionTestCase: XCTestCase {
     /// control cap or a return from dictation can leave the responder elsewhere for a
     /// beat, and a keystroke sent then goes nowhere — which reads as "the modifier
     /// leaked" when nothing was ever delivered.
-    private func typeDirect(_ text: String) {
+    func typeDirect(_ text: String) {
         wait { ($0["focused"] as? Bool) == true }
         // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
         // an empty input view and drives keys from the attached hardware keyboard, so
