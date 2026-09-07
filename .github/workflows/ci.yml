@@ -32,9 +32,13 @@ on:
   workflow_dispatch:
     inputs:
       only_suite:
-        description: "Run only this HerdrUITests class on iPhone (e.g. TerminalControlTests). Empty runs the full matrix."
+        description: "Run only this HerdrUITests class (e.g. TerminalControlTests). Empty runs the full matrix."
         required: false
         default: ""
+      only_device:
+        description: "Destination for a focused run: iphone or ipad."
+        required: false
+        default: "iphone"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -250,8 +254,12 @@ jobs:
           }
           FOCUS="${{ github.event.inputs.only_suite }}"
           if [ -n "$FOCUS" ]; then
-            echo "::notice::focused dispatch: HerdrUITests/$FOCUS on iPhone only"
-            run_suite "iPhone-$FOCUS" "$IPHONE_UDID" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
+            case "${{ github.event.inputs.only_device }}" in
+              ipad) label=iPad; udid="$IPAD_UDID"; xcrun simctl bootstatus "$IPAD_UDID" -b ;;
+              *)    label=iPhone; udid="$IPHONE_UDID" ;;
+            esac
+            echo "::notice::focused dispatch: HerdrUITests/$FOCUS on $label only"
+            run_suite "$label-$FOCUS" "$udid" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
             exit "$failed"
           fi
           # Whole suite includes Scroll/Selection/Paging and both new terminal suites.

@@ -155,6 +155,13 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         } else {
             XCTAssertNil(onscreen("Collapse keyboard", timeout: 2),
                          "iPad must not offer a dismissal for a keyboard it never shows")
+            // NOTHING HAS CANCELLED THE ARM ON THIS PATH, and the previous version of
+            // this branch expected the next key to be ordinary anyway: the fixture duly
+            // received 70 03 10 — the final p arrived as ^P, exactly as a live one-shot
+            // should encode it. iPad has no keyboard to dismiss, so cancel the way iPad
+            // actually can, with a second tap, and keep the no-leak assertion honest.
+            cap("terminal-ctrl").tap()
+            XCTAssertFalse(armed, "a second tap must cancel the one-shot")
         }
         focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("explicit-key-and-keyboard-dismissal-no-leak")
