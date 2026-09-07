@@ -470,7 +470,8 @@ struct TerminalInteractionRoot: View {
     let control: Bool
     private let client = HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            TerminalInteractionControls()
             if control {
                 NavigationStack {
                     TerminalPaneContent(client: client, paneID: "ix:a", title: "CONTROL",
@@ -481,7 +482,14 @@ struct TerminalInteractionRoot: View {
                                  livePaneIDs: ["ix:a", "ix:b"])
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { TerminalInteractionControls() }
+        // ABOVE THE PANE, NOT AS A BOTTOM INSET.
+        //
+        // As a bottom safe-area inset the fixture bar ended up drawn OVER the pane's
+        // own reply bar: the field measured (28, 799, 250x22) while the command grid
+        // occupied roughly 748-826, so every tap on the field hit the fixture instead
+        // and focus never moved. That cost two rounds and looked like a SwiftUI focus
+        // bug. Stacking it above the pane leaves the reply bar and the keyboard region
+        // untouched.
     }
 }
 
