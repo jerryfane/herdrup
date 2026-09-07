@@ -122,6 +122,15 @@ class TerminalInteractionTestCase: XCTestCase {
     /// beat, and a keystroke sent then goes nowhere — which reads as "the modifier
     /// leaked" when nothing was ever delivered.
     func typeDirect(_ text: String) {
+        // RESTORE THE RESPONDER FIRST IF IT MOVED. Tapping a control cap — and the
+        // drag that scrolls the bar to reach one — can take the responder off the
+        // terminal, and then this wait simply never came true: the whole-suite iPhone
+        // round failed here while the same case passed in isolation, and the warm
+        // rerun passed, which is the signature of a lost responder rather than a
+        // product defect.
+        if (probe()["focused"] as? Bool) != true {
+            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+        }
         wait { ($0["focused"] as? Bool) == true }
         // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
         // an empty input view and drives keys from the attached hardware keyboard, so
