@@ -1,0 +1,466 @@
+import XCTest
+import UIKit
+
+/// Shared-surface receipts. The probe is populated only by actual CoreText draws;
+/// screenshots retain the independent visual evidence in each result bundle.
+class TerminalInteractionTestCase: XCTestCase {
+    var app: XCUIApplication!
+    override func setUp() { super.setUp(); continueAfterFailure = false }
+    override func tearDown() {
+        XCUIDevice.shared.orientation = .portrait
+        app?.terminate()
+        super.tearDown()
+    }
+
+    /// Which fixture is mounted. The control fixture paints only a prompt line, so a
+    /// painted-prompt assertion is meaningful there; the resize fixture seeds a hundred
+    /// history records, where the prompt is legitimately off-viewport.
+    private(set) var fixtureMode = ""
+
+    func launch(_ mode: String) {
+        fixtureMode = mode
+        app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
+        app.launch()
+        XCTAssertTrue(app.staticTexts["terminal-interaction-probe"].waitForExistence(timeout: 15))
+        wait {
+            ($0["opens"] as? Int) == 1 && ($0["requests"] as? Int ?? 0) > 0
+                && ($0["covered"] as? Bool) == false && $0["top"] != nil
+        }
+    }
+
+    func probe() -> [String: Any] {
+        let label = app.staticTexts["terminal-interaction-probe"].label
+        return (try? JSONSerialization.jsonObject(with: Data(label.utf8))) as? [String: Any] ?? [:]
+    }
+
+    @discardableResult
+    func wait(timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line,
+              _ condition: @escaping ([String: Any]) -> Bool) -> [String: Any] {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { [weak self] _, _ in
+            guard let self else { return false }
+            return condition(self.probe())
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed,
+                       "Last painted receipt: \(probe())", file: file, line: line)
+        return probe()
+    }
+
+    /// A usable element, chosen and checked by GEOMETRY.
+    ///
+    /// `isHittable` is not usable here: on an element parked outside its scroll
+    /// viewport it raises "Activation point invalid" instead of returning false, which
+    /// failed eight cases outright. Two mounted panes also publish the same pane
+    /// identifiers, so a bare query can match a hidden twin ("Multiple matching
+    /// elements found"). Both are answered by taking the first match whose frame lies
+    /// inside the APPLICATION frame — the screen. A window query can return a window
+    /// that is not the main one, which would reject every element on the screen.
+    func onscreen(_ identifier: String, timeout: TimeInterval = 10) -> XCUIElement? {
+        // Identifier OR label: production keycaps carry only an accessibility label.
+        let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
+                                                       identifier, identifier))
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let visible = app.frame.insetBy(dx: -1, dy: -1)
+            for index in 0..<matches.count {
+                let candidate = matches.element(boundBy: index)
+                let frame = candidate.frame
+                if frame.width > 0, frame.height > 0, visible.contains(frame) { return candidate }
+            }
+        } while Date() < deadline
+        return nil
+    }
+
+    /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
+    /// the ctrl cap sits beyond its right edge: eight cases failed with "activation
+    /// point invalid" for tapping an off-viewport element, and asking `isHittable`
+    /// about such an element RAISES that same error instead of answering false. So
+    /// scroll the bar the way a reader does and judge reachability by frame geometry.
+    func cap(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        if let ready = onscreen(identifier, timeout: 5) { return ready }
+        for _ in 0..<6 {
+            scrollControlBar()
+            if let ready = onscreen(identifier, timeout: 2) { return ready }
+        }
+        XCTFail("control cap \(identifier) never scrolled into the viewport. \(elementDump())",
+                file: file, line: line)
+        return app.buttons[identifier].firstMatch
+    }
+
+    /// Drags the control bar ITSELF, in the leftmost cap's OWN coordinate space.
+    ///
+    /// `swipeLeft()` on a cap delivers the gesture to that button, so the bar never
+    /// moved. Normalized window coordinates were no better: the window query is not
+    /// guaranteed to be the main window, and a bad reference frame silently aims the
+    /// drag at nothing. Offsets past 1.0 are multiples of the anchor's own frame, so
+    /// this stays inside the bar's row by construction.
+    func scrollControlBar() {
+        let anchor = app.buttons["Escape"].firstMatch
+        guard anchor.exists else { return }
+        anchor.coordinate(withNormalizedOffset: CGVector(dx: 6.0, dy: 0.5))
+            .press(forDuration: 0.05,
+                   thenDragTo: anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)))
+        Thread.sleep(forTimeInterval: 0.25)
+    }
+
+    func requireDirectInput() throws {
+        let state = wait { $0["keyDriveEnabled"] != nil }
+        if state["iPad"] as? Bool == true && state["keyDriveEnabled"] as? Bool == false {
+            throw XCTSkip("iPad direct input requires an attached hardware keyboard; production keyDriveEnabled is false. No simulator bypass is installed; physical-keyboard receipt remains unverified.")
+        }
+        XCTAssertEqual(state["keyDriveEnabled"] as? Bool, true, "iPhone direct input must remain eligible")
+    }
+
+    func focusTerminal() {
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+        wait { ($0["focused"] as? Bool) == true }
+    }
+
+    /// Types into the terminal only once it actually owns the keyboard. A tap on a
+    /// control cap or a return from dictation can leave the responder elsewhere for a
+    /// beat, and a keystroke sent then goes nowhere — which reads as "the modifier
+    /// leaked" when nothing was ever delivered.
+    func typeDirect(_ text: String) {
+        // RESTORE THE RESPONDER FIRST IF IT MOVED. Tapping a control cap — and the
+        // drag that scrolls the bar to reach one — can take the responder off the
+        // terminal, and then this wait simply never came true: the whole-suite iPhone
+        // round failed here while the same case passed in isolation, and the warm
+        // rerun passed, which is the signature of a lost responder rather than a
+        // product defect.
+        if (probe()["focused"] as? Bool) != true {
+            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+        }
+        wait { ($0["focused"] as? Bool) == true }
+        // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
+        // an empty input view and drives keys from the attached hardware keyboard, so
+        // requiring `app.keyboards` there failed every iPad case on a condition the
+        // product is designed never to satisfy. On the phone the keyboard really is the
+        // input path: returning from dictation left the terminal first responder with
+        // none, the keystroke went nowhere, and no bytes reached the fixture — which
+        // from outside looks exactly like a modifier that ate the key.
+        if probe()["iPad"] as? Bool != true, !app.keyboards.element.exists {
+            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+            XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                          "direct input needs the software keyboard. \(elementDump())")
+        }
+        app.typeText(text)
+    }
+
+    /// Whether a keystroke can actually be delivered right now: a software keyboard on
+    /// the phone, or the terminal holding the responder on iPad, where keys arrive from
+    /// the attached hardware keyboard and no software keyboard ever appears. Used to
+    /// separate "the app did the wrong thing" from "this environment cannot type".
+    var canTypeDirectly: Bool {
+        if probe()["iPad"] as? Bool == true { return probe()["focused"] as? Bool == true }
+        return app.keyboards.element.exists
+    }
+
+    /// Every button with its identifier, label and frame. Attached to a reachability
+    /// failure so the next run explains itself instead of costing another CI round.
+    func elementDump() -> String {
+        let rows = app.buttons.allElementsBoundByIndex.map {
+            "\($0.identifier.isEmpty ? "-" : $0.identifier)|\($0.label)|\($0.frame)"
+        }
+        return "app=\(app.frame) buttons=[" + rows.joined(separator: " ") + "]"
+    }
+
+    /// Text fields with their frames and enabled state, for a focus failure.
+    func fieldDump() -> String {
+        let rows = app.textFields.allElementsBoundByIndex.map {
+            "\($0.identifier.isEmpty ? "-" : $0.identifier)|\($0.placeholderValue ?? "-")|\($0.frame)|enabled=\($0.isEnabled)"
+        }
+        return "textFields=[" + rows.joined(separator: " ") + "] keyboards=\(app.keyboards.count)"
+    }
+
+    /// Fixture commands are plain buttons in the harness bar, so one laid-out tap is
+    /// enough — no popover to present and nothing to scroll.
+    func command(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let item = onscreen("fixture-" + name) else {
+            XCTFail("Fixture command \(name) never became usable", file: file, line: line)
+            return
+        }
+        item.tap()
+    }
+
+    /// Opens a real menu and taps one of its items. A menu item that has not been
+    /// presented sits in the tree with an infinite frame, so this waits for actual
+    /// geometry and re-opens once rather than tapping into nothing.
+    func menuItem(_ menu: String, _ item: String,
+                  file: StaticString = #filePath, line: UInt = #line) {
+        for attempt in 0..<2 {
+            guard let control = onscreen(menu) else { continue }
+            control.tap()
+            if let entry = onscreen(item, timeout: 5) {
+                entry.tap()
+                return
+            }
+            if attempt == 0 {
+                // Dismiss a popover that opened without usable items.
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
+            }
+        }
+        XCTFail("menu \(menu) never offered a usable \(item)", file: file, line: line)
+    }
+
+    func settled(cols: Int? = nil, rows: Int? = nil) {
+        var stableSince: Date?
+        wait {
+            let matches = ($0["covered"] as? Bool) == false && ($0["complete"] as? Bool) == true
+                && (cols == nil || ($0["cols"] as? Int) == cols)
+                && (rows == nil || ($0["rows"] as? Int) == rows)
+            guard matches else { stableSince = nil; return false }
+            if stableSince == nil { stableSince = Date() }
+            return Date().timeIntervalSince(stableSince!) >= 0.4
+        }
+    }
+
+    func attach(_ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func anchor(file: StaticString = #filePath, line: UInt = #line) {
+        let state = wait { ($0["markerRow"] as? Int) == 0 && ($0["covered"] as? Bool) == false }
+        XCTAssertEqual(state["markerText"] as? String, "ANCHOR020", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(state["markerColumn"] as? Int ?? -1, 0, file: file, line: line)
+        XCTAssertEqual(state["tail"] as? Bool, false, file: file, line: line)
+    }
+
+    var terminal: XCUIElement { app.descendants(matching: .any)["terminal-surface"].firstMatch }
+}
+
+final class TerminalResizeTests: TerminalInteractionTestCase {
+    // Three painted cycles here; the vendored core suite drives ten inside a long
+    // wrapped line, where a cycle costs microseconds instead of two app launches'
+    // worth of accessibility round trips.
+    func testLogicalHistorySurvivesWidthCyclesAndHeightChange() {
+        launch("resize")
+        command("history"); anchor()
+        let original = probe()["top"] as? String
+        attach("history-before-80")
+        for cycle in 0..<3 {
+            command("120x24"); settled(cols: 120, rows: 24); anchor()
+            command("80x24"); settled(cols: 80, rows: 24); anchor()
+            XCTAssertEqual(probe()["top"] as? String, original, "Cycle \(cycle) drifted to another logical cell")
+        }
+        command("80x32"); settled(cols: 80, rows: 32); anchor()
+        command("80x24"); settled(cols: 80, rows: 24); anchor()
+        XCTAssertEqual(probe()["top"] as? String, original)
+        XCTAssertEqual(probe()["opens"] as? Int, 1, "A resize must not replay/reset the stream")
+        attach("history-after-cycles-and-height")
+    }
+
+    func testRealSidebarOrientationAndFontPreserveHistory() throws {
+        launch("resize")
+        guard probe()["iPad"] as? Bool == true else {
+            throw XCTSkip("Actual sidebar/orientation receipt runs on the iPad destination; iPhone uses exact-grid sweeps")
+        }
+        XCTAssertNotNil(onscreen("terminal-sidebar-toggle", timeout: 5),
+                        "The iPad receipt must exercise the actual sidebar")
+        command("natural"); settled()
+        command("history"); anchor()
+        let opens = probe()["opens"] as? Int
+        for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
+            onscreen("terminal-sidebar-toggle")?.tap()
+            settled(); anchor(); attach("sidebar-\(orientation.rawValue)")
+            XCUIDevice.shared.orientation = orientation
+            settled(); anchor(); attach("orientation-\(orientation.rawValue)")
+            onscreen("terminal-sidebar-toggle")?.tap()
+            settled(); anchor()
+        }
+        menuItem("terminal-actions", "terminal-font-increase")
+        settled(); anchor(); attach("larger-font-history")
+        menuItem("terminal-actions", "terminal-font-decrease")
+        settled(); anchor()
+        XCTAssertEqual(probe()["opens"] as? Int, opens)
+    }
+
+    func testReturningToEarlierTargetStillUsesLatestQuietWindow() {
+        launch("resize")
+        command("history"); anchor()
+        let before = probe()["requests"] as? Int ?? 0
+        command("bounce")
+        let until = Date().addingTimeInterval(0.6)
+        repeat {
+            XCTAssertEqual(probe()["markerRow"] as? Int, 0,
+                           "The painted history marker moved during the geometry sweep")
+        } while Date() < until
+        settled(cols: 120); anchor()
+        XCTAssertEqual(probe()["requests"] as? Int, before + 1)
+        attach("bounce-coalesced-without-intermediate-reflow")
+    }
+
+    func testStationaryTargetAndSupersededInflightRequests() {
+        launch("resize")
+        let initial = probe()["requests"] as? Int ?? 0
+        command("120x24"); settled(cols: 120)
+        XCTAssertEqual(probe()["requests"] as? Int, initial + 1)
+        command("delayed")
+        command("80x24")
+        wait { ($0["requests"] as? Int ?? 0) > initial + 1 }
+        command("120x24")
+        settled(cols: 120)
+        wait { ($0["requests"] as? Int ?? 0) == initial + 3 }
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+        attach("superseded-request-final-grid")
+    }
+
+    func testOrderedGeometryResponseAndWiderViewerDoNotReconnect() {
+        launch("resize")
+        command("history"); anchor()
+        for scenario in ["beforeMarker", "afterResponse", "delayed", "wider"] {
+            command(scenario)
+            command("120x24")
+            settled(cols: scenario == "wider" ? 140 : 120)
+            anchor(); attach("ordered-\(scenario)")
+            XCTAssertEqual(probe()["opens"] as? Int, 1)
+            command("quiet")
+            command("80x24"); settled(cols: 80); anchor()
+        }
+        command("server"); settled(cols: 120); anchor()
+        attach("unsolicited-authoritative-resize")
+    }
+
+    func testSplitSynchronizedAlternateFrameStaysHidden() {
+        launch("resize")
+        command("history"); anchor()
+        command("synchronized")
+        command("120x24")
+        // Sample the actual presentation across the fixture's split redraw, retaining
+        // transition screenshots. A hidden incomplete backing draw may occur, but it
+        // must never be published as live. Fixed sampling: a spin loop attached dozens
+        // of full screenshots for one assertion.
+        for index in 0..<6 {
+            let state = probe()
+            XCTAssertFalse((state["visible"] as? String ?? "").contains("INCOMPLETE"))
+            attach("split-frame-\(index)")
+            if index < 5 { Thread.sleep(forTimeInterval: 0.15) }
+        }
+        settled(cols: 120); anchor()
+        XCTAssertEqual(probe()["alternate"] as? Bool, false)
+        attach("normal-buffer-restored")
+    }
+
+    func testFailureAndNoRedrawReleaseCoverAtAuthoritativeGrid() {
+        launch("resize")
+        command("history"); anchor()
+        command("failure"); command("120x24")
+        wait { ($0["failures"] as? Int ?? 0) > 0 }
+        settled(cols: 80); anchor()
+        XCTAssertEqual(probe()["effectiveCols"] as? Int, 80)
+        attach("failed-request-real-grid-no-frozen-cover")
+        command("quiet"); command("80x32")
+        settled(cols: 80, rows: 32); anchor()
+        attach("no-output-height-resize-revealed")
+    }
+
+    func testLiveTailBusyOutputAndExplicitReturnToTail() {
+        launch("resize")
+        command("busy")
+        wait { ($0["appended"] as? Int ?? 0) >= 3 }
+        command("120x24"); settled(cols: 120)
+        wait { ($0["tail"] as? Bool) == true && ($0["visible"] as? String ?? "").contains("APPENDED") }
+        command("history"); anchor()
+        command("80x24"); settled(cols: 80); anchor()
+        command("tail")
+        wait { ($0["tail"] as? Bool) == true && ($0["visible"] as? String ?? "").contains("fixture>") }
+        command("quiet")
+        let receipt = wait {
+            ($0["appendedRecords"] as? [Int])?.last == ($0["appended"] as? Int)
+        }
+        let appended = receipt["appended"] as? Int ?? 0
+        XCTAssertEqual(receipt["records"] as? [Int], Array(0..<100), "Seed records were lost or replayed")
+        XCTAssertEqual(receipt["appendedRecords"] as? [Int], Array(1...max(1, appended)),
+                       "Live records were duplicated, reordered or dropped")
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+        attach("busy-output-tail-restored")
+    }
+
+    func testMountedPaneSwitchResetAndCloseDuringResize() {
+        launch("resize")
+        wait { ($0["mounted"] as? Int) == 2 }
+        command("history"); anchor()
+        command("delayed"); command("120x24")
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:b" && ($0["covered"] as? Bool) == false }
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:a" }
+        settled(cols: 120); anchor()
+        command("reset")
+        wait { ($0["epoch"] as? Int) == 8 && ($0["covered"] as? Bool) == false }
+        // Reset replaces the visible seed, not the reader's decision to follow.
+        // Returning explicitly must expose the new epoch rather than an old cover.
+        command("tail")
+        wait { ($0["visible"] as? String ?? "").contains("RESET-EPOCH8") }
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+        command("80x24"); command("close")
+        wait { ($0["mounted"] as? Int) == 1 && ($0["pane"] as? String) == "ix:b" && ($0["covered"] as? Bool) == false }
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+        attach("close-inflight-surviving-pane")
+    }
+
+    /// A control-bar keycap is input too, and it lives outside the terminal surface.
+    ///
+    /// Review found this at d750df7: keyCap/rawCap only cleared the modifier and sent,
+    /// so during a delayed resize their bytes reached the agent while the retained
+    /// frame stayed up. An input whose effect is hidden reads as ignored and invites a
+    /// second one, which is the whole hazard the cover exists to avoid.
+    func testExternalKeycapDuringCoveredResizeTakesControlOnce() {
+        launch("resize")
+        command("history"); anchor()
+        let before = probe()["previous"] as? Int ?? 0
+        // Reach the cap FIRST, so the scroll that reveals it is not part of the timed
+        // window below.
+        let keycap = cap("^P")
+        command("delayed"); command("120x24")
+        // THE COVER MUST BE UP BEFORE THE TAP, or this case would pass on a build with
+        // no cancellation at all: the quiet/deadline path removes the frame within
+        // about a second anyway. Review flagged exactly that.
+        // TIGHT POLLING, NOT A PREDICATE EXPECTATION. XCTNSPredicateExpectation
+        // re-evaluates about once a second, and this cover is deliberately short-lived,
+        // so the wait could miss it entirely and report a cover that never appeared.
+        var sawCover = false
+        let coverDeadline = Date().addingTimeInterval(4)
+        while Date() < coverDeadline {
+            if (probe()["covered"] as? Bool) == true { sawCover = true; break }
+        }
+        XCTAssertTrue(sawCover, "no retained frame appeared for this resize: \(probe())")
+        keycap.tap()
+        // And it must go NOW, not by the deadline. The deadline is 140 ms of settle
+        // plus one second; a 600 ms ceiling can only be met by the input cancelling it.
+        var cleared = false
+        let start = Date()
+        while Date().timeIntervalSince(start) < 0.6 {
+            if (probe()["covered"] as? Bool) == false { cleared = true; break }
+        }
+        XCTAssertTrue(cleared, "the keycap did not cancel the retained frame: \(probe())")
+        wait { ($0["previous"] as? Int) == before + 1 }
+        attach("keycap-cancels-cover")
+        settled(cols: 120)
+        XCTAssertEqual(probe()["previous"] as? Int, before + 1,
+                       "one keycap tap must deliver exactly one input")
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
+    }
+
+    func testDraggingDuringCoveredResizeTakesControl() {
+        launch("resize")
+        command("history"); anchor()
+        command("delayed"); command("120x24")
+        // Three drags with a beat between them, the gesture ScrollTests already proves
+        // moves this terminal; one flick can land inside the scroll view's slop.
+        for _ in 0..<3 {
+            let from = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.35))
+            let to = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.75))
+            from.press(forDuration: 0.05, thenDragTo: to)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        wait { ($0["covered"] as? Bool) == false && ($0["markerRow"] as? Int) != 0 }
+        settled(cols: 120)
+        XCTAssertNotEqual(probe()["markerRow"] as? Int, 0, "Late reveal restored the stale history anchor")
+        attach("gesture-cancels-covered-resize")
+    }
+}
