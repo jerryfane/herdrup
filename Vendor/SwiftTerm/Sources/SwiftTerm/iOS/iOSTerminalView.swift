@@ -2783,7 +2783,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                         // Spend the one-shot as soon as it has encoded one key, and do
                         // not install the repeat timer for it: a one-shot repeating is a
                         // chord the reader never asked for.
-                        let wasOneShot = __omp_shell("physicalControl && oneShotControlArmed")
+                        let wasOneShot = physicalControl == false && oneShotControlArmed
                         consumeOneShotControl(physicalControl: physicalControl)
                         if wasOneShot {
                             didHandleEvent = true
