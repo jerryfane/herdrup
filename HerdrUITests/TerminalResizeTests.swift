@@ -138,6 +138,15 @@ class TerminalInteractionTestCase: XCTestCase {
         app.typeText(text)
     }
 
+    /// Whether a keystroke can actually be delivered right now: a software keyboard on
+    /// the phone, or the terminal holding the responder on iPad, where keys arrive from
+    /// the attached hardware keyboard and no software keyboard ever appears. Used to
+    /// separate "the app did the wrong thing" from "this environment cannot type".
+    var canTypeDirectly: Bool {
+        if probe()["iPad"] as? Bool == true { return probe()["focused"] as? Bool == true }
+        return app.keyboards.element.exists
+    }
+
     /// Every button with its identifier, label and frame. Attached to a reachability
     /// failure so the next run explains itself instead of costing another CI round.
     func elementDump() -> String {

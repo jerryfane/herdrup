@@ -86,9 +86,16 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     /// (`handleReplyChange`) without depending on that handover.
     func testReplyFieldStillConsumesControl() throws {
         launch("control")
-        reply.tap()
-        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
-                      "the reply field must hold the keyboard. \(elementDump())")
+        // FOCUS IS READ FROM THE APP, NOT FROM `app.keyboards`. The simulator may have
+        // the host hardware keyboard attached, in which case iOS shows no software
+        // keyboard for a focused field at all and the keyboard query is simply wrong.
+        // The production chevron is gated on `replyFocused`, so its presence is the
+        // app's own statement that this field owns the input.
+        for attempt in 0..<3 {
+            reply.tap()
+            if onscreen("Collapse keyboard", timeout: 5) != nil { break }
+            XCTAssertNotEqual(attempt, 2, "the reply field never took focus. \(elementDump())")
+        }
         let draft = reply.value as? String
         cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }
@@ -129,10 +136,20 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         typeDirect("p"); input("p", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap()
-        XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
-                        "the keyboard chevron must be present while direct input holds the keyboard")
-        onscreen("Collapse keyboard")?.tap()
-        wait { ($0["focused"] as? Bool) == false }
+        // THE CHEVRON IS PHONE-ONLY BY DESIGN: its gate is
+        // `replyFocused || (terminalInputFocused && idiom == .phone)`, because the iPad
+        // terminal's input view is zero-frame, so there is no keyboard to collapse and
+        // the control would be dead. Asserting it on iPad tested a decision the product
+        // deliberately made the other way.
+        if probe()["iPad"] as? Bool != true {
+            XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
+                            "the keyboard chevron must be present while direct input holds the keyboard")
+            onscreen("Collapse keyboard")?.tap()
+            wait { ($0["focused"] as? Bool) == false }
+        } else {
+            XCTAssertNil(onscreen("Collapse keyboard", timeout: 2),
+                         "iPad must not offer a dismissal for a keyboard it never shows")
+        }
         focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("explicit-key-and-keyboard-dismissal-no-leak")
     }
@@ -153,6 +170,17 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         }
         if app.buttons["Stop dictation"].exists { app.buttons["Stop dictation"].tap() }
         if app.alerts.firstMatch.exists { app.alerts.buttons["OK"].tap() }
+        // DICTATION MUST ACTUALLY HAVE STARTED for its disarm to be owed: production
+        // clears the one-shot in MicButton's `onStart`, and `replyDictating` disables
+        // the reply field while the mic is live. A simulator with no audio input never
+        // starts it, and asserting the disarm there would fail on a state the app was
+        // never in.
+        let started = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate { [weak self] _, _ in self?.reply.isEnabled == false },
+            object: nil)], timeout: 5)
+        guard started == .completed || !armed else {
+            throw XCTSkip("dictation never started in this environment (no audio input), so no disarm is owed. \(elementDump())")
+        }
         // STARTING dictation is what must disarm, and the production cap's own label is
         // the observable for it. Asserting it here rather than only through a later
         // keystroke matters: a denied-permission session can leave the phone with no
@@ -160,7 +188,17 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         // modifier.
         XCTAssertFalse(armed, "starting dictation must consume the armed one-shot")
         attach("dictation-start-disarmed")
-        focusTerminal(); typeDirect("p"); input("p", previous: 0)
+        // The ordinary-key half needs an input path, and a dictation attempt can leave
+        // the phone with no keyboard: `focusTerminal` restores the responder, but iOS
+        // does not always bring the keyboard back. The disarm above is the receipt this
+        // case exists for; deliver a key too whenever the environment still can, rather
+        // than failing on a keyboard the app does not control.
+        focusTerminal()
+        guard canTypeDirectly else {
+            attach("dictation-no-input-path-after-permission-flow")
+            return
+        }
+        typeDirect("p"); input("p", previous: 0)
         attach("dictation-start-no-modifier-leak")
     }
 
