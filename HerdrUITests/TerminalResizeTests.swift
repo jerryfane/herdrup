@@ -12,7 +12,13 @@ class TerminalInteractionTestCase: XCTestCase {
         super.tearDown()
     }
 
+    /// Which fixture is mounted. The control fixture paints only a prompt line, so a
+    /// painted-prompt assertion is meaningful there; the resize fixture seeds a hundred
+    /// history records, where the prompt is legitimately off-viewport.
+    private(set) var fixtureMode = ""
+
     func launch(_ mode: String) {
+        fixtureMode = mode
         app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()

@@ -56,37 +56,26 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     /// leaked" when nothing was ever delivered.
     private func typeDirect(_ text: String) {
         wait { ($0["focused"] as? Bool) == true }
-        // AND A KEYBOARD MUST ACTUALLY BE UP. Returning from dictation left the
-        // terminal first responder with no keyboard, so the keystroke went nowhere and
-        // the fixture received no bytes at all — indistinguishable, from the outside,
-        // from a modifier that ate the key.
-        if !app.keyboards.element.exists {
+        // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
+        // an empty input view and drives keys from the attached hardware keyboard, so
+        // requiring `app.keyboards` there failed every iPad case on a condition the
+        // product is designed never to satisfy. On the phone the keyboard really is the
+        // input path: returning from dictation left the terminal first responder with
+        // none, the keystroke went nowhere, and no bytes reached the fixture — which
+        // from outside looks exactly like a modifier that ate the key.
+        if probe()["iPad"] as? Bool != true, !app.keyboards.element.exists {
             terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
-            XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 5),
+            XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
                           "direct input needs the software keyboard. \(elementDump())")
         }
         app.typeText(text)
     }
 
-    /// Hands the keyboard to the reply field and waits for the terminal to give it up,
-    /// so `typeText` cannot fail with "neither element nor any descendant has keyboard
-    /// focus".
-    private func focusReply() {
-        // One tap does not always move SwiftUI focus while the terminal holds the
-        // keyboard, and typing then fails with "neither element nor any descendant has
-        // keyboard focus". Retry the tap until the terminal reports it gave the
-        // responder up, which is the state the reply path needs.
-        for attempt in 0..<3 {
-            reply.tap()
-            let handed = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-                predicate: NSPredicate { [weak self] _, _ in
-                    (self?.probe()["focused"] as? Bool) == false
-                }, object: nil)], timeout: 5)
-            if handed == .completed { break }
-            XCTAssertNotEqual(attempt, 2, "the reply field never took the keyboard. \(elementDump())")
-        }
-        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 5),
-                      "the reply field must hold the keyboard for a reply-path chord")
+    /// Whether the ctrl one-shot is armed, read from the production cap's own
+    /// accessibility label. Idiom-independent, and the only observable that survives a
+    /// state where no keyboard is available at all.
+    private var armed: Bool {
+        cap("terminal-ctrl").label == "control armed"
     }
 
     private func chord(_ text: String) {
@@ -95,14 +84,20 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         app.typeText(text)
     }
 
+    /// The accepted line, plus the PAINTED prompt when the fixture actually paints one
+    /// in the viewport. The control fixture shows nothing but the prompt, so its paint
+    /// is the receipt; the resize fixture seeds a hundred history records and its
+    /// prompt is legitimately scrolled out, so demanding it there asserted the
+    /// viewport, not the input path.
     private func input(_ expected: String, previous: Int? = nil) {
         let prompt = ("fixture> " + expected).trimmingCharacters(in: .whitespaces)
+        let paintExpected = fixtureMode == "control"
         wait {
             ($0["input"] as? String) == expected
                 && (previous == nil || ($0["previous"] as? Int) == previous)
-                && ($0["visible"] as? String ?? "").split(separator: "\n").contains {
+                && (!paintExpected || ($0["visible"] as? String ?? "").split(separator: "\n").contains {
                     $0.trimmingCharacters(in: .whitespaces) == prompt
-                }
+                })
         }
     }
 
@@ -138,14 +133,34 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         attach("kitty-native-chords-and-unmodified-next-key")
     }
 
-    func testTwoTapsCancelAndReplyFieldStillConsumesControl() throws {
+    func testTwoTapsCancelInDirectInput() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        cap("terminal-ctrl").tap(); cap("terminal-ctrl").tap(); typeDirect("p")
+        cap("terminal-ctrl").tap()
+        XCTAssertTrue(armed, "one tap must arm the one-shot")
+        cap("terminal-ctrl").tap()
+        XCTAssertFalse(armed, "a second tap must cancel it without sending anything")
+        typeDirect("p")
         input("p", previous: 0)
-        focusReply()
+        attach("two-taps-cancel-without-input")
+    }
+
+    /// The reply path takes the keyboard FIRST, from a fresh launch.
+    ///
+    /// Handing the responder over from an already-focused terminal does not reliably
+    /// move SwiftUI focus in the simulator, and typing then fails with "neither element
+    /// nor any descendant has keyboard focus" — a harness limitation, not a product
+    /// one. Ordering the case this way exercises the same production path
+    /// (`handleReplyChange`) without depending on that handover.
+    func testReplyFieldStillConsumesControl() throws {
+        launch("control")
+        reply.tap()
+        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                      "the reply field must hold the keyboard. \(elementDump())")
+        let draft = reply.value as? String
         cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }
-        XCTAssertFalse((reply.value as? String ?? "").hasSuffix("p"), "Reply chord leaked literal text into the draft")
+        XCTAssertEqual(reply.value as? String, draft, "the reply chord leaked literal text into the draft")
+        XCTAssertFalse(armed, "the reply path must consume the one-shot")
         attach("reply-field-control-preserved")
     }
 
@@ -189,9 +204,10 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         attach("explicit-key-and-keyboard-dismissal-no-leak")
     }
 
-    func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
+func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
         cap("terminal-ctrl").tap()
+        XCTAssertTrue(armed)
         onscreen("Dictate", timeout: 5)?.tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         // Permissions may already be settled by another case on this simulator.
@@ -204,11 +220,18 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         }
         if app.buttons["Stop dictation"].exists { app.buttons["Stop dictation"].tap() }
         if app.alerts.firstMatch.exists { app.alerts.buttons["OK"].tap() }
+        // STARTING dictation is what must disarm, and the production cap's own label is
+        // the observable for it. Asserting it here rather than only through a later
+        // keystroke matters: a denied-permission session can leave the phone with no
+        // keyboard at all, and then "no character arrived" says nothing about the
+        // modifier.
+        XCTAssertFalse(armed, "starting dictation must consume the armed one-shot")
+        attach("dictation-start-disarmed")
         focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("dictation-start-no-modifier-leak")
     }
 
-    func testAppDeactivationDisarmsBeforeNextDirectKey() throws {
+        func testAppDeactivationDisarmsBeforeNextDirectKey() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
         cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
