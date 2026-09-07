@@ -220,6 +220,15 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
         app.activate()
+        // WAIT FOR THE APP TO BE SERVING SNAPSHOTS AGAIN before any query. The first
+        // (cold) iPad run failed here with "Failed to get matching snapshots: Timed out
+        // while evaluating UI query" — the accessibility hierarchy is not ready the
+        // instant `activate()` returns, and the retry passed, which is exactly the
+        // shape of failure the workflow refuses to let a warm rerun hide.
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
+                      "the app did not return to the foreground")
+        XCTAssertTrue(app.staticTexts["terminal-interaction-probe"].waitForExistence(timeout: 30),
+                      "the probe never came back after reactivation")
         focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("app-deactivation-no-modifier-leak")
     }
