@@ -411,7 +411,15 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         // THE COVER MUST BE UP BEFORE THE TAP, or this case would pass on a build with
         // no cancellation at all: the quiet/deadline path removes the frame within
         // about a second anyway. Review flagged exactly that.
-        wait(timeout: 5) { ($0["covered"] as? Bool) == true }
+        // TIGHT POLLING, NOT A PREDICATE EXPECTATION. XCTNSPredicateExpectation
+        // re-evaluates about once a second, and this cover is deliberately short-lived,
+        // so the wait could miss it entirely and report a cover that never appeared.
+        var sawCover = false
+        let coverDeadline = Date().addingTimeInterval(4)
+        while Date() < coverDeadline {
+            if (probe()["covered"] as? Bool) == true { sawCover = true; break }
+        }
+        XCTAssertTrue(sawCover, "no retained frame appeared for this resize: \(probe())")
         keycap.tap()
         // And it must go NOW, not by the deadline. The deadline is 140 ms of settle
         // plus one second; a 600 ms ceiling can only be met by the input cancelling it.

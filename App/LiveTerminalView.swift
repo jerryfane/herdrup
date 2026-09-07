@@ -407,6 +407,22 @@ struct LiveTerminalView: UIViewRepresentable {
             super.insertText(text)
         }
 
+        /// HARDWARE KEYS NEED THE SAME REFRESH AS SOFTWARE ONES.
+        ///
+        /// `insertText` re-reads the live binding immediately before encoding, which is
+        /// what makes "tap Ctrl, type instantly" work. A physical key never reaches
+        /// `insertText`: it is encoded from `pressesBegan`. So on iPad a control-bar cap
+        /// that cleared the one-shot could still be beaten by the next hardware key,
+        /// which encoded with the stale native flag and sent a chord the reader had
+        /// already cancelled — measured as Ctrl+P firing after tapping Tab.
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            onWillHandleHardwareKeys?()
+            super.pressesBegan(presses, with: event)
+        }
+        /// Refreshes the native modifier from the host's live state before a physical
+        /// key is encoded.
+        var onWillHandleHardwareKeys: (() -> Void)?
+
         /// A paste is not a chord: it must arrive verbatim, and it must not leave the
         /// modifier armed for the next keystroke.
         override func paste(_ sender: Any?) {
@@ -828,6 +844,7 @@ struct LiveTerminalView: UIViewRepresentable {
             view.onWillInsertText = { [weak self] text, composing in
                 self?.prepareForInsertedText(text, composing: composing)
             }
+            view.onWillHandleHardwareKeys = { [weak self] in self?.applyControlModifier() }
             view.onCancelControl = { [weak self] in
                 self?.cancelArmedControl()
                 self?.userTookControl()
@@ -1406,6 +1423,7 @@ struct LiveTerminalView: UIViewRepresentable {
             view?.displayCompletedHandler = nil
             view?.onWillInsertText = nil
             view?.onCancelControl = nil
+            view?.onWillHandleHardwareKeys = nil
             view?.onUserInteraction = nil
             surface?.onGeometryWillChange = nil
             view?.terminalDelegate = nil    // stop further SwiftTerm callbacks (sizeChanged)
