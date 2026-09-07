@@ -71,6 +71,73 @@ class TerminalInteractionTestCase: XCTestCase {
         return nil
     }
 
+    /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
+    /// the ctrl cap sits beyond its right edge: eight cases failed with "activation
+    /// point invalid" for tapping an off-viewport element, and asking `isHittable`
+    /// about such an element RAISES that same error instead of answering false. So
+    /// scroll the bar the way a reader does and judge reachability by frame geometry.
+    func cap(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        if let ready = onscreen(identifier, timeout: 5) { return ready }
+        for _ in 0..<6 {
+            scrollControlBar()
+            if let ready = onscreen(identifier, timeout: 2) { return ready }
+        }
+        XCTFail("control cap \(identifier) never scrolled into the viewport. \(elementDump())",
+                file: file, line: line)
+        return app.buttons[identifier].firstMatch
+    }
+
+    /// Drags the control bar ITSELF, in the leftmost cap's OWN coordinate space.
+    ///
+    /// `swipeLeft()` on a cap delivers the gesture to that button, so the bar never
+    /// moved. Normalized window coordinates were no better: the window query is not
+    /// guaranteed to be the main window, and a bad reference frame silently aims the
+    /// drag at nothing. Offsets past 1.0 are multiples of the anchor's own frame, so
+    /// this stays inside the bar's row by construction.
+    func scrollControlBar() {
+        let anchor = app.buttons["Escape"].firstMatch
+        guard anchor.exists else { return }
+        anchor.coordinate(withNormalizedOffset: CGVector(dx: 6.0, dy: 0.5))
+            .press(forDuration: 0.05,
+                   thenDragTo: anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)))
+        Thread.sleep(forTimeInterval: 0.25)
+    }
+
+    private func requireDirectInput() throws {
+        let state = wait { $0["keyDriveEnabled"] != nil }
+        if state["iPad"] as? Bool == true && state["keyDriveEnabled"] as? Bool == false {
+            throw XCTSkip("iPad direct input requires an attached hardware keyboard; production keyDriveEnabled is false. No simulator bypass is installed; physical-keyboard receipt remains unverified.")
+        }
+        XCTAssertEqual(state["keyDriveEnabled"] as? Bool, true, "iPhone direct input must remain eligible")
+    }
+
+    private func focusTerminal() {
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+        wait { ($0["focused"] as? Bool) == true }
+    }
+
+    /// Types into the terminal only once it actually owns the keyboard. A tap on a
+    /// control cap or a return from dictation can leave the responder elsewhere for a
+    /// beat, and a keystroke sent then goes nowhere — which reads as "the modifier
+    /// leaked" when nothing was ever delivered.
+    private func typeDirect(_ text: String) {
+        wait { ($0["focused"] as? Bool) == true }
+        // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
+        // an empty input view and drives keys from the attached hardware keyboard, so
+        // requiring `app.keyboards` there failed every iPad case on a condition the
+        // product is designed never to satisfy. On the phone the keyboard really is the
+        // input path: returning from dictation left the terminal first responder with
+        // none, the keystroke went nowhere, and no bytes reached the fixture — which
+        // from outside looks exactly like a modifier that ate the key.
+        if probe()["iPad"] as? Bool != true, !app.keyboards.element.exists {
+            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+            XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                          "direct input needs the software keyboard. \(elementDump())")
+        }
+        app.typeText(text)
+    }
+
     /// Every button with its identifier, label and frame. Attached to a reachability
     /// failure so the next run explains itself instead of costing another CI round.
     func elementDump() -> String {
@@ -308,6 +375,27 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         wait { ($0["mounted"] as? Int) == 1 && ($0["pane"] as? String) == "ix:b" && ($0["covered"] as? Bool) == false }
         XCTAssertEqual(probe()["opens"] as? Int, 1)
         attach("close-inflight-surviving-pane")
+    }
+
+    /// A control-bar keycap is input too, and it lives outside the terminal surface.
+    ///
+    /// Review found this at d750df7: keyCap/rawCap only cleared the modifier and sent,
+    /// so during a delayed resize their bytes reached the agent while the retained
+    /// frame stayed up. An input whose effect is hidden reads as ignored and invites a
+    /// second one, which is the whole hazard the cover exists to avoid.
+    func testExternalKeycapDuringCoveredResizeTakesControlOnce() {
+        launch("resize")
+        command("history"); anchor()
+        let before = probe()["previous"] as? Int ?? 0
+        command("delayed"); command("120x24")
+        // ^P is a raw-sequence cap: one control byte, one observable history step.
+        cap("^P").tap()
+        wait { ($0["covered"] as? Bool) == false && ($0["previous"] as? Int) == before + 1 }
+        attach("keycap-cancels-cover")
+        settled(cols: 120)
+        XCTAssertEqual(probe()["previous"] as? Int, before + 1,
+                       "one keycap tap must deliver exactly one input")
+        XCTAssertEqual(probe()["opens"] as? Int, 1)
     }
 
     func testDraggingDuringCoveredResizeTakesControl() {

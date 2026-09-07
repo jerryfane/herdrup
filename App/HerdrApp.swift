@@ -3831,6 +3831,12 @@ struct TerminalPaneContent: View {
     /// Incremented to ask the pane to jump to its newest output. LiveTerminalView
     /// performs exactly one jump per increment.
     @State private var jumpToTailToken = 0
+    /// Bumped whenever the host itself delivers input to the pane (a control-bar
+    /// keycap, a raw sequence cap). Those buttons live OUTSIDE the terminal surface, so
+    /// the view's own touch and key paths never see them: without this the retained
+    /// resize frame stayed up while their bytes reached the agent, and an input that
+    /// produced no redraw looked ignored. Reported by review at d750df7.
+    @State private var userInputToken = 0
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
@@ -3952,7 +3958,8 @@ struct TerminalPaneContent: View {
                                  // Read on foreground to tell a suspended stream from a
                                  // still-running one; see the scenePhase handler below.
                                  liveness: terminalLiveness,
-                                 controlArmed: $ctrlArmed)
+                                 controlArmed: $ctrlArmed,
+                                 userInputToken: userInputToken)
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .accessibilityIdentifier("terminal-surface")
@@ -4366,7 +4373,7 @@ struct TerminalPaneContent: View {
     }
 
     private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
-        Button { ctrlArmed = false; send(.key(key)) } label: {
+        Button { ctrlArmed = false; userInputToken += 1; send(.key(key)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? key).font(Typography.machine(12)) }
@@ -4388,7 +4395,7 @@ struct TerminalPaneContent: View {
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
     private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
-        Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
+        Button { ctrlArmed = false; userInputToken += 1; send(.rawSequence(sequence)) } label: {
             Group {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
                 else { Text(label ?? "").font(Typography.machine(12)) }

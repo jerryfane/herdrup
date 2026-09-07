@@ -111,6 +111,13 @@ struct LiveTerminalView: UIViewRepresentable {
     /// typing into the terminal, where SwiftTerm's own `controlModifier` does the
     /// encoding and reports back when it was consumed.
     @Binding var controlArmed: Bool
+    /// Monotonic count of inputs the HOST delivered on this pane's behalf — the
+    /// control-bar keycaps and raw-sequence caps. They are SwiftUI buttons outside
+    /// `TerminalSurfaceView`, so neither its `hitTest` nor `send` ever observes them,
+    /// and a retained resize frame would otherwise stay on screen while their bytes
+    /// reached the agent. A token, not a Bool, for the reason `jumpToTailToken` is one:
+    /// it cannot be coalesced away by a body pass.
+    var userInputToken: Int = 0
     /// The host's own copy of the stuck-stream threshold, so it judges staleness by the
     /// same rule the watchdog reconnects on rather than a second, drifting number.
     static var streamStuckTimeout: TimeInterval { Coordinator.streamStuckTimeout }
@@ -132,7 +139,8 @@ struct LiveTerminalView: UIViewRepresentable {
         // (the header refresh bumps `streamGen`) builds a fresh Coordinator while the
         // host's `@State` survives, so defaulting them replays the last jump as a second
         // Ctrl+End and mis-dedupes the tail callback.
-        context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail)
+        context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail,
+                                          userInputToken: userInputToken)
         context.coordinator.attach(surface)
         return surface
     }
@@ -157,6 +165,9 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.setForeground(isForeground)
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
+        // Before the focus decision below: a host-delivered keycap is the user acting
+        // on this pane, so it must drop a retained frame at once.
+        context.coordinator.noteHostInput(ifTokenChanged: userInputToken)
         // Drive terminal responder ownership from SwiftUI intent.
         //
         // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
@@ -663,9 +674,24 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Adopt the host's current jump token and tail belief WITHOUT acting on either.
         /// Called once per Coordinator, before `attach`, so a `streamGen` remount neither
         /// re-sends a jump it already performed nor swallows the next tail callback.
-        func seedBaselines(jumpToTailToken: Int, atTail: Bool) {
+        func seedBaselines(jumpToTailToken: Int, atTail: Bool, userInputToken: Int) {
             lastJumpToTailToken = jumpToTailToken
             lastReportedAtTail = atTail
+            lastUserInputToken = userInputToken
+        }
+
+        /// Last host-input token acted on, seeded like the jump token so a `streamGen`
+        /// remount does not replay an old keycap as a fresh user action.
+        private var lastUserInputToken = 0
+
+        /// The host delivered input on this pane's behalf. Same effect as a touch or a
+        /// typed key on the surface: the retained frame goes now, and the reveal task
+        /// that belonged to it cannot put it back.
+        func noteHostInput(ifTokenChanged token: Int) {
+            guard token != lastUserInputToken else { return }
+            lastUserInputToken = token
+            guard !stopped, foreground else { return }
+            userTookControl()
         }
 
         /// Per-pane geometry-ownership generation. Each `attach` for a pane id bumps this and
