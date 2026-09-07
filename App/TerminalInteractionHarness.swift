@@ -348,8 +348,11 @@ final class TerminalInteractionHarness: ObservableObject {
     /// Null cells are dropped; a real blank is a space (0x20), never a null.
     private func lineText(_ line: BufferLine, terminal: Terminal) -> String {
         var text = ""
-        for column in 0..<line.count where line[column].code != 0 {
-            text.append(terminal.getCharacter(for: line[column]))
+        for column in 0..<line.count {
+            // `CharData.code` is internal to SwiftTerm; the rendered character is the
+            // public view of a cell, and a null cell renders as "\0".
+            let character = terminal.getCharacter(for: line[column])
+            if character != "\0" { text.append(character) }
         }
         return text
     }
