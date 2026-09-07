@@ -50,6 +50,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private var historyIndex = 2
     private var input = ""
     private var pendingInput = ""
+    private var receivedHex = ""
     private var scenario = Scenario.quiet
     private var kitty = false
     private let paneID: String
@@ -236,6 +237,11 @@ final class TerminalInteractionDriver: @unchecked Sendable {
 
     private func consume(_ text: String) {
         pendingInput += text
+        // The RAW BYTES, kept for the receipt. "the key never arrived" and "the key
+        // arrived encoded differently" are different defects with different fixes, and
+        // from the test side they look identical without this.
+        receivedHex += text.unicodeScalars.map { String(format: "%02x", $0.value) }.joined(separator: " ") + " "
+        if receivedHex.count > 200 { receivedHex.removeFirst(receivedHex.count - 200) }
         while !pendingInput.isEmpty {
             if pendingInput.hasPrefix("\u{1b}[") {
                 let bodyStart = pendingInput.index(pendingInput.startIndex, offsetBy: 2)
@@ -279,7 +285,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                   "previous": previousActions, "next": nextActions, "clears": clearActions,
                   "legacyPrevious": legacyPrevious, "kittyPrevious": kittyPrevious,
                   "input": input, "historyIndex": historyIndex, "offset": offset,
-                  "scenario": scenario.rawValue, "epoch": epoch] }
+                  "scenario": scenario.rawValue, "epoch": epoch, "bytes": receivedHex] }
     }
 }
 
@@ -336,9 +342,16 @@ final class TerminalInteractionHarness: ObservableObject {
         // A draw must not synchronously invalidate its SwiftUI host.
     }
 
+    /// The painted row as text. A DOUBLE-WIDTH glyph occupies two cells and the second
+    /// carries no character, so emitting it as a space rendered a correct paint of
+    /// "日本" as "日 本" and failed an IME receipt on a defect that did not exist.
+    /// Null cells are dropped; a real blank is a space (0x20), never a null.
     private func lineText(_ line: BufferLine, terminal: Terminal) -> String {
-        (0..<line.count).map { String(terminal.getCharacter(for: line[$0])) }
-            .joined().replacingOccurrences(of: "\0", with: " ")
+        var text = ""
+        for column in 0..<line.count where line[column].code != 0 {
+            text.append(terminal.getCharacter(for: line[column]))
+        }
+        return text
     }
     private func viewport(_ view: TerminalView, cellSize: CGSize) -> [String: Any] {
         let terminal = view.getTerminal()

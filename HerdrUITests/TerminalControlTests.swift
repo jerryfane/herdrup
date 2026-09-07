@@ -50,6 +50,25 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         wait { ($0["focused"] as? Bool) == true }
     }
 
+    /// Types into the terminal only once it actually owns the keyboard. A tap on a
+    /// control cap or a return from dictation can leave the responder elsewhere for a
+    /// beat, and a keystroke sent then goes nowhere — which reads as "the modifier
+    /// leaked" when nothing was ever delivered.
+    private func typeDirect(_ text: String) {
+        wait { ($0["focused"] as? Bool) == true }
+        app.typeText(text)
+    }
+
+    /// Hands the keyboard to the reply field and waits for the terminal to give it up,
+    /// so `typeText` cannot fail with "neither element nor any descendant has keyboard
+    /// focus".
+    private func focusReply() {
+        reply.tap()
+        wait { ($0["focused"] as? Bool) == false }
+        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 5),
+                      "the reply field must hold the keyboard for a reply-path chord")
+    }
+
     private func chord(_ text: String) {
         cap("terminal-ctrl").tap()
         // Deliberately no wait for a SwiftUI update between arming and typing.
@@ -75,7 +94,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         XCTAssertEqual(probe()["legacyPrevious"] as? Int, 1)
         XCTAssertEqual(probe()["kittyPrevious"] as? Int, 0)
         XCTAssertEqual(reply.value as? String, draft, "Direct input changed the reply draft")
-        app.typeText("p")
+        typeDirect("p")
         input("second-known-commandp", previous: 1)
         attach("legacy-one-shot-followed-by-literal-p")
         chord("p"); input("first-known-command", previous: 2)
@@ -92,7 +111,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         chord("p"); input("second-known-command", previous: 1)
         XCTAssertEqual(probe()["kittyPrevious"] as? Int, 1)
         XCTAssertEqual(probe()["legacyPrevious"] as? Int, 0)
-        app.typeText("p"); input("second-known-commandp", previous: 1)
+        typeDirect("p"); input("second-known-commandp", previous: 1)
         chord("n"); input("", previous: 1)
         chord("p"); input("second-known-command", previous: 2)
         chord("c"); input("", previous: 2)
@@ -101,9 +120,9 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testTwoTapsCancelAndReplyFieldStillConsumesControl() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        cap("terminal-ctrl").tap(); cap("terminal-ctrl").tap(); app.typeText("p")
+        cap("terminal-ctrl").tap(); cap("terminal-ctrl").tap(); typeDirect("p")
         input("p", previous: 0)
-        reply.tap()
+        focusReply()
         cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }
         XCTAssertFalse((reply.value as? String ?? "").hasSuffix("p"), "Reply chord leaked literal text into the draft")
@@ -112,26 +131,26 @@ final class TerminalControlTests: TerminalInteractionTestCase {
 
     func testDeleteNonASCIICompositionAndPasteDisarm() throws {
         launch("control"); try requireDirectInput(); focusTerminal()
-        app.typeText("x")
-        cap("terminal-ctrl").tap(); app.typeText(XCUIKeyboardKey.delete.rawValue)
+        typeDirect("x")
+        cap("terminal-ctrl").tap(); typeDirect(XCUIKeyboardKey.delete.rawValue)
         input("", previous: 0)
-        app.typeText("p"); input("p", previous: 0)
+        typeDirect("p"); input("p", previous: 0)
         chord("c"); input("")
-        cap("terminal-ctrl").tap(); app.typeText("é")
+        cap("terminal-ctrl").tap(); typeDirect("é")
         input("é", previous: 0)
-        app.typeText("p"); input("ép", previous: 0)
+        typeDirect("p"); input("ép", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap(); command("ime-commit")
         input("日本", previous: 0)
-        focusTerminal(); app.typeText("p"); input("日本p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("日本p", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap(); command("paste-batch")
         input("paste-payload", previous: 0)
-        focusTerminal(); app.typeText("p"); input("paste-payloadp", previous: 0)
+        focusTerminal(); typeDirect("p"); input("paste-payloadp", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap(); command("batch-insert")
         input("batch-payload", previous: 0)
-        focusTerminal(); app.typeText("p"); input("batch-payloadp", previous: 0)
+        focusTerminal(); typeDirect("p"); input("batch-payloadp", previous: 0)
         attach("batch-composition-delete-and-next-key")
     }
 
@@ -139,14 +158,14 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         launch("control"); try requireDirectInput(); focusTerminal()
         cap("terminal-ctrl").tap()
         cap("Tab").tap()
-        app.typeText("p"); input("p", previous: 0)
+        typeDirect("p"); input("p", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap()
         XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
                         "the keyboard chevron must be present while direct input holds the keyboard")
         onscreen("Collapse keyboard")?.tap()
         wait { ($0["focused"] as? Bool) == false }
-        focusTerminal(); app.typeText("p"); input("p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("explicit-key-and-keyboard-dismissal-no-leak")
     }
 
@@ -165,7 +184,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         }
         if app.buttons["Stop dictation"].exists { app.buttons["Stop dictation"].tap() }
         if app.alerts.firstMatch.exists { app.alerts.buttons["OK"].tap() }
-        focusTerminal(); app.typeText("p"); input("p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("dictation-start-no-modifier-leak")
     }
 
@@ -174,7 +193,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
         app.activate()
-        focusTerminal(); app.typeText("p"); input("p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("p", previous: 0)
         attach("app-deactivation-no-modifier-leak")
     }
 
@@ -182,12 +201,12 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         launch("resize"); try requireDirectInput(); focusTerminal()
         cap("terminal-ctrl").tap(); command("switch")
         wait { ($0["pane"] as? String) == "ix:b" }
-        focusTerminal(); app.typeText("p"); input("p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("p", previous: 0)
         command("switch")
         wait { ($0["pane"] as? String) == "ix:a" }
-        focusTerminal(); app.typeText("p"); input("p", previous: 0)
+        focusTerminal(); typeDirect("p"); input("p", previous: 0)
         command("delayed"); command("120x24")
-        app.typeText("x")
+        typeDirect("x")
         wait { ($0["covered"] as? Bool) == false && ($0["input"] as? String) == "px" }
         settled(cols: 120)
         input("px", previous: 0)
