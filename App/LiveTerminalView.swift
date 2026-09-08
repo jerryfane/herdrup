@@ -423,6 +423,63 @@ struct LiveTerminalView: UIViewRepresentable {
         /// key is encoded.
         var onWillHandleHardwareKeys: (() -> Void)?
 
+        /// CTRL CHORDS FROM A PHYSICAL KEYBOARD, DELIVERED AS KEY COMMANDS.
+        ///
+        /// SwiftTerm encodes hardware keys in `pressesBegan`, and that is enough on an
+        /// iPad. It is NOT enough for a Designed-for-iPad app on a Mac, which is how
+        /// this app runs on Apple Silicon: plain characters arrive through the text
+        /// input system and reach the pane, while every Ctrl chord — including ones
+        /// macOS does not bind, like Ctrl+G and Ctrl+X — never surfaces at all. Measured
+        /// on a MacBook against `cat -v`: `abc` echoes, `^G`/`^X`/`^P`/`^A` produce
+        /// nothing.
+        ///
+        /// `UIKeyCommand` is the delivery mechanism UIKit guarantees for hardware
+        /// shortcuts on that platform. `wantsPriorityOverSystemBehavior` additionally
+        /// takes the chord back from macOS's own emacs-style text bindings, which is
+        /// what would otherwise swallow Ctrl+A, Ctrl+E, Ctrl+K and Ctrl+P specifically.
+        ///
+        /// When UIKit matches a key command it invokes the action INSTEAD of
+        /// `pressesBegan`, so this cannot double-send on a platform where the press path
+        /// already worked.
+        private static let controlChordInputs: [String] =
+            (UInt8(ascii: "a")...UInt8(ascii: "z")).map { String(UnicodeScalar($0)) }
+            + ["[", "]", "\\", "^", "_", " "]
+
+        override var keyCommands: [UIKeyCommand]? {
+            guard keyDriveEnabled else { return nil }
+            return Self.controlChordInputs.map { input in
+                let command = UIKeyCommand(input: input,
+                                           modifierFlags: .control,
+                                           action: #selector(handleControlChord(_:)))
+                command.wantsPriorityOverSystemBehavior = true
+                return command
+            }
+        }
+
+        @objc private func handleControlChord(_ command: UIKeyCommand) {
+            guard let input = command.input, let scalar = input.unicodeScalars.first else { return }
+            // The one-shot is spent by any chord the reader completes with a real Ctrl,
+            // so an armed cap cannot leak into the next keystroke.
+            onCancelControl?()
+            guard let byte = Self.controlByte(for: scalar) else { return }
+            send([byte])
+        }
+
+        /// The C0 byte for a control chord, matching the terminal's own mapping.
+        private static func controlByte(for scalar: UnicodeScalar) -> UInt8? {
+            switch scalar {
+            case "a"..."z": return UInt8(scalar.value - 0x60)
+            case "A"..."Z": return UInt8(scalar.value - 0x40)
+            case "[": return 0x1b
+            case "\\": return 0x1c
+            case "]": return 0x1d
+            case "^": return 0x1e
+            case "_": return 0x1f
+            case " ": return 0
+            default: return nil
+            }
+        }
+
         /// A paste is not a chord: it must arrive verbatim, and it must not leave the
         /// modifier armed for the next keystroke.
         override func paste(_ sender: Any?) {
