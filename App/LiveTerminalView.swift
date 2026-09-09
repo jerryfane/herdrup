@@ -1229,7 +1229,17 @@ struct LiveTerminalView: UIViewRepresentable {
             let pair = summary.map { ($0.index, $0.total) } ?? (0, 0)
             if let last = lastFindResult, last == pair { return }
             lastFindResult = pair
-            onFindResult(pair.0, pair.1)
+            // ASYNC, and this is the whole reason search appeared to find nothing.
+            //
+            // `performFind` runs inside `updateUIView`, i.e. DURING a SwiftUI update pass.
+            // Calling back synchronously mutates the host's @State while that pass is in
+            // flight, and SwiftUI discards it - the search really ran (engineMatches
+            // reported 99 matches on the same buffer) but the counter never moved.
+            // Hopping to the next runloop turn makes it an ordinary state change.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                self.onFindResult(pair.0, pair.1)
+            }
         }
 
         /// The last collapse token this Coordinator has acted on. Starts at 0, matching the
