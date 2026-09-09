@@ -38,15 +38,16 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testFindRevealsAMatchInHistory() {
         launch("resize")
         openFind()
-        findField().typeText("record 20")
+        // ANCHOR020 is the fixture's UNIQUE marker (TerminalInteractionHarness.swift:197):
+        // one match, at a known point in history, so "did it reveal it" is checkable.
+        findField().typeText("ANCHOR020")
 
         let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
-        XCTAssertNotEqual(count.label, "none", "a seeded record must be findable")
+        XCTAssertNotEqual(count.label, "none", "the seeded anchor must be findable")
 
         wait { probe in
-            guard let top = probe["top"] as? String else { return false }
-            return top.contains("record 2")
+            (probe["top"] as? String)?.contains("ANCHOR020") == true
         }
         add(XCTAttachment(screenshot: app.screenshot()))
     }
@@ -55,10 +56,13 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     /// and must not move the reader.
     func testMissingTermReportsNoneAndDoesNotScroll() {
         launch("resize")
-        let before = probe()["top"] as? String
         openFind()
-        findField().typeText("zzz-not-in-this-buffer")
+        // Captured AFTER the fixture has settled, not at launch: the seed is still
+        // painting for a moment, and a viewport that moved on its own would look like
+        // the search moved it.
+        let before = probe()["top"] as? String
 
+        findField().typeText("zzz-not-in-this-buffer")
         let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertEqual(count.label, "none")
@@ -71,8 +75,8 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testClosingSearchKeepsThePosition() {
         launch("resize")
         openFind()
-        findField().typeText("record 20")
-        wait { ($0["top"] as? String)?.contains("record 2") == true }
+        findField().typeText("ANCHOR020")
+        wait { ($0["top"] as? String)?.contains("ANCHOR020") == true }
         let atMatch = probe()["top"] as? String
 
         headerButton("terminal-find").tap()   // close
@@ -86,7 +90,8 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testNextAndPreviousStepBetweenMatches() {
         launch("resize")
         openFind()
-        findField().typeText("record")
+        // RECORD matches every seeded line, so next/previous have somewhere to go.
+        findField().typeText("RECORD")
 
         let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
