@@ -4128,6 +4128,11 @@ struct TerminalPaneContent: View {
                 .accessibilityIdentifier("terminal-refresh")
                 .accessibilityLabel("Reconnect and refresh")
             }
+            // A keep-mounted BACKGROUND pane still renders its header, so without this every
+            // loaded pane publishes its own "terminal-refresh"/"terminal-find" to the
+            // accessibility tree. VoiceOver could then land on a hidden pane's controls, and
+            // an automation query for one button legitimately matches several.
+            .accessibilityHidden(!isForeground)
             if let group {
                 HStack(spacing: 8) {
                     // Left: the pulsing status pill (dot + status word).
