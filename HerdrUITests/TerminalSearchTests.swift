@@ -6,11 +6,29 @@ import XCTest
 /// known record has exactly one match at a known place in history — which is what makes
 /// "did it actually find and reveal it" checkable rather than "did a field accept text".
 final class TerminalSearchTests: TerminalInteractionTestCase {
+    /// The `resize` fixture mounts TWO panes (`livePaneIDs: ["ix:a", "ix:b"]`) and
+    /// PaneKeepAliveContainer keeps the offscreen one alive, so a bare identifier query
+    /// matches more than one header. The VISIBLE pane is the hittable one — tree order is
+    /// not a contract, hittability is.
+    private func headerButton(_ id: String) -> XCUIElement {
+        let matches = app.buttons.matching(identifier: id)
+        XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 10), "no \(id) in the header")
+        return matches.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? matches.firstMatch
+    }
+
+    private func findField() -> XCUIElement {
+        let fields = app.textFields.matching(identifier: "terminal-find-field")
+        return fields.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? fields.firstMatch
+    }
+
+    private func findCount() -> XCUIElement {
+        let labels = app.staticTexts.matching(identifier: "terminal-find-count")
+        return labels.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? labels.firstMatch
+    }
+
     private func openFind() {
-        let find = app.buttons["terminal-find"]
-        XCTAssertTrue(find.waitForExistence(timeout: 10), "the header must offer search")
-        find.tap()
-        XCTAssertTrue(app.textFields["terminal-find-field"].waitForExistence(timeout: 5),
+        headerButton("terminal-find").tap()
+        XCTAssertTrue(findField().waitForExistence(timeout: 5),
                       "tapping the magnifier must reveal the field")
     }
 
@@ -20,9 +38,9 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testFindRevealsAMatchInHistory() {
         launch("resize")
         openFind()
-        app.textFields["terminal-find-field"].typeText("record 20")
+        findField().typeText("record 20")
 
-        let count = app.staticTexts["terminal-find-count"]
+        let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertNotEqual(count.label, "none", "a seeded record must be findable")
 
@@ -39,9 +57,9 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
         launch("resize")
         let before = probe()["top"] as? String
         openFind()
-        app.textFields["terminal-find-field"].typeText("zzz-not-in-this-buffer")
+        findField().typeText("zzz-not-in-this-buffer")
 
-        let count = app.staticTexts["terminal-find-count"]
+        let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertEqual(count.label, "none")
         XCTAssertEqual(probe()["top"] as? String, before,
@@ -53,12 +71,12 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testClosingSearchKeepsThePosition() {
         launch("resize")
         openFind()
-        app.textFields["terminal-find-field"].typeText("record 20")
+        findField().typeText("record 20")
         wait { ($0["top"] as? String)?.contains("record 2") == true }
         let atMatch = probe()["top"] as? String
 
-        app.buttons["terminal-find"].tap()   // close
-        XCTAssertFalse(app.textFields["terminal-find-field"].exists)
+        headerButton("terminal-find").tap()   // close
+        XCTAssertFalse(findField().isHittable)
         XCTAssertEqual(probe()["top"] as? String, atMatch,
                        "closing the find bar must not jump back to the newest output")
     }
@@ -68,18 +86,18 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testNextAndPreviousStepBetweenMatches() {
         launch("resize")
         openFind()
-        app.textFields["terminal-find-field"].typeText("record")
+        findField().typeText("record")
 
-        let count = app.staticTexts["terminal-find-count"]
+        let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertNotEqual(count.label, "none")
 
         let first = probe()["top"] as? String
-        app.buttons["terminal-find-next"].tap()
+        headerButton("terminal-find-next").tap()
         wait { ($0["top"] as? String) != first }
 
         let second = probe()["top"] as? String
-        app.buttons["terminal-find-previous"].tap()
+        headerButton("terminal-find-previous").tap()
         wait { ($0["top"] as? String) != second }
     }
 
@@ -87,9 +105,7 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     /// the header edit did not break the control it was added next to.
     func testRefreshStillReconnects() {
         launch("resize")
-        let refresh = app.buttons["terminal-refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 10))
-        refresh.tap()
+        headerButton("terminal-refresh").tap()
         wait { ($0["opens"] as? Int ?? 0) >= 2 }
     }
 }
