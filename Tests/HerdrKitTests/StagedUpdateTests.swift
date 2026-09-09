@@ -96,5 +96,35 @@ final class StagedUpdateTests: XCTestCase {
         XCTAssertFalse(try make(runningSha: "aaa", stagedSha: "aaa").updateAvailable, "same sha → false (no phantom)")
         XCTAssertTrue(try make(runningSha: "aaa", stagedSha: "bbb").updateAvailable, "different sha → true")
         XCTAssertTrue(try make(runningSha: nil, stagedSha: "bbb").updateAvailable, "no running_sha → fall back to staged-present")
+
+        // The producers disagree on LENGTH: `staged-build.json` records a short sha, the daemon
+        // reports the full 40. Equality made that a permanent phantom update - observed live on
+        // 2026-09-09 with staged `5a244caa` against running
+        // `5a244caa60b0c3a5742315c59d20ed81c05bc23e`.
+        let full = "5a244caa60b0c3a5742315c59d20ed81c05bc23e"
+        XCTAssertFalse(
+            try make(runningSha: full, stagedSha: "5a244caa").updateAvailable,
+            "an abbreviated sha of the running commit is not an update"
+        )
+        XCTAssertFalse(
+            try make(runningSha: full, stagedSha: "5A244CAA").updateAvailable,
+            "git shas are hex: the match is case-insensitive"
+        )
+        XCTAssertTrue(
+            try make(runningSha: full, stagedSha: "5a244cab").updateAvailable,
+            "a one-character difference in the abbreviation is a different commit"
+        )
+        XCTAssertTrue(
+            try make(runningSha: full, stagedSha: full + "0000").updateAvailable,
+            "a staged sha longer than the running commit is not an abbreviation of it"
+        )
+        XCTAssertTrue(
+            try make(runningSha: full, stagedSha: "").updateAvailable,
+            "an unidentifiable staged build is surfaced rather than hidden"
+        )
+        XCTAssertTrue(
+            try make(runningSha: "", stagedSha: "5a244caa").updateAvailable,
+            "an empty running sha cannot identify the build either"
+        )
     }
 }

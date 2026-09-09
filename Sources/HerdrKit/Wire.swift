@@ -940,12 +940,25 @@ public struct StagedUpdate: Decodable, Sendable, Equatable {
     }
 
     /// True when a staged build exists that differs from what's running. When the daemon reports its
-    /// commit (`runningSha`), require the shas to differ so a stale/equal manifest never shows a
-    /// phantom update; on an older daemon (no `runningSha`) fall back to "a build is staged".
+    /// commit (`runningSha`), require the shas to name DIFFERENT commits so a stale/equal manifest
+    /// never shows a phantom update; on an older daemon (no `runningSha`) fall back to "a build is
+    /// staged".
+    ///
+    /// The comparison is a PREFIX match, not equality, because the two values are written by
+    /// different producers at different lengths: the fleet build step records a short sha in
+    /// `staged-build.json`, while the daemon reports `build_info::commit()`, the full 40 characters.
+    /// Observed live on 2026-09-09: staged `5a244caa` against running
+    /// `5a244caa60b0c3a5742315c59d20ed81c05bc23e` - the same commit, shown as a permanent update.
+    /// Newer daemons also drop a same-commit staged build server-side; this keeps an older one from
+    /// crying wolf.
     public var updateAvailable: Bool {
         guard let staged else { return false }
-        guard let runningSha else { return true }
-        return staged.sha != runningSha
+        guard let runningSha, !runningSha.isEmpty, !staged.sha.isEmpty else { return true }
+        // One-directional by construction: the staged value may ABBREVIATE the running
+        // sha, never the reverse. A staged sha LONGER than the running one cannot be a
+        // prefix of it, so it correctly reads as a different commit rather than being
+        // suppressed - no separate length guard is needed, and the test pins that case.
+        return !runningSha.lowercased().hasPrefix(staged.sha.lowercased())
     }
 
     enum CodingKeys: String, CodingKey {
