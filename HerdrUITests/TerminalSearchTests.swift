@@ -32,6 +32,22 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
                       "tapping the magnifier must reveal the field")
     }
 
+    /// Which half is broken, if either. `engineMatches` asks SwiftTerm directly on the
+    /// live fixture buffer; the counter is what the app's wiring produced. Running both in
+    /// one test means a failure names the culprit instead of just failing.
+    func testEngineAndWiringAgree() {
+        launch("resize")
+        wait { ($0["engineMatches"] as? Int ?? 0) > 0 }
+        let engine = probe()["engineMatches"] as? Int ?? 0
+
+        openFind()
+        findField().typeText("RECORD")
+        let count = findCount()
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(count.label, "none",
+                          "SwiftTerm reports \(engine) matches for RECORD, so an empty counter is the app's wiring")
+    }
+
     /// The core contract: a term that exists is found, counted, and REVEALED — the match
     /// has to be on screen afterwards, not merely counted. `top` is the fixture's actual
     /// painted top row, so it can only be right if the view really scrolled.
