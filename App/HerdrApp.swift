@@ -3840,6 +3840,22 @@ struct TerminalPaneContent: View {
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
+    /// Find-bar state. `findRequest` is nil while the bar is closed, which is also what
+    /// clears the highlight — see `LiveTerminalView.performFind`.
+    @State private var findOpen = false
+    @State private var findTerm = ""
+    /// Bumped once per next/previous step. The term alone cannot express "same term,
+    /// next match", which is the whole interaction.
+    @State private var findGeneration = 0
+    @State private var findDirection: FindRequest.Direction = .forward
+    /// `(index, total)` from the terminal, rendered as "3/17".
+    @State private var findMatches: (Int, Int) = (0, 0)
+    @FocusState private var findFocused: Bool
+
+    private var findRequest: FindRequest? {
+        guard findOpen else { return nil }
+        return FindRequest(term: findTerm, generation: findGeneration, direction: findDirection)
+    }
     /// One-time gate for the "switch Claude Code to smooth (classic) scrolling" banner.
     /// Persisted app-wide via UserDefaults, so once the reader answers it once — Switch
     /// OR dismiss, for ANY Claude Code pane — it never shows again. See `showTuiBanner`.
@@ -3940,7 +3956,11 @@ struct TerminalPaneContent: View {
                 // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
-                                 wantsTerminalKeyFocus: isForeground && !replyFocused
+                                 // `!findFocused` matters: on iPad this expression is TRUE on
+                                 // every pass, so without it the terminal reclaims first
+                                 // responder the moment the find field takes it and the search
+                                 // box cannot be typed into at all.
+                                 wantsTerminalKeyFocus: isForeground && !replyFocused && !findFocused
                                      && (terminalInputFocused || UIDevice.current.userInterfaceIdiom == .pad),
                                  // Set by the collapse chevron so the resign in updateUIView can
                                  // tell a deliberate dismissal from an incidental body pass.
@@ -3959,7 +3979,9 @@ struct TerminalPaneContent: View {
                                  // still-running one; see the scenePhase handler below.
                                  liveness: terminalLiveness,
                                  controlArmed: $ctrlArmed,
-                                 userInputToken: userInputToken)
+                                 userInputToken: userInputToken,
+                                 findRequest: findRequest,
+                                 onFindResult: { index, total in findMatches = (index, total) })
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .accessibilityIdentifier("terminal-surface")
@@ -3994,6 +4016,10 @@ struct TerminalPaneContent: View {
         // recognizer to the WINDOW, so N keep-mounted panes would otherwise stack N
         // recognizers that all fire on one edge swipe.
         .overlay { if isForeground { EdgeSwipeBack { onClose() } } }
+        // Hardware-keyboard shortcuts for this pane. Foreground only: N keep-mounted panes
+        // would otherwise register N identical Command-F bindings, and UIKit would pick one
+        // arbitrarily — quite possibly a hidden pane's.
+        .background { if isForeground { paneKeyboardShortcuts } }
         // Runs ONCE per slot lifetime now (the pane stays mounted, so paneID never changes):
         // the one-shot prefill delivery + first status resolve.
         .task(id: paneID) {
@@ -4079,14 +4105,28 @@ struct TerminalPaneContent: View {
                     Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Palette.textDim)
                 }
-                Text(heading).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                Spacer()
+                if findOpen {
+                    findField
+                } else {
+                    Text(heading).font(Typography.app(16, .semibold))
+                        .foregroundStyle(Palette.text).lineLimit(1)
+                    Spacer()
+                }
+                Button { toggleFind() } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 15))
+                        .foregroundStyle(findOpen ? Palette.text : Palette.textDim)
+                }
+                .accessibilityIdentifier("terminal-find")
+                .accessibilityLabel(findOpen ? "Close search" : "Search terminal")
                 Button {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
                 } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundStyle(Palette.textDim)
                 }
+                .accessibilityIdentifier("terminal-refresh")
+                .accessibilityLabel("Reconnect and refresh")
             }
             if let group {
                 HStack(spacing: 8) {
@@ -4215,6 +4255,117 @@ struct TerminalPaneContent: View {
     /// Shown only while the pane is scrolled away from its newest output, so it is out
     /// of the way the rest of the time. Uses the app's primary ink-fill treatment, the
     /// same one the send arrow and the banner's Switch button use.
+    /// Hardware-keyboard shortcuts for this pane, carried by hidden zero-size buttons —
+    /// the same pattern the split view uses for Command-K and Command-slash
+    /// (`keyboardShortcuts`, :1931-1947).
+    ///
+    /// Why not `UIKeyCommand` on the terminal view, where the Ctrl chords live? Because
+    /// Ctrl chords have to be TAKEN BACK from macOS's emacs-style text bindings, which is
+    /// what `wantsPriorityOverSystemBehavior` is for (LiveTerminalView.swift:436-447).
+    /// Command chords have no such competitor: the vendored terminal declares no
+    /// `keyCommands`, and its `pressesBegan` has no branch for a Command-modified letter,
+    /// so the press walks up the responder chain to these buttons untouched.
+    @ViewBuilder private var paneKeyboardShortcuts: some View {
+        Button("Find in terminal") {
+            if findOpen { findFocused = true } else { toggleFind() }
+        }
+        .keyboardShortcut("f", modifiers: .command)
+        .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+
+        Button("Reconnect") {
+            streamGen += 1
+            Task { await refresh() }
+        }
+        .keyboardShortcut("r", modifiers: .command)
+        .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+
+        // Escape closes the find bar, matching every other find bar. Only bound while the
+        // bar is open, so it cannot swallow an Escape the terminal wants — vi users press
+        // it constantly, and stealing it would be a far worse bug than missing shortcut.
+        if findOpen {
+            Button("Close search") { toggleFind() }
+                .keyboardShortcut(.escape, modifiers: [])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+        }
+    }
+
+    /// The inline find field. Replaces the heading rather than adding a row, so opening
+    /// search cannot itself change the terminal's height — a resize mid-search would
+    /// reflow the buffer under the reader and move the match they are looking at.
+    private var findField: some View {
+        HStack(spacing: 6) {
+            TextField("Find", text: $findTerm)
+                .textFieldStyle(.plain)
+                .font(Typography.app(14))
+                .foregroundStyle(Palette.text)
+                .tint(Palette.text)
+                .focused($findFocused)
+                .submitLabel(.search)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityIdentifier("terminal-find-field")
+                // Return steps to the next match, the way every find bar behaves.
+                .onSubmit { stepFind(.forward) }
+            if findMatches.1 > 0 {
+                Text("\(findMatches.0)/\(findMatches.1)")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("terminal-find-count")
+            } else if !findTerm.isEmpty {
+                Text("none")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .accessibilityIdentifier("terminal-find-count")
+            }
+            Button { stepFind(.backward) } label: {
+                Image(systemName: "chevron.up").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(findMatches.1 > 0 ? Palette.textDim : Palette.textFaint)
+            }
+            .disabled(findMatches.1 == 0)
+            .accessibilityIdentifier("terminal-find-previous")
+            .accessibilityLabel("Previous match")
+            Button { stepFind(.forward) } label: {
+                Image(systemName: "chevron.down").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(findMatches.1 > 0 ? Palette.textDim : Palette.textFaint)
+            }
+            .disabled(findMatches.1 == 0)
+            .accessibilityIdentifier("terminal-find-next")
+            .accessibilityLabel("Next match")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+    }
+
+    /// Opens the find bar and takes focus, or closes it and hands focus back.
+    ///
+    /// Closing clears the term, which is what drops the highlight (`findRequest` goes nil).
+    /// It deliberately does NOT jump to the tail: a reader who searched into history is
+    /// still reading history.
+    private func toggleFind() {
+        if findOpen {
+            findOpen = false
+            findTerm = ""
+            findMatches = (0, 0)
+            findFocused = false
+        } else {
+            findOpen = true
+            findFocused = true
+            // An armed one-shot Ctrl would otherwise encode the next keystroke as a control
+            // byte — including one typed into the find field.
+            ctrlArmed = false
+        }
+    }
+
+    /// One next/previous step. The generation bump is what tells the Coordinator this is a
+    /// step rather than an edit of the term.
+    private func stepFind(_ direction: FindRequest.Direction) {
+        guard !findTerm.isEmpty else { return }
+        findDirection = direction
+        findGeneration += 1
+    }
+
     private var jumpToLatestPill: some View {
         Button { jumpToTailToken += 1 } label: {
             HStack(spacing: 6) {

@@ -27,6 +27,22 @@ private struct TerminalGeometryTarget: Equatable {
     let cellHeightPx: UInt32
 }
 
+/// One find-bar state: what to look for and which occurrence to sit on.
+///
+/// `generation` is what makes "next" work. Term and options alone cannot distinguish
+/// "the user typed another character" from "the user pressed next on the same term",
+/// and SwiftTerm's own engine resumes from the previous match only while the term is
+/// UNCHANGED (`SearchEngine.swift:70`). So the host bumps the generation for a
+/// next/previous step and leaves it alone while editing the term.
+struct FindRequest: Equatable {
+    var term: String
+    /// Bumped once per next/previous step; `direction` says which way that step goes.
+    var generation: Int = 0
+    var direction: Direction = .forward
+
+    enum Direction { case forward, backward }
+}
+
 /// A live SwiftTerm terminal for a herdr pane (#40). It consumes
 /// `client.streamTerminal(pane:)` — herdr's raw PTY byte firehose — and feeds the
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
@@ -118,6 +134,19 @@ struct LiveTerminalView: UIViewRepresentable {
     /// reached the agent. A token, not a Bool, for the reason `jumpToTailToken` is one:
     /// it cannot be coalesced away by a body pass.
     var userInputToken: Int = 0
+    /// The host's current find request, or nil when the find bar is closed.
+    ///
+    /// A VALUE, not a token: unlike a jump, a search is not a one-shot - the same
+    /// request must survive body passes without re-running, and a changed term must
+    /// re-run. `updateUIView` compares it against the last request the Coordinator
+    /// executed, so typing one character issues exactly one search.
+    ///
+    /// Closing the bar (nil) clears the highlight; it does NOT jump back to the tail,
+    /// because a reader who searched their way into history wants to stay there.
+    var findRequest: FindRequest? = nil
+    /// Reports `(index, total)` for the current term so the header can render "3 of 17",
+    /// and `(0, 0)` when nothing matches. Invoked only when the pair changes.
+    var onFindResult: (Int, Int) -> Void = { _, _ in }
     /// The host's own copy of the stuck-stream threshold, so it judges staleness by the
     /// same rule the watchdog reconnects on rather than a second, drifting number.
     static var streamStuckTimeout: TimeInterval { Coordinator.streamStuckTimeout }
@@ -168,6 +197,10 @@ struct LiveTerminalView: UIViewRepresentable {
         // Before the focus decision below: a host-delivered keycap is the user acting
         // on this pane, so it must drop a retained frame at once.
         context.coordinator.noteHostInput(ifTokenChanged: userInputToken)
+        // After noteHostInput: a find is the user acting on this pane too, so any retained
+        // resize frame must already be gone before the search scrolls the view underneath.
+        context.coordinator.onFindResult = onFindResult
+        context.coordinator.performFind(findRequest)
         // Drive terminal responder ownership from SwiftUI intent.
         //
         // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
@@ -1145,6 +1178,58 @@ struct LiveTerminalView: UIViewRepresentable {
             guard token != lastJumpToTailToken else { return }
             lastJumpToTailToken = token
             jumpToTail()
+        }
+
+        /// The last find request this Coordinator executed, so a body pass that changes
+        /// nothing does not re-run the search and steal the reader's position.
+        private var lastFindRequest: FindRequest?
+        /// The last `(index, total)` published, so an unchanged pair does not re-render
+        /// the header on every pass.
+        private var lastFindResult: (Int, Int)?
+        var onFindResult: (Int, Int) -> Void = { _, _ in }
+
+        /// Runs one search per CHANGE of the request, and clears the highlight when the
+        /// find bar closes.
+        ///
+        /// Closing does NOT return to the tail. A reader who searched their way back into
+        /// history is still reading it; yanking them to the newest output would undo the
+        /// very thing they used search for. Following resumes the moment they scroll back
+        /// down, exactly as it does after any manual scroll.
+        func performFind(_ request: FindRequest?) {
+            guard request != lastFindRequest else { return }
+            let previous = lastFindRequest
+            lastFindRequest = request
+            guard let view else { return }
+
+            guard let request, !request.term.isEmpty else {
+                // Empty term or closed bar: drop the highlight, leave the viewport alone.
+                view.clearSearch()
+                publishFindResult(nil)
+                return
+            }
+
+            // A retained resize frame must not survive a search: the view is about to
+            // scroll to a match the reader would otherwise not see happen.
+            userTookControl()
+
+            // Only a next/previous step advances; editing the term restarts from the top
+            // of the current match set, which is what SwiftTerm's engine does when the
+            // term changes (SearchEngine.swift:70-74).
+            let stepped = previous?.generation != request.generation
+            let backward = request.direction == .backward
+            _ = stepped && backward
+                ? view.findPrevious(request.term)
+                : view.findNext(request.term)
+
+            let summary = view.searchMatchSummary(request.term)
+            publishFindResult(summary)
+        }
+
+        private func publishFindResult(_ summary: (index: Int, total: Int)?) {
+            let pair = summary.map { ($0.index, $0.total) } ?? (0, 0)
+            if let last = lastFindResult, last == pair { return }
+            lastFindResult = pair
+            onFindResult(pair.0, pair.1)
         }
 
         /// The last collapse token this Coordinator has acted on. Starts at 0, matching the
