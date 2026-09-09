@@ -417,6 +417,14 @@ struct GramView: View {
             content
             bannerView
             composer
+                // The composer must ALWAYS fit: it holds the only way to send. Without a
+                // priority it is just another default-priority row, so when attachments add
+                // the chips strip and the progress block the stack's minimum can exceed the
+                // window - and a VStack overflows rather than clipping, putting the send
+                // button below the bottom edge. On Mac the split-view host anchors that
+                // overflow at the top (HerdrApp.swift:1885), so all of the excess is lost
+                // off-screen and, with no keyboard send, the composer becomes unreachable.
+                .layoutPriority(1)
         }
     }
 
@@ -435,6 +443,7 @@ struct GramView: View {
             content
             bannerView
             composer
+                .layoutPriority(1)   // see phoneBody: the composer must always fit
         }
     }
 
@@ -802,6 +811,10 @@ struct GramView: View {
                         ForEach(attachedFiles) { file in attachmentChip(file) }
                     }
                 }
+                // A ScrollView is greedy in BOTH axes by default, so the horizontal strip
+                // would also claim vertical slack and add to the height the composer
+                // demands. Pin it to the chips' own height.
+                .fixedSize(horizontal: false, vertical: true)
             }
             if let up = uploadBytes {
                 let frac = up.total > 0 ? min(1, Double(up.sent) / Double(up.total)) : 0
@@ -880,6 +893,12 @@ struct GramView: View {
                     .background(Circle().fill(canSend ? Palette.text : Palette.surface))
                 }
                 .disabled(!canSend)
+                // Keyboard send. The field is `axis: .vertical` so Return inserts a newline
+                // (a gram is often multi-line, and `onSubmit` does not fire for a vertical
+                // field anyway) - Command+Return sends, matching Mail and Messages.
+                // This is not a convenience: without it an unreachable send button is a total
+                // lockout, which is exactly what was reported on Mac.
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 16)
