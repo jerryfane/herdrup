@@ -954,8 +954,11 @@ public struct StagedUpdate: Decodable, Sendable, Equatable {
     public var updateAvailable: Bool {
         guard let staged else { return false }
         guard let runningSha, !runningSha.isEmpty, !staged.sha.isEmpty else { return true }
-        let shorter = min(staged.sha.count, runningSha.count)
-        return staged.sha.prefix(shorter).lowercased() != runningSha.prefix(shorter).lowercased()
+        // One-directional by construction: the staged value may ABBREVIATE the running
+        // sha, never the reverse. A staged sha LONGER than the running one cannot be a
+        // prefix of it, so it correctly reads as a different commit rather than being
+        // suppressed - no separate length guard is needed, and the test pins that case.
+        return !runningSha.lowercased().hasPrefix(staged.sha.lowercased())
     }
 
     enum CodingKeys: String, CodingKey {

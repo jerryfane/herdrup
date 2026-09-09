@@ -115,8 +115,16 @@ final class StagedUpdateTests: XCTestCase {
             "a one-character difference in the abbreviation is a different commit"
         )
         XCTAssertTrue(
+            try make(runningSha: full, stagedSha: full + "0000").updateAvailable,
+            "a staged sha longer than the running commit is not an abbreviation of it"
+        )
+        XCTAssertTrue(
             try make(runningSha: full, stagedSha: "").updateAvailable,
             "an unidentifiable staged build is surfaced rather than hidden"
+        )
+        XCTAssertTrue(
+            try make(runningSha: "", stagedSha: "5a244caa").updateAvailable,
+            "an empty running sha cannot identify the build either"
         )
     }
 }
