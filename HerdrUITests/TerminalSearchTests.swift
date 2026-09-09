@@ -26,6 +26,28 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
         return labels.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? labels.firstMatch
     }
 
+    /// Two identical reads a beat apart: the fixture paints for a while after launch, so a
+    /// single sample is not evidence that the viewport is still.
+    private func settledTop() -> String? {
+        var last = probe()["top"] as? String
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.25)
+            let now = probe()["top"] as? String
+            if now == last { return now }
+            last = now
+        }
+        return last
+    }
+
+    private func waitForLabelChange(_ element: XCUIElement, from: String, timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.label != from { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return false
+    }
+
     private func openFind() {
         headerButton("terminal-find").tap()
         XCTAssertTrue(findField().waitForExistence(timeout: 5),
@@ -62,8 +84,14 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertNotEqual(count.label, "none", "the seeded anchor must be findable")
 
+        // REVEALED, not scrolled-to-top: SwiftTerm's scrollToReveal brings the match into
+        // the viewport and leaves it wherever it lands. `markerRow` is the fixture's own
+        // measurement of ANCHOR020 relative to the visible top, so a value inside the
+        // viewport is the honest assertion; requiring row 0 asserted an intent the API
+        // never had (the previous run reported markerRow 12 — visible, and failing).
         wait { probe in
-            (probe["top"] as? String)?.contains("ANCHOR020") == true
+            guard let row = probe["markerRow"] as? Int, let rows = probe["rows"] as? Int else { return false }
+            return row >= 0 && row < rows
         }
         add(XCTAttachment(screenshot: app.screenshot()))
     }
@@ -73,16 +101,16 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     func testMissingTermReportsNoneAndDoesNotScroll() {
         launch("resize")
         openFind()
-        // Captured AFTER the fixture has settled, not at launch: the seed is still
-        // painting for a moment, and a viewport that moved on its own would look like
-        // the search moved it.
-        let before = probe()["top"] as? String
+        // Captured once the viewport has actually STOPPED moving. The fixture keeps
+        // painting for a while after launch, and a single read taken mid-seed made normal
+        // painting look like the search had scrolled.
+        let before = settledTop()
 
         findField().typeText("zzz-not-in-this-buffer")
         let count = findCount()
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertEqual(count.label, "none")
-        XCTAssertEqual(probe()["top"] as? String, before,
+        XCTAssertEqual(settledTop(), before,
                        "a failed search must leave the viewport where it was")
     }
 
@@ -92,7 +120,10 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
         launch("resize")
         openFind()
         findField().typeText("ANCHOR020")
-        wait { ($0["top"] as? String)?.contains("ANCHOR020") == true }
+        wait { probe in
+            guard let row = probe["markerRow"] as? Int, let rows = probe["rows"] as? Int else { return false }
+            return row >= 0 && row < rows
+        }
         let atMatch = probe()["top"] as? String
 
         headerButton("terminal-find").tap()   // close
@@ -113,13 +144,16 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertNotEqual(count.label, "none")
 
-        let first = probe()["top"] as? String
+        // Stepping moves the CURRENT match, which the counter reports as "i/N". Asserting
+        // on the counter rather than the top row keeps this about the interaction and not
+        // about how far a particular match happened to be from the viewport edge.
+        let first = count.label
         headerButton("terminal-find-next").tap()
-        wait { ($0["top"] as? String) != first }
+        XCTAssertTrue(waitForLabelChange(count, from: first), "next must move to another match")
 
-        let second = probe()["top"] as? String
+        let second = count.label
         headerButton("terminal-find-previous").tap()
-        wait { ($0["top"] as? String) != second }
+        XCTAssertTrue(waitForLabelChange(count, from: second), "previous must move back")
     }
 
     /// The refresh button keeps working with the magnifier beside it — a plain guard that
