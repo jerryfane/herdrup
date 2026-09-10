@@ -115,6 +115,17 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      - name: Inventory Xcode versions and simulator runtimes
+        # iPadOS 26 runs apps WINDOWED: a rotated iPad simulator gives a 1032x1032 square
+        # window, so no full-screen landscape capture is possible on it (#store-artwork).
+        # Older Xcodes bundle older runtimes where iPad apps are full screen. This prints
+        # what the runner actually has, so the choice is made from the image rather than
+        # from assumptions about it.
+        run: |
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          echo "--- selected:"; xcodebuild -version
+          echo "--- runtimes:"; xcrun simctl list runtimes | grep -i ios || true
+
       - name: Select required iPhone and iPad simulators
         id: simulators
         run: |
