@@ -115,19 +115,36 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
-      - name: Inventory Xcode versions and simulator runtimes
-        # iPadOS 26 runs apps WINDOWED: a rotated iPad simulator gives a 1032x1032 square
-        # window, so no full-screen landscape capture is possible on it (#store-artwork).
-        # Older Xcodes bundle older runtimes where iPad apps are full screen. This prints
-        # what the runner actually has, so the choice is made from the image rather than
-        # from assumptions about it.
+      - name: Provide a full-screen iPad runtime for store capture
+        # iPadOS 26 runs apps WINDOWED: rotating the simulator yields a 1032x1032 square
+        # window, so a full-screen landscape capture is impossible on it - measured, not
+        # assumed, and `UIRequiresFullScreen` does not change it. The runner image ships
+        # only Xcode 26.x, so no older runtime is bundled either.
+        #
+        # iOS 18 predates windowing, so an iPad there is full screen and rotates properly.
+        # Downloading it costs several minutes and is therefore scoped to the store
+        # capture dispatch alone; every other run is untouched.
+        if: >-
+          github.event_name == 'workflow_dispatch'
+          && inputs.only_suite == 'StoreScreenshotTests'
+          && inputs.only_device == 'ipad'
         run: |
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
-          echo "--- selected:"; xcodebuild -version
-          echo "--- runtimes:"; xcrun simctl list runtimes | grep -i ios || true
+          set -euo pipefail
+          if xcrun simctl list runtimes | grep -qE 'iOS 18\.[0-9]+'; then
+            echo "an iOS 18 runtime is already present"
+          else
+            echo "downloading the iOS 18 simulator runtime (several minutes)"
+            xcodebuild -downloadPlatform iOS -buildVersion 18.5 || \
+              xcodebuild -downloadPlatform iOS -buildVersion 18.4 || \
+              echo "::warning::no iOS 18 runtime could be downloaded; capture will fall back to iOS 26 and cannot be landscape"
+          fi
+          xcrun simctl list runtimes | grep -i ios || true
 
       - name: Select required iPhone and iPad simulators
         id: simulators
+        env:
+          ONLY_SUITE: ${{ inputs.only_suite }}
+          ONLY_DEVICE: ${{ inputs.only_device }}
         run: |
           xcrun simctl list devices available --json > SimulatorDevices.json
           python3 - <<'PY'
@@ -142,7 +159,15 @@ jobs:
           ]
           if not runtimes:
               raise SystemExit("::error::no available iOS simulator runtime")
-          _, runtime = max(runtimes)
+          # For the store capture the OLDEST iOS 18 runtime wins, because iPadOS 26 runs
+          # apps windowed and cannot produce a full-screen landscape iPad capture. Every
+          # other run keeps the newest, which is what the gate should test against.
+          store_capture = (
+              os.environ.get("ONLY_SUITE") == "StoreScreenshotTests"
+              and os.environ.get("ONLY_DEVICE") == "ipad"
+          )
+          ios18 = [item for item in runtimes if item[0][0] == 18]
+          _, runtime = (min(ios18) if (store_capture and ios18) else max(runtimes))
           available = [device for device in devices[runtime] if device.get("isAvailable", True)]
           phones = [device for device in available if device["name"].startswith("iPhone")]
           pads = [device for device in available if device["name"].startswith("iPad")]
