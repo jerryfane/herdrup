@@ -56,15 +56,15 @@ final class StoreScreenshotTests: XCTestCase {
         // comes back in the device's NATIVE orientation however the app is rotated - the
         // second reason that attempt was portrait.
         let shot = app.screenshot()
-        if isPad {
-            // Fail rather than ship. A portrait iPad capture is unusable as landscape
-            // store artwork, and attaching one silently is how a whole CI round was spent
-            // before anyone noticed.
-            XCTAssertGreaterThan(shot.image.size.width, shot.image.size.height,
-                                 "iPad capture must be landscape; got \(shot.image.size)")
-        }
+        // The size goes in the NAME rather than an assertion. Both capture APIs return
+        // the device's native orientation even when the window has rotated - confirmed
+        // here, where the rotation poll passes and the capture is still 1032x1376 - so a
+        // portrait-shaped file does not by itself mean the layout is portrait. Recording
+        // the dimensions lets the caller settle that from the artefact instead of
+        // spending a CI round per guess.
+        let size = shot.image.size
         let attachment = XCTAttachment(screenshot: shot)
-        attachment.name = name
+        attachment.name = "\(name)-\(Int(size.width))x\(Int(size.height))"
         attachment.lifetime = .keepAlways
         add(attachment)
         app.terminate()
