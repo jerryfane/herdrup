@@ -4759,6 +4759,7 @@ struct TerminalPaneContent: View {
                     .foregroundStyle(Palette.textFaint)
             }
             .disabled(sending)
+            .accessibilityLabel("Remove \(attachment.name)")
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
@@ -4825,7 +4826,10 @@ struct TerminalPaneContent: View {
               let attachment = TerminalAttachmentStaging.stageData(
                 Data(text.utf8), named: "pasted-text.txt", mime: "text/plain")
         else {
-            actionNote = "The pasted text is too large or could not be attached."
+            suppressLargePasteConversion = true
+            reply = restoredDraft
+            DispatchQueue.main.async { suppressLargePasteConversion = false }
+            actionNote = "The pasted text could not be attached, so it was kept in the reply."
             return
         }
         terminalAttachments.append(attachment)
@@ -4881,16 +4885,17 @@ struct TerminalPaneContent: View {
         targetPane: String,
         attachment: HerdrClient.GramFileAttachment
     ) async throws -> GramPostReceipt {
-        for attempt in 0..<3 {
+        var attempt = 0
+        while true {
             do {
                 return try await client.gramPostReceipt(
                     text: "", targetPane: targetPane, attachment: attachment)
             } catch let error as APIError where error.code == "upload_in_progress" {
-                if attempt == 2 { throw error }
+                attempt += 1
+                if attempt == 3 { throw error }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
-        throw TerminalAttachmentSendError.daemonUpgradeRequired
     }
 
     private static func promptText(caption: String, paths: [String]) -> String {
