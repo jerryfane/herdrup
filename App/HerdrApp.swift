@@ -5012,6 +5012,7 @@ struct TerminalPaneContent: View {
                 Menu {
                     ForEach(savedPrompts.prompts) { p in
                         Button(role: .destructive) { savedPrompts.delete(p.id) } label: { Text(p.label) }
+                    }
                 } label: { Label("Delete a prompt", systemImage: "trash") }
             }
         } label: {
