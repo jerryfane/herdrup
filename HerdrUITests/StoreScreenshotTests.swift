@@ -21,11 +21,18 @@ final class StoreScreenshotTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()
+        // Landscape is OPT-IN, and off by default. On iPad the app draws itself into a
+        // square 1032x1032 region once rotated - measured on both iPadOS 26 and iOS 18.5,
+        // so it is the app's layout, not the simulator - which makes rotated captures
+        // unusable as store artwork. Portrait is full screen and correct, so that is the
+        // default; the landscape path stays for whoever fixes the square layout.
+        let wantsLandscape = ProcessInfo.processInfo.environment["HERDR_SHOT_LANDSCAPE"] == "1"
+
         // AFTER launch, and CONFIRMED rather than assumed. Rotating before the app
         // exists does nothing (attempt 1), and a fixed sleep after the request is not
         // evidence the window rotated (attempt 2 came back portrait anyway). Poll the
         // window's own frame until it is wider than it is tall.
-        if isPad {
+        if isPad && wantsLandscape {
             XCUIDevice.shared.orientation = .landscapeLeft
             let window = app.windows.firstMatch
             let rotateBy = Date().addingTimeInterval(15)
