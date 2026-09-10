@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import PhotosUI
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
@@ -236,6 +237,7 @@ struct RootView: View {
         // killed session — up to ten 100 MB attachments — would otherwise survive every
         // launch in which the user never opens the Gram tab.
         .task { await GramView.Staging.sweepAbandonedOffMainActor() }
+        .task { await TerminalAttachmentStaging.sweepAbandonedOffMainActor() }
     }
 
     @ViewBuilder
@@ -3769,6 +3771,15 @@ struct TerminalPaneContent: View {
     @State private var showSavePrompt = false
     @State private var sending = false
     @State private var actionNote: String?
+    @State private var terminalAttachments: [TerminalAttachment] = []
+    @State private var terminalUploadBytes: (sent: Int, total: Int)?
+    @State private var terminalSendProgress: (sent: Int, total: Int)?
+    @State private var terminalPhotoItems: [PhotosPickerItem] = []
+    @State private var showTerminalPhotos = false
+    @State private var showTerminalFileImporter = false
+    @State private var loadingTerminalAttachment = false
+    @State private var suppressLargePasteConversion = false
+    @State private var pastedTextUndo: (attachmentID: UUID, restoredDraft: String)?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
     /// `/tui default` prompts (the reply box's send is gated by `sending`; this is its analogue).
     @State private var switchingTui = false
@@ -3900,11 +3911,12 @@ struct TerminalPaneContent: View {
         }
         return parts.isEmpty ? title : parts.joined(separator: " · ")   // fall back so the header is never blank
     }
-    // Send is withheld only while the auto-delivery loop is actively polling (it
-    // owns delivery then). A pending pre-fill does NOT disable the button once the
-    // loop stops — instead the button ROUTES a pre-fill through the prompt-only
-    // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !replyDictating }
+    // A pending pre-fill does not disable the button once its auto-delivery loop
+    // stops; `autoDelivering` blocks only while that loop owns delivery.
+    private var canSend: Bool {
+        (!reply.trimmingCharacters(in: .whitespaces).isEmpty || !terminalAttachments.isEmpty)
+            && !sending && !replyDictating && !loadingTerminalAttachment && !autoDelivering
+    }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4545,153 +4557,445 @@ struct TerminalPaneContent: View {
     }
 
     private var replyBar: some View {
-        HStack(spacing: 8) {
-            // Collapse-keyboard button — shown while EITHER input owner holds the
-            // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
-            // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
-            // send button. Matched to the send button's circular footprint.
-            //
-            // `terminalInputFocused` is in the condition because a TERMINAL tap raises the
-            // software keyboard too, and gating on `replyFocused` alone left that keyboard
-            // with no dismiss affordance at all: a reader who tapped once to select and
-            // copy a line could only put it down by first focusing the reply field to make
-            // this button appear, and then pressing it.
-            //
-            // ...AND THAT DISJUNCT IS iPHONE-ONLY, because on iPad it produced a DEAD BUTTON.
-            // `terminalInputFocused` goes true on any terminal tap, but the iPad terminal's
-            // inputView is a zero-frame view, so no keyboard ever appeared for it to collapse;
-            // pressing it cleared both flags and then `wantsTerminalKeyFocus` re-asserted
-            // through its own `|| idiom == .pad` disjunct and the terminal immediately retook
-            // the responder. A control that visibly does nothing is worse than an absent one.
-            if replyFocused || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone) {
-                Button {
-                    // Mark the collapse as DELIBERATE before dropping the flags, so the resign in
-                    // updateUIView is allowed to run even while a word is selected. No reset: the
-                    // pane consumes the token exactly once, so there is nothing to leak into
-                    // unrelated passes and no async hop that can race the pass it was meant for.
-                    terminalCollapseToken += 1
-                    ctrlArmed = false
-                    replyFocused = false
-                    terminalInputFocused = false
-                } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                        .frame(width: 40, height: 40)
-                        .background(Palette.surface).clipShape(Circle())
+        VStack(spacing: 6) {
+            if !terminalAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(terminalAttachments) { attachment in
+                            terminalAttachmentChip(attachment)
+                        }
+                    }
                 }
-                .accessibilityLabel("Collapse keyboard")
+                .fixedSize(horizontal: false, vertical: true)
             }
-            TextField("type a reply…", text: $reply)
-                .font(Typography.app(15)).foregroundStyle(Palette.text)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(Palette.surface).clipShape(Capsule())
-                .focused($replyFocused)
-                .disabled(replyDictating)   // dictation owns the field while live
-                // Ctrl-toggle interception: while armed, the next character typed
-                // here becomes a control byte instead of message text.
-                .onChange(of: reply) { oldValue, newValue in
-                    handleReplyChange(old: oldValue, new: newValue)
+
+            if let upload = terminalUploadBytes {
+                let fraction = upload.total > 0
+                    ? min(1, Double(upload.sent) / Double(upload.total))
+                    : 0
+                HStack(spacing: 8) {
+                    ProgressView(value: fraction)
+                    Text("\(GramFile.displaySize(of: UInt64(upload.sent))) / \(GramFile.displaySize(of: UInt64(upload.total)))")
+                        .font(Typography.machine(10))
+                        .foregroundStyle(Palette.textFaint)
+                        .monospacedDigit()
                 }
-                .submitLabel(.send)
-                // Return sends the reply and releases only the TERMINAL's claim on key input,
-                // keeping the reply field focused on every idiom — which is what the pre-PR code
-                // did, and why.
-                //
-                // The problem this has to solve is `wantsTerminalKeyFocus`, which carries
-                // `|| idiom == .pad`: if Return clears BOTH owners, that disjunct re-asserts on
-                // iPad and hands key focus to the terminal, so everything typed after Return goes
-                // to the agent's shell as raw keystrokes instead of composing the next reply.
-                // Clearing `terminalInputFocused` alone fixes that without touching the field.
-                //
-                // AN EARLIER VERSION OF THIS ALSO CLEARED `replyFocused` ON iPHONE, to dismiss the
-                // software keyboard. A review pointed out the cost: the reader then has to tap the
-                // field again for every subsequent message, and pre-PR behaviour deliberately kept
-                // focus so a back-and-forth exchange did not cost a tap per message. Dismissal was
-                // a side effect of needing to release the terminal, not a goal, and this PR already
-                // adds the affordance for doing it on purpose — the collapse chevron now renders
-                // for a terminal-raised keyboard too. So the keyboard stays up and the reader
-                // decides when it goes.
-                .onSubmit {
-                    if canSend { sendTapped() }
-                    replyFocused = true
-                    terminalInputFocused = false
+            } else if let progress = terminalSendProgress, progress.total > 1 {
+                Text("Attaching \(progress.sent + 1) of \(progress.total)…")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if pastedTextUndo != nil {
+                Button("Large paste attached as a file — Undo") {
+                    undoLargePaste()
                 }
-            // Dictate into the reply (on-device). isActive: isForeground stops the mic
-            // if this pane stops being the front one (no hot mic behind a hidden pane);
-            // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
-            // chord interception, so a dictation partial is never read as a control byte.
-            MicButton(text: $reply, diameter: 40, iconSize: 15,
-                      isActive: isForeground && !autoDelivering, recording: $replyDictating,
-                      onStart: { ctrlArmed = false })
-                // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
-                // isActive drops on autoDelivering so an in-flight dictation stops before
-                // the auto-deliver clears the reply, and it can't be started during either.
-                .disabled(sending || autoDelivering)
-            // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
-            // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
-            // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespaces).isEmpty {
-                savedPromptsButton
-            } else {
-                // THE BUTTON DISMISSES THE KEYBOARD ON iPHONE; RETURN DELIBERATELY DOES NOT.
-                //
-                // Reported by the owner on a real iPhone: tapping send left the keyboard up over
-                // ~40% of the pane, so the reply you just sent — and the agent's response to it —
-                // were behind the keyboard until you dismissed it by hand.
-                //
-                // The distinction from `.onSubmit` above is intent, not inconsistency. Return is
-                // pressed WITH your thumbs already on the keys, and the note on that path records a
-                // review's reasoning for keeping focus: a back-and-forth exchange should not cost a
-                // tap per message. Reaching for the send BUTTON is a deliberate move away from the
-                // keys, so treating it as "I am done typing" matches what the hand just did.
-                //
-                // iPHONE ONLY, and clearing `replyFocused` is the part that must be gated. On iPad
-                // `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so releasing the field hands
-                // key focus straight to the terminal and everything typed next would go to the
-                // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
-                // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
-                // there is nothing to gain there and a real regression to cause.
-                // AND IT MUST BUMP THE COLLAPSE TOKEN, not just clear the flags. Found by review:
-                // clearing the two focus flags alone reproduces the ORIGINAL #203 defect through a
-                // new door. With a word selected, `updateUIView`'s resign is gated on
-                // `deliberateCollapse || !hasActiveSelection`, so it refuses — while clearing the
-                // flags has already hidden the collapse chevron. Net result: keyboard up over the
-                // pane, selection held, and no visible way to dismiss it. That is exactly the state
-                // the chevron fix existed to eliminate, and my send-button change walked back into
-                // it because it copied the flag-clearing and not the token.
-                //
-                // Bumping the token marks this resign DELIBERATE, which is what it is: the reader
-                // pressed send. Same mechanism as the chevron, so there is one way to express
-                // "collapse on purpose" rather than two that disagree. This is the "what did last
-                // round's fix make POSSIBLE" question answered: the chevron fix made a token the
-                // only honest way to resign past a selection, and any new path that clears focus
-                // has to use it.
-                // SCOPED TO iPHONE for the same reason the flag is: on iPad the terminal's
-                // `wantsTerminalKeyFocus` carries the `.pad` disjunct, so the pass after this can
-                // take the become-focus branch and never reach `consumeCollapse` — the token would
-                // sit unconsumed and could fire on some later, unrelated collapse (herdrup#213).
-                // iPad has no software keyboard to dismiss, so there is nothing to request there.
-                Button {
-                    sendTapped()
-                    terminalInputFocused = false
-                    if UIDevice.current.userInterfaceIdiom == .phone {
+                .font(Typography.app(12, .medium))
+                .foregroundStyle(Palette.textDim)
+                .disabled(sending)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 8) {
+                if replyFocused
+                    || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone)
+                {
+                    Button {
                         terminalCollapseToken += 1
                         replyFocused = false
+                        terminalInputFocused = false
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Palette.textDim)
+                            .frame(width: 40, height: 40)
+                            .background(Palette.surface)
+                            .clipShape(Circle())
+                    }
+                    .accessibilityLabel("Collapse keyboard")
+                }
+
+                Menu {
+                    PasteButton(payloadType: TerminalPastePayload.self) { payloads in
+                        for payload in payloads { handleTerminalPaste(payload) }
+                    }
+                    Button {
+                        showTerminalPhotos = true
+                    } label: {
+                        Label("Photo & Video", systemImage: "photo.on.rectangle.angled")
+                    }
+                    Button {
+                        showTerminalFileImporter = true
+                    } label: {
+                        Label("File", systemImage: "doc")
                     }
                 } label: {
-                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                    Group {
+                        if loadingTerminalAttachment {
+                            ProgressView().tint(Palette.textDim)
+                        } else {
+                            Image(systemName: "paperclip")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Palette.textDim)
+                        }
+                    }
+                    .frame(width: 40, height: 40)
+                    .background(Palette.surface)
+                    .clipShape(Circle())
+                }
+                .disabled(sending || loadingTerminalAttachment)
+                .accessibilityLabel("Attach or paste")
+
+                TextField("type a reply…", text: $reply)
+                    .font(Typography.app(15))
+                    .foregroundStyle(Palette.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background(Palette.surface)
+                    .clipShape(Capsule())
+                    .focused($replyFocused)
+                    .disabled(replyDictating)
+                    .onChange(of: reply) { oldValue, newValue in
+                        handleReplyChange(old: oldValue, new: newValue)
+                    }
+                    .submitLabel(.send)
+                    .onSubmit {
+                        if canSend { sendTapped() }
+                        replyFocused = true
+                        terminalInputFocused = false
+                    }
+
+                MicButton(
+                    text: $reply, diameter: 40, iconSize: 15,
+                    isActive: isForeground && !autoDelivering,
+                    recording: $replyDictating,
+                    onStart: { ctrlArmed = false })
+                    .disabled(sending || autoDelivering)
+
+                if reply.trimmingCharacters(in: .whitespaces).isEmpty
+                    && terminalAttachments.isEmpty
+                {
+                    savedPromptsButton
+                } else {
+                    Button {
+                        sendTapped()
+                        terminalInputFocused = false
+                        if UIDevice.current.userInterfaceIdiom == .phone {
+                            terminalCollapseToken += 1
+                            replyFocused = false
+                        }
+                    } label: {
+                        Group {
+                            if terminalUploadBytes != nil {
+                                ProgressView().tint(Palette.text)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 15, weight: .bold))
+                            }
+                        }
                         .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
                         .frame(width: 40, height: 40)
-                        .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
+                        .background(canSend ? Palette.text : Palette.surface)
+                        .clipShape(Circle())
+                    }
+                    .disabled(!canSend)
                 }
-                .disabled(!canSend)
             }
         }
-        .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
         .sheet(isPresented: $showSavePrompt) {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
+        }
+        .fileImporter(
+            isPresented: $showTerminalFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true,
+            onCompletion: handleTerminalFiles)
+        .photosPicker(
+            isPresented: $showTerminalPhotos,
+            selection: $terminalPhotoItems,
+            maxSelectionCount: TerminalAttachmentStaging.maxAttachments,
+            matching: .any(of: [.images, .videos]))
+        .onChange(of: terminalPhotoItems) { _, items in
+            guard !items.isEmpty else { return }
+            Task { await loadTerminalPhotos(items) }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            stageTerminalURLs(urls)
+            return !urls.isEmpty
+        }
+    }
+
+    private func terminalAttachmentChip(_ attachment: TerminalAttachment) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: FileGlyph.name(for: attachment.mime, fileName: attachment.name))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+            Text(attachment.name)
+                .font(Typography.app(12, .medium))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 130)
+            Text(GramFile.displaySize(of: UInt64(attachment.size)))
+                .font(Typography.machine(10))
+                .foregroundStyle(Palette.textFaint)
+            if attachment.localPath != nil {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Palette.done)
+            }
+            Button {
+                TerminalAttachmentStaging.remove(attachment)
+                terminalAttachments.removeAll { $0.id == attachment.id }
+                if pastedTextUndo?.attachmentID == attachment.id { pastedTextUndo = nil }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.textFaint)
+            }
+            .disabled(sending)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        .opacity(sending ? 0.6 : 1)
+    }
+
+    private func handleTerminalFiles(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else { return }
+        stageTerminalURLs(urls)
+    }
+
+    private func stageTerminalURLs(_ urls: [URL]) {
+        var rejected = 0
+        for url in urls {
+            guard terminalAttachments.count < TerminalAttachmentStaging.maxAttachments else {
+                rejected += 1
+                continue
+            }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let attachment = TerminalAttachmentStaging.stageFile(url) else {
+                rejected += 1
+                continue
+            }
+            terminalAttachments.append(attachment)
+        }
+        if rejected > 0 {
+            actionNote = "Skipped \(rejected) unreadable, empty, oversized, or extra item\(rejected == 1 ? "" : "s")."
+        }
+    }
+
+    private func handleTerminalPaste(_ payload: TerminalPastePayload) {
+        switch payload.content {
+        case .text(let text):
+            handlePastedText(text)
+        case .image(let data):
+            guard terminalAttachments.count < TerminalAttachmentStaging.maxAttachments,
+                  let image = UIImage(data: data),
+                  let png = image.pngData(),
+                  let attachment = TerminalAttachmentStaging.stageData(
+                    png, named: "pasted-image.png", mime: "image/png")
+            else {
+                actionNote = "The pasted image could not be attached."
+                return
+            }
+            terminalAttachments.append(attachment)
+        case .file(let url):
+            stageTerminalURLs([url])
+        }
+    }
+
+    private func handlePastedText(_ text: String) {
+        let restored = reply + text
+        guard text.utf8.count > TerminalAttachmentStaging.inlineTextBytes else {
+            reply = restored
+            return
+        }
+        stageLargePastedText(text, restoredDraft: restored)
+    }
+
+    private func stageLargePastedText(_ text: String, restoredDraft: String) {
+        guard terminalAttachments.count < TerminalAttachmentStaging.maxAttachments,
+              let attachment = TerminalAttachmentStaging.stageData(
+                Data(text.utf8), named: "pasted-text.txt", mime: "text/plain")
+        else {
+            actionNote = "The pasted text is too large or could not be attached."
+            return
+        }
+        terminalAttachments.append(attachment)
+        pastedTextUndo = (attachment.id, restoredDraft)
+    }
+
+    private func undoLargePaste() {
+        guard let undo = pastedTextUndo,
+              let attachment = terminalAttachments.first(where: { $0.id == undo.attachmentID })
+        else {
+            pastedTextUndo = nil
+            return
+        }
+        TerminalAttachmentStaging.remove(attachment)
+        terminalAttachments.removeAll { $0.id == undo.attachmentID }
+        suppressLargePasteConversion = true
+        reply = undo.restoredDraft
+        DispatchQueue.main.async { suppressLargePasteConversion = false }
+        pastedTextUndo = nil
+    }
+
+    private func loadTerminalPhotos(_ items: [PhotosPickerItem]) async {
+        loadingTerminalAttachment = true
+        defer {
+            loadingTerminalAttachment = false
+            terminalPhotoItems = []
+        }
+        var rejected = 0
+        for item in items {
+            guard terminalAttachments.count < TerminalAttachmentStaging.maxAttachments else {
+                rejected += 1
+                continue
+            }
+            do {
+                guard let picked = try await item.loadTransferable(type: TerminalPickedMedia.self),
+                      let attachment = picked.attachment
+                else {
+                    rejected += 1
+                    continue
+                }
+                terminalAttachments.append(attachment)
+            } catch {
+                rejected += 1
+            }
+        }
+        if rejected > 0 {
+            actionNote = "Skipped \(rejected) unreadable, empty, oversized, or extra photo\(rejected == 1 ? "" : "s")."
+        }
+    }
+
+    private static func postTerminalAttachment(
+        client: HerdrClient,
+        targetPane: String,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramPostReceipt {
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPostReceipt(
+                    text: "", targetPane: targetPane, attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        throw TerminalAttachmentSendError.daemonUpgradeRequired
+    }
+
+    private static func promptText(caption: String, paths: [String]) -> String {
+        let references = paths.map { "- \($0.debugDescription)" }.joined(separator: "\n")
+        let heading = paths.count == 1
+            ? "Attachment on this host:"
+            : "Attachments on this host:"
+        let caption = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return caption.isEmpty
+            ? "\(heading)\n\(references)"
+            : "\(caption)\n\n\(heading)\n\(references)"
+    }
+
+    private func sendTerminalAttachments() {
+        guard let targetAgent = agent, router.mode(for: targetAgent) == .intent else {
+            actionNote = "Agent not ready for attachments."
+            return
+        }
+        let targetMachineID = targetAgent.machineID
+        guard let targetName = targetAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !targetName.isEmpty
+        else {
+            actionNote = TerminalAttachmentSendError.unnamedAgent.localizedDescription
+            return
+        }
+
+        let targetPane = paneID
+        let caption = reply
+        let files = terminalAttachments
+        Task {
+            sending = true
+            actionNote = nil
+            defer {
+                sending = false
+                terminalUploadBytes = nil
+                terminalSendProgress = nil
+            }
+            do {
+                var paths: [String] = []
+                for (index, original) in files.enumerated() {
+                    terminalSendProgress = (index, files.count)
+                    guard let currentIndex = terminalAttachments.firstIndex(
+                        where: { $0.id == original.id })
+                    else { throw TerminalAttachmentSendError.agentChanged }
+
+                    if let path = terminalAttachments[currentIndex].localPath {
+                        paths.append(path)
+                        continue
+                    }
+                    if terminalAttachments[currentIndex].gramMessageID != nil {
+                        throw TerminalAttachmentSendError.daemonUpgradeRequired
+                    }
+
+                    let uploadID: String
+                    if let pending = terminalAttachments[currentIndex].uploadID {
+                        uploadID = pending
+                    } else {
+                        terminalUploadBytes = (0, original.size)
+                        uploadID = try await client.gramUploadFile(
+                            fileURL: original.url,
+                            targetPane: targetPane
+                        ) { sent, total in
+                            terminalUploadBytes = (sent, total)
+                        }
+                        terminalAttachments[currentIndex].uploadID = uploadID
+                    }
+                    terminalUploadBytes = nil
+
+                    let receipt = try await Self.postTerminalAttachment(
+                        client: client,
+                        targetPane: targetPane,
+                        attachment: HerdrClient.GramFileAttachment(
+                            uploadID: uploadID, name: original.name, mime: original.mime))
+                    terminalAttachments[currentIndex].uploadID = nil
+                    terminalAttachments[currentIndex].gramMessageID = receipt.message.id
+                    guard let path = receipt.localFilePath, !path.isEmpty else {
+                        throw TerminalAttachmentSendError.daemonUpgradeRequired
+                    }
+                    terminalAttachments[currentIndex].localPath = path
+                    TerminalAttachmentStaging.remove(original)
+                    paths.append(path)
+                }
+
+                let live = try await client.agentList().first(where: { $0.paneID == targetPane })
+                guard live?.name == targetName, live?.machineID == targetMachineID,
+                      live.map { router.mode(for: $0) } == .intent
+                else { throw TerminalAttachmentSendError.agentChanged }
+
+                userInputToken += 1
+                try await submitPrompt(
+                    pane: targetPane,
+                    text: Self.promptText(caption: caption, paths: paths))
+                reply = ""
+                pastedTextUndo = nil
+                for attachment in terminalAttachments {
+                    TerminalAttachmentStaging.remove(attachment)
+                }
+                terminalAttachments = []
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await refresh()
+            } catch let error as APIError {
+                actionNote = Self.promptFailureNote(for: error)
+            } catch {
+                actionNote = error.localizedDescription
+            }
         }
     }
 
@@ -4708,7 +5012,6 @@ struct TerminalPaneContent: View {
                 Menu {
                     ForEach(savedPrompts.prompts) { p in
                         Button(role: .destructive) { savedPrompts.delete(p.id) } label: { Text(p.label) }
-                    }
                 } label: { Label("Delete a prompt", systemImage: "trash") }
             }
         } label: {
@@ -4723,8 +5026,10 @@ struct TerminalPaneContent: View {
     /// Insert a saved prompt into the reply field and send it — the same path a typed reply
     /// takes (`sendTapped` → mode-aware `send(.submitText)` → confirmed `agent.prompt`).
     private func usePrompt(_ p: SavedPrompt) {
+        suppressLargePasteConversion = true
         reply = p.text
         sendTapped()
+        DispatchQueue.main.async { suppressLargePasteConversion = false }
     }
 
     /// Routes a reader action through InputRouter, then executes the plan. A
@@ -4771,29 +5076,49 @@ struct TerminalPaneContent: View {
     /// single added character (typing) — not deletion or the programmatic clear
     /// after a send — so a backspace can never be misread as a chord.
     private func handleReplyChange(old: String, new: String) {
-        // A dictation append (even a single-char first partial) must never be read as a
-        // ctrl chord — only real typing arms and fires one.
         guard !replyDictating else { return }
-        guard ctrlArmed else { return }
-        // Treat ONLY a clean single-char APPEND as a chord: `new` must be `old`
-        // plus one trailing character. A mid-cursor insertion or paste (where the
-        // added char is NOT the suffix) must NOT be read as a chord — otherwise
-        // `removeLast()` would delete the wrong character and `new.last` would send
-        // the wrong Ctrl byte (a spurious ^C could interrupt the pane; review HIGH).
-        // In that case leave the text untouched and just disarm.
-        guard new.count == old.count + 1, new.hasPrefix(old), let typed = new.last else {
+
+        if ctrlArmed {
             ctrlArmed = false
-            return
+            if new.count == old.count + 1, new.hasPrefix(old), let typed = new.last,
+               let ctrl = InputRouter.controlByte(for: typed)
+            {
+                reply.removeLast()
+                send(.rawSequence(String(ctrl)))
+                return
+            }
         }
-        guard let ctrl = InputRouter.controlByte(for: typed) else {
-            // No control code for this character (a digit, space, emoji…): disarm
-            // without consuming it, so the character stays as ordinary text.
-            ctrlArmed = false
-            return
+
+        guard !suppressLargePasteConversion,
+              let inserted = Self.contiguousInsertion(from: old, to: new),
+              inserted.utf8.count > TerminalAttachmentStaging.inlineTextBytes
+        else { return }
+        reply = old
+        stageLargePastedText(inserted, restoredDraft: new)
+    }
+
+    private static func contiguousInsertion(from old: String, to new: String) -> String? {
+        guard new.count > old.count else { return nil }
+        var oldStart = old.startIndex
+        var newStart = new.startIndex
+        while oldStart < old.endIndex, newStart < new.endIndex,
+              old[oldStart] == new[newStart]
+        {
+            old.formIndex(after: &oldStart)
+            new.formIndex(after: &newStart)
         }
-        ctrlArmed = false
-        reply.removeLast()     // the appended char was a chord, not message text
-        send(.rawSequence(String(ctrl)))
+
+        var oldEnd = old.endIndex
+        var newEnd = new.endIndex
+        while oldEnd > oldStart, newEnd > newStart {
+            let previousOld = old.index(before: oldEnd)
+            let previousNew = new.index(before: newEnd)
+            guard old[previousOld] == new[previousNew] else { break }
+            oldEnd = previousOld
+            newEnd = previousNew
+        }
+        guard oldStart == oldEnd else { return nil }
+        return String(new[newStart..<newEnd])
     }
 
     /// Submits a reply as a prompt WITH delivery confirmation. Sets the visible note
@@ -4931,12 +5256,12 @@ struct TerminalPaneContent: View {
     /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
     /// (never rawKeys, at any time); a normal reply uses the usual routing.
     private func sendTapped() {
-        // An explicit Send ALWAYS takes over from any pending auto-deliver and goes
-        // through the normal prompt path (`send` → agent.prompt, server-gated). It must
-        // never be gated on the pre-fill delivery succeeding — that is exactly what could
-        // trap the reader on a stuck pre-fill with the reply bar locked.
         pendingPrefill = false
-        send(.submitText(reply))
+        if terminalAttachments.isEmpty {
+            send(.submitText(reply))
+        } else {
+            sendTerminalAttachments()
+        }
     }
 }
 
@@ -7153,7 +7478,7 @@ struct MockTransport: HerdrTransport {
 
     /// A canned `gram.post` echo, so the mock composer's send path resolves.
     static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true},"local_file_path":"/tmp/gram-files/gp1/file.txt"}}"#
 
     /// A canned `gram.get_file` reply; the bytes decode to "hello world".
     /// Byte-identical to MockWireFixtures.gramFileContent.

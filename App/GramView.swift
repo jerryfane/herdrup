@@ -1947,7 +1947,7 @@ private struct GramRow: View {
 
 /// Picks an SF Symbol for a file from its MIME type. Shared by the composer's
 /// staged-attachment chip and a received message's file chip.
-private enum FileGlyph {
+enum FileGlyph {
     static func name(for mime: String, fileName: String) -> String {
         let mime = mime.lowercased()
         if mime.hasPrefix("image/") { return "photo" }

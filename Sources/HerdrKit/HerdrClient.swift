@@ -490,7 +490,12 @@ public actor HerdrClient {
     struct GramPostParams: Encodable {
         let text: String
         let to: String?
+        let targetPaneID: String?
         let file: GramFileUploadParams?
+        enum CodingKeys: String, CodingKey {
+            case text, to, file
+            case targetPaneID = "target_pane_id"
+        }
     }
 
     /// The owner posts a message to agents. `to == nil` posts to the shared
@@ -500,13 +505,33 @@ public actor HerdrClient {
     /// text may be empty when a file is attached. Returns the stored message.
     @discardableResult
     public func gramPost(
-        text: String, to: String? = nil, attachment: GramFileAttachment? = nil
+        text: String,
+        to: String? = nil,
+        targetPane: String? = nil,
+        attachment: GramFileAttachment? = nil
     ) async throws -> GramMessage {
+        try await gramPostReceipt(
+            text: text, to: to, targetPane: targetPane, attachment: attachment).message
+    }
+
+    /// Posts a gram and preserves response-only finalization facts. The local file
+    /// path is available only on daemons that support terminal attachments and only
+    /// when this post carries a file. `targetPane` routes upload ownership and the
+    /// post to that pane's daemon; it is mutually exclusive with `to`.
+    public func gramPostReceipt(
+        text: String,
+        to: String? = nil,
+        targetPane: String? = nil,
+        attachment: GramFileAttachment? = nil
+    ) async throws -> GramPostReceipt {
         let file = attachment.map {
             GramFileUploadParams(uploadID: $0.uploadID, name: $0.name, mime: $0.mime)
         }
-        return try await call("gram.post", GramPostParams(text: text, to: to, file: file),
-                              as: GramMessageResult.self).message
+        let result = try await call(
+            "gram.post",
+            GramPostParams(text: text, to: to, targetPaneID: targetPane, file: file),
+            as: GramMessageResult.self)
+        return GramPostReceipt(message: result.message, localFilePath: result.localFilePath)
     }
 
     struct GramMarkReadParams: Encodable { let id: String }
@@ -528,10 +553,12 @@ public actor HerdrClient {
         let uploadID: String
         let offset: UInt64
         let dataBase64: String
+        let targetPaneID: String?
         enum CodingKeys: String, CodingKey {
             case uploadID = "upload_id"
             case offset
             case dataBase64 = "data_base64"
+            case targetPaneID = "target_pane_id"
         }
     }
 
@@ -549,8 +576,10 @@ public actor HerdrClient {
 
     struct GramUploadStreamParams: Encodable {
         let uploadID: String
+        let targetPaneID: String?
         enum CodingKeys: String, CodingKey {
             case uploadID = "upload_id"
+            case targetPaneID = "target_pane_id"
         }
     }
 
@@ -558,16 +587,15 @@ public actor HerdrClient {
     /// cannot serve one. Feature-detected by `ping` CAPABILITY, never by
     /// attempting the method: an unknown method comes back with an EMPTY `id` and
     /// the connection closed, so the reply cannot be correlated to the attempt.
-    public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
+    public func gramOpenUploadChannel(
+        uploadID: String,
+        targetPane: String? = nil
+    ) async -> GramUploadChannel? {
         guard let citadel = transport as? CitadelTransport else { return nil }
         // Three cache states, not two, and the probe is NOT written with `try?`:
         // `serverCapabilities()` both throws AND returns an Optional, so `try?`
         // flattens "the ping failed" into the same nil as "the daemon sent no
-        // capabilities" — which would cache a transient error as `unsupported` and pin
-        // this client to the per-chunk path for its whole lifetime, the exact outcome
-        // the `unknown` state exists to prevent. A ping that SUCCEEDS is cached either
-        // way, so a ten-file send pays one probe even against an old daemon; a ping
-        // that THROWS leaves the cache `unknown` and is re-probed on the next upload.
+        // capabilities" — which would cache a transient error as `unsupported`.
         if case .unknown = streamCapability {
             do {
                 let probed = try await serverCapabilities()
@@ -580,7 +608,7 @@ public actor HerdrClient {
         let env = RequestEnvelope(
             id: "herdrkit:gram.upload.stream:\(uploadID)",
             method: "gram.upload.stream",
-            params: GramUploadStreamParams(uploadID: uploadID)
+            params: GramUploadStreamParams(uploadID: uploadID, targetPaneID: targetPane)
         )
         guard let data = try? encoder.encode(env) else { return nil }
         return citadel.openUploadChannel(String(decoding: data, as: UTF8.self))
@@ -597,6 +625,7 @@ public actor HerdrClient {
     /// large (≈2100-chunk) 100 MB upload.
     public func gramUploadFile(
         _ data: Data,
+        targetPane: String? = nil,
         onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
     ) async throws -> String {
         let uploadID = "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -613,7 +642,7 @@ public actor HerdrClient {
                 "gram.upload_chunk",
                 GramUploadChunkParams(
                     uploadID: uploadID, offset: UInt64(offset),
-                    dataBase64: chunk.base64EncodedString()),
+                    dataBase64: chunk.base64EncodedString(), targetPaneID: targetPane),
                 as: JSONNull.self)
             offset = end
             if offset == data.count || offset - lastReported >= reportStep {
@@ -643,6 +672,7 @@ public actor HerdrClient {
     /// once at completion.
     public func gramUploadFile(
         fileURL: URL,
+        targetPane: String? = nil,
         onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
     ) async throws -> String {
         var uploadID = Self.mintUploadID()
@@ -655,7 +685,7 @@ public actor HerdrClient {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
-        let channel = await gramOpenUploadChannel(uploadID: uploadID)
+        let channel = await gramOpenUploadChannel(uploadID: uploadID, targetPane: targetPane)
         var streaming = false
         if let channel {
             do {
@@ -702,7 +732,8 @@ public actor HerdrClient {
                 _ = try await call(
                     "gram.upload_chunk",
                     GramUploadChunkParams(
-                        uploadID: uploadID, offset: UInt64(offset), dataBase64: encoded),
+                        uploadID: uploadID, offset: UInt64(offset), dataBase64: encoded,
+                        targetPaneID: targetPane),
                     as: JSONNull.self)
             }
             offset += chunk.count
