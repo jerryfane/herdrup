@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Captures the five App Store screens from the REAL app, at the simulator's native
 /// resolution, so store artwork is regenerated from the shipping UI rather than
@@ -12,7 +13,12 @@ import XCTest
 /// launch cannot silently produce a screenshot of an empty or half-built view — which is
 /// the failure mode that would quietly ship a broken store image.
 final class StoreScreenshotTests: XCTestCase {
+    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
     private func capture(_ mode: String, named name: String, until: (XCUIApplication) -> Bool) {
+        // Store artwork for iPad is LANDSCAPE (2732x2048): the split view with its sidebar
+        // is the whole reason an iPad shot differs from a phone one, and portrait hides it.
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()
@@ -46,7 +52,15 @@ final class StoreScreenshotTests: XCTestCase {
     }
 
     func testCaptureGram() {
-        capture("gram", named: "store-03-gram") { $0.staticTexts["Gram"].exists }
+        // "Gram" as a title exists only on PHONE: at regular width the page draws no
+        // header of its own - the host renders that section's controls in the app's real
+        // sidebar - so waiting for it on iPad waits forever. The composer is present in
+        // both layouts, which is what makes it the right readiness signal.
+        capture("gram", named: "store-03-gram") {
+            $0.textViews["Message an agent…"].exists
+                || $0.textFields["Message an agent…"].exists
+                || $0.staticTexts["Gram"].exists
+        }
     }
 
     func testCaptureSettings() {
