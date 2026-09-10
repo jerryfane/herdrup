@@ -17,10 +17,15 @@ struct TerminalAttachment: Identifiable, Equatable {
     var uploadID: String?
     var gramMessageID: String?
     var localPath: String?
+    var postedPaneID: String?
+    var postedMachineID: String?
+    var postedAgentName: String?
 
     init(
         id: UUID = UUID(), name: String, mime: String, staged: StagedAttachment,
-        uploadID: String? = nil, gramMessageID: String? = nil, localPath: String? = nil
+        uploadID: String? = nil, gramMessageID: String? = nil, localPath: String? = nil,
+        postedPaneID: String? = nil, postedMachineID: String? = nil,
+        postedAgentName: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -31,6 +36,9 @@ struct TerminalAttachment: Identifiable, Equatable {
         self.uploadID = uploadID
         self.gramMessageID = gramMessageID
         self.localPath = localPath
+        self.postedPaneID = postedPaneID
+        self.postedMachineID = postedMachineID
+        self.postedAgentName = postedAgentName
     }
 }
 

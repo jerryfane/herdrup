@@ -4937,6 +4937,10 @@ struct TerminalPaneContent: View {
                     else { throw TerminalAttachmentSendError.agentChanged }
 
                     if let path = terminalAttachments[currentIndex].localPath {
+                        guard terminalAttachments[currentIndex].postedPaneID == targetPane,
+                              terminalAttachments[currentIndex].postedMachineID == targetMachineID,
+                              terminalAttachments[currentIndex].postedAgentName == targetName
+                        else { throw TerminalAttachmentSendError.agentChanged }
                         paths.append(path)
                         continue
                     }
@@ -4970,6 +4974,9 @@ struct TerminalPaneContent: View {
                         throw TerminalAttachmentSendError.daemonUpgradeRequired
                     }
                     terminalAttachments[currentIndex].localPath = path
+                    terminalAttachments[currentIndex].postedPaneID = targetPane
+                    terminalAttachments[currentIndex].postedMachineID = targetMachineID
+                    terminalAttachments[currentIndex].postedAgentName = targetName
                     TerminalAttachmentStaging.remove(original)
                     paths.append(path)
                 }
