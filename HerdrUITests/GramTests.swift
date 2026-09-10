@@ -52,8 +52,14 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
                       "the second agent->owner message should render before filtering")
 
-        let field = app.textFields["Search messages"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "the search field should be pinned above the list")
+        // Search is now a magnifier in the header that becomes a field, matching the
+        // terminal pane, instead of a box pinned permanently above the list.
+        let toggle = app.buttons["gram-search"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the header should offer search")
+        toggle.tap()
+
+        let field = app.textFields["gram-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "tapping the magnifier should reveal the field")
         field.tap()
         field.typeText("Digest")
         // Assert the FIELD took the text before asserting anything about the list: an unfocused
@@ -75,6 +81,16 @@ final class GramTests: XCTestCase {
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
         XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
                       "clearing the search should bring the filtered-out messages back")
+
+        // CLOSING must also clear. A hidden field that is still filtering would leave the
+        // list silently short with nothing on screen to explain it - the failure mode a
+        // dismissible search box invites. Re-filter first so the close has work to undo.
+        field.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertFalse(field.exists, "closing should dismiss the field")
+        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
+                      "closing search should restore the unfiltered list")
     }
 
     /// Read all marks the unread messages read: the button is present while something is unread
