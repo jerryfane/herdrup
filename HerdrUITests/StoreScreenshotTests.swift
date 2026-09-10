@@ -18,10 +18,15 @@ final class StoreScreenshotTests: XCTestCase {
     private func capture(_ mode: String, named name: String, until: (XCUIApplication) -> Bool) {
         // Store artwork for iPad is LANDSCAPE (2732x2048): the split view with its sidebar
         // is the whole reason an iPad shot differs from a phone one, and portrait hides it.
-        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()
+        // AFTER launch: rotating before there is an app to rotate does nothing, which is
+        // why the first attempt returned five portrait captures.
+        if isPad {
+            XCUIDevice.shared.orientation = .landscapeLeft
+            Thread.sleep(forTimeInterval: 1.0)
+        }
 
         let deadline = Date().addingTimeInterval(20)
         var ready = false
@@ -35,7 +40,17 @@ final class StoreScreenshotTests: XCTestCase {
         // that proves the screen exists.
         Thread.sleep(forTimeInterval: 1.5)
 
-        let shot = XCUIScreen.main.screenshot()
+        // `app.screenshot()`, not `XCUIScreen.main.screenshot()`: the screen's capture
+        // comes back in the device's NATIVE orientation however the app is rotated - the
+        // second reason that attempt was portrait.
+        let shot = app.screenshot()
+        if isPad {
+            // Fail rather than ship. A portrait iPad capture is unusable as landscape
+            // store artwork, and attaching one silently is how a whole CI round was spent
+            // before anyone noticed.
+            XCTAssertGreaterThan(shot.image.size.width, shot.image.size.height,
+                                 "iPad capture must be landscape; got \(shot.image.size)")
+        }
         let attachment = XCTAttachment(screenshot: shot)
         attachment.name = name
         attachment.lifetime = .keepAlways
