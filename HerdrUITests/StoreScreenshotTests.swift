@@ -21,11 +21,23 @@ final class StoreScreenshotTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()
-        // AFTER launch: rotating before there is an app to rotate does nothing, which is
-        // why the first attempt returned five portrait captures.
+        // AFTER launch, and CONFIRMED rather than assumed. Rotating before the app
+        // exists does nothing (attempt 1), and a fixed sleep after the request is not
+        // evidence the window rotated (attempt 2 came back portrait anyway). Poll the
+        // window's own frame until it is wider than it is tall.
         if isPad {
             XCUIDevice.shared.orientation = .landscapeLeft
-            Thread.sleep(forTimeInterval: 1.0)
+            let window = app.windows.firstMatch
+            let rotateBy = Date().addingTimeInterval(15)
+            var rotated = false
+            while Date() < rotateBy {
+                let f = window.frame
+                if f.width > f.height { rotated = true; break }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+            XCTAssertTrue(rotated,
+                          "the window never rotated to landscape; frame \(window.frame)")
+            Thread.sleep(forTimeInterval: 1.0)   // let the split view re-lay-out
         }
 
         let deadline = Date().addingTimeInterval(20)
