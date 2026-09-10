@@ -109,6 +109,19 @@ final class GramStagingTests: XCTestCase {
             GramStaging.stageCopy(of: oneByte, named: "tiny.bin", in: session, maxBytes: cap))
         XCTAssertEqual(tiny.size, 1)
     }
+
+    func testDataStagesExactBytesAndEnforcesBounds() throws {
+        let payload = Data("pasted text".utf8)
+        let staged = try XCTUnwrap(
+            GramStaging.stageData(payload, named: "paste.txt", in: session, maxBytes: payload.count))
+        XCTAssertEqual(try Data(contentsOf: staged.url), payload)
+        XCTAssertEqual(staged.size, payload.count)
+        XCTAssertNil(
+            GramStaging.stageData(payload, named: "too-large.txt", in: session,
+                                  maxBytes: payload.count - 1))
+        XCTAssertNil(
+            GramStaging.stageData(Data(), named: "empty.txt", in: session, maxBytes: 1))
+    }
     /// A pick named `../../evil` must not stage outside its own directory.
     func testTraversalNameStaysInsideTheItemDirectory() throws {
         let source = try sourceFile(Data("x".utf8))

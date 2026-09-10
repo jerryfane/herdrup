@@ -120,10 +120,27 @@ public struct GramListAnswer: Sendable, Equatable {
     public var isUnchanged: Bool { messages == nil }
 }
 
-/// `gram.post` / `gram.send` / `gram.grab` result (`type` varies). Only the echoed
-/// `message` is decoded — the type discriminator is ignored.
+/// Successful `gram.post` result. `localFilePath` is response-only and exists
+/// only when the post finalized an attachment on that daemon.
+public struct GramPostReceipt: Sendable, Equatable {
+    public let message: GramMessage
+    public let localFilePath: String?
+
+    public init(message: GramMessage, localFilePath: String?) {
+        self.message = message
+        self.localFilePath = localFilePath
+    }
+}
+
+/// Wire shape for `gram.post` (`type: gram_sent`).
 struct GramMessageResult: Decodable {
     let message: GramMessage
+    let localFilePath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case localFilePath = "local_file_path"
+    }
 }
 
 /// `gram.get_file` result (`type: "gram_file_content"`): the file's bytes inline.

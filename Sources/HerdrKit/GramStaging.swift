@@ -59,6 +59,30 @@ public enum GramStaging {
         }
     }
 
+    /// Write user-mediated clipboard/text bytes into a fresh staged attachment.
+    /// The same non-empty and inclusive size cap as `stageCopy` applies, and every
+    /// failure removes its per-item directory.
+    public static func stageData(
+        _ data: Data,
+        named name: String,
+        in sessionDirectory: URL,
+        maxBytes: Int
+    ) -> StagedAttachment? {
+        guard !data.isEmpty, data.count <= maxBytes else { return nil }
+        let dir = sessionDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let destination = dir.appendingPathComponent(safeFileName(name))
+            try data.write(to: destination, options: .atomic)
+            protectStagedFile(at: destination)
+            return StagedAttachment(url: destination, dir: dir, size: data.count)
+        } catch {
+            try? FileManager.default.removeItem(at: dir)
+            return nil
+        }
+    }
+
     /// Remove every session directory under `root` except `keeping`. Bounded and
     /// stateless: a sibling of the current session's directory is by definition
     /// abandoned, because a session directory is named once at launch.

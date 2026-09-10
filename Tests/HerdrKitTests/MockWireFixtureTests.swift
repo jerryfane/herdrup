@@ -36,6 +36,29 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
+    private struct TargetedGramTransport: HerdrTransport {
+        func roundTrip(_ requestLine: String) async throws -> String {
+            let data = try XCTUnwrap(requestLine.data(using: .utf8))
+            let request = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let params = try XCTUnwrap(request["params"] as? [String: Any])
+            XCTAssertEqual(params["target_pane_id"] as? String, "peer/w1:p1")
+            switch request["method"] as? String {
+            case "gram.upload_chunk":
+                return MockWireFixtures.okResult
+            case "gram.post":
+                return MockWireFixtures.gramPosted
+            default:
+                XCTFail("unexpected method \(String(describing: request["method"]))")
+                return #"{"id":"x","result":{"type":"ok"}}"#
+            }
+        }
+
+        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { $0.finish() }
+        }
+    }
+
     func testMockAgentListDecodesRealisticStatuses() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let agents = try await client.agentList()
@@ -351,14 +374,29 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(messages.filter { $0.isUnread }.count, 1)
     }
 
-    /// `gram.post` echoes the stored message (`type: gram_sent`) — the composer
-    /// inserts it optimistically, so it must decode through the client path.
+    /// `gram.post` echoes the stored message and response-only finalized path.
+    /// The legacy convenience API still returns just the message.
     func testMockGramPostDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let posted = try await client.gramPost(text: "hello", to: nil)
         XCTAssertEqual(posted.id, "gp1")
         XCTAssertEqual(posted.direction, .ownerToAgent)
         XCTAssertEqual(posted.from, "owner")
+
+        let receipt = try await client.gramPostReceipt(text: "hello", to: nil)
+        XCTAssertEqual(receipt.message.id, "gp1")
+        XCTAssertEqual(receipt.localFilePath, "/home/owner/.config/herdr/gram-files/gp1/paste.txt")
+    }
+
+    func testTargetPaneIsEncodedForUploadAndPost() async throws {
+        let client = HerdrClient(transport: TargetedGramTransport())
+        let uploadID = try await client.gramUploadFile(
+            Data("file".utf8), targetPane: "peer/w1:p1")
+        let receipt = try await client.gramPostReceipt(
+            text: "",
+            targetPane: "peer/w1:p1",
+            attachment: .init(uploadID: uploadID, name: "x.txt", mime: "text/plain"))
+        XCTAssertEqual(receipt.localFilePath, "/home/owner/.config/herdr/gram-files/gp1/paste.txt")
     }
 
     /// A message may carry a file (`file` object); one without it decodes to nil,
@@ -712,7 +750,7 @@ enum MockWireFixtures {
     /// A canned `gram.post` echo (`type: gram_sent`). Keep in sync with the App's
     /// MockTransport.gramPosted.
     static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true},"local_file_path":"/home/owner/.config/herdr/gram-files/gp1/paste.txt"}}"#
 
     /// A canned `gram.get_file` reply (`type: gram_file_content`); the bytes decode
     /// to "hello world". Keep in sync with the App's MockTransport.gramFileContent.
