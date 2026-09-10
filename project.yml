@@ -191,6 +191,11 @@ targets:
           - IBMPlexMono-SemiBold.ttf
           - IBMPlexMono-Bold.ttf
         UILaunchScreen: {}
+        # CAPTURE-BRANCH ONLY, never merge: iPadOS 26 runs apps in a resizable window,
+        # so a rotated simulator yields a 1032x1032 SQUARE window rather than a
+        # full-screen landscape one - which is why store-sized landscape captures were
+        # impossible. This asks for full screen to test that theory.
+        UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # iPhone stays portrait-only (above); iPad (universal now) rotates freely.
