@@ -100,6 +100,12 @@ struct GramView: View {
     /// Free-text filter over the visible section. Local to the page: it is a transient view
     /// concern, unlike `showingSaved`, which the sidebar owns (a sibling column drives that).
     @State private var search = ""
+    /// Whether the header's search field is showing. Gram's search used to be a box
+    /// pinned permanently above the list; it is now the same magnifier-then-field the
+    /// terminal header uses (`InlineSearchField`), so the list keeps that vertical space
+    /// until someone actually searches.
+    @State private var searchOpen = false
+    @FocusState private var searchFocused: Bool
     /// True while a Read-all pass is running, so the button disables rather than stacking passes.
     @State private var markingAllRead = false
     /// A partial-failure report from a Read-all pass. Its OWN slot rather than `refreshNote`,
@@ -413,7 +419,6 @@ struct GramView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Palette.hairlineQuiet)
-            searchFieldIfFilterable
             content
             bannerView
             composer
@@ -439,7 +444,7 @@ struct GramView: View {
     /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
         VStack(spacing: 0) {
-            searchFieldIfFilterable
+            iPadSearchRow
             content
             bannerView
             composer
@@ -450,24 +455,55 @@ struct GramView: View {
     /// The message filter, pinned ABOVE the scroll in both layouts (it must not scroll away),
     /// copying the agents list's field verbatim except for the binding and placeholder so the
     /// two search surfaces in the app look and behave identically.
-    private var searchField: some View {
-        TextField("Search messages", text: $search)
-            .font(Typography.app(15)).foregroundStyle(Palette.text)
-            .textInputAutocapitalization(.never).autocorrectionDisabled()
-            .padding(.horizontal, 16).padding(.vertical, 11)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Palette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
+    /// iPad/regular width has no header of its own — the host renders Gram's section
+    /// controls in the app's real sidebar — so the magnifier needs a home here. A slim
+    /// right-aligned row: one icon when closed, the field when open. Still far less
+    /// vertical space than the permanent box this replaced.
+    @ViewBuilder
+    private var iPadSearchRow: some View {
+        if canFilter {
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if searchOpen { searchField.frame(maxWidth: 420) }
+                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search") { toggleSearch() }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
     }
 
-    /// The field, but only where there is something to filter. `content` renders a spinner while
-    /// loading and an error card (with a Retry) when the daemon has no gram, and a search box
-    /// pinned above either of those is a live control over nothing. The agents list's field sits
-    /// above an EMPTY LIST, never above an error state.
-    @ViewBuilder
-    private var searchFieldIfFilterable: some View {
-        if showingSaved || phase == .loaded { searchField }
+    /// The header's inline field, shared with the terminal pane (`InlineSearchField`).
+    /// No match counter or chevrons: Gram FILTERS the list rather than walking matches,
+    /// so the result count is the list itself.
+    private var searchField: some View {
+        InlineSearchField(
+            placeholder: "Search messages",
+            text: $search,
+            focus: $searchFocused,
+            matches: nil,
+            onNext: nil,
+            onPrevious: nil,
+            identifierPrefix: "gram-search"
+        )
+    }
+
+    /// Search is offered only where there is something to filter. `content` shows a
+    /// spinner while loading and an error card when the daemon has no gram, and a search
+    /// control over either is a live control over nothing.
+    private var canFilter: Bool { showingSaved || phase == .loaded }
+
+    /// Opens the field and takes focus, or closes it and clears the term — clearing is
+    /// what restores the unfiltered list, so a hidden field can never leave the list
+    /// silently filtered.
+    private func toggleSearch() {
+        if searchOpen {
+            searchOpen = false
+            search = ""
+            searchFocused = false
+        } else {
+            searchOpen = true
+            searchFocused = true
+        }
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -489,18 +525,27 @@ struct GramView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text(showingSaved ? "Saved" : "Gram")
-                .font(Typography.app(20, .semibold))
-                .foregroundStyle(Palette.text)
-            if !showingSaved, unreadCount > 0 {
-                Text("\(unreadCount)")
-                    .font(Typography.machine(11, .semibold))
-                    .foregroundStyle(Palette.ground)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Palette.waiting))
+            if searchOpen {
+                // Replaces the title rather than adding a row, exactly as the terminal
+                // header does, so opening search never changes the header's height.
+                searchField
+            } else {
+                Text(showingSaved ? "Saved" : "Gram")
+                    .font(Typography.app(20, .semibold))
+                    .foregroundStyle(Palette.text)
+                if !showingSaved, unreadCount > 0 {
+                    Text("\(unreadCount)")
+                        .font(Typography.machine(11, .semibold))
+                        .foregroundStyle(Palette.ground)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Palette.waiting))
+                }
+                Spacer()
             }
-            Spacer()
+            if canFilter {
+                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search") { toggleSearch() }
+            }
             // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { showingSaved.toggle() }

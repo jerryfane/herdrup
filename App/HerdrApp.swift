@@ -4112,13 +4112,7 @@ struct TerminalPaneContent: View {
                         .foregroundStyle(Palette.text).lineLimit(1)
                     Spacer()
                 }
-                Button { toggleFind() } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15))
-                        .foregroundStyle(findOpen ? Palette.text : Palette.textDim)
-                }
-                .accessibilityIdentifier("terminal-find")
-                .accessibilityLabel(findOpen ? "Close search" : "Search terminal")
+                InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find") { toggleFind() }
                 Button {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
@@ -4294,53 +4288,21 @@ struct TerminalPaneContent: View {
         }
     }
 
-    /// The inline find field. Replaces the heading rather than adding a row, so opening
-    /// search cannot itself change the terminal's height — a resize mid-search would
-    /// reflow the buffer under the reader and move the match they are looking at.
+    /// The inline find field, shared with Gram's header (`InlineSearchField`).
+    ///
+    /// Replaces the heading rather than adding a header row: growing the header would
+    /// resize the terminal mid-search and reflow the buffer under the reader, moving the
+    /// very match they are looking at.
     private var findField: some View {
-        HStack(spacing: 6) {
-            TextField("Find", text: $findTerm)
-                .textFieldStyle(.plain)
-                .font(Typography.app(14))
-                .foregroundStyle(Palette.text)
-                .tint(Palette.text)
-                .focused($findFocused)
-                .submitLabel(.search)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .accessibilityIdentifier("terminal-find-field")
-                // Return steps to the next match, the way every find bar behaves.
-                .onSubmit { stepFind(.forward) }
-            if findMatches.1 > 0 {
-                Text("\(findMatches.0)/\(findMatches.1)")
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .monospacedDigit()
-                    .accessibilityIdentifier("terminal-find-count")
-            } else if !findTerm.isEmpty {
-                Text("none")
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .accessibilityIdentifier("terminal-find-count")
-            }
-            Button { stepFind(.backward) } label: {
-                Image(systemName: "chevron.up").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(findMatches.1 > 0 ? Palette.textDim : Palette.textFaint)
-            }
-            .disabled(findMatches.1 == 0)
-            .accessibilityIdentifier("terminal-find-previous")
-            .accessibilityLabel("Previous match")
-            Button { stepFind(.forward) } label: {
-                Image(systemName: "chevron.down").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(findMatches.1 > 0 ? Palette.textDim : Palette.textFaint)
-            }
-            .disabled(findMatches.1 == 0)
-            .accessibilityIdentifier("terminal-find-next")
-            .accessibilityLabel("Next match")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        InlineSearchField(
+            placeholder: "Find",
+            text: $findTerm,
+            focus: $findFocused,
+            matches: (index: findMatches.0, total: findMatches.1),
+            onNext: { stepFind(.forward) },
+            onPrevious: { stepFind(.backward) },
+            identifierPrefix: "terminal-find"
+        )
     }
 
     /// Opens the find bar and takes focus, or closes it and hands focus back.
