@@ -62,9 +62,17 @@ final class StoreScreenshotTests: XCTestCase {
         // portrait-shaped file does not by itself mean the layout is portrait. Recording
         // the dimensions lets the caller settle that from the artefact instead of
         // spending a CI round per guess.
+        // Geometry in the NAME: the capture is landscape-shaped but its CONTENT is
+        // portrait rotated 90 degrees, which means the window turned while SwiftUI kept
+        // portrait metrics. Recording the window frame and the app's own idea of its
+        // size distinguishes "the app never adopted landscape" from "the capture API
+        // rotated it", and those need opposite fixes.
         let size = shot.image.size
+        let win = app.windows.firstMatch.frame
         let attachment = XCTAttachment(screenshot: shot)
-        attachment.name = "\(name)-\(Int(size.width))x\(Int(size.height))"
+        attachment.name = "\(name)-img\(Int(size.width))x\(Int(size.height))"
+            + "-win\(Int(win.width))x\(Int(win.height))"
+            + "-orient\(XCUIDevice.shared.orientation.rawValue)"
         attachment.lifetime = .keepAlways
         add(attachment)
         app.terminate()
