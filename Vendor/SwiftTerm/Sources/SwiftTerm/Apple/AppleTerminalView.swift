@@ -360,9 +360,16 @@ extension TerminalView {
     /// and Metal renderers so they stay pixel-consistent.
     func glyphSlotFit (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
     {
-        guard columnWidth >= 1, cellDimension != nil else { return .identity }
+        guard columnWidth >= 1 else { return .identity }
         guard columnWidth >= 2 || !usesPrimaryFont(font) else { return .identity }
+        return fittedGlyphSlot(font: font, glyph: glyph, columnWidth: columnWidth)
+    }
 
+    /// Metric half of ``glyphSlotFit(font:glyph:columnWidth:)``. Renderer loops
+    /// call this only after classifying their invariant run font once.
+    func fittedGlyphSlot (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
+    {
+        guard columnWidth >= 1, cellDimension != nil else { return .identity }
         let cellWidth = cellDimension.width
         let cellHeight = cellDimension.height
         let slotWidth = CGFloat(columnWidth) * cellWidth
@@ -1633,7 +1640,7 @@ extension TerminalView {
                         var computed = [GlyphSlotFit](repeating: .identity, count: runGlyphsCount)
                         var anyScaled = false
                         for i in 0..<runGlyphsCount {
-                            let fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i], columnWidth: prepared.segment.columnWidth)
+                            let fit = fittedGlyphSlot(font: ctRunFont, glyph: runGlyphs[i], columnWidth: prepared.segment.columnWidth)
                             computed[i] = fit
                             glyphPositions[i].x += fit.dx
                             glyphPositions[i].y += fit.dy

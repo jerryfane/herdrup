@@ -1217,9 +1217,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         // decoration loops below keep using the grid column, so
                         // underlines/strikethroughs stay cell-aligned.
                         let fit = needsGlyphFit
-                            ? terminalView.glyphSlotFit(font: glyphRun.font,
-                                                        glyph: glyph,
-                                                        columnWidth: shaped.segment.columnWidth)
+                            ? terminalView.fittedGlyphSlot(font: glyphRun.font,
+                                                              glyph: glyph,
+                                                              columnWidth: shaped.segment.columnWidth)
                             : GlyphSlotFit.identity
                         let basePos = CGPoint(x: lineOrigin.x + (cellWidth * CGFloat(glyphColumn)) + fit.dx,
                                               y: lineOrigin.y + yOffset + ctPos.y + fit.dy)
