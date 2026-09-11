@@ -2250,6 +2250,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             let runFont = runAttributes[.font] as? TTFont ?? terminalView.fontSet.normal
             let ctFont = runFont as CTFont
             let scaledFont = scaledFontFor(font: ctFont, scale: scale)
+            let glyphColumnWidth = max(1, Int(charData.width))
+            let needsGlyphFit =
+                glyphColumnWidth >= 2 || !terminalView.usesPrimaryFont(ctFont)
 
             let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { bufferPointer, count in
                 CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
@@ -2269,7 +2272,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 let ctPos = coreTextPositions[i]
                 // Center the glyph under the cursor the same way as normal text so
                 // a full-width (CJK) character doesn't shift when the caret lands on it.
-                let fit = terminalView.glyphSlotFit(font: ctFont, glyph: glyph, columnWidth: max(1, Int(charData.width)))
+                let fit = needsGlyphFit
+                    ? terminalView.fittedGlyphSlot(font: ctFont, glyph: glyph, columnWidth: glyphColumnWidth)
+                    : GlyphSlotFit.identity
                 let basePos = CGPoint(x: lineOrigin.x + cellWidth * doublePosition * CGFloat(buffer.x) + fit.dx * doublePosition,
                                       y: lineOrigin.y + yOffset + ctPos.y + fit.dy)
                 let pxX = basePos.x * scale + entry.bearing.x * fit.scale
