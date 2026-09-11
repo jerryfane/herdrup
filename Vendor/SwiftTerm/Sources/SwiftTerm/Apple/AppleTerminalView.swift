@@ -369,7 +369,7 @@ extension TerminalView {
     /// call this only after classifying their invariant run font once.
     func fittedGlyphSlot (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
     {
-        guard columnWidth >= 1, cellDimension != nil else { return .identity }
+        guard columnWidth >= 1 else { return .identity }
         let cellWidth = cellDimension.width
         let cellHeight = cellDimension.height
         let slotWidth = CGFloat(columnWidth) * cellWidth
