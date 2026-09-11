@@ -13,13 +13,13 @@ struct AgentLiveActivity: Widget {
                 hostLabel: context.attributes.hostLabel,
                 state: context.state,
                 isStale: context.isStale,
-                destination: ActivityDeepLink.url(for: context.state.agentID)
+                destination: AgentActivityDeepLink.url(for: context.state.agentID)
             )
             .activityBackgroundTint(WidgetPalette.ground)
             .activitySystemActionForegroundColor(WidgetPalette.text)
-            .widgetURL(ActivityDeepLink.url(for: context.state.agentID))
+            .widgetURL(AgentActivityDeepLink.url(for: context.state.agentID))
         } dynamicIsland: { context in
-            let destination = ActivityDeepLink.url(for: context.state.agentID)
+            let destination = AgentActivityDeepLink.url(for: context.state.agentID)
             let staleAttention = context.isStale || context.state.isEntirelyUnconfirmed
 
             return DynamicIsland {
@@ -338,16 +338,6 @@ private struct ElapsedTimer: View {
     }
 }
 
-private enum ActivityDeepLink {
-    static func url(for agentID: String?) -> URL? {
-        guard let agentID, !agentID.isEmpty else { return nil }
-        var components = URLComponents()
-        components.scheme = "herdrup"
-        components.host = "agent"
-        components.queryItems = [URLQueryItem(name: "pane", value: agentID)]
-        return components.url
-    }
-}
 
 private extension AgentActivityState {
     var isEntirelyUnconfirmed: Bool {

@@ -22,14 +22,9 @@ final class PushCenter: ObservableObject {
     /// opens the Gram page then clears it. Held here so a cold-launch tap (app was closed) survives
     /// until the view can act, exactly like `pendingPaneID`.
     @Published var pendingGram: Bool = false
-    /// Handle a Live Activity deep link. Only the app-owned scheme and exact
-    /// `agent` route are accepted; malformed or unrelated URLs are ignored.
+    /// Handle a Live Activity deep link. Malformed or unrelated URLs are ignored.
     func openLiveActivityURL(_ url: URL) {
-        guard url.scheme?.lowercased() == "herdrup", url.host == "agent",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let paneID = components.queryItems?.first(where: { $0.name == "pane" })?.value,
-              !paneID.isEmpty
-        else { return }
+        guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
         tapped(paneID: paneID)
     }
 

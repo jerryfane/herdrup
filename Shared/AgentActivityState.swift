@@ -125,6 +125,28 @@ enum AgentActivityStatus: String, Codable, Hashable {
     }
 }
 
+/// The one URL contract shared by the widget that emits a pane link and the app
+/// that consumes it. URLComponents preserves federated pane ids containing `/` or `:`.
+enum AgentActivityDeepLink {
+    static func url(for agentID: String?) -> URL? {
+        guard let agentID, !agentID.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "herdrup"
+        components.host = "agent"
+        components.queryItems = [URLQueryItem(name: "pane", value: agentID)]
+        return components.url
+    }
+
+    static func agentID(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == "herdrup", url.host == "agent",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let paneID = components.queryItems?.first(where: { $0.name == "pane" })?.value,
+              !paneID.isEmpty
+        else { return nil }
+        return paneID
+    }
+}
+
 /// The summary wording for a Live Activity, in ONE place and in the ActivityKit-free file
 /// so it is testable on Linux. Both widget layouts read it.
 ///

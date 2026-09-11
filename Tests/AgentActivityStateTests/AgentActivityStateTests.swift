@@ -91,6 +91,20 @@ final class AgentActivityStateTests: XCTestCase {
         XCTAssertEqual(back, original)
     }
 
+    func testLiveActivityDeepLinkRoundTripsFederatedPaneID() throws {
+        let paneID = "remote/w1:p7"
+        let url = try XCTUnwrap(AgentActivityDeepLink.url(for: paneID))
+        XCTAssertEqual(AgentActivityDeepLink.agentID(from: url), paneID)
+    }
+
+    func testLiveActivityDeepLinkRejectsUnownedRoutes() throws {
+        XCTAssertNil(AgentActivityDeepLink.url(for: nil))
+        XCTAssertNil(AgentActivityDeepLink.url(for: ""))
+        XCTAssertNil(AgentActivityDeepLink.agentID(from: try XCTUnwrap(URL(string: "https://agent?pane=w1:p7"))))
+        XCTAssertNil(AgentActivityDeepLink.agentID(from: try XCTUnwrap(URL(string: "herdrup://gram?pane=w1:p7"))))
+        XCTAssertNil(AgentActivityDeepLink.agentID(from: try XCTUnwrap(URL(string: "herdrup://agent"))))
+    }
+
     // MARK: - summary wording
 
     /// The wording table. Duplicated on purpose in HerdrKit's AgentList tests, because the
