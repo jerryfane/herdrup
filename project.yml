@@ -122,6 +122,7 @@ targets:
     # Connect — the archive action is untouched, so shipped builds hit the real store.
     scheme:
       testTargets:
+        - HerdrFontTests
         - HerdrUITests
       storeKitConfiguration: App/Herdr.storekit
     info:
@@ -178,9 +179,9 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         # Bundled design fonts (App/Fonts/, added as resources by xcodegen). Geist is
         # the APP voice, IBM Plex Mono the MACHINE voice — the two families the Claude
-        # Design spec (herdr mobile.dc.html) is set in. Registered here so the runtime
-        # loads them; DesignSystem.Typography addresses them by PostScript name. Both
-        # are SIL OFL (licenses alongside the .ttf files).
+        # Design spec (herdr mobile.dc.html) is set in. Nerd Fonts' monospaced symbols
+        # are the terminal's fallback for prompt/tool icons. Registered here so UIKit
+        # loads them; licenses are alongside the .ttf files.
         UIAppFonts:
           - Geist-Regular.ttf
           - Geist-Medium.ttf
@@ -190,6 +191,7 @@ targets:
           - IBMPlexMono-Medium.ttf
           - IBMPlexMono-SemiBold.ttf
           - IBMPlexMono-Bold.ttf
+          - SymbolsNerdFontMono-Regular.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -260,6 +262,24 @@ targets:
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"
+
+  # Hosted UIKit test for the terminal font contract. Running inside Herdr is
+  # essential: UIAppFonts registration belongs to the app bundle, and the test
+  # must prove Core Text can resolve a Nerd Font glyph from that shipped bundle.
+  HerdrFontTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: HerdrFontTests
+    dependencies:
+      - target: Herdr
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.fonttests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
 
   # UI-test bundle — the automated SCROLL RECEIPT. Launches the app in the
   # HERDR_SCREENSHOT_MOCK=scroll pane (a real SwiftTerm view fed 200 lines), swipes it,
