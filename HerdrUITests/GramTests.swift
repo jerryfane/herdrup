@@ -52,14 +52,15 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
                       "the second agent->owner message should render before filtering")
 
-        // Search is now a magnifier in the header that becomes a field, matching the
-        // terminal pane, instead of a box pinned permanently above the list.
+        // The search control must remain above the newest message and clickable. Command-F
+        // opens it on Mac/hardware keyboards; the same command path is exercised here.
         let toggle = app.buttons["gram-search"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the header should offer search")
-        toggle.tap()
+        XCTAssertTrue(toggle.isHittable, "the newest message must not cover the search control")
+        app.typeKey("f", modifierFlags: .command)
 
         let field = app.textFields["gram-search-field"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "tapping the magnifier should reveal the field")
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "Command-F should reveal the search field")
         field.tap()
         field.typeText("Digest")
         // Assert the FIELD took the text before asserting anything about the list: an unfocused
