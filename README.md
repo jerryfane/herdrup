@@ -16,6 +16,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
 
 - **Status board** — every agent grouped by what it needs: *needs you* (amber), *working*, *done*,
   *stopped*. Colour is meaning, not decoration — the one signal that matters reads instantly.
+- **Live Activity** — the Dynamic Island and Lock Screen show how many agents need you, keep working
+  progress visible, and open the exact agent from one quiet fleet-wide status.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
   Resizing preserves the logical history position; live followers stay at the tail. The on-screen
