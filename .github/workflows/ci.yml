@@ -190,6 +190,25 @@ jobs:
             exit 1
           fi
 
+      - name: Verify bundled Nerd Font cascade
+        run: |
+          set -o pipefail
+          mkdir -p TestReceipts
+          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+          if [ -z "$TIMEOUT_BIN" ]; then
+            echo "::error::no timeout binary; font test budget would be unenforceable"
+            exit 1
+          fi
+          "$TIMEOUT_BIN" --signal=INT 10m xcodebuild test \
+            -project Herdr.xcodeproj -scheme Herdr \
+            -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
+            -parallel-testing-enabled NO \
+            -only-testing:HerdrFontTests \
+            -derivedDataPath .build-dd \
+            -clonedSourcePackagesDirPath SourcePackages \
+            -resultBundlePath TestReceipts/font-contract.xcresult \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify
+
       - name: Run shared-terminal UI tests on iPhone and iPad
         run: |
           set -o pipefail
@@ -262,7 +281,7 @@ jobs:
             run_suite "$label-$FOCUS" "$udid" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
             exit "$failed"
           fi
-          # Whole suite includes Scroll/Selection/Paging and both new terminal suites.
+          # Whole iPhone UI suite: Scroll, Selection, Paging, and terminal interactions.
           run_suite iPhone "$IPHONE_UDID" 40m -only-testing:HerdrUITests || failed=1
 
           xcrun simctl boot "$IPAD_UDID" || true
