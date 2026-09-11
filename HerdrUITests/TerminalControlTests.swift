@@ -248,4 +248,33 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         input("px", previous: 0)
         attach("typing-cancels-cover-without-input-replay")
     }
+
+    func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
+        launch("control")
+        let field = app.textFields["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+
+        field.tap()
+        field.typeText("one")
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.3)
+        let oneLine = field.frame
+        let sendBottom = send.frame.maxY
+
+        field.typeText("\ntwo\nthree")
+        Thread.sleep(forTimeInterval: 0.3)
+        let threeLines = field.frame
+        XCTAssertGreaterThan(threeLines.height, oneLine.height)
+        XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue(send.isHittable)
+
+        field.typeText("\nfour")
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue(send.isHittable)
+    }
 }

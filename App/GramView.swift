@@ -911,7 +911,9 @@ struct GramView: View {
                     .foregroundStyle(Palette.text)
                     .tint(Palette.text)
                     .focused($composerFocused)
-                    .lineLimit(1...5)
+                    .lineLimit(1...3)
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                    .accessibilityIdentifier("gram-composer-input")
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
@@ -919,6 +921,7 @@ struct GramView: View {
                 // Dictate into the draft (on-device); appends, never clobbers typed text.
                 // Disabled during a send so dictation can't race the field-clear.
                 MicButton(text: $draft, recording: $draftDictating)
+                    .fixedSize()
                     .disabled(sending || loadingPhoto)
                 Button {
                     Task { await send() }
@@ -937,6 +940,9 @@ struct GramView: View {
                     .frame(width: 38, height: 38)
                     .background(Circle().fill(canSend ? Palette.text : Palette.surface))
                 }
+                .fixedSize()
+                .accessibilityLabel("Send gram")
+                .accessibilityIdentifier("gram-send-button")
                 .disabled(!canSend)
                 // Keyboard send. The field is `axis: .vertical` so Return inserts a newline
                 // (a gram is often multi-line, and `onSubmit` does not fire for a vertical

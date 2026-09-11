@@ -127,4 +127,36 @@ final class GramTests: XCTestCase {
         }
         XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
     }
+
+    func testComposerGrowsUpwardThenScrollsWithoutMovingSend() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+
+        let field = app.textFields["gram-composer-input"]
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+
+        field.tap()
+        field.typeText("one")
+        Thread.sleep(forTimeInterval: 0.3)
+        let oneLine = field.frame
+        let sendBottom = send.frame.maxY
+
+        field.typeText("\ntwo\nthree")
+        Thread.sleep(forTimeInterval: 0.3)
+        let threeLines = field.frame
+        XCTAssertGreaterThan(threeLines.height, oneLine.height)
+        XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue(send.isHittable)
+
+        field.typeText("\nfour")
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue(send.isHittable)
+    }
 }
