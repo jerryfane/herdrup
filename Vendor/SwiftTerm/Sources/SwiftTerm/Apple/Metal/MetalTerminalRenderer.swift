@@ -1199,6 +1199,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 var drawnGlyphsInRun = 0
                 for glyphRun in run.shaperRun.glyphRuns {
                     let scaledFont = scaledFontFor(font: glyphRun.font, scale: scale)
+                    let needsGlyphFit =
+                        shaped.segment.columnWidth >= 2 || !terminalView.usesPrimaryFont(glyphRun.font)
                     for i in 0..<glyphRun.glyphs.count {
                         let glyph = glyphRun.glyphs[i]
                         guard let entry = glyphEntry(for: scaledFont, glyph: glyph) else {
@@ -1214,8 +1216,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         // cell's left edge, mirroring the CoreGraphics path. The
                         // decoration loops below keep using the grid column, so
                         // underlines/strikethroughs stay cell-aligned.
-                        let fit =
-                            shaped.segment.columnWidth >= 2 || !terminalView.usesPrimaryFont(glyphRun.font)
+                        let fit = needsGlyphFit
                             ? terminalView.glyphSlotFit(font: glyphRun.font,
                                                         glyph: glyph,
                                                         columnWidth: shaped.segment.columnWidth)
