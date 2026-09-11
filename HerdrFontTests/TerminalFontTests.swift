@@ -16,6 +16,9 @@ final class TerminalFontTests: XCTestCase {
         var glyph: CGGlyph = 0
         XCTAssertTrue(CTFontGetGlyphsForCharacters(symbolFace, &character, &glyph, 1))
         XCTAssertNotEqual(glyph, 0)
+
+        assertSystemFallback(resolvedFont(for: "漢", from: font))
+        assertSystemFallback(resolvedFont(for: "\u{263a}\u{fe0f}", from: font))
     }
 
     private func resolvedFont(for text: String, from font: UIFont) -> CTFont {
@@ -24,5 +27,15 @@ final class TerminalFontTests: XCTestCase {
             text as CFString,
             CFRange(location: 0, length: (text as NSString).length)
         )
+    }
+
+    private func assertSystemFallback(
+        _ font: CTFont,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let name = CTFontCopyPostScriptName(font) as String
+        XCTAssertNotEqual(name, "SymbolsNFM", file: file, line: line)
+        XCTAssertNotEqual(name, "LastResort", file: file, line: line)
     }
 }

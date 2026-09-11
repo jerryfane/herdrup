@@ -341,16 +341,27 @@ extension TerminalView {
         return CellDimension(width: max(1, snappedWidth), height: max(min(snappedHeight, 8192), 1))
     }
 
+    /// Returns whether `font` is one of the terminal's primary faces. Core Text
+    /// splits fallback glyphs into separate runs, so this is also the cheap gate
+    /// that keeps metric lookups off the ordinary one-column text path.
+    func usesPrimaryFont (_ font: CTFont) -> Bool
+    {
+        CFEqual(font, fontSet.normal as CTFont)
+            || CFEqual(font, fontSet.bold as CTFont)
+            || CFEqual(font, fontSet.italic as CTFont)
+            || CFEqual(font, fontSet.boldItalic as CTFont)
+    }
+
     /// Computes how to center `glyph` within its `columnWidth`-cell slot (and
     /// scale it down if its ink overflows). Returns ``GlyphSlotFit/identity`` for
     /// ordinary single-cell glyphs, so Latin text in a monospace font is rendered
-    /// exactly as before and the hot path stays untouched. Shared by the
-    /// CoreGraphics and Metal glyph renderers so they stay pixel-consistent.
+    /// exactly as before and the hot path stays untouched. Wide glyphs and
+    /// single-cell fallback runs use the metric path. Shared by the CoreGraphics
+    /// and Metal renderers so they stay pixel-consistent.
     func glyphSlotFit (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
     {
-        // Only wide cells need adjusting: a single-width glyph in a monospace
-        // font already fills its cell, so we skip the metric lookups entirely.
-        guard columnWidth >= 2, cellDimension != nil else { return .identity }
+        guard columnWidth >= 1, cellDimension != nil else { return .identity }
+        guard columnWidth >= 2 || !usesPrimaryFont(font) else { return .identity }
 
         let cellWidth = cellDimension.width
         let cellHeight = cellDimension.height
@@ -1618,7 +1629,7 @@ extension TerminalView {
                     let ctRunFont = runFont as CTFont
                     var glyphPositions = positions
                     var scaledFits: [GlyphSlotFit]? = nil
-                    if prepared.segment.columnWidth >= 2 {
+                    if prepared.segment.columnWidth >= 2 || !usesPrimaryFont(ctRunFont) {
                         var computed = [GlyphSlotFit](repeating: .identity, count: runGlyphsCount)
                         var anyScaled = false
                         for i in 0..<runGlyphsCount {

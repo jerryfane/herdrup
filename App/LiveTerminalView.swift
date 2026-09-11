@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import CoreText
 import SwiftUI
 import UIKit
 import SwiftTerm
@@ -864,8 +865,13 @@ struct LiveTerminalView: UIViewRepresentable {
             guard let symbols = UIFont(name: "SymbolsNFM", size: size) else {
                 return primary
             }
+            let systemFallbacks =
+                CTFontCopyDefaultCascadeListForLanguages(primary as CTFont, nil)
+                as? [CTFontDescriptor] ?? []
+            var cascade: [Any] = [symbols.fontDescriptor]
+            cascade.append(contentsOf: systemFallbacks)
             let descriptor = primary.fontDescriptor.addingAttributes([
-                .cascadeList: [symbols.fontDescriptor]
+                .cascadeList: cascade
             ])
             return UIFont(descriptor: descriptor, size: size)
         }
