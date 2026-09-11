@@ -1,8 +1,8 @@
 import Foundation
 import ActivityKit
 
-/// The shape of the Herdr agent-session Live Activity — shared verbatim by the app
-/// (which starts / updates / ends it) and the widget extension (which renders it).
+/// The shape of Herdrup's fleet Live Activity — shared verbatim by the app
+/// (which starts, updates, and ends it) and the widget extension (which renders it).
 ///
 /// Deliberately free of SwiftUI and HerdrKit so it compiles into BOTH targets with no
 /// extra dependencies. `State` and `Status` are TYPEALIASES to types declared in
@@ -10,15 +10,13 @@ import ActivityKit
 /// `Status` when it builds a state (see `LiveActivityController`); the widget only
 /// ever reads these plain values.
 ///
-/// One Live Activity represents ONE SSH session (one machine). Its dynamic
-/// `ContentState` summarises the session's agents: a representative *headline* agent
-/// (the highest-priority one — something that needs you outranks something merely
-/// working, which outranks idle) plus counts, so the surface can say "2 need you".
+/// One Live Activity represents the fleet visible through the connected home.
+/// Its dynamic state carries the highest-priority agent plus fleet-wide counts;
+/// the static host label is only secondary context for that connection.
 struct AgentActivityAttributes: ActivityAttributes {
     typealias ContentState = State
 
-    /// Fixed for the life of the activity: which machine this session is on
-    /// (the saved host's nickname if it has one, else the host itself).
+    /// Fixed secondary context: the connected home's nickname, or its host name.
     var hostLabel: String
 
     /// Re-exposed under the names they had while nested here, so `ContentState`,

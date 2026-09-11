@@ -16,20 +16,21 @@ final class AgentActivityStateTests: XCTestCase {
 
     // MARK: - additive-FIELD tolerance
 
-    /// A payload from a build that predates `unconfirmedCount` must still decode. A
-    /// stored-property default does NOT achieve this: Codable synthesis never consults it
-    /// and throws keyNotFound, which ActivityKit answers by DROPPING the activity, after
-    /// which it can never be reclaimed or ended. Only the hand-written decodeIfPresent does.
-    func testAnOldPayloadWithoutUnconfirmedCountDecodesToZero() throws {
+    /// A payload from a build that predates the additive Live Activity fields must
+    /// still decode. ActivityKit drops an activity when its content state cannot be
+    /// decoded, so every additive field uses `decodeIfPresent`.
+    func testAnOldPayloadWithoutAdditiveFieldsDecodes() throws {
         let s = try decode(#"{"headline":"jarvis","status":"needsYou","needsYouCount":2,"workingCount":1,"totalCount":9}"#)
         XCTAssertEqual(s.unconfirmedCount, 0)
         XCTAssertEqual(s.needsYouCount, 2)
         XCTAssertEqual(s.status, .needsYou)
-        XCTAssertNil(s.workingSince, "an absent workingSince is legitimately nil, not an error")
+        XCTAssertNil(s.workingSince)
+        XCTAssertNil(s.blockedSince)
+        XCTAssertNil(s.agentID)
     }
 
-    /// The tolerance is scoped to that ONE key. A genuinely malformed payload must still
-    /// fail loudly rather than decoding into a plausible zero.
+    /// The tolerance is scoped to documented additive fields. A genuinely malformed
+    /// payload must still fail rather than decoding into a plausible zero.
     ///
     /// `status` IS IN THIS LOOP DELIBERATELY, and it is the subtle member. This type treats
     /// an ABSENT status and an UNRECOGNISED status differently on purpose: an unrecognised
@@ -83,7 +84,8 @@ final class AgentActivityStateTests: XCTestCase {
     func testRoundTripThroughEncodeAndDecode() throws {
         let original = AgentActivityState(headline: "jarvis", status: .working, needsYouCount: 2,
                                           unconfirmedCount: 1, workingCount: 3, totalCount: 9,
-                                          workingSince: 1_788_200_000)
+                                          workingSince: 1_788_200_000, blockedSince: 1_788_199_500,
+                                          agentID: "w1:p7")
         let back = try JSONDecoder().decode(AgentActivityState.self,
                                             from: try JSONEncoder().encode(original))
         XCTAssertEqual(back, original)
