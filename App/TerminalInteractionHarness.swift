@@ -51,8 +51,6 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private var input = ""
     private var pendingInput = ""
     private var receivedHex = ""
-    private var prompt = ""
-    private var promptActions = 0
     private var scenario = Scenario.quiet
     private var kitty = false
     private let paneID: String
@@ -96,14 +94,6 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         case "pane.send_text":
             locked { consume(request.params?.text ?? "") }
             return Self.json(["id": request.id, "result": [:]])
-        case "agent.prompt":
-            locked {
-                prompt = request.params?.text ?? ""
-                promptActions += 1
-            }
-            return Self.json(["id": request.id, "result": [
-                "type": "agent_prompted", "delivery": "submitted"
-            ]])
         case "agent.read":
             return Self.json(["id": request.id, "result": ["read": [
                 "pane_id": paneID, "text": "", "truncated": false,
@@ -294,8 +284,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                   "requests": requests, "failures": failures, "appended": appended,
                   "previous": previousActions, "next": nextActions, "clears": clearActions,
                   "legacyPrevious": legacyPrevious, "kittyPrevious": kittyPrevious,
-                  "input": input, "prompt": prompt, "prompts": promptActions,
-                  "historyIndex": historyIndex, "offset": offset,
+                  "input": input, "historyIndex": historyIndex, "offset": offset,
                   "scenario": scenario.rawValue, "epoch": epoch, "bytes": receivedHex] }
     }
 }
