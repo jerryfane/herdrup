@@ -25,7 +25,13 @@ struct HerdrApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                .onOpenURL { url in
+                    guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
+                    PushCenter.shared.tapped(paneID: paneID)
+                }
+        }
     }
 }
 
@@ -3730,6 +3736,120 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
+private struct TerminalReplyField: UIViewRepresentable {
+    @Binding var text: String
+    let isEnabled: Bool
+    let isFocused: Bool
+    let onFocusChange: (Bool) -> Void
+    let onChange: (String, String) -> Void
+    let onReturn: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> ReplyTextView {
+        let view = ReplyTextView()
+        view.delegate = context.coordinator
+        view.backgroundColor = UIColor(Palette.surface)
+        view.layer.cornerRadius = 20
+        view.textColor = UIColor(Palette.text)
+        view.tintColor = UIColor(Palette.brand)
+        view.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+        view.textContainerInset = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
+        view.autocapitalizationType = .none
+        view.autocorrectionType = .no
+        view.returnKeyType = .send
+        view.isScrollEnabled = false
+        view.accessibilityIdentifier = "terminal-reply-input"
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.updatePlaceholder()
+        return view
+    }
+
+    func updateUIView(_ view: ReplyTextView, context: Context) {
+        context.coordinator.parent = self
+        if view.text != text {
+            view.text = text
+            view.updatePlaceholder()
+            view.invalidateIntrinsicContentSize()
+        }
+        view.isEditable = isEnabled
+        if isFocused, !view.isFirstResponder {
+            view.becomeFirstResponder()
+        } else if !isFocused, view.isFirstResponder {
+            view.resignFirstResponder()
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ReplyTextView,
+                      context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        let natural = uiView.sizeThatFits(
+            CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        ).height
+        let lineHeight = uiView.font?.lineHeight ?? 18
+        let minimum = lineHeight + 22
+        let maximum = lineHeight * 3 + 22
+        uiView.isScrollEnabled = natural > maximum
+        return CGSize(width: width, height: min(max(natural, minimum), maximum))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: TerminalReplyField
+
+        init(_ parent: TerminalReplyField) {
+            self.parent = parent
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            parent.onFocusChange(true)
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            parent.onFocusChange(false)
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            let old = parent.text
+            let new = textView.text ?? ""
+            parent.text = new
+            parent.onChange(old, new)
+            (textView as? ReplyTextView)?.updatePlaceholder()
+            textView.invalidateIntrinsicContentSize()
+        }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                      replacementText replacement: String) -> Bool {
+            guard replacement == "\n" else { return true }
+            parent.onReturn()
+            return false
+        }
+    }
+
+    final class ReplyTextView: UITextView {
+        private let placeholder = UILabel()
+
+        override init(frame: CGRect, textContainer: NSTextContainer?) {
+            super.init(frame: frame, textContainer: textContainer)
+            placeholder.text = "type a reply…"
+            placeholder.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+            placeholder.textColor = UIColor(Palette.textFaint)
+            placeholder.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(placeholder)
+            NSLayoutConstraint.activate([
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+
+        func updatePlaceholder() {
+            placeholder.isHidden = !text.isEmpty
+        }
+    }
+}
+
 /// One agent's live terminal + controls. Its identity (pane id, per-pane @State, terminal
 /// stream) is fixed for its lifetime — it is hosted MOUNTED by `PaneKeepAliveContainer` and
 /// never torn down while its slot exists, so reopening it (and swiping/paging to it) is
@@ -4582,21 +4702,21 @@ struct TerminalPaneContent: View {
                 }
                 .accessibilityLabel("Collapse keyboard")
             }
-            TextField("type a reply…", text: $reply, axis: .vertical)
-                .font(Typography.app(15)).foregroundStyle(Palette.text)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .lineLimit(1...3)
-                .frame(minWidth: 0, maxWidth: .infinity)
-                .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 20))
-                .focused($replyFocused)
-                .accessibilityIdentifier("terminal-reply-input")
-                .disabled(replyDictating)   // dictation owns the field while live
-                // Ctrl-toggle interception: while armed, the next character typed
-                // here becomes a control byte instead of message text.
-                .onChange(of: reply) { oldValue, newValue in
+            TerminalReplyField(
+                text: $reply,
+                isEnabled: !replyDictating,
+                isFocused: replyFocused,
+                onFocusChange: { replyFocused = $0 },
+                onChange: { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
+                },
+                onReturn: {
+                    guard canSend else { return }
+                    ctrlArmed = false
+                    sendTapped()
                 }
+            )
+            .frame(minWidth: 0, maxWidth: .infinity)
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
@@ -4615,9 +4735,9 @@ struct TerminalPaneContent: View {
             if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 savedPromptsButton
             } else {
-                // The button dismisses the software keyboard on iPhone; Return now inserts
-                // a newline and Command+Return sends without changing focus. A deliberate
-                // button dismissal must bump the collapse token so SwiftTerm will resign
+                // Tapping the arrow deliberately dismisses the iPhone keyboard. The
+                // keyboard's Return key activates this same button and delivery path.
+                // Dismissal bumps the collapse token so SwiftTerm will resign
                 // even while a selection is active. Keep that request phone-only: iPad has
                 // no software keyboard here, and its terminal-focus branch would leave an
                 // unconsumed token that could fire during a later unrelated collapse.
@@ -4638,9 +4758,6 @@ struct TerminalPaneContent: View {
                 .fixedSize()
                 .accessibilityLabel("Send reply")
                 .accessibilityIdentifier("terminal-send-button")
-                // Return inserts a newline in the vertical field; Command+Return sends,
-                // matching Gram and keeping hardware-keyboard submission available.
-                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)

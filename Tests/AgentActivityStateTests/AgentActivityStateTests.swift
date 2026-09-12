@@ -16,20 +16,24 @@ final class AgentActivityStateTests: XCTestCase {
 
     // MARK: - additive-FIELD tolerance
 
-    /// A payload from a build that predates `unconfirmedCount` must still decode. A
-    /// stored-property default does NOT achieve this: Codable synthesis never consults it
-    /// and throws keyNotFound, which ActivityKit answers by DROPPING the activity, after
-    /// which it can never be reclaimed or ended. Only the hand-written decodeIfPresent does.
-    func testAnOldPayloadWithoutUnconfirmedCountDecodesToZero() throws {
+    /// A payload from a build that predates the additive activity metadata must still
+    /// decode. Codable synthesis throws `keyNotFound`; ActivityKit then drops the
+    /// activity, so every optional field is decoded with `decodeIfPresent`.
+    func testAnOldPayloadWithoutAdditiveMetadataStillDecodes() throws {
         let s = try decode(#"{"headline":"jarvis","status":"needsYou","needsYouCount":2,"workingCount":1,"totalCount":9}"#)
         XCTAssertEqual(s.unconfirmedCount, 0)
         XCTAssertEqual(s.needsYouCount, 2)
         XCTAssertEqual(s.status, .needsYou)
         XCTAssertNil(s.workingSince, "an absent workingSince is legitimately nil, not an error")
+        XCTAssertNil(s.blockedSince)
+        XCTAssertNil(s.question)
+        XCTAssertNil(s.defaultAnswer)
+        XCTAssertNil(s.agentID)
+        XCTAssertNil(s.updatedAt)
     }
 
-    /// The tolerance is scoped to that ONE key. A genuinely malformed payload must still
-    /// fail loudly rather than decoding into a plausible zero.
+    /// The tolerance is scoped to documented additive metadata. A genuinely malformed
+    /// core payload must still fail loudly rather than decoding into a plausible zero.
     ///
     /// `status` IS IN THIS LOOP DELIBERATELY, and it is the subtle member. This type treats
     /// an ABSENT status and an UNRECOGNISED status differently on purpose: an unrecognised
@@ -81,12 +85,34 @@ final class AgentActivityStateTests: XCTestCase {
 
     /// Encoding is still synthesized, so a state this build writes must be readable by it.
     func testRoundTripThroughEncodeAndDecode() throws {
-        let original = AgentActivityState(headline: "jarvis", status: .working, needsYouCount: 2,
-                                          unconfirmedCount: 1, workingCount: 3, totalCount: 9,
-                                          workingSince: 1_788_200_000)
-        let back = try JSONDecoder().decode(AgentActivityState.self,
-                                            from: try JSONEncoder().encode(original))
+        let original = AgentActivityState(
+            headline: "jarvis",
+            status: .needsYou,
+            needsYouCount: 2,
+            unconfirmedCount: 1,
+            workingCount: 3,
+            totalCount: 9,
+            workingSince: nil,
+            blockedSince: 1_788_200_000,
+            question: "Run migration on prod db?",
+            defaultAnswer: "yes",
+            agentID: "pane:7",
+            updatedAt: 1_788_200_012
+        )
+        let back = try JSONDecoder().decode(
+            AgentActivityState.self,
+            from: try JSONEncoder().encode(original)
+        )
         XCTAssertEqual(back, original)
+    }
+
+    func testActivityDeepLinkRoundTripsOpaquePaneIdentity() {
+        let paneID = "pg:one/two #3"
+        let url = AgentActivityDeepLink.url(agentID: paneID)
+        XCTAssertEqual(url.scheme, "herdrup")
+        XCTAssertEqual(url.host, "agent")
+        XCTAssertEqual(AgentActivityDeepLink.agentID(from: url), paneID)
+        XCTAssertNil(AgentActivityDeepLink.agentID(from: AgentActivityDeepLink.url(agentID: nil)))
     }
 
     // MARK: - summary wording
