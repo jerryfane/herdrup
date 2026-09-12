@@ -3972,7 +3972,7 @@ struct TerminalPaneContent: View {
     @State private var replyDictating = false
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
-    @FocusState private var replyFocused: Bool
+    @State private var replyFocused = false
     /// Terminal-input focus is explicit on touch devices. A terminal tap enables
     /// direct PTY typing; reply submission and keyboard collapse clear it so the
     /// software keyboard can genuinely dismiss instead of immediately moving focus
