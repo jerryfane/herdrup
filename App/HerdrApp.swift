@@ -25,7 +25,13 @@ struct HerdrApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                .onOpenURL { url in
+                    guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
+                    PushCenter.shared.tapped(paneID: paneID)
+                }
+        }
     }
 }
 

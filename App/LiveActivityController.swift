@@ -60,7 +60,7 @@ final class LiveActivityController: ObservableObject {
             // still go through update() directly.
             activity = try Activity.request(
                 attributes: attributes,
-                content: ActivityContent(state: state, staleDate: nil),
+                content: ActivityContent(state: state, staleDate: Date().addingTimeInterval(90)),
                 pushType: .token
             )
             observePushToken()
@@ -87,7 +87,7 @@ final class LiveActivityController: ObservableObject {
     /// Push a new state to the live activity, if there is one.
     func update(_ state: AgentActivityAttributes.ContentState) {
         guard let activity else { return }
-        Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
+        Task { await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(90))) }
     }
 
     /// End and clear the activity immediately (on disconnect / sign-out). Ends EVERY
@@ -132,7 +132,10 @@ final class LiveActivityController: ObservableObject {
             unconfirmedCount: c.unconfirmedCount,
             workingCount: c.workingCount,
             totalCount: c.totalCount,
-            workingSince: c.workingSinceUnixSeconds
+            workingSince: c.workingSinceUnixSeconds,
+            blockedSince: c.blockedSinceUnixSeconds,
+            agentID: c.agentID,
+            updatedAt: Date().timeIntervalSince1970
         )
     }
 

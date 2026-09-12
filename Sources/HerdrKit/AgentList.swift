@@ -331,6 +331,8 @@ public struct AgentList: Equatable, Sendable {
         public let workingCount: Int
         public let totalCount: Int
         public let workingSinceUnixSeconds: Double?
+        public let blockedSinceUnixSeconds: Double?
+        public let agentID: String?
     }
 
     /// THE ATTENTION COUNTS DIVERGE FROM THE ROSTER'S ON PURPOSE, and this is the reason.
@@ -367,6 +369,9 @@ public struct AgentList: Equatable, Sendable {
         let since: Double? = word == "working"
             ? lead?.info.lastCompletedTurn?.completedUnixMs.map { Double($0) / 1000 }
             : nil
+        let blockedSince: Double? = word == "needsYou"
+            ? lead?.info.statusSinceUnixMs.map { Double($0) / 1000 }
+            : nil
         return ActivityContent(
             headline: lead?.title ?? "No agents",
             statusWord: word,
@@ -374,7 +379,9 @@ public struct AgentList: Equatable, Sendable {
             unconfirmedCount: unconfirmed,
             workingCount: rows.filter { $0.group == .working }.count,
             totalCount: rows.count,
-            workingSinceUnixSeconds: since)
+            workingSinceUnixSeconds: since,
+            blockedSinceUnixSeconds: blockedSince,
+            agentID: lead?.info.paneID)
     }
 
     /// THE WORDING SPEC for "N need you", in HerdrKit so every surface can share one rule

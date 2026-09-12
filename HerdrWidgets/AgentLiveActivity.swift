@@ -2,196 +2,393 @@ import SwiftUI
 import WidgetKit
 import ActivityKit
 
-/// The agent-session Live Activity: a lock-screen banner and the Dynamic Island
-/// presentations. It renders `AgentActivityAttributes` — a status dot coloured by
-/// the session's highest-priority agent, that agent's name, and a one-line summary
-/// ("2 need you" / "Working" / "Idle"). Colours mirror the app's status palette
-/// (amber = needs you, blue = working, red = stopped, faint = idle); the widget
-/// keeps its own copy because the app's DesignSystem is app-target only.
 struct AgentLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AgentActivityAttributes.self) { context in
-            // Lock screen / notification-banner presentation.
-            LockScreenView(hostLabel: context.attributes.hostLabel, state: context.state)
-                .activityBackgroundTint(WidgetPalette.ground)
-                .activitySystemActionForegroundColor(WidgetPalette.text)
+            LockScreenView(
+                hostLabel: context.attributes.hostLabel,
+                state: context.state,
+                isStale: context.isStale
+            )
+            .widgetURL(context.state.deepLinkURL)
+            .activityBackgroundTint(WidgetPalette.ground)
+            .activitySystemActionForegroundColor(WidgetPalette.text)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    StatusDot(status: context.state.status)
+                    ExpandedHero(state: context.state, isStale: context.isStale)
                         .padding(.leading, 4)
                 }
+                DynamicIslandExpandedRegion(.center) {
+                    ExpandedHeadline(state: context.state, isStale: context.isStale)
+                }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Text(context.attributes.hostLabel)
-                        .font(.caption2)
-                        .foregroundStyle(WidgetPalette.textFaint)
-                        .lineLimit(1)
+                    FleetTotals(hostLabel: context.attributes.hostLabel, state: context.state)
                         .padding(.trailing, 4)
                 }
-                DynamicIslandExpandedRegion(.center) {
-                    VStack(spacing: 2) {
-                        Text(context.state.headline)
-                            .font(.headline)
-                            .foregroundStyle(WidgetPalette.text)
-                            .lineLimit(1)
-                        // The ticking timer shows ONLY when exactly one agent is working, so it
-                        // unambiguously tracks THAT agent and stops the moment it finishes. The
-                        // Live Activity is one aggregate per machine, so with several agents working
-                        // a single "since" is meaningless (and the timer would appear to run on as
-                        // the busiest agent changes) — show the "N working" count instead.
-                        if context.state.status == .working, context.state.workingCount == 1,
-                           let since = context.state.workingSince {
-                            HStack(spacing: 5) {
-                                Text("Working").font(.caption).foregroundStyle(WidgetPalette.color(.working))
-                                WorkingTimer(since: since, font: .caption)
-                            }
-                            .lineLimit(1)
-                        } else {
-                            Text(summary(context.state))
-                                .font(.caption)
-                                .foregroundStyle(WidgetPalette.color(context.state.status))
-                                .lineLimit(1)
-                        }
+                DynamicIslandExpandedRegion(.bottom) {
+                    if context.state.needsYouCount > 0 {
+                        ActivityAction(
+                            title: "Open",
+                            destination: context.state.deepLinkURL,
+                            outlined: context.isStale
+                        )
+                        .padding(.horizontal, 8)
+                        .padding(.top, 6)
                     }
                 }
             } compactLeading: {
-                StatusDot(status: context.state.status)
+                StatusMark(
+                    status: context.state.status,
+                    diameter: 10,
+                    isUnconfirmed: context.state.markIsUnconfirmed,
+                    isStale: context.isStale
+                )
             } compactTrailing: {
-                // ONLY the count that demands action gets the scarce compact slot. A ticking
-                // timer here widened the notch pill (and kept growing as it counted up), so the
-                // working state stays a bare dot in the compact view; its live elapsed timer
-                // lives in the EXPANDED view and the lock screen, where width isn't constrained.
-                if context.state.needsYouCount > 0 {
-                    Text("\(context.state.needsYouCount)")
-                        .font(.caption2).bold()
-                        .foregroundStyle(WidgetPalette.color(.needsYou))
-                }
+                CompactCount(state: context.state)
             } minimal: {
-                StatusDot(status: context.state.status)
+                StatusMark(
+                    status: context.state.status,
+                    diameter: 14,
+                    isUnconfirmed: context.state.markIsUnconfirmed,
+                    isStale: context.isStale
+                )
+                .frame(width: 36, height: 36)
             }
-            .keylineTint(WidgetPalette.color(context.state.status))
+            .widgetURL(context.state.deepLinkURL)
+            .keylineTint(context.state.markColor)
         }
-    }
-
-    /// One-line summary line: prefer the actionable count, else the status word.
-    private func summary(_ s: AgentActivityAttributes.ContentState) -> String {
-        AgentActivitySummary.line(s)
     }
 }
 
-/// The lock-screen / banner layout: status dot, agent name + summary, host on the
-/// right. Kept compact and legible on the dark banner tint.
-private struct LockScreenView: View {
+private struct CompactCount: View {
+    let state: AgentActivityAttributes.ContentState
+
+    @ViewBuilder
+    var body: some View {
+        if state.needsYouCount > 0 {
+            Text(state.needsYouCount.compactCount)
+                .font(WidgetFont.plexSemiBold(13))
+                .monospacedDigit()
+                .foregroundStyle(WidgetPalette.waiting)
+        } else if state.workingCount > 0 {
+            Text(state.workingCount.compactCount)
+                .font(WidgetFont.plexMedium(13))
+                .monospacedDigit()
+                .foregroundStyle(WidgetPalette.working)
+        }
+    }
+}
+
+private struct ExpandedHero: View {
+    let state: AgentActivityAttributes.ContentState
+    let isStale: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if state.needsYouCount > 0 {
+                HStack(spacing: 7) {
+                    StatusMark(
+                        status: state.status,
+                        diameter: 10,
+                        isUnconfirmed: state.markIsUnconfirmed,
+                        isStale: isStale
+                    )
+                    if state.needsYouCount > 1 {
+                        Text(verbatim: "\(state.needsYouCount)")
+                            .font(WidgetFont.plexSemiBold(26))
+                            .monospacedDigit()
+                            .foregroundStyle(WidgetPalette.waiting)
+                    }
+                }
+                Text("need you")
+                    .font(WidgetFont.geist(12))
+                    .foregroundStyle(WidgetPalette.textDim)
+            } else {
+                StatusMark(status: state.status, diameter: 10, isStale: isStale)
+            }
+        }
+    }
+}
+
+private struct ExpandedHeadline: View {
+    let state: AgentActivityAttributes.ContentState
+    let isStale: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(state.activityHeadline(isStale: isStale))
+                .font(WidgetFont.geistSemiBold(16))
+                .foregroundStyle(WidgetPalette.text)
+                .lineLimit(1)
+            if let question = state.question, !question.isEmpty, !isStale {
+                Text(question)
+                    .font(WidgetFont.plex(12))
+                    .foregroundStyle(WidgetPalette.textDim)
+                    .lineLimit(1)
+            }
+            if isStale {
+                Text("Connection stale")
+                    .font(WidgetFont.plex(11))
+                    .foregroundStyle(WidgetPalette.textFaint)
+                    .lineLimit(1)
+            } else if state.needsYouCount > 0, let since = state.blockedSince {
+                HStack(spacing: 4) {
+                    Text("waiting")
+                    Text(Date(timeIntervalSince1970: since), style: .timer)
+                        .monospacedDigit()
+                }
+                .font(WidgetFont.plex(11))
+                .foregroundStyle(WidgetPalette.textFaint)
+                .lineLimit(1)
+            } else if state.status == .working, let since = state.workingSince {
+                Text(Date(timeIntervalSince1970: since), style: .timer)
+                    .font(WidgetFont.plex(11))
+                    .monospacedDigit()
+                    .foregroundStyle(WidgetPalette.textFaint)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+private struct FleetTotals: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 12) {
-            StatusDot(status: state.status, diameter: 12)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(state.headline)
-                    .font(.headline)
-                    .foregroundStyle(WidgetPalette.text)
-                    .lineLimit(1)
-                // Timer ONLY for a single working agent (see the Dynamic Island note): it then
-                // tracks that agent and stops when it finishes. With several working, the "since"
-                // is ambiguous and looks like it never stops, so show the "N working" count. The
-                // live ticking time IS the motion here — the dot can't animate on a Live Activity.
-                if state.status == .working, state.workingCount == 1, let since = state.workingSince {
-                    HStack(spacing: 5) {
-                        Text("Working").font(.subheadline).foregroundStyle(WidgetPalette.color(.working))
-                        WorkingTimer(since: since)
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(hostLabel)
+            Text("\(state.workingCount) working")
+            Text(state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
+        }
+        .font(WidgetFont.plex(11))
+        .foregroundStyle(WidgetPalette.textFaint)
+        .lineLimit(1)
+    }
+}
+
+private struct LockScreenView: View {
+    let hostLabel: String
+    let state: AgentActivityAttributes.ContentState
+    let isStale: Bool
+    @Environment(\.isLuminanceReduced) private var isLuminanceReduced
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                lockHero
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(state.activityHeadline(isStale: isStale))
+                        .font(WidgetFont.geistSemiBold(18))
+                        .foregroundStyle(WidgetPalette.text)
+                        .lineLimit(1)
+                    if let question = state.question, !question.isEmpty, !isStale {
+                        Text(question)
+                            .font(WidgetFont.plex(15))
+                            .foregroundStyle(WidgetPalette.textDim)
+                            .lineLimit(1)
+                    } else if state.needsYouCount > 0, !isStale {
+                        Text(AgentActivitySummary.line(state))
+                            .font(WidgetFont.plex(13))
+                            .foregroundStyle(state.markColor)
+                            .lineLimit(1)
                     }
-                    .lineLimit(1)
-                } else {
-                    Text(summary)
-                        .font(.subheadline)
-                        .foregroundStyle(WidgetPalette.color(state.status))
-                        .lineLimit(1)
+                    if !isLuminanceReduced {
+                        lockDetail
+                    }
                 }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(hostLabel)
-                    .font(.caption)
-                    .foregroundStyle(WidgetPalette.textFaint)
-                    .lineLimit(1)
-                if state.totalCount > 0 {
-                    Text(state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
-                        .font(.caption2)
-                        .foregroundStyle(WidgetPalette.textFaint)
-                        .lineLimit(1)
-                }
+
+            if state.needsYouCount > 0 {
+                ActivityAction(
+                    title: "Open Herdrup",
+                    destination: state.deepLinkURL,
+                    outlined: isStale || isLuminanceReduced
+                )
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
     }
 
-    private var summary: String { AgentActivitySummary.line(state) }
+    @ViewBuilder
+    private var lockHero: some View {
+        if state.needsYouCount > 0 {
+            VStack(alignment: .leading, spacing: -1) {
+                HStack(alignment: .center, spacing: 7) {
+                    StatusMark(
+                        status: state.status,
+                        diameter: 12,
+                        isUnconfirmed: state.markIsUnconfirmed,
+                        isStale: isStale
+                    )
+                    Text(verbatim: "\(state.needsYouCount)")
+                        .font(WidgetFont.plexSemiBold(34))
+                        .monospacedDigit()
+                        .foregroundStyle(WidgetPalette.waiting)
+                }
+                Text("need you")
+                    .font(WidgetFont.geist(13))
+                    .foregroundStyle(WidgetPalette.textDim)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        } else {
+            StatusMark(status: state.status, diameter: 12, isStale: isStale)
+                .frame(width: 34, height: 34, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder
+    private var lockDetail: some View {
+        if isStale {
+            if let updatedAt = state.updatedAt {
+                HStack(spacing: 3) {
+                    Text("last seen")
+                    Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
+                    Text("· \(hostLabel) unreachable")
+                }
+                .font(WidgetFont.plex(11))
+                .foregroundStyle(WidgetPalette.textFaint)
+                .lineLimit(1)
+            } else {
+                Text("\(hostLabel) unreachable")
+                    .font(WidgetFont.plex(11))
+                    .foregroundStyle(WidgetPalette.textFaint)
+                    .lineLimit(1)
+            }
+        } else {
+            Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
+                .font(WidgetFont.plex(13))
+                .foregroundStyle(WidgetPalette.textFaint)
+                .lineLimit(1)
+        }
+    }
 }
 
-/// A filled status circle; colour carries the meaning (amber = needs you, blue =
-/// working, red = stopped, faint = idle). STATIC on purpose: a Live Activity is
-/// rendered from snapshots and iOS frame-interpolates ONLY time-driven views
-/// (`Text(timerInterval:)` / `ProgressView(timerInterval:)`), so a pulsing or
-/// spinning dot genuinely cannot animate here. The working state's MOTION comes
-/// from the live `WorkingTimer` beside the dot, not from the dot itself.
-private struct StatusDot: View {
+private struct ActivityAction: View {
+    let title: String
+    let destination: URL
+    let outlined: Bool
+
+    var body: some View {
+        Link(destination: destination) {
+            Text(title)
+                .font(WidgetFont.geistSemiBold(15))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(outlined ? WidgetPalette.text : WidgetPalette.ground)
+                .background(outlined ? Color.clear : WidgetPalette.text)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    if outlined {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(WidgetPalette.hairline, lineWidth: 1)
+                    }
+                }
+        }
+    }
+}
+
+private struct StatusMark: View {
     let status: AgentActivityAttributes.Status
     var diameter: CGFloat = 10
+    var isUnconfirmed = false
+    var isStale = false
 
+    @ViewBuilder
     var body: some View {
-        Circle()
-            .fill(WidgetPalette.color(status))
+        switch status {
+        case .needsYou:
+            if isStale || isUnconfirmed {
+                Circle()
+                    .strokeBorder(WidgetPalette.waiting, lineWidth: max(1.5, diameter * 0.16))
+                    .frame(width: diameter, height: diameter)
+            } else {
+                Circle()
+                    .fill(WidgetPalette.waiting)
+                    .frame(width: diameter, height: diameter)
+            }
+        case .working:
+            Circle()
+                .strokeBorder(WidgetPalette.working, lineWidth: max(1.5, diameter * 0.16))
+                .frame(width: diameter, height: diameter)
+        case .idle:
+            Circle()
+                .fill(WidgetPalette.textFaint)
+                .frame(width: max(4, diameter * 0.42), height: max(4, diameter * 0.42))
+                .frame(width: diameter, height: diameter)
+        case .stopped:
+            ZStack {
+                Circle()
+                    .strokeBorder(WidgetPalette.died, lineWidth: max(1.5, diameter * 0.15))
+                Capsule()
+                    .fill(WidgetPalette.died)
+                    .frame(width: diameter * 0.62, height: max(1.5, diameter * 0.14))
+            }
             .frame(width: diameter, height: diameter)
+        }
     }
 }
 
-/// A live, up-counting elapsed-time readout ("1:23") for the working state — the
-/// one thing iOS actually animates in a Live Activity (`Text(_, style: .timer)` is
-/// frame-interpolated, unlike `symbolEffect`/spinners). `since` is Unix SECONDS.
-private struct WorkingTimer: View {
-    let since: Double
-    var font: Font = .subheadline
-
-    var body: some View {
-        Text(Date(timeIntervalSince1970: since), style: .timer)
-            .font(font)
-            .monospacedDigit()
-            .foregroundStyle(WidgetPalette.color(.working))
-    }
+private enum WidgetFont {
+    static func geist(_ size: CGFloat) -> Font { .custom("Geist-Regular", fixedSize: size) }
+    static func geistSemiBold(_ size: CGFloat) -> Font { .custom("Geist-SemiBold", fixedSize: size) }
+    static func plex(_ size: CGFloat) -> Font { .custom("IBMPlexMono", fixedSize: size) }
+    static func plexMedium(_ size: CGFloat) -> Font { .custom("IBMPlexMono-Medm", fixedSize: size) }
+    static func plexSemiBold(_ size: CGFloat) -> Font { .custom("IBMPlexMono-SmBld", fixedSize: size) }
 }
 
-/// The widget's own copy of the app's status palette (DesignSystem is app-only).
-/// Hex values match `Palette` in App/DesignSystem.swift.
-enum WidgetPalette {
-    static let ground     = Color(hex6: 0x13162A)
-    static let text       = Color(hex6: 0xEEF0F7)
-    static let textFaint  = Color(hex6: 0x666D91)
-    static let waiting    = Color(hex6: 0xE9A63C) // amber — needs you
-    static let working    = Color(hex6: 0x5B9BE8) // blue — running
-    static let died       = Color(hex6: 0xE2584E) // red — stopped / exited
-    static let idle       = textFaint
+private enum WidgetPalette {
+    static let ground = Color(hex6: 0x13162A)
+    static let hairline = Color(hex6: 0x2E3358)
+    static let text = Color(hex6: 0xEEF0F7)
+    static let textDim = Color(hex6: 0x99A0BC)
+    static let textFaint = Color(hex6: 0x666D91)
+    static let waiting = Color(hex6: 0xE9A63C)
+    static let died = Color(hex6: 0xE2584E)
+    static let working = Color(hex6: 0x5B9BE8)
 
     static func color(_ status: AgentActivityAttributes.Status) -> Color {
         switch status {
         case .needsYou: return waiting
-        case .working:  return working
-        case .stopped:  return died
-        case .idle:     return idle
+        case .working: return working
+        case .idle: return textFaint
+        case .stopped: return died
         }
     }
 }
 
+private extension AgentActivityState {
+    var markIsUnconfirmed: Bool {
+        needsYouCount > 0 && unconfirmedCount >= needsYouCount
+    }
+
+    var markColor: Color { WidgetPalette.color(status) }
+
+    var displayHeadline: String {
+        needsYouCount == 0 ? "Nothing needs you" : headline
+    }
+
+    func activityHeadline(isStale: Bool) -> String {
+        guard isStale, needsYouCount > 0 else { return displayHeadline }
+        return "\(needsYouCount) may need you"
+    }
+
+    var deepLinkURL: URL { AgentActivityDeepLink.url(agentID: agentID) }
+}
+
+private extension Int {
+    var compactCount: String { self >= 100 ? "99+" : String(self) }
+}
+
 private extension Color {
-    /// Builds a colour from a 0xRRGGBB literal (sRGB), matching DesignSystem's helper.
     init(hex6: UInt32) {
         self.init(
             .sRGB,
-            red:   Double((hex6 >> 16) & 0xFF) / 255,
+            red: Double((hex6 >> 16) & 0xFF) / 255,
             green: Double((hex6 >> 8) & 0xFF) / 255,
-            blue:  Double(hex6 & 0xFF) / 255,
+            blue: Double(hex6 & 0xFF) / 255,
             opacity: 1
         )
     }
