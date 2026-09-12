@@ -3749,6 +3749,7 @@ private struct TerminalReplyField: UIViewRepresentable {
     func makeUIView(context: Context) -> ReplyTextView {
         let view = ReplyTextView()
         view.delegate = context.coordinator
+        view.onReturn = { context.coordinator.parent.onReturn($0) }
         view.backgroundColor = UIColor(Palette.surface)
         view.layer.cornerRadius = 20
         view.textColor = UIColor(Palette.text)
@@ -3835,6 +3836,15 @@ private struct TerminalReplyField: UIViewRepresentable {
 
     final class ReplyTextView: UITextView {
         private let placeholder = UILabel()
+        var onReturn: ((String) -> Void)?
+
+        override func insertText(_ insertedText: String) {
+            guard insertedText != "\n" else {
+                onReturn?(text ?? "")
+                return
+            }
+            super.insertText(insertedText)
+        }
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
             super.init(frame: frame, textContainer: textContainer)
