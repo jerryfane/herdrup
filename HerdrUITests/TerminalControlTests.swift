@@ -249,6 +249,21 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("typing-cancels-cover-without-input-replay")
     }
 
+    func testReplyContainingOnlyNewlinesIsNotSendable() {
+        launch("control")
+        let field = app.textFields["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+
+        field.tap()
+        field.typeText("\n\n")
+        XCTAssertFalse(app.buttons["terminal-send-button"].exists,
+                       "a newline-only reply should stay empty and unsendable")
+
+        field.typeText("message")
+        XCTAssertTrue(app.buttons["terminal-send-button"].waitForExistence(timeout: 5),
+                      "visible text should make the reply sendable")
+    }
+
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
         launch("control")
         let field = app.textFields["terminal-reply-input"]

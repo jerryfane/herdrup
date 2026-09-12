@@ -3904,7 +3904,7 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !replyDictating }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending && !replyDictating }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4612,7 +4612,7 @@ struct TerminalPaneContent: View {
             // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
             // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
             // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespaces).isEmpty {
+            if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 savedPromptsButton
             } else {
                 // The button dismisses the software keyboard on iPhone; Return now inserts
