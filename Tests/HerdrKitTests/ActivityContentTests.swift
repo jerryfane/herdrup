@@ -24,13 +24,14 @@ final class ActivityContentTests: XCTestCase {
     /// AgentInfo can hold a shape the wire cannot produce.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        lastKnownStatus: String? = nil, machineID: String? = nil, reachability: String? = nil,
-        archivedBy: String? = nil
+        statusSinceUnixMs: UInt64? = nil, lastKnownStatus: String? = nil,
+        machineID: String? = nil, reachability: String? = nil, archivedBy: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
+        if let statusSinceUnixMs { obj["status_since_unix_ms"] = statusSinceUnixMs }
         if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
         if let machineID { obj["machine_id"] = machineID }
         if let reachability { obj["reachability"] = reachability }
@@ -530,5 +531,16 @@ final class ActivityContentTests: XCTestCase {
         let since = try XCTUnwrap(l.activityContent.workingSinceUnixSeconds)
         XCTAssertEqual(since, 1_723_000_000.5, accuracy: 0.0001,
                        "the divide must happen in Double; integer division silently truncates the millisecond remainder")
+    }
+
+    func testBlockedContentCarriesItsWaitStartAndExactPaneTarget() throws {
+        let ms: UInt64 = 1_723_000_000_500
+        let l = AgentList(
+            agents: [try agent(pane: "w1:p7", status: "blocked", name: "api-refactor",
+                               statusSinceUnixMs: ms)],
+            livePaneIDs: ["w1:p7"])
+        let blockedSince = try XCTUnwrap(l.activityContent.blockedSinceUnixSeconds)
+        XCTAssertEqual(blockedSince, 1_723_000_000.5, accuracy: 0.0001)
+        XCTAssertEqual(l.activityContent.agentID, "w1:p7")
     }
 }

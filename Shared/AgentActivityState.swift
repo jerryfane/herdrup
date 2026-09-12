@@ -43,7 +43,7 @@ struct AgentActivityState: Codable, Hashable {
     var unconfirmedCount: Int = 0
     /// How many agents are actively working right now.
     var workingCount: Int
-    /// Total agents in the session.
+    /// Total agents across the connected fleet.
     var totalCount: Int
     /// When the headline agent's CURRENT turn started (Unix SECONDS), set only
     /// while `status == .working`. Drives a live `Text(timerInterval:)` in the
@@ -52,26 +52,27 @@ struct AgentActivityState: Codable, Hashable {
     /// A plain Double (not Date) so the daemon-pushed JSON decodes identically,
     /// dodging Swift's Date reference-date Codable strategy. `nil` when not working.
     var workingSince: Double?
+    /// When the headline agent entered its blocked state (Unix seconds). Optional so
+    /// activities and daemon pushes from older builds remain decodable.
+    var blockedSince: Double?
+    /// Stable pane target for the headline agent. The activity deep link binds to
+    /// this id instead of resolving the newest blocked agent again when tapped.
+    var agentID: String?
 
-    /// Hand-written for TWO additive directions, both of which otherwise make the whole
-    /// activity undecodable, which ActivityKit answers by DROPPING the activity so it
-    /// can never be reclaimed or ended.
+    /// Hand-written decoding keeps additive payload changes from making the whole
+    /// activity undecodable, which ActivityKit answers by dropping the activity.
     ///
-    /// 1. An absent `unconfirmedCount`, from an activity persisted by, or a payload
-    ///    minted by, a build predating the field. A stored-property default does not
-    ///    help: Codable synthesis never consults it.
-    /// 2. An UNRECOGNISED `status` word, from a newer app or daemon pushing a bucket
-    ///    this widget binary lacks. Raw-value decoding throws `dataCorrupted` there,
-    ///    which is the same drop-the-activity outcome as case 1. HerdrKit already
-    ///    treats this hazard as first-class with `AgentStatus.unrecognised(String)`;
-    ///    this file cannot carry that arm without a new case, so it falls back to
-    ///    `.needsYou`, matching HerdrKit's rule that something uninterpretable
-    ///    SURFACES rather than sinking. A wrongly-attention-grabbing lock screen is
-    ///    recoverable; a silently dropped activity is not.
+    /// `unconfirmedCount`, `workingSince`, `blockedSince`, and `agentID` are absent
+    /// from older persisted activities and older daemon pushes, so each is decoded
+    /// with `decodeIfPresent`. A stored-property default does not help because
+    /// Codable synthesis never consults it.
     ///
-    /// Every OTHER field stays required exactly as synthesis would have it, so a
-    /// genuinely malformed payload still fails loudly instead of decoding into a
-    /// plausible zero.
+    /// An unrecognised `status` word can arrive from a newer app or daemon. Raw-value
+    /// decoding would throw there, so it falls back to `.needsYou`, matching
+    /// HerdrKit's rule that something uninterpretable surfaces rather than sinks.
+    ///
+    /// Every other field stays required, so a genuinely malformed payload still
+    /// fails instead of decoding into a plausible zero.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         headline = try c.decode(String.self, forKey: .headline)
@@ -82,12 +83,15 @@ struct AgentActivityState: Codable, Hashable {
         workingCount = try c.decode(Int.self, forKey: .workingCount)
         totalCount = try c.decode(Int.self, forKey: .totalCount)
         workingSince = try c.decodeIfPresent(Double.self, forKey: .workingSince)
+        blockedSince = try c.decodeIfPresent(Double.self, forKey: .blockedSince)
+        agentID = try c.decodeIfPresent(String.self, forKey: .agentID)
     }
 
     /// Restored because writing `init(from:)` suppresses the synthesized memberwise
     /// initialiser this type is constructed with everywhere else.
     init(headline: String, status: AgentActivityStatus, needsYouCount: Int, unconfirmedCount: Int = 0,
-         workingCount: Int, totalCount: Int, workingSince: Double?) {
+         workingCount: Int, totalCount: Int, workingSince: Double?,
+         blockedSince: Double? = nil, agentID: String? = nil) {
         self.headline = headline
         self.status = status
         self.needsYouCount = needsYouCount
@@ -95,6 +99,8 @@ struct AgentActivityState: Codable, Hashable {
         self.workingCount = workingCount
         self.totalCount = totalCount
         self.workingSince = workingSince
+        self.blockedSince = blockedSince
+        self.agentID = agentID
     }
 }
 
@@ -116,6 +122,28 @@ enum AgentActivityStatus: String, Codable, Hashable {
         case .idle:     return "Idle"
         case .stopped:  return "Stopped"
         }
+    }
+}
+
+/// The one URL contract shared by the widget that emits a pane link and the app
+/// that consumes it. URLComponents preserves federated pane ids containing `/` or `:`.
+enum AgentActivityDeepLink {
+    static func url(for agentID: String?) -> URL? {
+        guard let agentID, !agentID.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "herdrup"
+        components.host = "agent"
+        components.queryItems = [URLQueryItem(name: "pane", value: agentID)]
+        return components.url
+    }
+
+    static func agentID(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == "herdrup", url.host == "agent",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let paneID = components.queryItems?.first(where: { $0.name == "pane" })?.value,
+              !paneID.isEmpty
+        else { return nil }
+        return paneID
     }
 }
 

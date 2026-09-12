@@ -3,10 +3,9 @@ import Combine
 import ActivityKit
 import HerdrKit
 
-/// Owns the single agent-session Live Activity: starts it when a session connects,
-/// updates it as the agent list changes, ends it on disconnect. Every entry point is
-/// a no-op when the user has Live Activities turned off (Settings) or the platform
-/// can't run them, so callers never have to guard.
+/// Owns the single fleet Live Activity: starts it when the home session connects,
+/// updates it from the federated agent list, and ends it on disconnect. Every entry
+/// point is a no-op when Live Activities are disabled or unavailable.
 ///
 /// A singleton (like `PushCenter.shared`) because two layers drive it: `RootView`
 /// starts/ends it around connect/disconnect, while the agents list view pushes status
@@ -28,10 +27,12 @@ final class LiveActivityController: ObservableObject {
 
     /// Whether the system currently permits Live Activities (user toggle + capability).
     private var enabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
+    /// A missed refresh must become visible instead of leaving an arbitrarily old
+    /// count looking live. Ninety seconds allows one normal poll plus one missed beat.
+    private static var staleDate: Date { Date().addingTimeInterval(90) }
 
-    /// Start the session activity for `hostLabel`, or — if one is already live (e.g. a
-    /// reconnect kept it) — just push the new state. Idempotent: never stacks a second
-    /// banner for one session.
+    /// Start the fleet activity for the connected home, or update the reclaimed
+    /// activity after a reconnect. Idempotent: never stacks a second fleet banner.
     func start(hostLabel: String, state: AgentActivityAttributes.ContentState) {
         guard enabled else { return }
         // ActivityKit PERSISTS activities across app launches: after a kill + relaunch our
@@ -60,7 +61,7 @@ final class LiveActivityController: ObservableObject {
             // still go through update() directly.
             activity = try Activity.request(
                 attributes: attributes,
-                content: ActivityContent(state: state, staleDate: nil),
+                content: ActivityContent(state: state, staleDate: Self.staleDate),
                 pushType: .token
             )
             observePushToken()
@@ -87,7 +88,7 @@ final class LiveActivityController: ObservableObject {
     /// Push a new state to the live activity, if there is one.
     func update(_ state: AgentActivityAttributes.ContentState) {
         guard let activity else { return }
-        Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
+        Task { await activity.update(ActivityContent(state: state, staleDate: Self.staleDate)) }
     }
 
     /// End and clear the activity immediately (on disconnect / sign-out). Ends EVERY
@@ -132,7 +133,9 @@ final class LiveActivityController: ObservableObject {
             unconfirmedCount: c.unconfirmedCount,
             workingCount: c.workingCount,
             totalCount: c.totalCount,
-            workingSince: c.workingSinceUnixSeconds
+            workingSince: c.workingSinceUnixSeconds,
+            blockedSince: c.blockedSinceUnixSeconds,
+            agentID: c.agentID
         )
     }
 

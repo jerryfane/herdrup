@@ -25,7 +25,10 @@ struct HerdrApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                .onOpenURL { PushCenter.shared.openLiveActivityURL($0) }
+        }
     }
 }
 

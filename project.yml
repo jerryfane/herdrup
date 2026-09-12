@@ -144,6 +144,10 @@ targets:
         # this via ASSETCATALOG_COMPILER_APPICON_NAME, but this Info.plist is
         # generated (GENERATE_INFOPLIST_FILE: NO), so we set it explicitly too.
         CFBundleIconName: AppIcon
+        # Live Activity deep links open the exact agent pane.
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - herdrup
         # Live Activities (#90): opt the app in so ActivityKit may start the agent-session
         # activity on the lock screen / Dynamic Island. Required or Activity.request throws.
         NSSupportsLiveActivities: true
@@ -295,6 +299,10 @@ targets:
     sources:
       - path: HerdrWidgets
       - path: Shared
+      # The widget is a separate bundle, so it needs its own copies of the app
+      # logo and the two type families used by the Live Activity design.
+      - path: App/Assets.xcassets
+      - path: App/Fonts
     dependencies:
       - sdk: WidgetKit.framework
       - sdk: SwiftUI.framework
@@ -306,6 +314,15 @@ targets:
         # Must MATCH the app target's, or the App Store rejects the upload. Same
         # reason as the app's: without this, xcodegen writes a default "1.0".
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        UIAppFonts:
+          - Geist-Regular.ttf
+          - Geist-Medium.ttf
+          - Geist-SemiBold.ttf
+          - Geist-Bold.ttf
+          - IBMPlexMono-Regular.ttf
+          - IBMPlexMono-Medium.ttf
+          - IBMPlexMono-SemiBold.ttf
+          - IBMPlexMono-Bold.ttf
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:

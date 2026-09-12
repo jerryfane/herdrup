@@ -22,6 +22,11 @@ final class PushCenter: ObservableObject {
     /// opens the Gram page then clears it. Held here so a cold-launch tap (app was closed) survives
     /// until the view can act, exactly like `pendingPaneID`.
     @Published var pendingGram: Bool = false
+    /// Handle a Live Activity deep link. Malformed or unrelated URLs are ignored.
+    func openLiveActivityURL(_ url: URL) {
+        guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
+        tapped(paneID: paneID)
+    }
 
     private static let tokenKey = "push.deviceToken"
 
