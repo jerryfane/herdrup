@@ -31,6 +31,7 @@ struct AgentLiveActivity: Widget {
                         ActivityAction(
                             title: "Open",
                             destination: context.state.deepLinkURL,
+                            tint: context.state.markColor,
                             outlined: context.isStale
                         )
                         .padding(.horizontal, 8)
@@ -205,6 +206,7 @@ private struct LockScreenView: View {
                 ActivityAction(
                     title: "Open Herdrup",
                     destination: state.deepLinkURL,
+                    tint: state.markColor,
                     outlined: isStale || isLuminanceReduced
                 )
             }
@@ -270,6 +272,7 @@ private struct LockScreenView: View {
 private struct ActivityAction: View {
     let title: String
     let destination: URL
+    let tint: Color
     let outlined: Bool
 
     var body: some View {
@@ -278,7 +281,7 @@ private struct ActivityAction: View {
                 .font(WidgetFont.geistSemiBold(15))
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .foregroundStyle(outlined ? WidgetPalette.text : WidgetPalette.ground)
-                .background(outlined ? Color.clear : WidgetPalette.text)
+                .background(outlined ? Color.clear : tint)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {
                     if outlined {
