@@ -238,7 +238,7 @@ private struct LockScreenView: View {
             .fixedSize(horizontal: true, vertical: false)
         } else {
             StatusMark(status: state.status, diameter: 12, isStale: isStale)
-                .frame(width: 34, height: 34, alignment: .topLeading)
+                .frame(width: 34, height: 34)
         }
     }
 
