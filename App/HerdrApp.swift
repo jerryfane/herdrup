@@ -3837,6 +3837,15 @@ private struct TerminalReplyField: UIViewRepresentable {
             textView.invalidateIntrinsicContentSize()
         }
 
+        func textViewShouldEndEditing(_ textView: UITextView) -> Bool {
+            guard parent.isFocused else { return true }
+            let currentText = textView.text ?? ""
+            if !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                parent.onReturn(currentText)
+            }
+            return false
+        }
+
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText replacement: String) -> Bool {
             guard replacement == "\n" else { return true }
