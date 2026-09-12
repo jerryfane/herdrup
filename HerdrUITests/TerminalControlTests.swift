@@ -256,7 +256,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         field.typeText("message")
         let keyboardSend = app.keyboards.buttons["send"]
         XCTAssertTrue(keyboardSend.waitForExistence(timeout: 5))
-        keyboardSend.tap()
+        keyboardSend.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         wait { ($0["prompt"] as? String) == "message" && ($0["prompts"] as? Int) == 1 }
     }
 
