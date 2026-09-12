@@ -290,6 +290,7 @@ struct GramView: View {
             }
         }
         .background(Palette.ground.ignoresSafeArea())
+        .background { gramKeyboardShortcuts }
         // Poll while the page is open so new agent messages appear without a manual
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
@@ -418,6 +419,8 @@ struct GramView: View {
     private var phoneBody: some View {
         VStack(spacing: 0) {
             header
+                .background(Palette.ground)
+                .zIndex(1)
             Divider().overlay(Palette.hairlineQuiet)
             content
             bannerView
@@ -445,6 +448,8 @@ struct GramView: View {
     private var iPadBody: some View {
         VStack(spacing: 0) {
             iPadSearchRow
+                .layoutPriority(1)
+                .zIndex(1)
             content
             bannerView
             composer
@@ -469,6 +474,7 @@ struct GramView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+            .background(Palette.ground)
         }
     }
 
@@ -504,6 +510,20 @@ struct GramView: View {
             searchOpen = true
             searchFocused = true
         }
+    }
+
+    /// Gram is the active page whenever this view is mounted, so one hidden responder
+    /// command is enough. Reuses the terminal's shortcut pattern: Command-F opens search,
+    /// or moves focus back into an already-open field.
+    private var gramKeyboardShortcuts: some View {
+        Button("Find in Gram") {
+            if searchOpen { searchFocused = true } else { toggleSearch() }
+        }
+        .keyboardShortcut("f", modifiers: .command)
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+        .disabled(!canFilter)
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -911,7 +931,9 @@ struct GramView: View {
                     .foregroundStyle(Palette.text)
                     .tint(Palette.text)
                     .focused($composerFocused)
-                    .lineLimit(1...5)
+                    .lineLimit(1...3)
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                    .accessibilityIdentifier("gram-composer-input")
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
@@ -919,6 +941,7 @@ struct GramView: View {
                 // Dictate into the draft (on-device); appends, never clobbers typed text.
                 // Disabled during a send so dictation can't race the field-clear.
                 MicButton(text: $draft, recording: $draftDictating)
+                    .fixedSize()
                     .disabled(sending || loadingPhoto)
                 Button {
                     Task { await send() }
@@ -937,6 +960,9 @@ struct GramView: View {
                     .frame(width: 38, height: 38)
                     .background(Circle().fill(canSend ? Palette.text : Palette.surface))
                 }
+                .fixedSize()
+                .accessibilityLabel("Send gram")
+                .accessibilityIdentifier("gram-send-button")
                 .disabled(!canSend)
                 // Keyboard send. The field is `axis: .vertical` so Return inserts a newline
                 // (a gram is often multi-line, and `onSubmit` does not fire for a vertical

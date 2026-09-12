@@ -52,14 +52,14 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
                       "the second agent->owner message should render before filtering")
 
-        // Search is now a magnifier in the header that becomes a field, matching the
-        // terminal pane, instead of a box pinned permanently above the list.
+        // The search control must remain above the newest message and clickable.
         let toggle = app.buttons["gram-search"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the header should offer search")
+        XCTAssertTrue(toggle.isHittable, "the newest message must not cover the search control")
         toggle.tap()
 
         let field = app.textFields["gram-search-field"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "tapping the magnifier should reveal the field")
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "the search button should reveal the search field")
         field.tap()
         field.typeText("Digest")
         // Assert the FIELD took the text before asserting anything about the list: an unfocused
@@ -126,5 +126,37 @@ final class GramTests: XCTestCase {
             if readAll.waitForNonExistence(timeout: 4) { cleared = true; break }
         }
         XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
+    }
+
+    func testComposerGrowsUpwardThenScrollsWithoutMovingSend() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+
+        let field = app.textFields["gram-composer-input"]
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+
+        field.tap()
+        field.typeText("one")
+        Thread.sleep(forTimeInterval: 0.3)
+        let oneLine = field.frame
+        let sendBottom = send.frame.maxY
+
+        field.typeText("\ntwo\nthree")
+        Thread.sleep(forTimeInterval: 0.3)
+        let threeLines = field.frame
+        XCTAssertGreaterThan(threeLines.height, oneLine.height)
+        XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue(send.isHittable)
+
+        field.typeText("\nfour")
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue(send.isHittable)
     }
 }

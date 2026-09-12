@@ -3904,7 +3904,7 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !replyDictating }
+    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending && !replyDictating }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4545,7 +4545,7 @@ struct TerminalPaneContent: View {
     }
 
     private var replyBar: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .bottom, spacing: 8) {
             // Collapse-keyboard button — shown while EITHER input owner holds the
             // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
             // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
@@ -4582,41 +4582,20 @@ struct TerminalPaneContent: View {
                 }
                 .accessibilityLabel("Collapse keyboard")
             }
-            TextField("type a reply…", text: $reply)
+            TextField("type a reply…", text: $reply, axis: .vertical)
                 .font(Typography.app(15)).foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .lineLimit(1...3)
+                .frame(minWidth: 0, maxWidth: .infinity)
                 .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(Palette.surface).clipShape(Capsule())
+                .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 20))
                 .focused($replyFocused)
+                .accessibilityIdentifier("terminal-reply-input")
                 .disabled(replyDictating)   // dictation owns the field while live
                 // Ctrl-toggle interception: while armed, the next character typed
                 // here becomes a control byte instead of message text.
                 .onChange(of: reply) { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
-                }
-                .submitLabel(.send)
-                // Return sends the reply and releases only the TERMINAL's claim on key input,
-                // keeping the reply field focused on every idiom — which is what the pre-PR code
-                // did, and why.
-                //
-                // The problem this has to solve is `wantsTerminalKeyFocus`, which carries
-                // `|| idiom == .pad`: if Return clears BOTH owners, that disjunct re-asserts on
-                // iPad and hands key focus to the terminal, so everything typed after Return goes
-                // to the agent's shell as raw keystrokes instead of composing the next reply.
-                // Clearing `terminalInputFocused` alone fixes that without touching the field.
-                //
-                // AN EARLIER VERSION OF THIS ALSO CLEARED `replyFocused` ON iPHONE, to dismiss the
-                // software keyboard. A review pointed out the cost: the reader then has to tap the
-                // field again for every subsequent message, and pre-PR behaviour deliberately kept
-                // focus so a back-and-forth exchange did not cost a tap per message. Dismissal was
-                // a side effect of needing to release the terminal, not a goal, and this PR already
-                // adds the affordance for doing it on purpose — the collapse chevron now renders
-                // for a terminal-raised keyboard too. So the keyboard stays up and the reader
-                // decides when it goes.
-                .onSubmit {
-                    if canSend { sendTapped() }
-                    replyFocused = true
-                    terminalInputFocused = false
                 }
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
@@ -4625,6 +4604,7 @@ struct TerminalPaneContent: View {
             MicButton(text: $reply, diameter: 40, iconSize: 15,
                       isActive: isForeground && !autoDelivering, recording: $replyDictating,
                       onStart: { ctrlArmed = false })
+                .fixedSize()
                 // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
                 // isActive drops on autoDelivering so an in-flight dictation stops before
                 // the auto-deliver clears the reply, and it can't be started during either.
@@ -4632,47 +4612,15 @@ struct TerminalPaneContent: View {
             // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
             // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
             // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespaces).isEmpty {
+            if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 savedPromptsButton
             } else {
-                // THE BUTTON DISMISSES THE KEYBOARD ON iPHONE; RETURN DELIBERATELY DOES NOT.
-                //
-                // Reported by the owner on a real iPhone: tapping send left the keyboard up over
-                // ~40% of the pane, so the reply you just sent — and the agent's response to it —
-                // were behind the keyboard until you dismissed it by hand.
-                //
-                // The distinction from `.onSubmit` above is intent, not inconsistency. Return is
-                // pressed WITH your thumbs already on the keys, and the note on that path records a
-                // review's reasoning for keeping focus: a back-and-forth exchange should not cost a
-                // tap per message. Reaching for the send BUTTON is a deliberate move away from the
-                // keys, so treating it as "I am done typing" matches what the hand just did.
-                //
-                // iPHONE ONLY, and clearing `replyFocused` is the part that must be gated. On iPad
-                // `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so releasing the field hands
-                // key focus straight to the terminal and everything typed next would go to the
-                // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
-                // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
-                // there is nothing to gain there and a real regression to cause.
-                // AND IT MUST BUMP THE COLLAPSE TOKEN, not just clear the flags. Found by review:
-                // clearing the two focus flags alone reproduces the ORIGINAL #203 defect through a
-                // new door. With a word selected, `updateUIView`'s resign is gated on
-                // `deliberateCollapse || !hasActiveSelection`, so it refuses — while clearing the
-                // flags has already hidden the collapse chevron. Net result: keyboard up over the
-                // pane, selection held, and no visible way to dismiss it. That is exactly the state
-                // the chevron fix existed to eliminate, and my send-button change walked back into
-                // it because it copied the flag-clearing and not the token.
-                //
-                // Bumping the token marks this resign DELIBERATE, which is what it is: the reader
-                // pressed send. Same mechanism as the chevron, so there is one way to express
-                // "collapse on purpose" rather than two that disagree. This is the "what did last
-                // round's fix make POSSIBLE" question answered: the chevron fix made a token the
-                // only honest way to resign past a selection, and any new path that clears focus
-                // has to use it.
-                // SCOPED TO iPHONE for the same reason the flag is: on iPad the terminal's
-                // `wantsTerminalKeyFocus` carries the `.pad` disjunct, so the pass after this can
-                // take the become-focus branch and never reach `consumeCollapse` — the token would
-                // sit unconsumed and could fire on some later, unrelated collapse (herdrup#213).
-                // iPad has no software keyboard to dismiss, so there is nothing to request there.
+                // The button dismisses the software keyboard on iPhone; Return now inserts
+                // a newline and Command+Return sends without changing focus. A deliberate
+                // button dismissal must bump the collapse token so SwiftTerm will resign
+                // even while a selection is active. Keep that request phone-only: iPad has
+                // no software keyboard here, and its terminal-focus branch would leave an
+                // unconsumed token that could fire during a later unrelated collapse.
                 Button {
                     sendTapped()
                     terminalInputFocused = false
@@ -4687,6 +4635,12 @@ struct TerminalPaneContent: View {
                         .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
                 }
                 .disabled(!canSend)
+                .fixedSize()
+                .accessibilityLabel("Send reply")
+                .accessibilityIdentifier("terminal-send-button")
+                // Return inserts a newline in the vertical field; Command+Return sends,
+                // matching Gram and keeping hardware-keyboard submission available.
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
