@@ -2,10 +2,9 @@ import XCTest
 import UIKit
 
 final class TerminalControlTests: TerminalInteractionTestCase {
-    /// The pane's only text field. Matched positionally rather than by placeholder:
-    /// the placeholder match can resolve to the label rather than the editable field,
-    /// and a tap on that does not move focus.
-    private var reply: XCUIElement { app.textFields.firstMatch }
+    /// The UIKit-backed terminal reply editor. Its delegate owns Return submission,
+    /// which SwiftUI's multiline TextField could not observe.
+    private var reply: XCUIElement { app.textViews["terminal-reply-input"] }
 
     /// Whether the ctrl one-shot is armed, read from the production cap's own
     /// accessibility label. Idiom-independent, and the only observable that survives a
@@ -251,7 +250,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
 
     func testReplyContainingOnlyNewlinesIsNotSendable() {
         launch("control")
-        let field = app.textFields["terminal-reply-input"]
+        let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
 
         field.tap()
@@ -264,9 +263,20 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "visible text should make the reply sendable")
     }
 
+    func testKeyboardReturnSubmitsReplyToTheAgent() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+
+        field.tap()
+        field.typeText("message")
+        field.typeText("\n")
+        input("message")
+    }
+
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
         launch("control")
-        let field = app.textFields["terminal-reply-input"]
+        let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
 
         field.tap()
@@ -277,7 +287,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
 
-        field.typeText("\ntwo\nthree")
+        field.typeText(String(repeating: " wrapped", count: 20))
         Thread.sleep(forTimeInterval: 0.3)
         let threeLines = field.frame
         XCTAssertGreaterThan(threeLines.height, oneLine.height)
@@ -285,11 +295,11 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue(send.isHittable)
 
-        field.typeText("\nfour")
+        field.typeText(String(repeating: " overflow", count: 20) + " tail-token")
         Thread.sleep(forTimeInterval: 0.3)
         XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
-        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue((field.value as? String)?.contains("tail-token") == true)
         XCTAssertTrue(send.isHittable)
     }
 }
