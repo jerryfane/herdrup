@@ -64,7 +64,10 @@ extension CaretView {
             // and scale an oversized glyph down to match (drawTerminalContents
             // does the same via CTFontCreateCopyWithAttributes). The caret bounds
             // span `glyphColumnWidth` cells, so the centered glyph isn't clipped.
-            let fits = runGlyphs.map { terminal.glyphSlotFit(font: ctRunFont, glyph: $0, columnWidth: glyphColumnWidth) }
+            let needsGlyphFit = glyphColumnWidth >= 2 || !terminal.usesPrimaryFont(ctRunFont)
+            let fits = needsGlyphFit
+                ? runGlyphs.map { terminal.fittedGlyphSlot(font: ctRunFont, glyph: $0, columnWidth: glyphColumnWidth) }
+                : [GlyphSlotFit](repeating: .identity, count: runGlyphsCount)
             var positions = fits.map { CGPoint(x: $0.dx, y: yOffset + $0.dy) }
             if fits.contains(where: { $0.scale != 1 }) {
                 for i in 0..<runGlyphsCount {

@@ -1,5 +1,6 @@
 #if canImport(UIKit) && (os(iOS) || os(visionOS))
 import UIKit
+import CoreText
 import XCTest
 @testable import SwiftTerm
 
@@ -136,6 +137,24 @@ final class TerminalViewGeometryTests: XCTestCase {
         view.feed(text: "\(escape)[?2026l")
         XCTAssertFalse(terminal.synchronizedOutputActive)
         XCTAssertEqual(synchronizationChanges, [true, false])
+    }
+
+    func testOversizedSingleColumnFallbackFitsPrimaryCell() {
+        let view = makeView()
+        let fallback = CTFontCreateWithName("Helvetica" as CFString, 14, nil)
+        var character = UniChar(0x57)
+        var glyph: CGGlyph = 0
+        XCTAssertTrue(CTFontGetGlyphsForCharacters(fallback, &character, &glyph, 1))
+
+        let fit = view.glyphSlotFit(font: fallback, glyph: glyph, columnWidth: 1)
+        var ink = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(fallback, .horizontal, &glyph, &ink, 1)
+
+        XCTAssertLessThan(fit.scale, 1)
+        XCTAssertLessThanOrEqual(ink.width * fit.scale, view.cellDimension.width + 0.001)
+
+        let primary = view.font as CTFont
+        XCTAssertTrue(view.glyphSlotFit(font: primary, glyph: glyph, columnWidth: 1).isIdentity)
     }
 }
 #endif
