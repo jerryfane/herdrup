@@ -255,7 +255,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         field.tap()
         field.typeText("message")
         field.typeText("\n")
-        input("message")
+        wait { ($0["prompt"] as? String) == "message" && ($0["prompts"] as? Int) == 1 }
     }
 
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
