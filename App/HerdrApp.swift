@@ -3820,6 +3820,17 @@ private struct TerminalReplyField: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             let old = parent.text
             let new = textView.text ?? ""
+            if new.hasSuffix("\n") || new.hasSuffix("\r") {
+                let submission = new.hasSuffix("\r\n")
+                    ? String(new.dropLast(2))
+                    : String(new.dropLast())
+                textView.text = submission
+                parent.text = submission
+                (textView as? ReplyTextView)?.updatePlaceholder()
+                textView.invalidateIntrinsicContentSize()
+                parent.onReturn(submission)
+                return
+            }
             parent.text = new
             parent.onChange(old, new)
             (textView as? ReplyTextView)?.updatePlaceholder()
