@@ -79,28 +79,12 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         attach("two-taps-cancel-without-input")
     }
 
-    /// The reply path takes the keyboard FIRST, from a fresh launch.
-    ///
-    /// Handing the responder over from an already-focused terminal does not reliably
-    /// move SwiftUI focus in the simulator, and typing then fails with "neither element
-    /// nor any descendant has keyboard focus" — a harness limitation, not a product
-    /// one. Ordering the case this way exercises the same production path
-    /// (`handleReplyChange`) without depending on that handover.
+    /// The reply path takes the keyboard first, from a fresh launch. Typing the chord
+    /// is the observable focus check; this must not depend on a SwiftUI toolbar control
+    /// because the reply editor is UIKit-backed.
     func testReplyFieldStillConsumesControl() throws {
         launch("control")
-        // FOCUS IS READ FROM THE APP, NOT FROM `app.keyboards`. The simulator may have
-        // the host hardware keyboard attached, in which case iOS shows no software
-        // keyboard for a focused field at all and the keyboard query is simply wrong.
-        // The production chevron is gated on `replyFocused`, so its presence is the
-        // app's own statement that this field owns the input.
-        for attempt in 0..<3 {
-            // Tap INSIDE the text, not at the element's centre: the centre of a SwiftUI
-            // TextField row can land on padding that does not begin editing.
-            reply.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
-            if onscreen("Collapse keyboard", timeout: 5) != nil { break }
-            XCTAssertNotEqual(attempt, 2,
-                              "the reply field never took focus. \(elementDump()) \(fieldDump())")
-        }
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
         let draft = reply.value as? String
         cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }

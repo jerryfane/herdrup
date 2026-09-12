@@ -3742,7 +3742,7 @@ private struct TerminalReplyField: UIViewRepresentable {
     let isFocused: Bool
     let onFocusChange: (Bool) -> Void
     let onChange: (String, String) -> Void
-    let onReturn: () -> Void
+    let onReturn: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3828,7 +3828,7 @@ private struct TerminalReplyField: UIViewRepresentable {
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText replacement: String) -> Bool {
             guard replacement == "\n" else { return true }
-            parent.onReturn()
+            parent.onReturn(textView.text ?? "")
             return false
         }
     }
@@ -4718,10 +4718,12 @@ struct TerminalPaneContent: View {
                 onChange: { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 },
-                onReturn: {
-                    guard canSend else { return }
+                onReturn: { currentText in
+                    guard !sending, !replyDictating,
+                          !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    else { return }
                     ctrlArmed = false
-                    sendTapped()
+                    sendTapped(currentText)
                 }
             )
             .frame(minWidth: 0, maxWidth: .infinity)
@@ -5009,13 +5011,13 @@ struct TerminalPaneContent: View {
 
     /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
     /// (never rawKeys, at any time); a normal reply uses the usual routing.
-    private func sendTapped() {
+    private func sendTapped(_ text: String? = nil) {
         // An explicit Send ALWAYS takes over from any pending auto-deliver and goes
         // through the normal prompt path (`send` → agent.prompt, server-gated). It must
         // never be gated on the pre-fill delivery succeeding — that is exactly what could
         // trap the reader on a stuck pre-fill with the reply bar locked.
         pendingPrefill = false
-        send(.submitText(reply))
+        send(.submitText(text ?? reply))
     }
 }
 
