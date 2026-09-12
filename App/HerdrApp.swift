@@ -3749,7 +3749,6 @@ private struct TerminalReplyField: UIViewRepresentable {
     func makeUIView(context: Context) -> ReplyTextView {
         let view = ReplyTextView()
         view.delegate = context.coordinator
-        view.onReturn = { context.coordinator.parent.onReturn($0) }
         view.backgroundColor = UIColor(Palette.surface)
         view.layer.cornerRadius = 20
         view.textColor = UIColor(Palette.text)
@@ -3820,30 +3819,10 @@ private struct TerminalReplyField: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             let old = parent.text
             let new = textView.text ?? ""
-            if new.hasSuffix("\n") || new.hasSuffix("\r") {
-                let submission = new.hasSuffix("\r\n")
-                    ? String(new.dropLast(2))
-                    : String(new.dropLast())
-                textView.text = submission
-                parent.text = submission
-                (textView as? ReplyTextView)?.updatePlaceholder()
-                textView.invalidateIntrinsicContentSize()
-                parent.onReturn(submission)
-                return
-            }
             parent.text = new
             parent.onChange(old, new)
             (textView as? ReplyTextView)?.updatePlaceholder()
             textView.invalidateIntrinsicContentSize()
-        }
-
-        func textViewShouldEndEditing(_ textView: UITextView) -> Bool {
-            guard parent.isFocused else { return true }
-            let currentText = textView.text ?? ""
-            if !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                parent.onReturn(currentText)
-            }
-            return false
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
@@ -3856,15 +3835,6 @@ private struct TerminalReplyField: UIViewRepresentable {
 
     final class ReplyTextView: UITextView {
         private let placeholder = UILabel()
-        var onReturn: ((String) -> Void)?
-
-        override func insertText(_ insertedText: String) {
-            guard insertedText != "\n" else {
-                onReturn?(text ?? "")
-                return
-            }
-            super.insertText(insertedText)
-        }
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
             super.init(frame: frame, textContainer: textContainer)

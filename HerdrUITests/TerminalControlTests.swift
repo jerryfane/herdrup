@@ -247,17 +247,20 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "visible text should make the reply sendable")
     }
 
-    func testKeyboardReturnSubmitsReplyToTheAgent() {
+    func testTypingKeepsReplyFocusedAndSendDeliversToAgent() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
 
         field.tap()
-        field.typeText("message")
-        let keyboardSend = app.keyboards.buttons["send"]
-        XCTAssertTrue(keyboardSend.waitForExistence(timeout: 5))
-        keyboardSend.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        wait { ($0["prompt"] as? String) == "message" && ($0["prompts"] as? Int) == 1 }
+        field.typeText("w")
+        field.typeText("ord")
+        XCTAssertEqual(field.value as? String, "word")
+
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        send.tap()
+        wait { ($0["prompt"] as? String) == "word" && ($0["prompts"] as? Int) == 1 }
     }
 
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
