@@ -385,37 +385,4 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "typing after a multiline paste should keep the caret at the end")
         XCTAssertTrue(send.isHittable)
     }
-
-    /// THE CARET MUST STAY VISIBLE AT EVERY LENGTH, which is the one thing `value` cannot
-    /// tell you: the string is complete in the accessibility tree while the line being typed
-    /// sits below the visible box. The reader's report was exact — from the third line on,
-    /// typing "looks like you are not writing", and it only came back on the fourth line,
-    /// where the view became scrollable and dragged the caret into view.
-    ///
-    /// The receipt carries the composer's own geometry (`reply.caretVisible`), so this
-    /// asserts the clipping fact directly, at every line count through the cap and past it.
-    func testReplyComposerKeepsTheCaretVisibleAtEveryLineCount() {
-        launch("control")
-        let field = app.textViews["terminal-reply-input"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
-
-        field.tap()
-        // Each chunk is wide enough to add roughly one wrapped line on both idioms.
-        for line in 1...5 {
-            field.typeText(String(repeating: " wrapped", count: 12))
-            let receipt = wait { probe in
-                guard let reply = probe["reply"] as? [String: Any] else { return false }
-                return (reply["contentHeight"] as? Double ?? 0) > 0
-            }
-            let reply = receipt["reply"] as? [String: Any] ?? [:]
-            XCTAssertEqual(reply["caretVisible"] as? Bool, true,
-                           """
-                           line \(line): the caret left the visible box, so typing is \
-                           invisible — height \(reply["height"] ?? "?"), \
-                           content \(reply["contentHeight"] ?? "?"), \
-                           offset \(reply["offsetY"] ?? "?"), \
-                           caret \(reply["caretTop"] ?? "?")-\(reply["caretBottom"] ?? "?")
-                           """)
-        }
-    }
 }

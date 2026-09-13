@@ -3761,39 +3761,6 @@ private enum PastedFile {
     }
 }
 
-#if DEBUG
-/// DEBUG-only mirror of the reply composer's scroll geometry.
-///
-/// It exists because "the text I am typing is invisible" is a CLIPPING fact — caret below
-/// the visible box — that no XCUITest query can see: `value` still returns the full string
-/// while the line being typed is out of view. The terminal receipt carries these numbers so
-/// a test can assert the caret is inside the box instead of eyeballing a screenshot.
-@MainActor
-enum ReplyComposerProbe {
-    private(set) static var geometry: [String: Any] = [:]
-
-    static func record(_ view: UITextView) {
-        var caretTop = 0.0
-        var caretBottom = 0.0
-        if let selection = view.selectedTextRange {
-            let caret = view.caretRect(for: selection.end)
-            caretTop = caret.minY
-            caretBottom = caret.maxY
-        }
-        geometry = [
-            "height": Double(view.bounds.height),
-            "contentHeight": Double(view.contentSize.height),
-            "offsetY": Double(view.contentOffset.y),
-            "caretTop": caretTop,
-            "caretBottom": caretBottom,
-            // The single fact the receipt exists for: is the caret inside the visible box?
-            "caretVisible": caretBottom <= Double(view.contentOffset.y + view.bounds.height) + 1
-                && caretTop >= Double(view.contentOffset.y) - 1,
-        ]
-    }
-}
-#endif
-
 private struct TerminalReplyField: UIViewRepresentable {
     @Binding var text: String
     let isEnabled: Bool
@@ -4001,17 +3968,11 @@ private struct TerminalReplyField: UIViewRepresentable {
         override func layoutSubviews() {
             super.layoutSubviews()
             refreshScrollMode()
-            #if DEBUG
-            ReplyComposerProbe.record(self)
-            #endif
             guard shouldRevealCaretAfterLayout else { return }
             shouldRevealCaretAfterLayout = false
             guard let selection = selectedTextRange else { return }
             let caret = caretRect(for: selection.end).insetBy(dx: 0, dy: -4)
             scrollRectToVisible(caret, animated: false)
-            #if DEBUG
-            ReplyComposerProbe.record(self)
-            #endif
         }
 
 
