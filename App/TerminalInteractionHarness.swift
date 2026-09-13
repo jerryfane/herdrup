@@ -461,6 +461,12 @@ final class TerminalInteractionHarness: ObservableObject {
         case "paste-batch":
             UIPasteboard.general.string = "paste-payload"
             surfaces[activeID]?.view?.paste(nil)
+        case "photo-pasteboard":
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24))
+            UIPasteboard.general.image = renderer.image { context in
+                UIColor.systemBlue.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
+            }
         case "batch-insert":
             surfaces[activeID]?.view?.insertText("batch-payload")
         case "ime-commit":
@@ -511,7 +517,8 @@ private struct TerminalInteractionControls: View {
     private let ticks = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private static let commands =
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
-         "reset", "server", "switch", "close", "bounce", "paste-batch", "batch-insert", "ime-commit"]
+         "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
+         "batch-insert", "ime-commit"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

@@ -262,8 +262,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
-        UIPasteboard.general.image = UIImage(systemName: "photo.fill")
-        defer { UIPasteboard.general.items = [] }
+        command("photo-pasteboard")
 
         field.press(forDuration: 1)
         let paste = app.descendants(matching: .any)
