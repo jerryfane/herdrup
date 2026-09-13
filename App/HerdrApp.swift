@@ -4901,16 +4901,17 @@ struct TerminalPaneContent: View {
             actionNote = "Photo attachments need a named agent with a ready prompt."
             return
         }
-        guard let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
-            UTType($0).conforms(to: .image)
-        }) else {
+        guard let type = provider.registeredTypeIdentifiers.lazy
+            .compactMap({ UTType($0) })
+            .first(where: { $0.conforms(to: .image) })
+        else {
             actionNote = "Couldn't add that photo."
             return
         }
 
         loadingReplyPhoto = true
         ctrlArmed = false
-        let type = UTType(typeIdentifier)
+        let typeIdentifier = type.identifier
         let ext = type.preferredFilenameExtension ?? "jpg"
         let name: String = {
             var candidate = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
