@@ -467,6 +467,8 @@ final class TerminalInteractionHarness: ObservableObject {
                 UIColor.systemBlue.setFill()
                 context.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
             }
+        case "reply-multiline-pasteboard":
+            UIPasteboard.general.string = "pasted-one\npasted-two\npasted-three\npasted-four\npasted-tail"
         case "batch-insert":
             surfaces[activeID]?.view?.insertText("batch-payload")
         case "ime-commit":
@@ -518,6 +520,7 @@ private struct TerminalInteractionControls: View {
     private static let commands =
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
+         "reply-multiline-pasteboard",
          "batch-insert", "ime-commit"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 

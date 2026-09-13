@@ -3758,6 +3758,9 @@ private struct TerminalReplyField: UIViewRepresentable {
         view.tintColor = UIColor(Palette.brand)
         view.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
         view.textContainerInset = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
+        let lineHeight = view.font?.lineHeight ?? 18
+        view.minimumHeight = lineHeight + 22
+        view.maximumHeight = lineHeight * 3 + 22
         view.autocapitalizationType = .none
         view.autocorrectionType = .no
         view.returnKeyType = .send
@@ -3775,6 +3778,7 @@ private struct TerminalReplyField: UIViewRepresentable {
             view.text = text
             view.updatePlaceholder()
             view.invalidateIntrinsicContentSize()
+            view.refreshScrollMode()
         }
         view.isEditable = isEnabled
         if isFocused {
@@ -3790,14 +3794,10 @@ private struct TerminalReplyField: UIViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ReplyTextView,
                       context: Context) -> CGSize? {
         guard let width = proposal.width, width > 0 else { return nil }
-        let natural = uiView.sizeThatFits(
-            CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
-        ).height
-        let lineHeight = uiView.font?.lineHeight ?? 18
-        let minimum = lineHeight + 22
-        let maximum = lineHeight * 3 + 22
-        uiView.updateScrollMode(contentHeight: natural, maximumHeight: maximum)
-        return CGSize(width: width, height: min(max(natural, minimum), maximum))
+        let natural = uiView.fittingHeight(for: width)
+        return CGSize(
+            width: width,
+            height: min(max(natural, uiView.minimumHeight), uiView.maximumHeight))
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -3827,6 +3827,7 @@ private struct TerminalReplyField: UIViewRepresentable {
             parent.onChange(old, new)
             (textView as? ReplyTextView)?.updatePlaceholder()
             textView.invalidateIntrinsicContentSize()
+            (textView as? ReplyTextView)?.refreshScrollMode()
             (textView as? ReplyTextView)?.requestCaretReveal()
         }
 
@@ -3841,6 +3842,8 @@ private struct TerminalReplyField: UIViewRepresentable {
     final class ReplyTextView: UITextView {
         var onPasteImage: ((NSItemProvider) -> Void)?
         private let placeholder = UILabel()
+        var minimumHeight: CGFloat = 40
+        var maximumHeight: CGFloat = 76
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
             super.init(frame: frame, textContainer: textContainer)
@@ -3880,8 +3883,15 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         private var shouldRevealCaretAfterLayout = false
 
-        func updateScrollMode(contentHeight: CGFloat, maximumHeight: CGFloat) {
-            let shouldScroll = contentHeight > maximumHeight + 0.5
+        func fittingHeight(for width: CGFloat) -> CGFloat {
+            super.sizeThatFits(
+                CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            ).height
+        }
+
+        func refreshScrollMode() {
+            guard bounds.width > 0 else { return }
+            let shouldScroll = fittingHeight(for: bounds.width) > maximumHeight + 0.5
             guard isScrollEnabled != shouldScroll else { return }
             isScrollEnabled = shouldScroll
             alwaysBounceVertical = shouldScroll
@@ -3900,6 +3910,7 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         override func layoutSubviews() {
             super.layoutSubviews()
+            refreshScrollMode()
             guard shouldRevealCaretAfterLayout else { return }
             shouldRevealCaretAfterLayout = false
             guard isScrollEnabled, let selection = selectedTextRange else { return }

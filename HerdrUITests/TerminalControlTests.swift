@@ -319,6 +319,20 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         field.typeText(" after-scroll")
         XCTAssertTrue((field.value as? String)?.contains("after-scroll") == true,
                       "scrolling overflow text should keep the composer focused and editable")
+        command("reply-multiline-pasteboard")
+        let end = field.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.8))
+        end.tap()
+        end.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5))
+        paste.tap()
+        XCTAssertTrue((field.value as? String)?.contains("pasted-tail") == true,
+                      "a multiline paste should remain in the scrolling composer")
+        field.typeText(" after-paste")
+        XCTAssertTrue((field.value as? String)?.hasSuffix("pasted-tail after-paste") == true,
+                      "typing after a multiline paste should keep the caret at the end")
         XCTAssertTrue(send.isHittable)
     }
 }
