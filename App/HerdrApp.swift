@@ -3744,7 +3744,9 @@ private struct TerminalReplyField: UIViewRepresentable {
     let onFocusChange: (Bool) -> Void
     let onChange: (String, String) -> Void
     let onReturn: (String) -> Void
-    let onPasteImage: (NSItemProvider) -> Void
+    /// Returns false when the composer declines the photo, so `paste(_:)` can fall through
+    /// to UIKit instead of turning the paste into a no-op.
+    let onPasteImage: (NSItemProvider) -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3817,7 +3819,15 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         func textViewDidEndEditing(_ textView: UITextView) {
             nativeFocusPendingStateSync = false
-            parent.onFocusChange(false)
+            // `resignFirstResponder()` and `isEditable = false` both run from INSIDE
+            // updateUIView and both end editing synchronously, so writing the focus binding
+            // straight through from here mutates SwiftUI state during its own update pass
+            // ("Modifying state during view update, this will cause undefined behavior").
+            // Hop off the pass, and skip the write when the declared state already agrees —
+            // @State has no same-value short circuit, so an equal write still publishes.
+            guard parent.isFocused else { return }
+            let notify = parent.onFocusChange
+            Task { @MainActor in notify(false) }
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -3840,7 +3850,7 @@ private struct TerminalReplyField: UIViewRepresentable {
     }
 
     final class ReplyTextView: UITextView {
-        var onPasteImage: ((NSItemProvider) -> Void)?
+        var onPasteImage: ((NSItemProvider) -> Bool)?
         private let placeholder = UILabel()
         var minimumHeight: CGFloat = 40
         var maximumHeight: CGFloat = 76
@@ -3860,22 +3870,31 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { nil }
+        // `hasImages`, NOT `itemProviders`. UIKit calls canPerformAction while it BUILDS the
+        // edit menu — before the user has asked for anything — and reading `itemProviders`
+        // there is a pasteboard CONTENT read, which for a photo copied in Photos or Safari
+        // (the only real case here) raises the system "Allow Paste?" prompt on every
+        // long-press. `hasImages` answers the same question from metadata and never prompts.
+        // The content read inside `paste(_:)` below is user-initiated, so it is fine.
         override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-            if action == #selector(paste(_:)),
-               UIPasteboard.general.itemProviders.contains(where: {
-                   $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
-               })
-            {
+            if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
                 return true
             }
             return super.canPerformAction(action, withSender: sender)
         }
 
         override func paste(_ sender: Any?) {
-            if let provider = UIPasteboard.general.itemProviders.first(where: {
-                $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
-            }) {
-                onPasteImage?(provider)
+            // Text wins when the pasteboard carries both. Copying an image out of Safari
+            // registers a URL alongside the image, and a composer that swallowed the item as
+            // a photo dropped the text the user was actually after. Every bail-out path —
+            // no image, text present, or a handler that declines (no named intent agent) —
+            // falls through to UIKit's own paste, so plain text always pastes.
+            if UIPasteboard.general.hasImages, !UIPasteboard.general.hasStrings,
+               let provider = UIPasteboard.general.itemProviders.first(where: {
+                   $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+               }),
+               onPasteImage?(provider) == true
+            {
                 return
             }
             super.paste(sender)
@@ -4838,7 +4857,14 @@ struct TerminalPaneContent: View {
                 replyPhotoStrip
                 TerminalReplyField(
                     text: $reply,
-                    isEnabled: !replyDictating && !sending && !loadingReplyPhoto,
+                    // ONLY dictation disables the field. Gating it on `sending` (and on the
+                    // photo upload, which holds for upload + post + prompt) set
+                    // `isEditable = false` on a first-responder text view, which ends editing:
+                    // the keyboard visibly dropped on EVERY reply and nothing re-acquired it,
+                    // so consecutive replies needed a re-tap each time. Double sends are
+                    // already prevented where they happen — `canSend` disables the button and
+                    // `onReturn` bails while `sending`.
+                    isEnabled: !replyDictating,
                     isFocused: replyFocused,
                     onFocusChange: { replyFocused = $0 },
                     onChange: { oldValue, newValue in
@@ -4904,20 +4930,23 @@ struct TerminalPaneContent: View {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
-    private func pasteReplyPhoto(_ provider: NSItemProvider) {
-        guard !sending, !loadingReplyPhoto else { return }
+    /// Stages a pasted image as the reply's attachment. Returns false when this composer
+    /// cannot take it — a send in flight, or a pane with no named intent agent — so the
+    /// caller pastes normally instead of swallowing the gesture.
+    @discardableResult
+    private func pasteReplyPhoto(_ provider: NSItemProvider) -> Bool {
+        guard !sending, !loadingReplyPhoto else { return false }
         guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
               currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
             actionNote = "Photo attachments need a named agent with a ready prompt."
-            return
+            return false
         }
         guard let type = provider.registeredTypeIdentifiers.lazy
             .compactMap({ UTType($0) })
             .first(where: { $0.conforms(to: .image) })
         else {
-            actionNote = "Couldn't add that photo."
-            return
+            return false
         }
 
         loadingReplyPhoto = true
@@ -4960,6 +4989,7 @@ struct TerminalPaneContent: View {
                 Task { @MainActor in finishReplyPhotoPaste(dataPhoto) }
             }
         }
+        return true
     }
 
     private func finishReplyPhotoPaste(_ photo: PromptPhoto?) {

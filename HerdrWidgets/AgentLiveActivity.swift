@@ -118,7 +118,7 @@ private struct ExpandedHeadline: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(state.activityHeadline(isStale: isStale))
+            Text(state.headline)
                 .font(WidgetFont.geistSemiBold(16))
                 .foregroundStyle(WidgetPalette.text)
                 .lineLimit(1)
@@ -129,7 +129,7 @@ private struct ExpandedHeadline: View {
                     .lineLimit(1)
             }
             if isStale {
-                Text("Connection stale")
+                Text("Not updated recently")
                     .font(WidgetFont.plex(11))
                     .foregroundStyle(WidgetPalette.textFaint)
                     .lineLimit(1)
@@ -180,7 +180,7 @@ private struct LockScreenView: View {
             HStack(alignment: .top, spacing: 14) {
                 lockHero
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(state.activityHeadline(isStale: isStale))
+                    Text(state.headline)
                         .font(WidgetFont.geistSemiBold(18))
                         .foregroundStyle(WidgetPalette.text)
                         .lineLimit(1)
@@ -247,15 +247,15 @@ private struct LockScreenView: View {
         if isStale {
             if let updatedAt = state.updatedAt {
                 HStack(spacing: 3) {
-                    Text("last seen")
+                    Text("last update")
                     Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
-                    Text("· \(hostLabel) unreachable")
+                    Text("· no update from \(hostLabel)")
                 }
                 .font(WidgetFont.plex(11))
                 .foregroundStyle(WidgetPalette.textFaint)
                 .lineLimit(1)
             } else {
-                Text("\(hostLabel) unreachable")
+                Text("No update from \(hostLabel)")
                     .font(WidgetFont.plex(11))
                     .foregroundStyle(WidgetPalette.textFaint)
                     .lineLimit(1)
@@ -363,20 +363,20 @@ private enum WidgetPalette {
 }
 
 private extension AgentActivityState {
-    var markIsUnconfirmed: Bool {
-        needsYouCount > 0 && unconfirmedCount >= needsYouCount
-    }
+    // `markIsUnconfirmed` lives in `Shared/AgentActivityState.swift`, not here: it decides
+    // whether the mark renders hollow, and a rule in this target cannot be executed by any
+    // test.
 
     var markColor: Color { WidgetPalette.color(status) }
 
-    var displayHeadline: String {
-        needsYouCount == 0 ? "Nothing needs you" : headline
-    }
-
-    func activityHeadline(isStale: Bool) -> String {
-        guard isStale, needsYouCount > 0 else { return displayHeadline }
-        return "\(needsYouCount) may need you"
-    }
+    // NO HEADLINE OVERRIDE LIVES HERE. A private rule in this target once rewrote the
+    // headline to "Nothing needs you" whenever needsYouCount == 0, which put that all-clear
+    // above a RED stopped mark (the agent had died), discarded the agent's name on a working
+    // roster, and answered the connect handshake — "Connecting…", nothing known yet — with a
+    // confident all-clear. No test target can see this file, so CI could not catch any of it.
+    // The headline is the lead agent's own name, decided in HerdrKit's
+    // `AgentList.activityContent` where a test executes it; a quiet roster is expressed by
+    // `AgentActivitySummary.line`, which is pinned in `Shared/`.
 
     var deepLinkURL: URL { AgentActivityDeepLink.url(agentID: agentID) }
 }

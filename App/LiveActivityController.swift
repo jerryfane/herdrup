@@ -58,9 +58,18 @@ final class LiveActivityController: ObservableObject {
             // pushType: .token so ActivityKit issues a per-activity push token — the server uses
             // it to update the widget in the BACKGROUND (locked / app closed). Foreground updates
             // still go through update() directly.
+            //
+            // staleDate IS DELIBERATELY nil. A stale window only says something true if
+            // something re-pushes inside it; the only caller of update() is
+            // `.onChange(of: fullList)`, AgentList is Equatable, and no timer or heartbeat
+            // re-pushes anywhere in this client. A 90s window therefore marked a HEALTHY,
+            // stable roster — one agent blocked, waiting for you, the state this activity
+            // exists for — as "stale", and the widget then asserted the host was unreachable
+            // while the app was connected in the foreground. Until a real liveness signal
+            // drives it, this claims nothing.
             activity = try Activity.request(
                 attributes: attributes,
-                content: ActivityContent(state: state, staleDate: Date().addingTimeInterval(90)),
+                content: ActivityContent(state: state, staleDate: nil),
                 pushType: .token
             )
             observePushToken()
@@ -87,7 +96,9 @@ final class LiveActivityController: ObservableObject {
     /// Push a new state to the live activity, if there is one.
     func update(_ state: AgentActivityAttributes.ContentState) {
         guard let activity else { return }
-        Task { await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(90))) }
+        // staleDate nil for the same reason as in `start`: nothing re-pushes on a cadence,
+        // so an elapsed window would mean "the roster did not change", not "the host is gone".
+        Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
     }
 
     /// End and clear the activity immediately (on disconnect / sign-out). Ends EVERY

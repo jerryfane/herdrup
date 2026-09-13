@@ -146,4 +146,23 @@ final class AgentActivityStateTests: XCTestCase {
                                    workingSince: nil)
         XCTAssertEqual(AgentActivitySummary.line(s), "1 may need you")
     }
+
+    /// The hollow-mark rule, which decides whether the Dynamic Island and lock screen state
+    /// mark is drawn filled (a fact) or hollow (a maybe). It used to live in a private
+    /// extension inside HerdrWidgets, where nothing can execute it.
+    func testTheMarkIsHollowOnlyWhenEveryWaitingAgentIsUnconfirmed() {
+        func mark(needsYou: Int, unconfirmed: Int) -> Bool {
+            AgentActivityState(headline: "a", status: .needsYou, needsYouCount: needsYou,
+                               unconfirmedCount: unconfirmed, workingCount: 0, totalCount: 9,
+                               workingSince: nil).markIsUnconfirmed
+        }
+        XCTAssertTrue(mark(needsYou: 1, unconfirmed: 1))
+        XCTAssertTrue(mark(needsYou: 2, unconfirmed: 2))
+        XCTAssertFalse(mark(needsYou: 2, unconfirmed: 1),
+                       "one confirmed agent waiting is a fact, so the mark stays filled")
+        XCTAssertFalse(mark(needsYou: 0, unconfirmed: 0),
+                       "nothing waiting cannot be an unconfirmed claim")
+        XCTAssertFalse(mark(needsYou: 0, unconfirmed: 3),
+                       "a stale count with nothing waiting must not hollow the mark")
+    }
 }

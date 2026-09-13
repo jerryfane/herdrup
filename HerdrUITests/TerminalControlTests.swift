@@ -232,15 +232,28 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("typing-cancels-cover-without-input-replay")
     }
 
+    /// PASTED, not typed. Return now submits instead of inserting, so `typeText("\n\n")`
+    /// never reaches the buffer and a typing version of this test passed because newlines
+    /// are uninsertable — not because `canSend` trims them. Pasting is the only route that
+    /// still puts a newline-only string in the composer, so it is the route that pins the
+    /// trimming rule.
     func testReplyContainingOnlyNewlinesIsNotSendable() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("newline-pasteboard")
 
         field.tap()
-        field.typeText("\n\n")
+        field.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5))
+        paste.tap()
+        XCTAssertEqual(field.value as? String, "\n\n",
+                       "the newlines must actually reach the composer for this to test anything")
         XCTAssertFalse(app.buttons["terminal-send-button"].exists,
-                       "a newline-only reply should stay empty and unsendable")
+                       "a newline-only reply should stay unsendable")
 
         field.typeText("message")
         XCTAssertTrue(app.buttons["terminal-send-button"].waitForExistence(timeout: 5),

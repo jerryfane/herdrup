@@ -114,6 +114,18 @@ struct AgentActivityState: Codable, Hashable {
         self.agentID = agentID
         self.updatedAt = updatedAt
     }
+
+    /// Whether the status mark should render HOLLOW: every waiting agent rests on a state
+    /// the home could not confirm, so the attention claim is a maybe rather than a fact.
+    /// A partly-confirmed roster keeps the filled mark — one confirmed agent waiting IS a
+    /// fact — and the doubt is carried by `AgentActivitySummary.line`'s "· N stale" clause.
+    ///
+    /// This lives here, not in the widget target, because a rule the widget owns is a rule
+    /// no test can execute: `HerdrWidgets` has no test bundle and XCUITest cannot see a Live
+    /// Activity at all.
+    var markIsUnconfirmed: Bool {
+        needsYouCount > 0 && unconfirmedCount >= needsYouCount
+    }
 }
 
 enum AgentActivityDeepLink {
