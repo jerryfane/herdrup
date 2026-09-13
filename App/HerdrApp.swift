@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
+import UniformTypeIdentifiers
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
 import UserNotifications // notification authorization status (Settings notify section)
@@ -25,7 +26,13 @@ struct HerdrApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                .onOpenURL { url in
+                    guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
+                    PushCenter.shared.tapped(paneID: paneID)
+                }
+        }
     }
 }
 
@@ -3730,6 +3737,213 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
+private struct TerminalReplyField: UIViewRepresentable {
+    @Binding var text: String
+    let isEnabled: Bool
+    let isFocused: Bool
+    let onFocusChange: (Bool) -> Void
+    let onChange: (String, String) -> Void
+    let onReturn: (String) -> Void
+    /// Returns false when the composer declines the photo, so `paste(_:)` can fall through
+    /// to UIKit instead of turning the paste into a no-op.
+    let onPasteImage: (NSItemProvider) -> Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> ReplyTextView {
+        let view = ReplyTextView()
+        view.onPasteImage = onPasteImage
+        view.delegate = context.coordinator
+        view.backgroundColor = UIColor(Palette.surface)
+        view.layer.cornerRadius = 20
+        view.textColor = UIColor(Palette.text)
+        view.tintColor = UIColor(Palette.brand)
+        view.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+        view.textContainerInset = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
+        let lineHeight = view.font?.lineHeight ?? 18
+        view.minimumHeight = lineHeight + 22
+        view.maximumHeight = lineHeight * 3 + 22
+        view.autocapitalizationType = .none
+        view.autocorrectionType = .no
+        view.returnKeyType = .send
+        view.isScrollEnabled = false
+        view.accessibilityIdentifier = "terminal-reply-input"
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.updatePlaceholder()
+        return view
+    }
+
+    func updateUIView(_ view: ReplyTextView, context: Context) {
+        context.coordinator.parent = self
+        view.onPasteImage = onPasteImage
+        if view.text != text {
+            view.text = text
+            view.updatePlaceholder()
+            view.invalidateIntrinsicContentSize()
+            view.refreshScrollMode()
+        }
+        view.isEditable = isEnabled
+        if isFocused {
+            context.coordinator.nativeFocusPendingStateSync = false
+            if !view.isFirstResponder {
+                view.becomeFirstResponder()
+            }
+        } else if view.isFirstResponder, !context.coordinator.nativeFocusPendingStateSync {
+            view.resignFirstResponder()
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ReplyTextView,
+                      context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        let natural = uiView.fittingHeight(for: width)
+        return CGSize(
+            width: width,
+            height: min(max(natural, uiView.minimumHeight), uiView.maximumHeight))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: TerminalReplyField
+        /// A native tap reaches UIKit before SwiftUI commits the FocusState update.
+        /// Keep that responder alive through text-binding renders until the true state arrives.
+        var nativeFocusPendingStateSync = false
+
+        init(_ parent: TerminalReplyField) {
+            self.parent = parent
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            nativeFocusPendingStateSync = true
+            parent.onFocusChange(true)
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            nativeFocusPendingStateSync = false
+            // `resignFirstResponder()` and `isEditable = false` both run from INSIDE
+            // updateUIView and both end editing synchronously, so writing the focus binding
+            // straight through from here mutates SwiftUI state during its own update pass
+            // ("Modifying state during view update, this will cause undefined behavior").
+            // Hop off the pass, and skip the write when the declared state already agrees —
+            // @State has no same-value short circuit, so an equal write still publishes.
+            guard parent.isFocused else { return }
+            let notify = parent.onFocusChange
+            Task { @MainActor in notify(false) }
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            let old = parent.text
+            let new = textView.text ?? ""
+            parent.text = new
+            parent.onChange(old, new)
+            (textView as? ReplyTextView)?.updatePlaceholder()
+            textView.invalidateIntrinsicContentSize()
+            (textView as? ReplyTextView)?.refreshScrollMode()
+            (textView as? ReplyTextView)?.requestCaretReveal()
+        }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                      replacementText replacement: String) -> Bool {
+            guard replacement == "\n" else { return true }
+            parent.onReturn(textView.text ?? "")
+            return false
+        }
+    }
+
+    final class ReplyTextView: UITextView {
+        var onPasteImage: ((NSItemProvider) -> Bool)?
+        private let placeholder = UILabel()
+        var minimumHeight: CGFloat = 40
+        var maximumHeight: CGFloat = 76
+
+        override init(frame: CGRect, textContainer: NSTextContainer?) {
+            super.init(frame: frame, textContainer: textContainer)
+            placeholder.text = "type a reply…"
+            placeholder.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+            placeholder.textColor = UIColor(Palette.textFaint)
+            placeholder.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(placeholder)
+            NSLayoutConstraint.activate([
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+        // `hasImages`, NOT `itemProviders`. UIKit calls canPerformAction while it BUILDS the
+        // edit menu — before the user has asked for anything — and reading `itemProviders`
+        // there is a pasteboard CONTENT read, which for a photo copied in Photos or Safari
+        // (the only real case here) raises the system "Allow Paste?" prompt on every
+        // long-press. `hasImages` answers the same question from metadata and never prompts.
+        // The content read inside `paste(_:)` below is user-initiated, so it is fine.
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
+                return true
+            }
+            return super.canPerformAction(action, withSender: sender)
+        }
+
+        override func paste(_ sender: Any?) {
+            // Text wins when the pasteboard carries both. Copying an image out of Safari
+            // registers a URL alongside the image, and a composer that swallowed the item as
+            // a photo dropped the text the user was actually after. Every bail-out path —
+            // no image, text present, or a handler that declines (no named intent agent) —
+            // falls through to UIKit's own paste, so plain text always pastes.
+            if UIPasteboard.general.hasImages, !UIPasteboard.general.hasStrings,
+               let provider = UIPasteboard.general.itemProviders.first(where: {
+                   $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+               }),
+               onPasteImage?(provider) == true
+            {
+                return
+            }
+            super.paste(sender)
+        }
+
+        private var shouldRevealCaretAfterLayout = false
+
+        func fittingHeight(for width: CGFloat) -> CGFloat {
+            super.sizeThatFits(
+                CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            ).height
+        }
+
+        func refreshScrollMode() {
+            guard bounds.width > 0 else { return }
+            let shouldScroll = fittingHeight(for: bounds.width) > maximumHeight + 0.5
+            guard isScrollEnabled != shouldScroll else { return }
+            isScrollEnabled = shouldScroll
+            alwaysBounceVertical = shouldScroll
+            if shouldScroll {
+                shouldRevealCaretAfterLayout = true
+            } else if contentOffset != .zero {
+                setContentOffset(.zero, animated: false)
+            }
+            setNeedsLayout()
+        }
+
+        func requestCaretReveal() {
+            shouldRevealCaretAfterLayout = true
+            setNeedsLayout()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            refreshScrollMode()
+            guard shouldRevealCaretAfterLayout else { return }
+            shouldRevealCaretAfterLayout = false
+            guard isScrollEnabled, let selection = selectedTextRange else { return }
+            let caret = caretRect(for: selection.end).insetBy(dx: 0, dy: -4)
+            scrollRectToVisible(caret, animated: false)
+        }
+
+
+        func updatePlaceholder() {
+            placeholder.isHidden = !text.isEmpty
+        }
+    }
+}
+
 /// One agent's live terminal + controls. Its identity (pane id, per-pane @State, terminal
 /// stream) is fixed for its lifetime — it is hosted MOUNTED by `PaneKeepAliveContainer` and
 /// never torn down while its slot exists, so reopening it (and swiping/paging to it) is
@@ -3749,8 +3963,18 @@ struct TerminalPaneContent: View {
     /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
     /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
     let onClose: () -> Void
+    private struct PromptPhoto: Identifiable, Sendable {
+        let id: UUID
+        let name: String
+        let mime: String
+        let staged: StagedAttachment?
+        let uploadID: String?
+        let gramMessageID: String?
+    }
 
     @State private var reply: String
+    @State private var replyPhoto: PromptPhoto?
+    @State private var loadingReplyPhoto = false
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -3814,7 +4038,7 @@ struct TerminalPaneContent: View {
     @State private var replyDictating = false
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
-    @FocusState private var replyFocused: Bool
+    @State private var replyFocused = false
     /// Terminal-input focus is explicit on touch devices. A terminal tap enables
     /// direct PTY typing; reply submission and keyboard collapse clear it so the
     /// software keyboard can genuinely dismiss instead of immediately moving focus
@@ -3904,7 +4128,12 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending && !replyDictating }
+    private var hasReplyContent: Bool {
+        replyPhoto != nil || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var canSend: Bool {
+        hasReplyContent && !sending && !replyDictating && !loadingReplyPhoto
+    }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4543,6 +4772,48 @@ struct TerminalPaneContent: View {
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
         .accessibilityIdentifier("terminal-ctrl")
     }
+    @ViewBuilder
+    private var replyPhotoStrip: some View {
+        if loadingReplyPhoto {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Adding photo…")
+                    .font(Typography.app(12, .medium))
+                    .foregroundStyle(Palette.textDim)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+            .accessibilityIdentifier("terminal-photo-loading")
+        } else if let photo = replyPhoto {
+            HStack(spacing: 8) {
+                Image(systemName: "photo")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.textDim)
+                Text(photo.name)
+                    .font(Typography.app(12, .medium))
+                    .foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button {
+                    removeReplyPhoto(photo)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.textFaint)
+                }
+                .disabled(sending)
+                .accessibilityLabel("Remove attached photo")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+            .opacity(sending ? 0.6 : 1)
+            .accessibilityIdentifier("terminal-photo-attachment")
+        }
+    }
+
 
     private var replyBar: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -4582,21 +4853,35 @@ struct TerminalPaneContent: View {
                 }
                 .accessibilityLabel("Collapse keyboard")
             }
-            TextField("type a reply…", text: $reply, axis: .vertical)
-                .font(Typography.app(15)).foregroundStyle(Palette.text)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .lineLimit(1...3)
-                .frame(minWidth: 0, maxWidth: .infinity)
-                .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 20))
-                .focused($replyFocused)
-                .accessibilityIdentifier("terminal-reply-input")
-                .disabled(replyDictating)   // dictation owns the field while live
-                // Ctrl-toggle interception: while armed, the next character typed
-                // here becomes a control byte instead of message text.
-                .onChange(of: reply) { oldValue, newValue in
-                    handleReplyChange(old: oldValue, new: newValue)
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                replyPhotoStrip
+                TerminalReplyField(
+                    text: $reply,
+                    // ONLY dictation disables the field. Gating it on `sending` (and on the
+                    // photo upload, which holds for upload + post + prompt) set
+                    // `isEditable = false` on a first-responder text view, which ends editing:
+                    // the keyboard visibly dropped on EVERY reply and nothing re-acquired it,
+                    // so consecutive replies needed a re-tap each time. Double sends are
+                    // already prevented where they happen — `canSend` disables the button and
+                    // `onReturn` bails while `sending`.
+                    isEnabled: !replyDictating,
+                    isFocused: replyFocused,
+                    onFocusChange: { replyFocused = $0 },
+                    onChange: { oldValue, newValue in
+                        handleReplyChange(old: oldValue, new: newValue)
+                    },
+                    onReturn: { currentText in
+                        guard !sending, !replyDictating,
+                              replyPhoto != nil
+                                || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        else { return }
+                        ctrlArmed = false
+                        sendTapped(currentText)
+                    },
+                    onPasteImage: pasteReplyPhoto
+                )
+            }
+            .frame(minWidth: 0, maxWidth: .infinity)
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
@@ -4612,12 +4897,12 @@ struct TerminalPaneContent: View {
             // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
             // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
             // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !hasReplyContent {
                 savedPromptsButton
             } else {
-                // The button dismisses the software keyboard on iPhone; Return now inserts
-                // a newline and Command+Return sends without changing focus. A deliberate
-                // button dismissal must bump the collapse token so SwiftTerm will resign
+                // Tapping the arrow deliberately dismisses the iPhone keyboard. The
+                // keyboard's Return key activates this same button and delivery path.
+                // Dismissal bumps the collapse token so SwiftTerm will resign
                 // even while a selection is active. Keep that request phone-only: iPad has
                 // no software keyboard here, and its terminal-focus branch would leave an
                 // unconsumed token that could fire during a later unrelated collapse.
@@ -4638,9 +4923,6 @@ struct TerminalPaneContent: View {
                 .fixedSize()
                 .accessibilityLabel("Send reply")
                 .accessibilityIdentifier("terminal-send-button")
-                // Return inserts a newline in the vertical field; Command+Return sends,
-                // matching Gram and keeping hardware-keyboard submission available.
-                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
@@ -4648,6 +4930,90 @@ struct TerminalPaneContent: View {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
+    /// Stages a pasted image as the reply's attachment. Returns false when this composer
+    /// cannot take it — a send in flight, or a pane with no named intent agent — so the
+    /// caller pastes normally instead of swallowing the gesture.
+    @discardableResult
+    private func pasteReplyPhoto(_ provider: NSItemProvider) -> Bool {
+        guard !sending, !loadingReplyPhoto else { return false }
+        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            actionNote = "Photo attachments need a named agent with a ready prompt."
+            return false
+        }
+        guard let type = provider.registeredTypeIdentifiers.lazy
+            .compactMap({ UTType($0) })
+            .first(where: { $0.conforms(to: .image) })
+        else {
+            return false
+        }
+
+        loadingReplyPhoto = true
+        ctrlArmed = false
+        let typeIdentifier = type.identifier
+        let ext = type.preferredFilenameExtension ?? "jpg"
+        let name: String = {
+            var candidate = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if candidate.isEmpty {
+                candidate = "photo-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
+            }
+            if URL(fileURLWithPath: candidate).pathExtension.isEmpty { candidate += ".\(ext)" }
+            return GramStaging.safeFileName(candidate)
+        }()
+        let mime = type.preferredMIMEType ?? "image/jpeg"
+
+        provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { source, _ in
+            let filePhoto: PromptPhoto? = source.flatMap { url in
+                guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
+                return PromptPhoto(
+                    id: UUID(), name: name, mime: mime, staged: staged,
+                    uploadID: nil, gramMessageID: nil)
+            }
+            if let filePhoto {
+                Task { @MainActor in finishReplyPhotoPaste(filePhoto) }
+                return
+            }
+
+            // In-memory pasteboards can vend encoded image data but no file URL.
+            provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
+                let dataPhoto: PromptPhoto? = data.flatMap {
+                    guard let staged = GramStaging.stageData(
+                        $0, named: name, in: GramView.Staging.session,
+                        maxBytes: GramView.Staging.maxFileBytes)
+                    else { return nil }
+                    return PromptPhoto(
+                        id: UUID(), name: name, mime: mime, staged: staged,
+                        uploadID: nil, gramMessageID: nil)
+                }
+                Task { @MainActor in finishReplyPhotoPaste(dataPhoto) }
+            }
+        }
+        return true
+    }
+
+    private func finishReplyPhotoPaste(_ photo: PromptPhoto?) {
+        loadingReplyPhoto = false
+        guard let photo else {
+            actionNote = "Couldn't add that photo."
+            return
+        }
+        if let previous = replyPhoto { removeReplyPhoto(previous) }
+        replyPhoto = photo
+        actionNote = nil
+    }
+
+    private func removeReplyPhoto(_ photo: PromptPhoto) {
+        guard replyPhoto?.id == photo.id else { return }
+        replyPhoto = nil
+        if let staged = photo.staged {
+            try? FileManager.default.removeItem(at: staged.dir)
+        }
+        if let messageID = photo.gramMessageID {
+            Task { try? await client.gramDelete(id: messageID) }
+        }
+    }
+
 
     /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
     /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
@@ -4689,6 +5055,10 @@ struct TerminalPaneContent: View {
         // send and the raw sequences. The automatic pre-fill delivery is excluded on
         // purpose — nobody touched anything, so there is no user act to honour.
         if !autoDelivering { userInputToken += 1 }
+        if case .submitText(let text) = action, let photo = replyPhoto {
+            sendPromptWithPhoto(text, photo: photo)
+            return
+        }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
         Task {
@@ -4708,7 +5078,11 @@ struct TerminalPaneContent: View {
                 case .refused(let reason):
                     actionNote = "not sent: \(reason)"; return
                 }
-                if case .submitText = action { reply = "" }
+                // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
+                // whole round trip now (see the `isEnabled` comment on TerminalReplyField),
+                // so an unconditional clear here would wipe a reply typed while the prompt
+                // was in flight — the very flow that fix exists to allow.
+                if case .submitText(let sent) = action, reply == sent { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
@@ -4719,6 +5093,98 @@ struct TerminalPaneContent: View {
             }
         }
     }
+    private func sendPromptWithPhoto(_ text: String, photo: PromptPhoto) {
+        guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !target.isEmpty
+        else {
+            actionNote = "Photo attachments need a named agent with a ready prompt."
+            return
+        }
+
+        Task {
+            sending = true
+            defer { sending = false }
+            do {
+                var current = photo
+                var messageID = current.gramMessageID
+                if messageID == nil {
+                    let uploadID: String
+                    if let existing = current.uploadID {
+                        uploadID = existing
+                    } else {
+                        guard let staged = current.staged else {
+                            actionNote = "Couldn't read the attached photo."
+                            return
+                        }
+                        uploadID = try await client.gramUploadFile(fileURL: staged.url)
+                        current = PromptPhoto(
+                            id: current.id, name: current.name, mime: current.mime,
+                            staged: staged, uploadID: uploadID, gramMessageID: nil)
+                        if replyPhoto?.id == current.id { replyPhoto = current }
+                    }
+
+                    let attachment = HerdrClient.GramFileAttachment(
+                        uploadID: uploadID, name: current.name, mime: current.mime)
+                    let posted = try await Self.postReplyPhoto(
+                        client: client, target: target, attachment: attachment)
+                    messageID = posted.id
+                    if let staged = current.staged {
+                        try? FileManager.default.removeItem(at: staged.dir)
+                    }
+                    current = PromptPhoto(
+                        id: current.id, name: current.name, mime: current.mime,
+                        staged: nil, uploadID: nil, gramMessageID: posted.id)
+                    if replyPhoto?.id == current.id { replyPhoto = current }
+                }
+
+                guard let messageID else {
+                    actionNote = "Couldn't deliver the attached photo."
+                    return
+                }
+                let rawExtension = URL(fileURLWithPath: current.name).pathExtension.lowercased()
+                let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
+                let outputPath = "/tmp/herdr-photo-\(messageID)"
+                    + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+                let reference = """
+                [Photo attached via Herdr Gram message \(messageID). Download it with \
+                `herdr gram get-file \(messageID) -o \(outputPath)`, then inspect \(outputPath).]
+                """
+                let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? reference
+                    : "\(text)\n\n\(reference)"
+                try await submitPrompt(pane: paneID, text: prompt)
+                if replyPhoto?.id == current.id { replyPhoto = nil }
+                if reply == text { reply = "" }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await refresh()
+            } catch let apiError as APIError {
+                actionNote = Self.promptFailureNote(for: apiError)
+            } catch {
+                actionNote = "send failed: \(error)"
+            }
+        }
+    }
+
+    private static func postReplyPhoto(
+        client: HerdrClient,
+        target: String,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramMessage {
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPost(
+                    text: "Photo attached from the terminal composer.",
+                    to: target,
+                    attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        throw GramError.invalidFileData
+    }
+
 
     /// While the Ctrl toggle is armed, consume the next TYPED character and send it
     /// as its control byte instead of adding it to the message. Only reacts to a
@@ -4884,13 +5350,13 @@ struct TerminalPaneContent: View {
 
     /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
     /// (never rawKeys, at any time); a normal reply uses the usual routing.
-    private func sendTapped() {
+    private func sendTapped(_ text: String? = nil) {
         // An explicit Send ALWAYS takes over from any pending auto-deliver and goes
         // through the normal prompt path (`send` → agent.prompt, server-gated). It must
         // never be gated on the pre-fill delivery succeeding — that is exactly what could
         // trap the reader on a stuck pre-fill with the reply bar locked.
         pendingPrefill = false
-        send(.submitText(reply))
+        send(.submitText(text ?? reply))
     }
 }
 
@@ -6887,6 +7353,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("gram.get_file") { return Self.gramFileContent }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
+        if requestLine.contains("agent.prompt") { return Self.agentPrompted }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -7116,6 +7583,9 @@ struct MockTransport: HerdrTransport {
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
+    static let agentPrompted =
+        #"{"id":"mock","result":{"type":"agent_prompted","delivery":"submitted"}}"#
+
 
     // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
     // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is

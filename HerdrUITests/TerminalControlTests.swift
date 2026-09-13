@@ -2,10 +2,9 @@ import XCTest
 import UIKit
 
 final class TerminalControlTests: TerminalInteractionTestCase {
-    /// The pane's only text field. Matched positionally rather than by placeholder:
-    /// the placeholder match can resolve to the label rather than the editable field,
-    /// and a tap on that does not move focus.
-    private var reply: XCUIElement { app.textFields.firstMatch }
+    /// The UIKit-backed terminal reply editor. Its delegate owns Return submission,
+    /// which SwiftUI's multiline TextField could not observe.
+    private var reply: XCUIElement { app.textViews["terminal-reply-input"] }
 
     /// Whether the ctrl one-shot is armed, read from the production cap's own
     /// accessibility label. Idiom-independent, and the only observable that survives a
@@ -80,28 +79,12 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         attach("two-taps-cancel-without-input")
     }
 
-    /// The reply path takes the keyboard FIRST, from a fresh launch.
-    ///
-    /// Handing the responder over from an already-focused terminal does not reliably
-    /// move SwiftUI focus in the simulator, and typing then fails with "neither element
-    /// nor any descendant has keyboard focus" — a harness limitation, not a product
-    /// one. Ordering the case this way exercises the same production path
-    /// (`handleReplyChange`) without depending on that handover.
+    /// The reply path takes the keyboard first, from a fresh launch. Typing the chord
+    /// is the observable focus check; this must not depend on a SwiftUI toolbar control
+    /// because the reply editor is UIKit-backed.
     func testReplyFieldStillConsumesControl() throws {
         launch("control")
-        // FOCUS IS READ FROM THE APP, NOT FROM `app.keyboards`. The simulator may have
-        // the host hardware keyboard attached, in which case iOS shows no software
-        // keyboard for a focused field at all and the keyboard query is simply wrong.
-        // The production chevron is gated on `replyFocused`, so its presence is the
-        // app's own statement that this field owns the input.
-        for attempt in 0..<3 {
-            // Tap INSIDE the text, not at the element's centre: the centre of a SwiftUI
-            // TextField row can land on padding that does not begin editing.
-            reply.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
-            if onscreen("Collapse keyboard", timeout: 5) != nil { break }
-            XCTAssertNotEqual(attempt, 2,
-                              "the reply field never took focus. \(elementDump()) \(fieldDump())")
-        }
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
         let draft = reply.value as? String
         cap("terminal-ctrl").tap(); reply.typeText("p")
         wait { ($0["input"] as? String) == "second-known-command" && ($0["previous"] as? Int) == 1 }
@@ -249,24 +232,77 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("typing-cancels-cover-without-input-replay")
     }
 
+    /// PASTED, not typed. Return now submits instead of inserting, so `typeText("\n\n")`
+    /// never reaches the buffer and a typing version of this test passed because newlines
+    /// are uninsertable — not because `canSend` trims them. Pasting is the only route that
+    /// still puts a newline-only string in the composer, so it is the route that pins the
+    /// trimming rule.
     func testReplyContainingOnlyNewlinesIsNotSendable() {
         launch("control")
-        let field = app.textFields["terminal-reply-input"]
+        let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("newline-pasteboard")
 
         field.tap()
-        field.typeText("\n\n")
+        field.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5))
+        paste.tap()
+        XCTAssertEqual(field.value as? String, "\n\n",
+                       "the newlines must actually reach the composer for this to test anything")
         XCTAssertFalse(app.buttons["terminal-send-button"].exists,
-                       "a newline-only reply should stay empty and unsendable")
+                       "a newline-only reply should stay unsendable")
 
         field.typeText("message")
         XCTAssertTrue(app.buttons["terminal-send-button"].waitForExistence(timeout: 5),
                       "visible text should make the reply sendable")
     }
 
+    func testTypingKeepsReplyFocusedAcrossStateUpdates() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+
+        field.tap()
+        field.typeText("w")
+        field.typeText("ord")
+        XCTAssertEqual(field.value as? String, "word")
+    }
+
+    func testCopiedPhotoOffersPasteAndSendsAttachment() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("photo-pasteboard")
+
+        field.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5),
+                      "a copied photo should offer Paste in the reply editor")
+        paste.tap()
+
+        let chip = app.descendants(matching: .any)
+            .matching(identifier: "terminal-photo-attachment")
+            .firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 10),
+                      "pasting a photo should stage a visible attachment")
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5),
+                      "a photo should be sendable without caption text")
+        send.tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: chip)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
+                       "the photo should upload, post to the agent, and clear after prompt delivery")
+    }
+
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
         launch("control")
-        let field = app.textFields["terminal-reply-input"]
+        let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
 
         field.tap()
@@ -277,7 +313,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
 
-        field.typeText("\ntwo\nthree")
+        field.typeText(String(repeating: " wrapped", count: 60))
         Thread.sleep(forTimeInterval: 0.3)
         let threeLines = field.frame
         XCTAssertGreaterThan(threeLines.height, oneLine.height)
@@ -285,11 +321,31 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue(send.isHittable)
 
-        field.typeText("\nfour")
+        field.typeText(String(repeating: " overflow", count: 20) + " tail-token")
         Thread.sleep(forTimeInterval: 0.3)
         XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
-        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue((field.value as? String)?.contains("tail-token") == true)
+        let lower = field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let upper = field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        lower.press(forDuration: 0.05, thenDragTo: upper)
+        field.typeText(" after-scroll")
+        XCTAssertTrue((field.value as? String)?.contains("after-scroll") == true,
+                      "scrolling overflow text should keep the composer focused and editable")
+        command("reply-multiline-pasteboard")
+        let end = field.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.8))
+        end.tap()
+        end.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5))
+        paste.tap()
+        XCTAssertTrue((field.value as? String)?.contains("pasted-tail") == true,
+                      "a multiline paste should remain in the scrolling composer")
+        field.typeText(" after-paste")
+        XCTAssertTrue((field.value as? String)?.hasSuffix("pasted-tail after-paste") == true,
+                      "typing after a multiline paste should keep the caret at the end")
         XCTAssertTrue(send.isHittable)
     }
 }

@@ -24,13 +24,14 @@ final class ActivityContentTests: XCTestCase {
     /// AgentInfo can hold a shape the wire cannot produce.
     private func agent(
         pane: String, status: String?, name: String? = nil, completedUnixMs: Int64? = nil,
-        lastKnownStatus: String? = nil, machineID: String? = nil, reachability: String? = nil,
-        archivedBy: String? = nil
+        statusSinceUnixMs: UInt64? = nil, lastKnownStatus: String? = nil,
+        machineID: String? = nil, reachability: String? = nil, archivedBy: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let status { obj["agent_status"] = status }
         if let name { obj["name"] = name }
         if let completedUnixMs { obj["last_completed_turn"] = ["completed_unix_ms": completedUnixMs] }
+        if let statusSinceUnixMs { obj["status_since_unix_ms"] = statusSinceUnixMs }
         if let lastKnownStatus { obj["last_known_status"] = lastKnownStatus }
         if let machineID { obj["machine_id"] = machineID }
         if let reachability { obj["reachability"] = reachability }
@@ -89,7 +90,9 @@ final class ActivityContentTests: XCTestCase {
             unconfirmedCount: c.unconfirmedCount,
             workingCount: c.workingCount,
             totalCount: c.totalCount,
-            workingSince: c.workingSinceUnixSeconds)
+            workingSince: c.workingSinceUnixSeconds,
+            blockedSince: c.blockedSinceUnixSeconds,
+            agentID: c.agentID)
     }
 
     // MARK: - the premise: HerdrKit can only emit words this enum accepts
@@ -372,6 +375,25 @@ final class ActivityContentTests: XCTestCase {
                         "premise: it carries a timestamp")
         XCTAssertNil(idle.activityContent.workingSinceUnixSeconds,
                      "an idle agent is between turns; there is nothing running to time")
+    }
+
+    func testBlockedLeadCarriesStatusAgeAndDeepLinkIdentity() throws {
+        let ms: UInt64 = 1_723_000_000_000
+        let blocked = AgentList(
+            agents: [try agent(
+                pane: "pane:blocked",
+                status: "blocked",
+                name: "api-refactor",
+                statusSinceUnixMs: ms
+            )],
+            livePaneIDs: ["pane:blocked"]
+        )
+        XCTAssertEqual(blocked.activityContent.blockedSinceUnixSeconds, 1_723_000_000)
+        XCTAssertEqual(blocked.activityContent.agentID, "pane:blocked")
+
+        let working = try list([.working])
+        XCTAssertNil(working.activityContent.blockedSinceUnixSeconds)
+        XCTAssertEqual(working.activityContent.agentID, "p0")
     }
 
     // MARK: - the residual mutants #207's review left surviving
