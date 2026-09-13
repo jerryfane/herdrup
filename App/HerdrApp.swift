@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
+import UniformTypeIdentifiers
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
 import UserNotifications // notification authorization status (Settings notify section)
@@ -3743,11 +3744,13 @@ private struct TerminalReplyField: UIViewRepresentable {
     let onFocusChange: (Bool) -> Void
     let onChange: (String, String) -> Void
     let onReturn: (String) -> Void
+    let onPasteImage: (NSItemProvider) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> ReplyTextView {
         let view = ReplyTextView()
+        view.onPasteImage = onPasteImage
         view.delegate = context.coordinator
         view.backgroundColor = UIColor(Palette.surface)
         view.layer.cornerRadius = 20
@@ -3767,6 +3770,7 @@ private struct TerminalReplyField: UIViewRepresentable {
 
     func updateUIView(_ view: ReplyTextView, context: Context) {
         context.coordinator.parent = self
+        view.onPasteImage = onPasteImage
         if view.text != text {
             view.text = text
             view.updatePlaceholder()
@@ -3792,7 +3796,7 @@ private struct TerminalReplyField: UIViewRepresentable {
         let lineHeight = uiView.font?.lineHeight ?? 18
         let minimum = lineHeight + 22
         let maximum = lineHeight * 3 + 22
-        uiView.isScrollEnabled = natural > maximum
+        uiView.updateScrollMode(contentHeight: natural, maximumHeight: maximum)
         return CGSize(width: width, height: min(max(natural, minimum), maximum))
     }
 
@@ -3823,6 +3827,7 @@ private struct TerminalReplyField: UIViewRepresentable {
             parent.onChange(old, new)
             (textView as? ReplyTextView)?.updatePlaceholder()
             textView.invalidateIntrinsicContentSize()
+            (textView as? ReplyTextView)?.requestCaretReveal()
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
@@ -3834,6 +3839,7 @@ private struct TerminalReplyField: UIViewRepresentable {
     }
 
     final class ReplyTextView: UITextView {
+        var onPasteImage: ((NSItemProvider) -> Void)?
         private let placeholder = UILabel()
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
@@ -3851,6 +3857,56 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { nil }
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(paste(_:)),
+               UIPasteboard.general.itemProviders.contains(where: {
+                   $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+               })
+            {
+                return true
+            }
+            return super.canPerformAction(action, withSender: sender)
+        }
+
+        override func paste(_ sender: Any?) {
+            if let provider = UIPasteboard.general.itemProviders.first(where: {
+                $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+            }) {
+                onPasteImage?(provider)
+                return
+            }
+            super.paste(sender)
+        }
+
+        private var shouldRevealCaretAfterLayout = false
+
+        func updateScrollMode(contentHeight: CGFloat, maximumHeight: CGFloat) {
+            let shouldScroll = contentHeight > maximumHeight + 0.5
+            guard isScrollEnabled != shouldScroll else { return }
+            isScrollEnabled = shouldScroll
+            alwaysBounceVertical = shouldScroll
+            if shouldScroll {
+                shouldRevealCaretAfterLayout = true
+            } else if contentOffset != .zero {
+                setContentOffset(.zero, animated: false)
+            }
+            setNeedsLayout()
+        }
+
+        func requestCaretReveal() {
+            shouldRevealCaretAfterLayout = true
+            setNeedsLayout()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard shouldRevealCaretAfterLayout else { return }
+            shouldRevealCaretAfterLayout = false
+            guard isScrollEnabled, let selection = selectedTextRange else { return }
+            let caret = caretRect(for: selection.end).insetBy(dx: 0, dy: -4)
+            scrollRectToVisible(caret, animated: false)
+        }
+
 
         func updatePlaceholder() {
             placeholder.isHidden = !text.isEmpty
@@ -3877,8 +3933,18 @@ struct TerminalPaneContent: View {
     /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
     /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
     let onClose: () -> Void
+    private struct PromptPhoto: Identifiable, Sendable {
+        let id: UUID
+        let name: String
+        let mime: String
+        let staged: StagedAttachment?
+        let uploadID: String?
+        let gramMessageID: String?
+    }
 
     @State private var reply: String
+    @State private var replyPhoto: PromptPhoto?
+    @State private var loadingReplyPhoto = false
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -4032,7 +4098,12 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending && !replyDictating }
+    private var hasReplyContent: Bool {
+        replyPhoto != nil || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var canSend: Bool {
+        hasReplyContent && !sending && !replyDictating && !loadingReplyPhoto
+    }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4671,6 +4742,48 @@ struct TerminalPaneContent: View {
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
         .accessibilityIdentifier("terminal-ctrl")
     }
+    @ViewBuilder
+    private var replyPhotoStrip: some View {
+        if loadingReplyPhoto {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Adding photo…")
+                    .font(Typography.app(12, .medium))
+                    .foregroundStyle(Palette.textDim)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+            .accessibilityIdentifier("terminal-photo-loading")
+        } else if let photo = replyPhoto {
+            HStack(spacing: 8) {
+                Image(systemName: "photo")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.textDim)
+                Text(photo.name)
+                    .font(Typography.app(12, .medium))
+                    .foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button {
+                    removeReplyPhoto(photo)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.textFaint)
+                }
+                .disabled(sending)
+                .accessibilityLabel("Remove attached photo")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+            .opacity(sending ? 0.6 : 1)
+            .accessibilityIdentifier("terminal-photo-attachment")
+        }
+    }
+
 
     private var replyBar: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -4710,22 +4823,27 @@ struct TerminalPaneContent: View {
                 }
                 .accessibilityLabel("Collapse keyboard")
             }
-            TerminalReplyField(
-                text: $reply,
-                isEnabled: !replyDictating,
-                isFocused: replyFocused,
-                onFocusChange: { replyFocused = $0 },
-                onChange: { oldValue, newValue in
-                    handleReplyChange(old: oldValue, new: newValue)
-                },
-                onReturn: { currentText in
-                    guard !sending, !replyDictating,
-                          !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    else { return }
-                    ctrlArmed = false
-                    sendTapped(currentText)
-                }
-            )
+            VStack(alignment: .leading, spacing: 6) {
+                replyPhotoStrip
+                TerminalReplyField(
+                    text: $reply,
+                    isEnabled: !replyDictating && !sending && !loadingReplyPhoto,
+                    isFocused: replyFocused,
+                    onFocusChange: { replyFocused = $0 },
+                    onChange: { oldValue, newValue in
+                        handleReplyChange(old: oldValue, new: newValue)
+                    },
+                    onReturn: { currentText in
+                        guard !sending, !replyDictating,
+                              replyPhoto != nil
+                                || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        else { return }
+                        ctrlArmed = false
+                        sendTapped(currentText)
+                    },
+                    onPasteImage: pasteReplyPhoto
+                )
+            }
             .frame(minWidth: 0, maxWidth: .infinity)
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
@@ -4742,7 +4860,7 @@ struct TerminalPaneContent: View {
             // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
             // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
             // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !hasReplyContent {
                 savedPromptsButton
             } else {
                 // Tapping the arrow deliberately dismisses the iPhone keyboard. The
@@ -4775,6 +4893,55 @@ struct TerminalPaneContent: View {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
+    private func pasteReplyPhoto(_ provider: NSItemProvider) {
+        guard !sending, !loadingReplyPhoto else { return }
+        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            actionNote = "Photo attachments need a named agent with a ready prompt."
+            return
+        }
+
+        loadingReplyPhoto = true
+        ctrlArmed = false
+        let suggestedName = provider.suggestedName
+        provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { source, _ in
+            let result: (name: String, mime: String, staged: StagedAttachment)? = source.flatMap { url in
+                let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension.lowercased()
+                var name = suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if name.isEmpty { name = "photo-\(UUID().uuidString.prefix(8).lowercased()).\(ext)" }
+                if URL(fileURLWithPath: name).pathExtension.isEmpty { name += ".\(ext)" }
+                let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? "image/jpeg"
+                guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
+                return (GramStaging.safeFileName(name), mime, staged)
+            }
+
+            Task { @MainActor in
+                loadingReplyPhoto = false
+                guard let result else {
+                    actionNote = "Couldn't add that photo."
+                    return
+                }
+                if let previous = replyPhoto { removeReplyPhoto(previous) }
+                replyPhoto = PromptPhoto(
+                    id: UUID(), name: result.name, mime: result.mime, staged: result.staged,
+                    uploadID: nil, gramMessageID: nil)
+                actionNote = nil
+            }
+        }
+    }
+
+    private func removeReplyPhoto(_ photo: PromptPhoto) {
+        guard replyPhoto?.id == photo.id else { return }
+        replyPhoto = nil
+        if let staged = photo.staged {
+            try? FileManager.default.removeItem(at: staged.dir)
+        }
+        if let messageID = photo.gramMessageID {
+            Task { try? await client.gramDelete(id: messageID) }
+        }
+    }
+
 
     /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
     /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
@@ -4816,6 +4983,10 @@ struct TerminalPaneContent: View {
         // send and the raw sequences. The automatic pre-fill delivery is excluded on
         // purpose — nobody touched anything, so there is no user act to honour.
         if !autoDelivering { userInputToken += 1 }
+        if case .submitText(let text) = action, let photo = replyPhoto {
+            sendPromptWithPhoto(text, photo: photo)
+            return
+        }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
         Task {
@@ -4846,6 +5017,98 @@ struct TerminalPaneContent: View {
             }
         }
     }
+    private func sendPromptWithPhoto(_ text: String, photo: PromptPhoto) {
+        guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !target.isEmpty
+        else {
+            actionNote = "Photo attachments need a named agent with a ready prompt."
+            return
+        }
+
+        Task {
+            sending = true
+            defer { sending = false }
+            do {
+                var current = photo
+                var messageID = current.gramMessageID
+                if messageID == nil {
+                    let uploadID: String
+                    if let existing = current.uploadID {
+                        uploadID = existing
+                    } else {
+                        guard let staged = current.staged else {
+                            actionNote = "Couldn't read the attached photo."
+                            return
+                        }
+                        uploadID = try await client.gramUploadFile(fileURL: staged.url)
+                        current = PromptPhoto(
+                            id: current.id, name: current.name, mime: current.mime,
+                            staged: staged, uploadID: uploadID, gramMessageID: nil)
+                        if replyPhoto?.id == current.id { replyPhoto = current }
+                    }
+
+                    let attachment = HerdrClient.GramFileAttachment(
+                        uploadID: uploadID, name: current.name, mime: current.mime)
+                    let posted = try await Self.postReplyPhoto(
+                        client: client, target: target, attachment: attachment)
+                    messageID = posted.id
+                    if let staged = current.staged {
+                        try? FileManager.default.removeItem(at: staged.dir)
+                    }
+                    current = PromptPhoto(
+                        id: current.id, name: current.name, mime: current.mime,
+                        staged: nil, uploadID: nil, gramMessageID: posted.id)
+                    if replyPhoto?.id == current.id { replyPhoto = current }
+                }
+
+                guard let messageID else {
+                    actionNote = "Couldn't deliver the attached photo."
+                    return
+                }
+                let rawExtension = URL(fileURLWithPath: current.name).pathExtension.lowercased()
+                let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
+                let outputPath = "/tmp/herdr-photo-\(messageID)"
+                    + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+                let reference = """
+                [Photo attached via Herdr Gram message \(messageID). Download it with \
+                `herdr gram get-file \(messageID) -o \(outputPath)`, then inspect \(outputPath).]
+                """
+                let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? reference
+                    : "\(text)\n\n\(reference)"
+                try await submitPrompt(pane: paneID, text: prompt)
+                if replyPhoto?.id == current.id { replyPhoto = nil }
+                reply = ""
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await refresh()
+            } catch let apiError as APIError {
+                actionNote = Self.promptFailureNote(for: apiError)
+            } catch {
+                actionNote = "send failed: \(error)"
+            }
+        }
+    }
+
+    private static func postReplyPhoto(
+        client: HerdrClient,
+        target: String,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramMessage {
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPost(
+                    text: "Photo attached from the terminal composer.",
+                    to: target,
+                    attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        throw GramError.invalidFileData
+    }
+
 
     /// While the Ctrl toggle is armed, consume the next TYPED character and send it
     /// as its control byte instead of adding it to the message. Only reacts to a
@@ -7014,6 +7277,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("gram.get_file") { return Self.gramFileContent }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
+        if requestLine.contains("agent.prompt") { return Self.agentPrompted }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -7243,6 +7507,9 @@ struct MockTransport: HerdrTransport {
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
+    static let agentPrompted =
+        #"{"id":"mock","result":{"type":"agent_prompted","delivery":"submitted"}}"#
+
 
     // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
     // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is

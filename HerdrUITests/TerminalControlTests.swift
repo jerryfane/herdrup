@@ -258,6 +258,34 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(field.value as? String, "word")
     }
 
+    func testCopiedPhotoOffersPasteAndSendsAttachment() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        UIPasteboard.general.image = UIImage(systemName: "photo.fill")
+        defer { UIPasteboard.general.items = [] }
+
+        field.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5),
+                      "a copied photo should offer Paste in the reply editor")
+        paste.tap()
+
+        let chip = app.otherElements["terminal-photo-attachment"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10),
+                      "pasting a photo should stage a visible attachment")
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5),
+                      "a photo should be sendable without caption text")
+        send.tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: chip)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
+                       "the photo should upload, post to the agent, and clear after prompt delivery")
+    }
+
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
@@ -284,6 +312,12 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue((field.value as? String)?.contains("tail-token") == true)
+        let lower = field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let upper = field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        lower.press(forDuration: 0.05, thenDragTo: upper)
+        field.typeText(" after-scroll")
+        XCTAssertTrue((field.value as? String)?.contains("after-scroll") == true,
+                      "scrolling overflow text should keep the composer focused and editable")
         XCTAssertTrue(send.isHittable)
     }
 }
