@@ -272,7 +272,9 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "a copied photo should offer Paste in the reply editor")
         paste.tap()
 
-        let chip = app.otherElements["terminal-photo-attachment"]
+        let chip = app.descendants(matching: .any)
+            .matching(identifier: "terminal-photo-attachment")
+            .firstMatch
         XCTAssertTrue(chip.waitForExistence(timeout: 10),
                       "pasting a photo should stage a visible attachment")
         let send = app.buttons["terminal-send-button"]
