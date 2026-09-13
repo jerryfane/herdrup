@@ -58,6 +58,30 @@ public enum GramStaging {
             return nil
         }
     }
+    /// Write already-loaded bytes into a fresh staged item. Used when an
+    /// `NSItemProvider` can vend an image object but not a file representation.
+    /// Reject before touching disk when the payload is empty or over the cap.
+    public static func stageData(
+        _ data: Data,
+        named name: String,
+        in sessionDirectory: URL,
+        maxBytes: Int
+    ) -> StagedAttachment? {
+        guard !data.isEmpty, data.count <= maxBytes else { return nil }
+        let dir = sessionDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let destination = dir.appendingPathComponent(safeFileName(name))
+            try data.write(to: destination, options: .atomic)
+            protectStagedFile(at: destination)
+            return StagedAttachment(url: destination, dir: dir, size: data.count)
+        } catch {
+            try? FileManager.default.removeItem(at: dir)
+            return nil
+        }
+    }
+
 
     /// Remove every session directory under `root` except `keeping`. Bounded and
     /// stateless: a sibling of the current session's directory is by definition

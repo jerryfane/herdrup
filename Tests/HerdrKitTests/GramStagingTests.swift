@@ -109,6 +109,19 @@ final class GramStagingTests: XCTestCase {
             GramStaging.stageCopy(of: oneByte, named: "tiny.bin", in: session, maxBytes: cap))
         XCTAssertEqual(tiny.size, 1)
     }
+    func testLoadedImageDataStagesWithTheSameBounds() throws {
+        let bytes = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let staged = try XCTUnwrap(
+            GramStaging.stageData(bytes, named: "photo.jpg", in: session, maxBytes: bytes.count))
+        XCTAssertEqual(try Data(contentsOf: staged.url), bytes)
+        XCTAssertEqual(staged.url.lastPathComponent, "photo.jpg")
+        XCTAssertEqual(staged.size, bytes.count)
+
+        XCTAssertNil(GramStaging.stageData(Data(), named: "empty.jpg", in: session, maxBytes: 4))
+        XCTAssertNil(
+            GramStaging.stageData(bytes, named: "large.jpg", in: session, maxBytes: bytes.count - 1))
+    }
+
     /// A pick named `../../evil` must not stage outside its own directory.
     func testTraversalNameStaysInsideTheItemDirectory() throws {
         let source = try sourceFile(Data("x".utf8))

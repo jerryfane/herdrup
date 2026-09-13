@@ -4906,29 +4906,58 @@ struct TerminalPaneContent: View {
         ctrlArmed = false
         let suggestedName = provider.suggestedName
         provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { source, _ in
-            let result: (name: String, mime: String, staged: StagedAttachment)? = source.flatMap { url in
+            let filePhoto: PromptPhoto? = source.flatMap { url in
                 let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension.lowercased()
                 var name = suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if name.isEmpty { name = "photo-\(UUID().uuidString.prefix(8).lowercased()).\(ext)" }
                 if URL(fileURLWithPath: name).pathExtension.isEmpty { name += ".\(ext)" }
                 let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? "image/jpeg"
                 guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
-                return (GramStaging.safeFileName(name), mime, staged)
+                return PromptPhoto(
+                    id: UUID(), name: GramStaging.safeFileName(name), mime: mime, staged: staged,
+                    uploadID: nil, gramMessageID: nil)
+            }
+            if let filePhoto {
+                Task { @MainActor in finishReplyPhotoPaste(filePhoto) }
+                return
             }
 
-            Task { @MainActor in
-                loadingReplyPhoto = false
-                guard let result else {
-                    actionNote = "Couldn't add that photo."
-                    return
-                }
-                if let previous = replyPhoto { removeReplyPhoto(previous) }
-                replyPhoto = PromptPhoto(
-                    id: UUID(), name: result.name, mime: result.mime, staged: result.staged,
-                    uploadID: nil, gramMessageID: nil)
-                actionNote = nil
+            // Some pasteboards (including UIImage-backed ones) advertise an image but
+            // cannot vend a file URL. Decode only on that fallback path, encode a bounded
+            // JPEG, and stage it through the same disk-backed uploader.
+            provider.loadObject(ofClass: UIImage.self) { object, _ in
+                let objectPhoto: PromptPhoto? = {
+                    guard let image = object as? UIImage,
+                          let data = image.jpegData(compressionQuality: 0.9)
+                    else { return nil }
+                    let proposed = suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let stem = proposed.map {
+                        URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+                    }.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? "photo-\(UUID().uuidString.prefix(8).lowercased())"
+                    let name = "\(GramStaging.safeFileName(stem)).jpg"
+                    guard let staged = GramStaging.stageData(
+                        data, named: name, in: GramView.Staging.session,
+                        maxBytes: GramView.Staging.maxFileBytes)
+                    else { return nil }
+                    return PromptPhoto(
+                        id: UUID(), name: name, mime: "image/jpeg", staged: staged,
+                        uploadID: nil, gramMessageID: nil)
+                }()
+                Task { @MainActor in finishReplyPhotoPaste(objectPhoto) }
             }
         }
+    }
+
+    private func finishReplyPhotoPaste(_ photo: PromptPhoto?) {
+        loadingReplyPhoto = false
+        guard let photo else {
+            actionNote = "Couldn't add that photo."
+            return
+        }
+        if let previous = replyPhoto { removeReplyPhoto(previous) }
+        replyPhoto = photo
+        actionNote = nil
     }
 
     private func removeReplyPhoto(_ photo: PromptPhoto) {
