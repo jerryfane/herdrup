@@ -4,6 +4,7 @@ import SwiftUI
 import SwiftTerm
 import UIKit
 import HerdrKit
+import UniformTypeIdentifiers
 
 /// A tiny ordered PTY peer. Every pane owns its own continuation, byte offset,
 /// history reader and resize script; the root only routes decoded envelopes.
@@ -471,6 +472,17 @@ final class TerminalInteractionHarness: ObservableObject {
             UIPasteboard.general.string = "pasted-one\npasted-two\npasted-three\npasted-four\npasted-tail"
         case "newline-pasteboard":
             UIPasteboard.general.string = "\n\n"
+        case "file-pasteboard":
+            // A PDF, because the point of the receipt is a NON-IMAGE file: it exercises the
+            // composer's file branch (no UIImage anywhere in the path) and, unlike a plain
+            // text payload, it is a type the composer must attach rather than insert.
+            let page = CGRect(x: 0, y: 0, width: 120, height: 60)
+            let pdf = UIGraphicsPDFRenderer(bounds: page).pdfData { context in
+                context.beginPage()
+                UIColor.black.setStroke()
+                context.cgContext.stroke(page.insetBy(dx: 8, dy: 8))
+            }
+            UIPasteboard.general.setData(pdf, forPasteboardType: UTType.pdf.identifier)
         case "batch-insert":
             surfaces[activeID]?.view?.insertText("batch-payload")
         case "ime-commit":
@@ -522,7 +534,7 @@ private struct TerminalInteractionControls: View {
     private static let commands =
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
-         "reply-multiline-pasteboard", "newline-pasteboard",
+         "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "batch-insert", "ime-commit"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 

@@ -277,17 +277,10 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         command("photo-pasteboard")
 
-        field.press(forDuration: 1)
-        let paste = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "Paste"))
-            .firstMatch
-        XCTAssertTrue(paste.waitForExistence(timeout: 5),
+        XCTAssertTrue(pasteIntoReply(field),
                       "a copied photo should offer Paste in the reply editor")
-        paste.tap()
 
-        let chip = app.descendants(matching: .any)
-            .matching(identifier: "terminal-photo-attachment")
-            .firstMatch
+        let chip = replyAttachmentChip
         XCTAssertTrue(chip.waitForExistence(timeout: 10),
                       "pasting a photo should stage a visible attachment")
         let send = app.buttons["terminal-send-button"]
@@ -298,6 +291,50 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
             predicate: NSPredicate(format: "exists == false"), object: chip)
         XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
                        "the photo should upload, post to the agent, and clear after prompt delivery")
+    }
+
+    /// The SAME path with a non-image file (a PDF), because the composer only accepted
+    /// images at first: "paste a photo" worked while "paste the file you just copied" was a
+    /// silent no-op. Nothing in staging, upload or the prompt reference is image-specific,
+    /// so this receipt exists to keep the type filter from narrowing back.
+    func testCopiedFileOffersPasteAndSendsAttachment() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("file-pasteboard")
+
+        XCTAssertTrue(pasteIntoReply(field),
+                      "a copied file should offer Paste in the reply editor")
+
+        let chip = replyAttachmentChip
+        XCTAssertTrue(chip.waitForExistence(timeout: 10),
+                      "pasting a file should stage a visible attachment")
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5),
+                      "a file should be sendable without caption text")
+        send.tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: chip)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
+                       "the file should upload, post to the agent, and clear after prompt delivery")
+    }
+
+    /// The staged-attachment chip. A container, so it is matched across element types
+    /// rather than assumed to be an `otherElement`.
+    private var replyAttachmentChip: XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "terminal-attachment").firstMatch
+    }
+
+    /// Long-press the reply field and tap Paste. Returns false when the menu never offered
+    /// it, so the caller can fail with its own message.
+    private func pasteIntoReply(_ field: XCUIElement) -> Bool {
+        field.press(forDuration: 1)
+        let paste = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Paste"))
+            .firstMatch
+        guard paste.waitForExistence(timeout: 5) else { return false }
+        paste.tap()
+        return true
     }
 
     func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
