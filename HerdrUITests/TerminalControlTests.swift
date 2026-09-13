@@ -300,7 +300,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
 
-        field.typeText(String(repeating: " wrapped", count: 20))
+        field.typeText(String(repeating: " wrapped", count: 60))
         Thread.sleep(forTimeInterval: 0.3)
         let threeLines = field.frame
         XCTAssertGreaterThan(threeLines.height, oneLine.height)
