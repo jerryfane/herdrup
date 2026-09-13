@@ -5078,7 +5078,11 @@ struct TerminalPaneContent: View {
                 case .refused(let reason):
                     actionNote = "not sent: \(reason)"; return
                 }
-                if case .submitText = action { reply = "" }
+                // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
+                // whole round trip now (see the `isEnabled` comment on TerminalReplyField),
+                // so an unconditional clear here would wipe a reply typed while the prompt
+                // was in flight — the very flow that fix exists to allow.
+                if case .submitText(let sent) = action, reply == sent { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
@@ -5151,7 +5155,7 @@ struct TerminalPaneContent: View {
                     : "\(text)\n\n\(reference)"
                 try await submitPrompt(pane: paneID, text: prompt)
                 if replyPhoto?.id == current.id { replyPhoto = nil }
-                reply = ""
+                if reply == text { reply = "" }
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
