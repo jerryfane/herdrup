@@ -3737,6 +3737,30 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
+/// WHICH PASTEBOARD ITEMS THE REPLY COMPOSER TREATS AS A FILE rather than as text.
+///
+/// Shared by the UIKit text view (which decides whether to offer and intercept Paste) and
+/// the pane (which stages the item), so the two can never disagree about what "a pasted
+/// file" is.
+private enum PastedFile {
+    /// Concrete bytes, or a package like an .rtfd bundle — but never text, a link or a
+    /// contact card, which are ordinary pastes the reader expects to land as characters.
+    static func isAttachment(_ type: UTType) -> Bool {
+        guard type.conforms(to: .data) || type.conforms(to: .package) else { return false }
+        return !type.conforms(to: .text) && !type.conforms(to: .url)
+            && !type.conforms(to: .vCard) && type != .rtf && type != .flatRTFD
+    }
+
+    /// The first attachable type on the general pasteboard, read from TYPE METADATA ONLY.
+    ///
+    /// `UIPasteboard.types` never touches the items, so this is safe to call while UIKit
+    /// builds an edit menu. Reading `itemProviders` there instead is a content read, which
+    /// raises the system "Allow Paste?" prompt for anything copied in another app.
+    static func pasteboardType() -> UTType? {
+        UIPasteboard.general.types.lazy.compactMap { UTType($0) }.first(where: isAttachment)
+    }
+}
+
 private struct TerminalReplyField: UIViewRepresentable {
     @Binding var text: String
     let isEnabled: Bool
@@ -3744,15 +3768,15 @@ private struct TerminalReplyField: UIViewRepresentable {
     let onFocusChange: (Bool) -> Void
     let onChange: (String, String) -> Void
     let onReturn: (String) -> Void
-    /// Returns false when the composer declines the photo, so `paste(_:)` can fall through
+    /// Returns false when the composer declines the file, so `paste(_:)` can fall through
     /// to UIKit instead of turning the paste into a no-op.
-    let onPasteImage: (NSItemProvider) -> Bool
+    let onPasteFile: (NSItemProvider) -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> ReplyTextView {
         let view = ReplyTextView()
-        view.onPasteImage = onPasteImage
+        view.onPasteFile = onPasteFile
         view.delegate = context.coordinator
         view.backgroundColor = UIColor(Palette.surface)
         view.layer.cornerRadius = 20
@@ -3775,7 +3799,7 @@ private struct TerminalReplyField: UIViewRepresentable {
 
     func updateUIView(_ view: ReplyTextView, context: Context) {
         context.coordinator.parent = self
-        view.onPasteImage = onPasteImage
+        view.onPasteFile = onPasteFile
         if view.text != text {
             view.text = text
             view.updatePlaceholder()
@@ -3850,7 +3874,7 @@ private struct TerminalReplyField: UIViewRepresentable {
     }
 
     final class ReplyTextView: UITextView {
-        var onPasteImage: ((NSItemProvider) -> Bool)?
+        var onPasteFile: ((NSItemProvider) -> Bool)?
         private let placeholder = UILabel()
         var minimumHeight: CGFloat = 40
         var maximumHeight: CGFloat = 76
@@ -3870,14 +3894,8 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { nil }
-        // `hasImages`, NOT `itemProviders`. UIKit calls canPerformAction while it BUILDS the
-        // edit menu — before the user has asked for anything — and reading `itemProviders`
-        // there is a pasteboard CONTENT read, which for a photo copied in Photos or Safari
-        // (the only real case here) raises the system "Allow Paste?" prompt on every
-        // long-press. `hasImages` answers the same question from metadata and never prompts.
-        // The content read inside `paste(_:)` below is user-initiated, so it is fine.
         override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-            if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
+            if action == #selector(paste(_:)), PastedFile.pasteboardType() != nil {
                 return true
             }
             return super.canPerformAction(action, withSender: sender)
@@ -3886,14 +3904,14 @@ private struct TerminalReplyField: UIViewRepresentable {
         override func paste(_ sender: Any?) {
             // Text wins when the pasteboard carries both. Copying an image out of Safari
             // registers a URL alongside the image, and a composer that swallowed the item as
-            // a photo dropped the text the user was actually after. Every bail-out path —
-            // no image, text present, or a handler that declines (no named intent agent) —
-            // falls through to UIKit's own paste, so plain text always pastes.
-            if UIPasteboard.general.hasImages, !UIPasteboard.general.hasStrings,
+            // a file dropped the text the user was actually after. Every bail-out path —
+            // no file type, text present, or a handler that declines (no named intent
+            // agent) — falls through to UIKit's own paste, so plain text always pastes.
+            if !UIPasteboard.general.hasStrings, let type = PastedFile.pasteboardType(),
                let provider = UIPasteboard.general.itemProviders.first(where: {
-                   $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+                   $0.hasItemConformingToTypeIdentifier(type.identifier)
                }),
-               onPasteImage?(provider) == true
+               onPasteFile?(provider) == true
             {
                 return
             }
@@ -3963,18 +3981,22 @@ struct TerminalPaneContent: View {
     /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
     /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
     let onClose: () -> Void
-    private struct PromptPhoto: Identifiable, Sendable {
+    /// One staged file on its way to the agent: a pasted photo, a PDF, a log, anything
+    /// the pasteboard can vend as a file. `isImage` only chooses the chip glyph and the
+    /// wording of the prompt reference; the delivery path is identical either way.
+    private struct PromptAttachment: Identifiable, Sendable {
         let id: UUID
         let name: String
         let mime: String
+        let isImage: Bool
         let staged: StagedAttachment?
         let uploadID: String?
         let gramMessageID: String?
     }
 
     @State private var reply: String
-    @State private var replyPhoto: PromptPhoto?
-    @State private var loadingReplyPhoto = false
+    @State private var replyAttachment: PromptAttachment?
+    @State private var loadingReplyAttachment = false
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -4129,10 +4151,10 @@ struct TerminalPaneContent: View {
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
     private var hasReplyContent: Bool {
-        replyPhoto != nil || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        replyAttachment != nil || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private var canSend: Bool {
-        hasReplyContent && !sending && !replyDictating && !loadingReplyPhoto
+        hasReplyContent && !sending && !replyDictating && !loadingReplyAttachment
     }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
@@ -4773,44 +4795,44 @@ struct TerminalPaneContent: View {
         .accessibilityIdentifier("terminal-ctrl")
     }
     @ViewBuilder
-    private var replyPhotoStrip: some View {
-        if loadingReplyPhoto {
+    private var replyAttachmentStrip: some View {
+        if loadingReplyAttachment {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Adding photo…")
+                Text("Adding attachment…")
                     .font(Typography.app(12, .medium))
                     .foregroundStyle(Palette.textDim)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-            .accessibilityIdentifier("terminal-photo-loading")
-        } else if let photo = replyPhoto {
+            .accessibilityIdentifier("terminal-attachment-loading")
+        } else if let attachment = replyAttachment {
             HStack(spacing: 8) {
-                Image(systemName: "photo")
+                Image(systemName: attachment.isImage ? "photo" : "doc")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Palette.textDim)
-                Text(photo.name)
+                Text(attachment.name)
                     .font(Typography.app(12, .medium))
                     .foregroundStyle(Palette.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
                 Button {
-                    removeReplyPhoto(photo)
+                    removeReplyAttachment(attachment)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
                         .foregroundStyle(Palette.textFaint)
                 }
                 .disabled(sending)
-                .accessibilityLabel("Remove attached photo")
+                .accessibilityLabel("Remove attachment")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
             .opacity(sending ? 0.6 : 1)
-            .accessibilityIdentifier("terminal-photo-attachment")
+            .accessibilityIdentifier("terminal-attachment")
         }
     }
 
@@ -4854,11 +4876,11 @@ struct TerminalPaneContent: View {
                 .accessibilityLabel("Collapse keyboard")
             }
             VStack(alignment: .leading, spacing: 6) {
-                replyPhotoStrip
+                replyAttachmentStrip
                 TerminalReplyField(
                     text: $reply,
                     // ONLY dictation disables the field. Gating it on `sending` (and on the
-                    // photo upload, which holds for upload + post + prompt) set
+                    // attachment upload, which holds for upload + post + prompt) set
                     // `isEditable = false` on a first-responder text view, which ends editing:
                     // the keyboard visibly dropped on EVERY reply and nothing re-acquired it,
                     // so consecutive replies needed a re-tap each time. Double sends are
@@ -4872,13 +4894,13 @@ struct TerminalPaneContent: View {
                     },
                     onReturn: { currentText in
                         guard !sending, !replyDictating,
-                              replyPhoto != nil
+                              replyAttachment != nil
                                 || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         else { return }
                         ctrlArmed = false
                         sendTapped(currentText)
                     },
-                    onPasteImage: pasteReplyPhoto
+                    onPasteFile: pasteReplyAttachment
                 )
             }
             .frame(minWidth: 0, maxWidth: .infinity)
@@ -4930,86 +4952,96 @@ struct TerminalPaneContent: View {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
-    /// Stages a pasted image as the reply's attachment. Returns false when this composer
-    /// cannot take it — a send in flight, or a pane with no named intent agent — so the
-    /// caller pastes normally instead of swallowing the gesture.
+    /// Stages a pasted FILE of any kind — a photo, a PDF, a log, a zip — as the reply's
+    /// attachment. Returns false when this composer cannot take it (a send in flight, a
+    /// pane with no named intent agent, or an item that vends no file type), so the caller
+    /// pastes normally instead of swallowing the gesture.
+    ///
+    /// Only IMAGES used to be accepted, which made "paste a photo" work and "paste the log
+    /// you just copied" silently do nothing. The delivery path never cared: staging, the
+    /// Gram upload channel and the prompt reference are all byte-agnostic, so the image
+    /// restriction was in the type filter alone.
     @discardableResult
-    private func pasteReplyPhoto(_ provider: NSItemProvider) -> Bool {
-        guard !sending, !loadingReplyPhoto else { return false }
+    private func pasteReplyAttachment(_ provider: NSItemProvider) -> Bool {
+        guard !sending, !loadingReplyAttachment else { return false }
         guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
               currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
-            actionNote = "Photo attachments need a named agent with a ready prompt."
+            actionNote = "Attachments need a named agent with a ready prompt."
             return false
         }
-        guard let type = provider.registeredTypeIdentifiers.lazy
-            .compactMap({ UTType($0) })
-            .first(where: { $0.conforms(to: .image) })
+        let types = provider.registeredTypeIdentifiers.lazy.compactMap { UTType($0) }
+        // An image first when the item offers several representations (a screenshot also
+        // vends a file URL), then any concrete file type.
+        guard let type = types.first(where: { $0.conforms(to: .image) })
+                ?? types.first(where: PastedFile.isAttachment)
         else {
             return false
         }
 
-        loadingReplyPhoto = true
+        loadingReplyAttachment = true
         ctrlArmed = false
         let typeIdentifier = type.identifier
-        let ext = type.preferredFilenameExtension ?? "jpg"
+        let isImage = type.conforms(to: .image)
+        let ext = type.preferredFilenameExtension ?? (isImage ? "jpg" : "dat")
         let name: String = {
             var candidate = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if candidate.isEmpty {
-                candidate = "photo-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
+                let stem = isImage ? "photo" : "file"
+                candidate = "\(stem)-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
             }
             if URL(fileURLWithPath: candidate).pathExtension.isEmpty { candidate += ".\(ext)" }
             return GramStaging.safeFileName(candidate)
         }()
-        let mime = type.preferredMIMEType ?? "image/jpeg"
+        let mime = type.preferredMIMEType ?? (isImage ? "image/jpeg" : "application/octet-stream")
 
         provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { source, _ in
-            let filePhoto: PromptPhoto? = source.flatMap { url in
+            let fileAttachment: PromptAttachment? = source.flatMap { url in
                 guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
-                return PromptPhoto(
-                    id: UUID(), name: name, mime: mime, staged: staged,
+                return PromptAttachment(
+                    id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
                     uploadID: nil, gramMessageID: nil)
             }
-            if let filePhoto {
-                Task { @MainActor in finishReplyPhotoPaste(filePhoto) }
+            if let fileAttachment {
+                Task { @MainActor in finishReplyAttachmentPaste(fileAttachment) }
                 return
             }
 
-            // In-memory pasteboards can vend encoded image data but no file URL.
+            // In-memory pasteboards can vend encoded bytes but no file URL.
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
-                let dataPhoto: PromptPhoto? = data.flatMap {
+                let dataAttachment: PromptAttachment? = data.flatMap {
                     guard let staged = GramStaging.stageData(
                         $0, named: name, in: GramView.Staging.session,
                         maxBytes: GramView.Staging.maxFileBytes)
                     else { return nil }
-                    return PromptPhoto(
-                        id: UUID(), name: name, mime: mime, staged: staged,
+                    return PromptAttachment(
+                        id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
                         uploadID: nil, gramMessageID: nil)
                 }
-                Task { @MainActor in finishReplyPhotoPaste(dataPhoto) }
+                Task { @MainActor in finishReplyAttachmentPaste(dataAttachment) }
             }
         }
         return true
     }
 
-    private func finishReplyPhotoPaste(_ photo: PromptPhoto?) {
-        loadingReplyPhoto = false
-        guard let photo else {
-            actionNote = "Couldn't add that photo."
+    private func finishReplyAttachmentPaste(_ attachment: PromptAttachment?) {
+        loadingReplyAttachment = false
+        guard let attachment else {
+            actionNote = "Couldn't add that attachment."
             return
         }
-        if let previous = replyPhoto { removeReplyPhoto(previous) }
-        replyPhoto = photo
+        if let previous = replyAttachment { removeReplyAttachment(previous) }
+        replyAttachment = attachment
         actionNote = nil
     }
 
-    private func removeReplyPhoto(_ photo: PromptPhoto) {
-        guard replyPhoto?.id == photo.id else { return }
-        replyPhoto = nil
-        if let staged = photo.staged {
+    private func removeReplyAttachment(_ attachment: PromptAttachment) {
+        guard replyAttachment?.id == attachment.id else { return }
+        replyAttachment = nil
+        if let staged = attachment.staged {
             try? FileManager.default.removeItem(at: staged.dir)
         }
-        if let messageID = photo.gramMessageID {
+        if let messageID = attachment.gramMessageID {
             Task { try? await client.gramDelete(id: messageID) }
         }
     }
@@ -5055,8 +5087,8 @@ struct TerminalPaneContent: View {
         // send and the raw sequences. The automatic pre-fill delivery is excluded on
         // purpose — nobody touched anything, so there is no user act to honour.
         if !autoDelivering { userInputToken += 1 }
-        if case .submitText(let text) = action, let photo = replyPhoto {
-            sendPromptWithPhoto(text, photo: photo)
+        if case .submitText(let text) = action, let attachment = replyAttachment {
+            sendPromptWithAttachment(text, attachment: attachment)
             return
         }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
@@ -5093,12 +5125,12 @@ struct TerminalPaneContent: View {
             }
         }
     }
-    private func sendPromptWithPhoto(_ text: String, photo: PromptPhoto) {
+    private func sendPromptWithAttachment(_ text: String, attachment: PromptAttachment) {
         guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
               let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
               !target.isEmpty
         else {
-            actionNote = "Photo attachments need a named agent with a ready prompt."
+            actionNote = "Attachments need a named agent with a ready prompt."
             return
         }
 
@@ -5106,7 +5138,7 @@ struct TerminalPaneContent: View {
             sending = true
             defer { sending = false }
             do {
-                var current = photo
+                var current = attachment
                 var messageID = current.gramMessageID
                 if messageID == nil {
                     let uploadID: String
@@ -5114,47 +5146,51 @@ struct TerminalPaneContent: View {
                         uploadID = existing
                     } else {
                         guard let staged = current.staged else {
-                            actionNote = "Couldn't read the attached photo."
+                            actionNote = "Couldn't read the attachment."
                             return
                         }
                         uploadID = try await client.gramUploadFile(fileURL: staged.url)
-                        current = PromptPhoto(
+                        current = PromptAttachment(
                             id: current.id, name: current.name, mime: current.mime,
-                            staged: staged, uploadID: uploadID, gramMessageID: nil)
-                        if replyPhoto?.id == current.id { replyPhoto = current }
+                            isImage: current.isImage, staged: staged, uploadID: uploadID,
+                            gramMessageID: nil)
+                        if replyAttachment?.id == current.id { replyAttachment = current }
                     }
 
-                    let attachment = HerdrClient.GramFileAttachment(
+                    let file = HerdrClient.GramFileAttachment(
                         uploadID: uploadID, name: current.name, mime: current.mime)
-                    let posted = try await Self.postReplyPhoto(
-                        client: client, target: target, attachment: attachment)
+                    let posted = try await Self.postReplyAttachment(
+                        client: client, target: target, attachment: file)
                     messageID = posted.id
                     if let staged = current.staged {
                         try? FileManager.default.removeItem(at: staged.dir)
                     }
-                    current = PromptPhoto(
+                    current = PromptAttachment(
                         id: current.id, name: current.name, mime: current.mime,
-                        staged: nil, uploadID: nil, gramMessageID: posted.id)
-                    if replyPhoto?.id == current.id { replyPhoto = current }
+                        isImage: current.isImage, staged: nil, uploadID: nil,
+                        gramMessageID: posted.id)
+                    if replyAttachment?.id == current.id { replyAttachment = current }
                 }
 
                 guard let messageID else {
-                    actionNote = "Couldn't deliver the attached photo."
+                    actionNote = "Couldn't deliver the attachment."
                     return
                 }
                 let rawExtension = URL(fileURLWithPath: current.name).pathExtension.lowercased()
                 let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
-                let outputPath = "/tmp/herdr-photo-\(messageID)"
+                let stem = current.isImage ? "photo" : "file"
+                let outputPath = "/tmp/herdr-\(stem)-\(messageID)"
                     + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+                let noun = current.isImage ? "Photo" : "File \(current.name)"
                 let reference = """
-                [Photo attached via Herdr Gram message \(messageID). Download it with \
+                [\(noun) attached via Herdr Gram message \(messageID). Download it with \
                 `herdr gram get-file \(messageID) -o \(outputPath)`, then inspect \(outputPath).]
                 """
                 let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? reference
                     : "\(text)\n\n\(reference)"
                 try await submitPrompt(pane: paneID, text: prompt)
-                if replyPhoto?.id == current.id { replyPhoto = nil }
+                if replyAttachment?.id == current.id { replyAttachment = nil }
                 if reply == text { reply = "" }
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
@@ -5166,7 +5202,7 @@ struct TerminalPaneContent: View {
         }
     }
 
-    private static func postReplyPhoto(
+    private static func postReplyAttachment(
         client: HerdrClient,
         target: String,
         attachment: HerdrClient.GramFileAttachment
@@ -5174,7 +5210,7 @@ struct TerminalPaneContent: View {
         for attempt in 0..<3 {
             do {
                 return try await client.gramPost(
-                    text: "Photo attached from the terminal composer.",
+                    text: "Attachment from the terminal composer.",
                     to: target,
                     attachment: attachment)
             } catch let error as APIError where error.code == "upload_in_progress" {
