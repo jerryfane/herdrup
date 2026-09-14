@@ -3743,9 +3743,16 @@ struct EdgeSwipeBack: UIViewRepresentable {
 /// the pane (which stages the item), so the two can never disagree about what "a pasted
 /// file" is.
 private enum PastedFile {
-    /// Concrete bytes, or a package like an .rtfd bundle — but never text, a link or a
-    /// contact card, which are ordinary pastes the reader expects to land as characters.
+    /// Concrete bytes, or a package like an .rtfd bundle — but never text, a web link or
+    /// a contact card, which are ordinary pastes the reader expects to land as
+    /// characters.
+    ///
+    /// A FILE URL is the exception, and it is the whole reason Copy in Finder or Files
+    /// used to paste a path instead of attaching the file: `public.file-url` conforms to
+    /// `public.url`, so the link exclusion swallowed it. A file url names bytes; a web
+    /// url names a page.
     static func isAttachment(_ type: UTType) -> Bool {
+        if type.conforms(to: .fileURL) { return true }
         guard type.conforms(to: .data) || type.conforms(to: .package) else { return false }
         return !type.conforms(to: .text) && !type.conforms(to: .url)
             && !type.conforms(to: .vCard) && type != .rtf && type != .flatRTFD
@@ -3756,8 +3763,19 @@ private enum PastedFile {
     /// `UIPasteboard.types` never touches the items, so this is safe to call while UIKit
     /// builds an edit menu. Reading `itemProviders` there instead is a content read, which
     /// raises the system "Allow Paste?" prompt for anything copied in another app.
+    ///
+    /// A file url wins over the file's own concrete type when both are advertised: it is
+    /// the representation that survives a cross-process copy with its name intact.
     static func pasteboardType() -> UTType? {
-        UIPasteboard.general.types.lazy.compactMap { UTType($0) }.first(where: isAttachment)
+        let types = UIPasteboard.general.types.lazy.compactMap { UTType($0) }
+        return types.first { $0.conforms(to: .fileURL) } ?? types.first(where: isAttachment)
+    }
+
+    /// Whether the pasteboard names a FILE. Metadata only, and the one case where an
+    /// accompanying text representation must not win: Finder and Files put the path on
+    /// the pasteboard beside the file, and pasting that path is never what was meant.
+    static func pasteboardHasFileURL() -> Bool {
+        UIPasteboard.general.contains(pasteboardTypes: [UTType.fileURL.identifier])
     }
 }
 
@@ -3906,11 +3924,15 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         override func paste(_ sender: Any?) {
             // Text wins when the pasteboard carries both. Copying an image out of Safari
-            // registers a URL alongside the image, and a composer that swallowed the item as
-            // a file dropped the text the user was actually after. Every bail-out path —
-            // no file type, text present, or a handler that declines (no named intent
-            // agent) — falls through to UIKit's own paste, so plain text always pastes.
-            if !UIPasteboard.general.hasStrings, let type = PastedFile.pasteboardType(),
+            // registers a URL alongside the image, and a composer that swallowed the item
+            // as a file dropped the text the user was actually after.
+            //
+            // A FILE URL overrides that: Finder and Files put the path on the pasteboard
+            // beside the file, so deferring to text there pasted "/Users/…/main.pdf" and
+            // attached nothing — which is exactly how Command-V looked broken on Mac and
+            // iPad. Every other bail-out still falls through to UIKit's own paste.
+            if PastedFile.pasteboardHasFileURL() || !UIPasteboard.general.hasStrings,
+               let type = PastedFile.pasteboardType(),
                let provider = UIPasteboard.general.itemProviders.first(where: {
                    $0.hasItemConformingToTypeIdentifier(type.identifier)
                }),
@@ -4038,6 +4060,8 @@ struct TerminalPaneContent: View {
     /// Per-agent push mute, toggled from the header's ⋯ menu (keyed by this pane's
     /// public id — the same id the push payload carries).
     @ObservedObject private var mute = MuteStore.shared
+    /// A drag is hovering the reply bar, so the target says so before the drop lands.
+    @State private var replyDropTargeted = false
     /// Saved prompts, shown from the reply bar when the input is empty (the send arrow would be
     /// dead then). Tapping one inserts it and sends it via the normal path.
     @ObservedObject private var savedPrompts = SavedPromptsStore.shared
@@ -5034,6 +5058,23 @@ struct TerminalPaneContent: View {
             }
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+        // DRAG AND DROP, the other half of "get a file in from a Mac or an iPad". The
+        // whole bar is the target, not just the field: a dragged file is aimed at the
+        // composer, and a 40-point text view is a cruel thing to hit with a trackpad.
+        // `.item` covers everything a Finder or Files drag vends, and each provider goes
+        // through the SAME staging path as a paste, so the cap, the type rule and the
+        // named-agent guard are shared rather than re-stated.
+        .onDrop(of: [.item], isTargeted: $replyDropTargeted) { providers in
+            providers.map { pasteReplyAttachment($0) }.contains(true)
+        }
+        .overlay {
+            if replyDropTargeted {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(Palette.brand, lineWidth: 2)
+                    .padding(.horizontal, 8)
+                    .allowsHitTesting(false)
+            }
+        }
         .sheet(isPresented: $showSavePrompt) {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
@@ -5062,11 +5103,40 @@ struct TerminalPaneContent: View {
         }
         let types = provider.registeredTypeIdentifiers.lazy.compactMap { UTType($0) }
         // An image first when the item offers several representations (a screenshot also
-        // vends a file URL), then any concrete file type.
+        // vends a file URL), then any concrete file type, then a bare file url — which is
+        // all a Finder or Files copy carries once its text path is set aside.
         guard let type = types.first(where: { $0.conforms(to: .image) })
-                ?? types.first(where: PastedFile.isAttachment)
+                ?? types.first(where: { PastedFile.isAttachment($0) && !$0.conforms(to: .fileURL) })
+                ?? types.first(where: { $0.conforms(to: .fileURL) })
         else {
             return false
+        }
+
+        // A file url is a REFERENCE, not bytes: loading it as a file representation
+        // yields a temp file containing the path text. Resolve it to the real file and
+        // copy from there, inside a security scope, because a document picked outside the
+        // app's container is only readable while that scope is open.
+        if type.conforms(to: .fileURL) {
+            loadingReplyAttachment = true
+            ctrlArmed = false
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                let attachment: PromptAttachment? = url.flatMap { source in
+                    let scoped = source.startAccessingSecurityScopedResource()
+                    defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+                    let name = GramStaging.safeFileName(source.lastPathComponent)
+                    guard !name.isEmpty,
+                          let staged = GramView.Staging.copy(of: source, named: name)
+                    else { return nil }
+                    let fileType = UTType(filenameExtension: source.pathExtension)
+                    return PromptAttachment(
+                        id: UUID(), name: name,
+                        mime: fileType?.preferredMIMEType ?? "application/octet-stream",
+                        isImage: fileType?.conforms(to: .image) ?? false,
+                        staged: staged, uploadID: nil, gramMessageID: nil)
+                }
+                Task { @MainActor in finishReplyAttachmentPaste(attachment) }
+            }
+            return true
         }
 
         loadingReplyAttachment = true

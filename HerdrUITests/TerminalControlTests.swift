@@ -358,6 +358,25 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         }
     }
 
+    /// COPY IN FINDER OR FILES, which is how a Mac or iPad reader gets a file into the
+    /// composer with Command-V. That pasteboard carries the file url AND the path as
+    /// text, and the composer used to defer to the text: it pasted "/…/dropped-note.txt"
+    /// and attached nothing. The chip must carry the file's real name.
+    func testACopiedFileURLAttachesTheFileRatherThanItsPath() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("file-url-pasteboard")
+
+        XCTAssertTrue(pasteIntoReply(field), "a copied file should offer Paste")
+
+        let chip = app.staticTexts["dropped-note.txt"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10),
+                      "the file itself should stage, named as it is on disk")
+        XCTAssertEqual(field.value as? String ?? "", "",
+                       "and its path must not be pasted as text")
+    }
+
     /// The staged-attachment chip. A container, so it is matched across element types
     /// rather than assumed to be an `otherElement`.
     private var replyAttachmentChip: XCUIElement {
