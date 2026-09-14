@@ -6069,8 +6069,9 @@ struct SettingsView: View {
                     header
                     Divider().overlay(Palette.hairlineQuiet)
                     ScrollView {
-                        // Grouped subviews keep this builder well under SwiftUI's 10-child
-                        // ViewBuilder ceiling (7 children + the footers Group).
+                        // Grouped subviews keep this builder under SwiftUI's 10-child
+                        // ViewBuilder ceiling (8 children + the footers Group = 9, so
+                        // one slot left: the next section needs its own Group).
                         VStack(alignment: .leading, spacing: 0) {
                             atAGlanceSection
                             manageSection
@@ -6237,7 +6238,7 @@ struct SettingsView: View {
 
     /// iPad "App & About": the light sections that stay inline on the iPhone index.
     private func aboutDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "App & About", subtitle: "Trouble, help, support & legal",
+        detailScaffold(title: "App & About", subtitle: "Previews, trouble, help, support & legal",
                        showBack: showBack) {
             previewsSection
             troubleSection

@@ -114,7 +114,7 @@ private struct ExpandedHost: View {
     var body: some View {
         Text(hostLabel)
             .font(WidgetFont.plex(11))
-            .foregroundStyle(WidgetPalette.textFaint)
+            .foregroundStyle(WidgetPalette.glassTextFaint)
             .lineLimit(1)
             .truncationMode(.tail)
     }
@@ -129,19 +129,19 @@ private struct ExpandedBody: View {
     let isStale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.headline)
                     .font(WidgetFont.geistSemiBold(16))
                     .foregroundStyle(WidgetPalette.text)
                     .lineLimit(1)
-                if let question = state.question, !question.isEmpty, !isStale {
-                    Text(question)
-                        .font(WidgetFont.plex(12))
-                        .foregroundStyle(WidgetPalette.textDim)
-                        .lineLimit(1)
-                }
-                footer
+                // EXACTLY ONE secondary line. The expanded island's height budget is
+                // about 160pt and nothing here can compress — every line is
+                // `lineLimit(1)` and the button's 36 is a floor — so a third line plus
+                // the action is how the card gets clipped instead of shrunk. The
+                // question is the more useful of the two when there is one; the counts
+                // keep their place in every other state.
+                secondary
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -150,20 +150,32 @@ private struct ExpandedBody: View {
                     title: "Open herdrup",
                     destination: state.deepLinkURL,
                     tint: state.markColor,
-                    outlined: isStale
+                    outlined: isStale,
+                    minHeight: 36
                 )
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GlassSurface(cornerRadius: 18))
+        .background(GlassSurface(cornerRadius: 16))
         .padding(.horizontal, 2)
-        .padding(.top, 4)
     }
 
-    /// One faint line: the timer that matters in this state, then the fleet counts. The
-    /// machine's name is the trailing corner's job, so it is not repeated here.
+    @ViewBuilder
+    private var secondary: some View {
+        if !isStale, let question = state.question, !question.isEmpty {
+            Text(question)
+                .font(WidgetFont.plex(12))
+                .foregroundStyle(WidgetPalette.glassTextDim)
+                .lineLimit(1)
+        } else {
+            footer
+        }
+    }
+
+    /// The timer that matters in this state, then the fleet counts. The machine's name
+    /// is the trailing corner's job, so it is not repeated here.
     @ViewBuilder
     private var footer: some View {
         HStack(spacing: 4) {
@@ -184,7 +196,7 @@ private struct ExpandedBody: View {
             }
         }
         .font(WidgetFont.plex(11))
-        .foregroundStyle(WidgetPalette.textFaint)
+        .foregroundStyle(WidgetPalette.glassTextFaint)
         .lineLimit(1)
         .truncationMode(.tail)
     }
@@ -229,7 +241,7 @@ private struct LockScreenView: View {
                     if let question = state.question, !question.isEmpty, !isStale {
                         Text(question)
                             .font(WidgetFont.plex(15))
-                            .foregroundStyle(WidgetPalette.textDim)
+                            .foregroundStyle(dim)
                             .lineLimit(1)
                     } else if state.needsYouCount > 0, !isStale {
                         Text(AgentActivitySummary.line(state))
@@ -270,6 +282,13 @@ private struct LockScreenView: View {
         }
     }
 
+    /// Secondary and tertiary ink, picked for the surface actually behind them. On
+    /// glass the wallpaper is unknown, so the lifted pair is the only one that stays
+    /// legible over a bright one; on the Always-On backdrop the surface is the opaque
+    /// navy these were tuned against, and the dimmer pair is correct there.
+    private var dim: Color { isLuminanceReduced ? WidgetPalette.textDim : WidgetPalette.glassTextDim }
+    private var faint: Color { isLuminanceReduced ? WidgetPalette.textFaint : WidgetPalette.glassTextFaint }
+
     @ViewBuilder
     private var lockHero: some View {
         if state.needsYouCount > 0 {
@@ -288,7 +307,7 @@ private struct LockScreenView: View {
                 }
                 Text("need you")
                     .font(WidgetFont.geist(13))
-                    .foregroundStyle(WidgetPalette.textDim)
+                    .foregroundStyle(dim)
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
@@ -307,18 +326,18 @@ private struct LockScreenView: View {
                     Text("· no update from \(hostLabel)")
                 }
                 .font(WidgetFont.plex(11))
-                .foregroundStyle(WidgetPalette.textFaint)
+                .foregroundStyle(faint)
                 .lineLimit(1)
             } else {
                 Text("No update from \(hostLabel)")
                     .font(WidgetFont.plex(11))
-                    .foregroundStyle(WidgetPalette.textFaint)
+                    .foregroundStyle(faint)
                     .lineLimit(1)
             }
         } else {
             Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
                 .font(WidgetFont.plex(13))
-                .foregroundStyle(WidgetPalette.textFaint)
+                .foregroundStyle(faint)
                 .lineLimit(1)
         }
     }
@@ -330,11 +349,16 @@ private struct ActivityAction: View {
     let tint: Color
     let outlined: Bool
 
+    /// 44 on the lock screen, where it is a touch target with a whole widget to sit in.
+    /// The expanded island passes less: its height budget is finite and this control is
+    /// the only thing in the card that could give way before the system clips it.
+    var minHeight: CGFloat = 44
+
     var body: some View {
         Link(destination: destination) {
             Text(title)
                 .font(WidgetFont.geistSemiBold(15))
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .frame(maxWidth: .infinity, minHeight: minHeight)
                 .foregroundStyle(outlined ? WidgetPalette.text : WidgetPalette.ground)
                 .background(outlined ? Color.clear : tint)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -398,17 +422,24 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
-    /// The brand wash over the system blur. Translucent on purpose: enough navy to keep
-    /// the surface herdrup-coloured, little enough that the wallpaper still reads
-    /// through it, with the same top-leading lift as `backdrop`.
+    /// The brand wash over the system blur. Translucent, but only by a fifth: the
+    /// surface sits over an UNKNOWN wallpaper, and a lighter wash let the faint text
+    /// fall to 1.05:1 against a bright one — invisible. At 0.80 the wallpaper still
+    /// moves behind the blur while the surface stays predictably dark.
     static let glassWash = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A).opacity(0.62), Color(hex6: 0x13162A).opacity(0.42)],
+        colors: [Color(hex6: 0x1B1F3A).opacity(0.80), Color(hex6: 0x13162A).opacity(0.80)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
     /// The lit edge of a glass pane — brighter than `hairline`, which is a divider on an
     /// opaque surface and disappears against a blur.
     static let glassEdge = Color.white.opacity(0.14)
+    /// Secondary and tertiary text ON GLASS. Lifted from `textDim` / `textFaint`,
+    /// which are tuned for the opaque navy: over the worst-case bright wallpaper they
+    /// measure 5.9:1 and 4.5:1 (WCAG AA for small text), where the opaque pair measured
+    /// 2.0:1 and 1.1:1 on the same surface. Only the glass paths use these.
+    static let glassTextDim = Color(hex6: 0xC9CFE2)
+    static let glassTextFaint = Color(hex6: 0xAEB6D0)
     static let ground = Color(hex6: 0x13162A)
     /// A top-leading lift on the ground colour. Two stops, eight points apart in
     /// lightness: enough to read as depth on the lock screen, not enough to fight the
