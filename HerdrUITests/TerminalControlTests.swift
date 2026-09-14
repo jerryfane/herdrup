@@ -327,30 +327,35 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
-        let chips = app.descendants(matching: .any).matching(identifier: "terminal-attachment")
+        // BY NAME, not by counting elements carrying the chip identifier: SwiftUI
+        // propagates an identifier to every child of the chip, so a count there reports
+        // glyph + label + remove button per attachment, not attachments.
+        let photoChip = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "photo-")).firstMatch
+        let fileChip = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "file-")).firstMatch
 
         command("photo-pasteboard")
         XCTAssertTrue(pasteIntoReply(field), "the photo should offer Paste")
-        XCTAssertTrue(chips.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(photoChip.waitForExistence(timeout: 10), "the photo should stage a chip")
 
         command("file-pasteboard")
         XCTAssertTrue(pasteIntoReply(field), "the file should offer Paste too")
-        let both = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "count == 2"), object: chips)
         let note = app.staticTexts["terminal-action-note"]
-        XCTAssertEqual(XCTWaiter.wait(for: [both], timeout: 10), .completed,
-                       """
-                       a second paste must ADD an attachment, not replace the first — \
-                       chips=\(chips.count), note=\(note.exists ? note.label : "none")
-                       """)
+        XCTAssertTrue(fileChip.waitForExistence(timeout: 10),
+                      "the file should stage its own chip — note=\(note.exists ? note.label : "none")")
+        XCTAssertTrue(photoChip.exists,
+                      "a second paste must ADD an attachment, not replace the first")
 
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         send.tap()
-        let cleared = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "count == 0"), object: chips)
-        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 20), .completed,
-                       "both attachments should post and clear once the prompt is delivered")
+        for chip in [photoChip, fileChip] {
+            let cleared = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"), object: chip)
+            XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 20), .completed,
+                           "both attachments should post and clear once the prompt is delivered")
+        }
     }
 
     /// The staged-attachment chip. A container, so it is matched across element types
