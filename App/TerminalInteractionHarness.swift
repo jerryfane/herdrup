@@ -483,6 +483,17 @@ final class TerminalInteractionHarness: ObservableObject {
                 context.cgContext.stroke(page.insetBy(dx: 8, dy: 8))
             }
             UIPasteboard.general.setData(pdf, forPasteboardType: UTType.pdf.identifier)
+        case "file-url-pasteboard":
+            // What COPY IN FINDER OR FILES puts on the pasteboard: a file url, plus the
+            // path as text. The text is the trap — deferring to it pasted the path and
+            // attached nothing, which is how Command-V looked broken on Mac and iPad.
+            let dropped = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dropped-note.txt")
+            try? Data("dropped from finder".utf8).write(to: dropped, options: .atomic)
+            UIPasteboard.general.items = [[
+                UTType.fileURL.identifier: dropped as NSURL,
+                UTType.utf8PlainText.identifier: dropped.path,
+            ]]
         case "batch-insert":
             surfaces[activeID]?.view?.insertText("batch-payload")
         case "ime-commit":
@@ -535,6 +546,7 @@ private struct TerminalInteractionControls: View {
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
+         "file-url-pasteboard",
          "batch-insert", "ime-commit"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 

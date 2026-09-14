@@ -204,7 +204,7 @@ private struct LockScreenView: View {
 
             if state.needsYouCount > 0 {
                 ActivityAction(
-                    title: "Open Herdrup",
+                    title: "Open herdrup",
                     destination: state.deepLinkURL,
                     tint: state.markColor,
                     outlined: isStale || isLuminanceReduced
@@ -213,6 +213,11 @@ private struct LockScreenView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // A gradient, not a flat fill. `activityBackgroundTint` takes one Color, so the
+        // depth has to be painted inside the view; it sits UNDER the content and above
+        // that tint, which stays as the base so a system fallback still matches.
+        .background(WidgetPalette.backdrop)
     }
 
     @ViewBuilder
@@ -344,6 +349,14 @@ private enum WidgetFont {
 
 private enum WidgetPalette {
     static let ground = Color(hex6: 0x13162A)
+    /// A top-leading lift on the ground colour. Two stops, eight points apart in
+    /// lightness: enough to read as depth on the lock screen, not enough to fight the
+    /// status marks, which are the only saturated things on the surface.
+    static let backdrop = LinearGradient(
+        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x13162A)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
     static let hairline = Color(hex6: 0x2E3358)
     static let text = Color(hex6: 0xEEF0F7)
     static let textDim = Color(hex6: 0x99A0BC)
