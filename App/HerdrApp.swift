@@ -5331,7 +5331,7 @@ struct TerminalPaneContent: View {
     /// ONE prompt for the whole batch. A single attachment keeps its original wording;
     /// several are listed with one download command each, because an agent that gets a
     /// prompt per file cannot see them as one request.
-    static func attachmentPrompt(
+    private static func attachmentPrompt(
         text: String,
         delivered: [(attachment: PromptAttachment, messageID: String)]
     ) -> String {
