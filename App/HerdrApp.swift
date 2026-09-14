@@ -360,6 +360,8 @@ struct RootView: View {
             }
         case .settings:
             SettingsView(client: mockClient, agents: [], host: "mac.tail-scale.ts.net")
+        case .htmlPreview:
+            HtmlPreviewHarness()
         case .newAgent:
             NewAgentView(client: mockClient,
                          initialFolder: "/root/herdr-ios", initialKind: "codex",
@@ -7668,8 +7670,34 @@ struct PagingTestHarness: View {
 }
 #endif
 
+/// Renders the received-document viewer over a file that tries to REWRITE ITSELF with
+/// script, so a UI receipt can read the rendered text and see whether the Settings
+/// switch let it run. Reads the same `@AppStorage` key `GramView` reads and passes it
+/// to the same view, so the receipt covers the shipping wiring rather than a stand-in.
+#if DEBUG
+struct HtmlPreviewHarness: View {
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
+
+    /// The paragraph says the safe thing; the script replaces it. Whichever sentence
+    /// the webview ends up showing IS the answer, and it is plain DOM text, which
+    /// XCUITest reads out of the web view.
+    private static let document = """
+    <!doctype html><meta charset="utf-8">
+    <body style="font:17px -apple-system;padding:24px">
+    <p id="out">script did not run</p>
+    <script>document.getElementById("out").textContent = "script ran";</script>
+    </body>
+    """
+
+    var body: some View {
+        HtmlWebView(html: Self.document, allowsJavaScript: previewJavaScript)
+            .ignoresSafeArea(edges: .bottom)
+    }
+}
+#endif
+
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -7683,6 +7711,11 @@ enum ScreenshotMock {
         case "rosterstress": return .rosterStress
         case "pane": return .pane
         case "settings": return .settings
+        // `htmlpreview` renders the received-document viewer over a file whose script
+        // REWRITES the page, so a receipt can read off the rendered text whether the
+        // Settings switch let it run. Same view and same @AppStorage key the Gram page
+        // uses, so the wiring under test is the shipping one.
+        case "htmlpreview": return .htmlPreview
         case "newagent": return .newAgent
         // `scroll` drives the omp scroll receipt: a real SwiftTerm pane seeded with 200
         // distinct lines of scrollback so a swipe visibly moves the content.
