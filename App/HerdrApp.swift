@@ -5144,12 +5144,19 @@ struct TerminalPaneContent: View {
             return false
         }
         let types = provider.registeredTypeIdentifiers.lazy.compactMap { UTType($0) }
-        // An image first when the item offers several representations (a screenshot also
-        // vends a file URL), then any concrete file type, then a bare file url — which is
-        // all a Finder or Files copy carries once its text path is set aside.
-        guard let type = types.first(where: { $0.conforms(to: .image) })
-                ?? types.first(where: { PastedFile.isAttachment($0) && !$0.conforms(to: .fileURL) })
-                ?? types.first(where: { $0.conforms(to: .fileURL) })
+        // A FILE URL WINS when the item carries one. A Finder copy of a document vends
+        // the file url AND the document's ICON (com.apple.icns, which conforms to
+        // public.image), so preferring the image staged a 288 KB icon called
+        // "photo-31ec1fb2.icns" instead of the PDF the reader copied. Any image beside a
+        // file url is derived from that file — an icon, a thumbnail, or, when the file IS
+        // an image, the same bytes under a worse name.
+        //
+        // Without a file url the item is in-memory: a screenshot, an image copied out of
+        // Safari, a PDF put on the pasteboard as data. Then an image wins over any other
+        // concrete type, as before.
+        guard let type = types.first(where: { $0.conforms(to: .fileURL) })
+                ?? types.first(where: { $0.conforms(to: .image) })
+                ?? types.first(where: { PastedFile.isAttachment($0) })
         else {
             return false
         }

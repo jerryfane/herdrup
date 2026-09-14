@@ -494,6 +494,28 @@ final class TerminalInteractionHarness: ObservableObject {
                 UTType.fileURL.identifier: dropped as NSURL,
                 UTType.utf8PlainText.identifier: dropped.path,
             ]]
+        case "finder-document-pasteboard":
+            // What a MAC FINDER COPY of a document really carries: the file url, the path
+            // as text, and the document's ICON as an image. Preferring the image staged
+            // the icon — a 288 KB .icns named "photo-….icns" — instead of the PDF.
+            let doc = FileManager.default.temporaryDirectory
+                .appendingPathComponent("quarterly-report.pdf")
+            let page = CGRect(x: 0, y: 0, width: 120, height: 60)
+            let pdf = UIGraphicsPDFRenderer(bounds: page).pdfData { context in
+                context.beginPage()
+                UIColor.black.setStroke()
+                context.cgContext.stroke(page.insetBy(dx: 8, dy: 8))
+            }
+            try? pdf.write(to: doc, options: .atomic)
+            let icon = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
+                UIColor.systemBlue.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+            }
+            UIPasteboard.general.items = [[
+                UTType.fileURL.identifier: doc as NSURL,
+                UTType.utf8PlainText.identifier: doc.path,
+                UTType.png.identifier: icon,
+            ]]
         case "batch-insert":
             surfaces[activeID]?.view?.insertText("batch-payload")
         case "ime-commit":
@@ -546,7 +568,7 @@ private struct TerminalInteractionControls: View {
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
-         "file-url-pasteboard",
+         "file-url-pasteboard", "finder-document-pasteboard",
          "batch-insert", "ime-commit"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
