@@ -87,6 +87,9 @@ struct GramView: View {
     /// longer tell a healthy poll from a failing one.
     @State private var loadFailures = 0
     @State private var isLoading = false
+    /// A page fetch (older messages) in flight, kept apart from `isLoading` so the head
+    /// poll and a scroll-driven page never block each other.
+    @State private var isLoadingPage = false
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -293,6 +296,13 @@ struct GramView: View {
         .onChange(of: refreshToken) { old, new in
             guard new != old else { return }
             Task { await load(initial: false) }
+        }
+        // SEARCH READS THE WHOLE STORE, so typing pulls the remaining pages in rather
+        // than filtering the window and calling a message the client never loaded "no
+        // match". One deliberate cost, paid only by someone who actually searched.
+        .onChange(of: search) { _, new in
+            guard !new.isEmpty else { return }
+            Task { await loadEveryPage() }
         }
         // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
         .onChange(of: readAllToken) { old, new in
@@ -755,6 +765,22 @@ struct GramView: View {
                         )
                         .onAppear { markReadIfNeeded(message) }
                     }
+                    // The sentinel. In a LazyVStack it is only built when the reader
+                    // actually reaches the end of the loaded messages, which is exactly
+                    // when the next page is worth fetching. Search is excluded: it
+                    // loads every page up front, so a sentinel there would race it.
+                    if inboxStore.inbox.hasMore, search.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading older messages…")
+                                .font(Typography.app(12))
+                                .foregroundStyle(Palette.textFaint)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("gram-loading-older")
+                        .task { await loadMore() }
+                    }
                 }
                 .padding(16)
             }
@@ -775,8 +801,11 @@ struct GramView: View {
 
     /// Show the "set up gram" card until an agent has actually messaged (proof the
     /// skill is in use) or the owner dismisses it.
+    /// Not while older pages are unloaded: the card says "no agent has ever used gram
+    /// here", and the newest page alone cannot support that claim.
     private var shouldShowSetupCard: Bool {
         !setupCardDismissed && !messages.contains(where: \.isFromAgent)
+            && !inboxStore.inbox.hasMore
     }
 
     /// A dismissable card teaching the owner how to give their agents the gram skill:
@@ -1120,7 +1149,8 @@ struct GramView: View {
             // Conditional on the digest we hold. An unchanged store answers in a few
             // hundred bytes; only a real change ships the list.
             let answer = try await client.gramList(
-                ifUnchangedDigest: inboxStore.inbox.conditionalDigest)
+                ifUnchangedDigest: inboxStore.inbox.conditionalDigest,
+                limit: Self.pageSize)
             let changed = inboxStore.inbox.apply(answer)
             phase = .loaded
             refreshNote = nil
@@ -1156,6 +1186,45 @@ struct GramView: View {
             } else {
                 refreshNote = "Refresh failed. Showing the last loaded messages."
             }
+        }
+    }
+
+    /// How many messages one page carries.
+    ///
+    /// 40 fills more than a screen on every idiom, so the reader never sees the
+    /// sentinel do its work on the first draw, and it is small enough that the open
+    /// costs a few tens of KB instead of the ~900 KB the whole store weighs. Older
+    /// pages are the same size: a scroll that keeps going should keep costing the same.
+    static let pageSize = 40
+
+    /// Ask for the page older than everything loaded. Driven by a sentinel at the end
+    /// of the list, so it runs exactly when the reader reaches the bottom.
+    ///
+    /// Its own in-flight flag, NOT `isLoading`: the 6-second head poll and a page fetch
+    /// answer different questions, and sharing one flag would make each starve the
+    /// other precisely while the reader is scrolling.
+    private func loadMore() async {
+        guard !isLoadingPage, !isLoading else { return }
+        guard let cursor = inboxStore.inbox.nextCursor else { return }
+        isLoadingPage = true
+        defer { isLoadingPage = false }
+        do {
+            let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
+            inboxStore.inbox.appendPage(answer)
+        } catch {
+            // Nothing to escalate: the loaded messages are still on screen and the
+            // sentinel will try again the next time it appears.
+            refreshNote = "Couldn't load older messages."
+        }
+    }
+
+    /// Pull every remaining page in. Search and Read-all both read the whole list, so
+    /// they say so by loading it rather than quietly answering from a window.
+    private func loadEveryPage() async {
+        while inboxStore.inbox.nextCursor != nil, !Task.isCancelled {
+            let before = inboxStore.inbox.messages.count
+            await loadMore()
+            if inboxStore.inbox.messages.count == before { break }
         }
     }
 
@@ -1725,7 +1794,19 @@ struct GramView: View {
         markAllNote = nil
         // Snapshot the ids first: `serverMessages` is mutated inside the loop and a poll may
         // replace it mid-pass, so iterating the live array could skip or repeat a message.
-        var pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        //
+        // The ids come from an unread-ONLY fetch, not from the loaded window. The inbox
+        // is paged, so the window holds the newest messages and an older unread one
+        // would otherwise be left unread while the badge — counted by the daemon over
+        // the whole store — kept showing it. That fetch is small by construction; on a
+        // daemon that cannot page it returns the same ids the window would have given.
+        var pending: [String]
+        do {
+            let unreadAnswer = try await client.gramList(unreadOnly: true)
+            pending = (unreadAnswer.messages ?? []).filter(\.isUnread).map(\.id)
+        } catch {
+            pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        }
         // Ids this pass actually marked, re-applied after the loop: `load` REPLACES
         // `serverMessages` wholesale, so a poll landing mid-pass reverts the flips written
         // below and the badge would still show a count after a fully successful pass.
@@ -1741,7 +1822,11 @@ struct GramView: View {
                 // Reusing the existing in-flight set is what stops a duplicate `gram.mark_read`.
                 guard !markingRead.contains(id) else { stillInFlight.append(id); continue }
                 // Someone else's pass already read it; nothing left to do for this id.
-                guard serverMessages.first(where: { $0.id == id })?.isUnread ?? false else { continue }
+                // An id absent from the window is NOT skipped: it came from the
+                // unread-only fetch, so it is unread and simply older than the page.
+                if let loaded = serverMessages.first(where: { $0.id == id }), !loaded.isUnread {
+                    continue
+                }
                 markingRead.insert(id)
                 attempted += 1
                 do {

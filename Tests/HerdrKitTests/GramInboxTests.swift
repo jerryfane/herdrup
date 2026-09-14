@@ -157,4 +157,77 @@ final class GramInboxTests: XCTestCase {
                        "re-sending identical messages is not a content change")
         XCTAssertTrue(inbox.apply(answer([try message("g1"), try message("g2")], digest: "d2")))
     }
+
+    private func page(
+        _ messages: [GramMessage], hasMore: Bool, unread: Int? = nil, digest: String? = "d"
+    ) -> GramListAnswer {
+        GramListAnswer(messages: messages, digest: digest, storeID: "store-1",
+                       hasMore: hasMore, unreadCount: unread)
+    }
+
+    /// Scrolling loads older pages BELOW what is held, de-duped, and the cursor walks
+    /// to the oldest loaded message. Without the de-dupe a message that shifted between
+    /// pages renders twice.
+    func testAppendingAPageExtendsTheListAndMovesTheCursor() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        XCTAssertEqual(inbox.nextCursor, "b")
+
+        inbox.appendPage(page([try message("b"), try message("a")], hasMore: false))
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"],
+                       "the page must append older messages once, keeping newest-first order")
+        XCTAssertFalse(inbox.hasMore)
+        XCTAssertNil(inbox.nextCursor, "nothing older left to ask for")
+    }
+
+    /// THE POLL MUST NOT EAT THE PAGES. The head refresh returns only the newest page,
+    /// so replacing the list wholesale — what `apply` used to do — would throw away
+    /// everything the reader scrolled back through, every six seconds.
+    func testHeadRefreshKeepsAlreadyLoadedOlderPages() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        inbox.appendPage(page([try message("a")], hasMore: false))
+
+        inbox.apply(page([try message("d"), try message("c"), try message("b")], hasMore: true))
+        XCTAssertEqual(inbox.messages.map(\.id), ["d", "c", "b", "a"],
+                       "a new message joins the head and the loaded tail survives")
+        XCTAssertFalse(inbox.hasMore,
+                       "the tail already reached the end; the head answer cannot revoke that")
+    }
+
+    /// When the store moved on by more than a page there is no overlap to splice onto,
+    /// and keeping the old tail would render a silent gap in the timeline.
+    func testHeadRefreshWithNoOverlapDropsTheStaleTail() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+
+        inbox.apply(page([try message("z"), try message("y")], hasMore: true))
+        XCTAssertEqual(inbox.messages.map(\.id), ["z", "y"])
+        XCTAssertTrue(inbox.hasMore, "older messages are reachable again from this head")
+    }
+
+    /// The badge counts the whole store. A paged client holds a window, so the daemon's
+    /// count has to win — counting the window would under-count every unread message
+    /// older than the first page.
+    func testUnreadCountPrefersTheServerCountOverTheWindow() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c", unread: false)], hasMore: true, unread: 7))
+        XCTAssertEqual(inbox.unreadCount, 7)
+
+        // An unpaged daemon sends no count, and then the window IS the whole list.
+        var unpaged = GramInbox()
+        unpaged.apply(answer([try message("c"), try message("b", unread: false)], digest: "d"))
+        XCTAssertEqual(unpaged.unreadCount, 1)
+        XCTAssertFalse(unpaged.hasMore, "no paging fields means this answer is everything")
+    }
+
+    /// A page must not arm the conditional poll: the digest fingerprints the whole
+    /// store, and adopting it from a page would have the daemon answer "unchanged" for
+    /// a list this inbox only partly holds.
+    func testAppendingAPageNeverAdoptsItsDigest() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, digest: "head"))
+        inbox.appendPage(page([try message("b")], hasMore: false, digest: "page"))
+        XCTAssertEqual(inbox.conditionalDigest, "head")
+    }
 }

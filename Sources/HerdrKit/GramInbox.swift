@@ -40,12 +40,33 @@ public struct GramInbox: Sendable, Equatable {
     /// would invite an "unchanged" answer we could not render.
     public var conditionalDigest: String? { hasLoaded ? digest : nil }
 
-    /// Unread agent->owner count over the FULL list, which is why the list is kept
-    /// whole rather than windowed: a truncated view would silently under-count.
-    public var unreadCount: Int { messages.filter(\.isUnread).count }
+    /// Unread agent->owner count. The daemon's count over the WHOLE store wins when it
+    /// sends one, because a paged client holds a window and counting the window would
+    /// silently under-count the badge. Without it (an older daemon, which then also
+    /// sends the whole list) the local count is the same number.
+    public var unreadCount: Int { serverUnreadCount ?? messages.filter(\.isUnread).count }
 
-    /// Folds one `gram.list` answer in. Returns whether `messages` changed, so a
-    /// caller can skip work (re-render, badge writes) on an unchanged poll.
+    /// Whether older messages exist beyond what is loaded, i.e. whether scrolling to
+    /// the end should ask for another page. False on an unpaged daemon: the one answer
+    /// it sends IS everything.
+    public private(set) var hasMore = false
+
+    /// The cursor for the next page: the oldest loaded message. Nil when nothing is
+    /// loaded or nothing older remains.
+    public var nextCursor: String? { hasMore ? messages.last?.id : nil }
+
+    private var serverUnreadCount: Int?
+
+    /// Folds in an answer to a HEAD request — the first page, or an unpaged full list.
+    /// Returns whether `messages` changed, so a caller can skip work (re-render, badge
+    /// writes) on an unchanged poll.
+    ///
+    /// A head answer SPLICES rather than replaces. Pages already loaded below the head
+    /// must survive a poll, or the reader who scrolled back through three pages would
+    /// watch them vanish every six seconds. The splice keeps the freshly-sent head and
+    /// whatever of the old list continues past it; when the two do not overlap at all
+    /// (the store moved on more than a page while the app was away) the tail is dropped,
+    /// because a gap would show messages in the wrong order with nothing to signal it.
     @discardableResult
     public mutating func apply(_ answer: GramListAnswer) -> Bool {
         // A store swap invalidates everything we hold, INCLUDING on an "unchanged"
@@ -56,6 +77,8 @@ public struct GramInbox: Sendable, Equatable {
             messages = []
             digest = nil
             hasLoaded = false
+            hasMore = false
+            serverUnreadCount = nil
         }
         if let incoming = answer.storeID { storeID = incoming }
 
@@ -73,11 +96,55 @@ public struct GramInbox: Sendable, Equatable {
             // the pre-mutation list.
             return false
         }
-        let changed = fresh != messages
-        messages = fresh
+        let merged = Self.splice(head: fresh, onto: messages)
+        let changed = merged != messages
+        messages = merged
         digest = answer.digest
         hasLoaded = true
+        serverUnreadCount = answer.unreadCount
+        // `hasMore` is about the OLDEST loaded message, so a head answer only decides
+        // it when the head is all we kept. When an older tail survived the splice, what
+        // lies past that tail is unchanged by this answer.
+        if merged.count == fresh.count { hasMore = answer.hasMore ?? false }
         return changed
+    }
+
+    /// Folds in an answer to a page request (`beforeID` set): older messages appended
+    /// below what is loaded, de-duped by id so a message that moved between pages
+    /// cannot appear twice.
+    ///
+    /// The digest is NOT adopted: it fingerprints the whole store, and adopting it from
+    /// a page would arm a conditional head poll for a list this inbox only partly holds.
+    @discardableResult
+    public mutating func appendPage(_ answer: GramListAnswer) -> Bool {
+        if let known = storeID, let incoming = answer.storeID, known != incoming {
+            // The page belongs to another store; the head refresh will reset us.
+            return false
+        }
+        guard let older = answer.messages, !older.isEmpty else {
+            hasMore = answer.hasMore ?? false
+            return false
+        }
+        let known = Set(messages.map(\.id))
+        messages.append(contentsOf: older.filter { !known.contains($0.id) })
+        hasMore = answer.hasMore ?? false
+        if let count = answer.unreadCount { serverUnreadCount = count }
+        hasLoaded = true
+        return true
+    }
+
+    /// Head page first, then whatever of the previous list continues past it. Returns
+    /// just the head when the two share no message — see `apply`.
+    private static func splice(head: [GramMessage], onto existing: [GramMessage]) -> [GramMessage] {
+        guard !existing.isEmpty, let oldest = head.last else { return head }
+        guard let overlap = existing.firstIndex(where: { $0.id == oldest.id }) else {
+            // No overlap. Either the head IS the whole list (unpaged daemon) or the
+            // store moved on by more than a page.
+            return head
+        }
+        let tail = existing[existing.index(after: overlap)...]
+        let headIDs = Set(head.map(\.id))
+        return head + tail.filter { !headIDs.contains($0.id) }
     }
 
     /// Drops a message the owner deleted, so the local list agrees with the server
