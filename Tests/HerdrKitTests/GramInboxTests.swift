@@ -270,6 +270,38 @@ final class GramInboxTests: XCTestCase {
         XCTAssertEqual(inbox.unreadCount, 1)
     }
 
+    /// An IDENTICAL head answer must not invalidate a page already in flight. Any local
+    /// mark-read or delete clears the digest, so the next poll is unconditional and
+    /// ships the same rows straight back; bumping the generation there dropped a
+    /// perfectly contiguous page and left the sentinel spinning on an unchanged cursor.
+    func testAnIdenticalHeadAnswerKeepsAnInFlightPageValid() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        let generation = inbox.generation
+
+        // The unconditional poll returns exactly what is held.
+        XCTAssertFalse(inbox.apply(page([try message("c"), try message("b")], hasMore: true)))
+        XCTAssertTrue(inbox.appendPage(page([try message("a")], hasMore: false),
+                                       generation: generation),
+                      "the page was still contiguous, so it must land")
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
+    }
+
+    /// Read-all marks each id twice with a poll landing in between — that poll is the
+    /// reason the second pass exists. The out-of-window ledger therefore has to survive
+    /// a head answer, or the re-apply decrements the badge a second time.
+    func testAnOutOfWindowReadSurvivesAHeadRefresh() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, unread: 3))
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2)
+
+        // A poll lands mid-pass: the daemon's count already excludes the id it marked.
+        inbox.apply(page([try message("d"), try message("c")], hasMore: true, unread: 2))
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2, "the re-apply must not decrement again")
+    }
+
     /// The badge counts the whole store. A paged client holds a window, so the daemon's
     /// count has to win — counting the window would under-count every unread message
     /// older than the first page.

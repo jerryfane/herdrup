@@ -630,7 +630,21 @@ struct GramView: View {
         // Let a drag on the message feed dismiss the keyboard too, so the composer
         // never gets stuck covering the tab bar with no way out.
         .scrollDismissesKeyboard(.interactively)
+        // THE WHOLE-STORE WALK LIVES HERE, on a view that outlives every result state.
+        // Hanging it on the result views instead meant the walk died the moment the
+        // screen switched between "no matches yet" and the first match: the successor
+        // task started while the cancelled predecessor was still suspended in its page
+        // fetch, the single-flight guard refused it, and the banner then promised a
+        // search that had stopped. One owner, re-keyed on the query, cancelled with it.
+        .task(id: searchWalkKey) {
+            guard !showingSaved, !search.isEmpty else { return }
+            await loadEveryPage()
+        }
     }
+
+    /// Identity for the search walk: the query, plus which section is showing. Saved is
+    /// local, so switching to it must cancel the walk rather than re-key it.
+    private var searchWalkKey: String { "\(showingSaved ? "saved" : "inbox")\u{1}\(search)" }
 
     /// Shown when the list HAS rows but the active search matches none of them. A distinct
     /// state from "nothing here yet": a blank scroll after typing reads as an empty inbox,
@@ -785,9 +799,6 @@ struct GramView: View {
         case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
             noMatches(stillLoading: inboxStore.inbox.hasMore && pageError == nil,
                       loadedCount: messages.count, failure: pageError)
-                // The walk has to be driven from here too: this state renders INSTEAD of
-                // the list, so the instalment banner that normally carries it is absent.
-                .task(id: search) { await loadEveryPage() }
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -854,7 +865,6 @@ struct GramView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .accessibilityIdentifier("gram-searching-older")
-                        .task(id: search) { await loadEveryPage() }
                     }
                 }
                 .padding(16)
@@ -1301,7 +1311,10 @@ struct GramView: View {
     ///
     /// The inbox's `generation` is read BEFORE the request and handed back with the
     /// answer, so a page built on a cursor that a head replacement has since invalidated
-    /// is dropped instead of landing below rows the new head no longer contains.
+    /// is dropped instead of landing below rows the new head no longer contains. A drop
+    /// is then RETRIED here, because the cursor may not have moved — an in-place row
+    /// change (a queue item being grabbed) counts as a change — and the sentinel's task
+    /// is keyed on the cursor, so nothing else would re-fire.
     ///
     /// Returns whether the loaded list actually grew, so a caller looping to the end can
     /// tell a finished walk from a stuck one.
@@ -1311,21 +1324,29 @@ struct GramView: View {
         guard !isLoadingPage else { return false }
         isLoadingPage = true
         defer { isLoadingPage = false }
-        await waitWhile { isLoading }
-        guard let cursor = inboxStore.inbox.nextCursor else { return false }
-        let generation = inboxStore.inbox.generation
-        do {
-            let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
-            let grew = inboxStore.inbox.appendPage(answer, generation: generation)
-            if grew { pageError = nil }
-            return grew
-        } catch {
-            // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
-            // clears that note within six seconds and the reader would be left with a
-            // spinner, no message and no way to retry.
-            pageError = "Couldn't load older messages."
-            return false
+        for _ in 0..<2 {
+            await waitWhile { isLoading }
+            guard let cursor = inboxStore.inbox.nextCursor else { return false }
+            let generation = inboxStore.inbox.generation
+            do {
+                let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
+                if inboxStore.inbox.appendPage(answer, generation: generation) {
+                    pageError = nil
+                    return true
+                }
+                // Refused as stale, or an answer of ids already held. Retry once against
+                // the current generation; a second miss ends the attempt without a note,
+                // since nothing failed — the list simply did not grow.
+                guard inboxStore.inbox.generation != generation else { return false }
+            } catch {
+                // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
+                // clears that note within six seconds and the reader would be left with a
+                // spinner, no message and no way to retry.
+                pageError = "Couldn't load older messages."
+                return false
+            }
         }
+        return false
     }
 
     /// Up to two seconds of yielding while `condition` holds. Two seconds because that
