@@ -337,8 +337,12 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(pasteIntoReply(field), "the file should offer Paste too")
         let both = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "count == 2"), object: chips)
+        let note = app.staticTexts["terminal-action-note"]
         XCTAssertEqual(XCTWaiter.wait(for: [both], timeout: 10), .completed,
-                       "a second paste must ADD an attachment, not replace the first")
+                       """
+                       a second paste must ADD an attachment, not replace the first — \
+                       chips=\(chips.count), note=\(note.exists ? note.label : "none")
+                       """)
 
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))

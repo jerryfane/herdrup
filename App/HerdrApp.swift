@@ -4287,6 +4287,9 @@ struct TerminalPaneContent: View {
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
+                        // Identified so a failing receipt can quote the refusal instead of
+                        // reporting only that nothing happened.
+                        .accessibilityIdentifier("terminal-action-note")
                 }
                 controlBar
                 replyBar
