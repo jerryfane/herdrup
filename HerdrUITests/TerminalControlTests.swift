@@ -319,6 +319,36 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                        "the file should upload, post to the agent, and clear after prompt delivery")
     }
 
+    /// TWO attachments in one reply. The composer used to hold a single one and a second
+    /// paste REPLACED the first — silently, after deleting its staged bytes — so this
+    /// pins the count through the whole path: both chips staged, both delivered, both
+    /// cleared by the one prompt that names them.
+    func testTwoPastedFilesAreBothStagedAndSentTogether() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        let chips = app.descendants(matching: .any).matching(identifier: "terminal-attachment")
+
+        command("photo-pasteboard")
+        XCTAssertTrue(pasteIntoReply(field), "the photo should offer Paste")
+        XCTAssertTrue(chips.firstMatch.waitForExistence(timeout: 10))
+
+        command("file-pasteboard")
+        XCTAssertTrue(pasteIntoReply(field), "the file should offer Paste too")
+        let both = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count == 2"), object: chips)
+        XCTAssertEqual(XCTWaiter.wait(for: [both], timeout: 10), .completed,
+                       "a second paste must ADD an attachment, not replace the first")
+
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        send.tap()
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count == 0"), object: chips)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 20), .completed,
+                       "both attachments should post and clear once the prompt is delivered")
+    }
+
     /// The staged-attachment chip. A container, so it is matched across element types
     /// rather than assumed to be an `otherElement`.
     private var replyAttachmentChip: XCUIElement {

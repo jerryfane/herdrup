@@ -4015,12 +4015,18 @@ struct TerminalPaneContent: View {
     }
 
     @State private var reply: String
-    @State private var replyAttachment: PromptAttachment?
+    /// Every staged attachment, in paste order. Each sends as its own gram message and
+    /// they are all named by ONE prompt, so the agent gets a single turn that points at
+    /// the whole set. Capped at `GramView.Staging.maxAttachments`.
+    @State private var replyAttachments: [PromptAttachment] = []
     @State private var loadingReplyAttachment = false
     /// Bytes sent / total for the attachment currently uploading, nil when none is.
     /// A 20 MB photo on a slow link takes long enough that a spinner alone reads as a
-    /// hang, so the chip shows a determinate bar driven by the upload channel itself.
+    /// hang, so the strip shows a determinate bar driven by the upload channel itself.
     @State private var replyUploadBytes: (sent: Int, total: Int)?
+    /// Which file of how many is in flight, so the gap between one upload finishing and
+    /// its gram post landing still says something. Nil for a single attachment.
+    @State private var replySendProgress: (sent: Int, total: Int)?
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -4175,7 +4181,7 @@ struct TerminalPaneContent: View {
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
     private var hasReplyContent: Bool {
-        replyAttachment != nil || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !replyAttachments.isEmpty || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private var canSend: Bool {
         hasReplyContent && !sending && !replyDictating && !loadingReplyAttachment
@@ -4820,71 +4826,94 @@ struct TerminalPaneContent: View {
     }
     @ViewBuilder
     private var replyAttachmentStrip: some View {
-        if loadingReplyAttachment {
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Adding attachment…")
-                    .font(Typography.app(12, .medium))
-                    .foregroundStyle(Palette.textDim)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-            .accessibilityIdentifier("terminal-attachment-loading")
-        } else if let attachment = replyAttachment {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Image(systemName: attachment.isImage ? "photo" : "doc")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                    Text(attachment.name)
-                        .font(Typography.app(12, .medium))
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
-                    if let upload = replyUploadBytes {
-                        Text(Self.uploadLabel(sent: upload.sent, total: upload.total))
-                            .font(Typography.machine(11))
-                            .foregroundStyle(Palette.textFaint)
-                            .monospacedDigit()
-                            .accessibilityIdentifier("terminal-attachment-progress")
-                    } else {
-                        Button {
-                            removeReplyAttachment(attachment)
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 15))
-                                .foregroundStyle(Palette.textFaint)
+        VStack(alignment: .leading, spacing: 5) {
+            if !replyAttachments.isEmpty {
+                // Horizontal, and pinned to the chips' own height: a ScrollView is
+                // greedy in both axes, and a greedy strip would steal the vertical slack
+                // the composer needs (the same trap GramView's strip documents).
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(replyAttachments) { attachment in
+                            replyAttachmentChip(attachment)
                         }
-                        .disabled(sending)
-                        .accessibilityLabel("Remove attachment")
                     }
                 }
-                if let upload = replyUploadBytes {
-                    // Determinate, because the upload channel reports real byte progress:
-                    // an indeterminate spinner on a 100 MB attachment is indistinguishable
-                    // from a stall.
-                    ProgressView(value: upload.total > 0
-                        ? min(1, Double(upload.sent) / Double(upload.total))
-                        : 0)
-                        .tint(Palette.text)
-                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-            .opacity(sending && replyUploadBytes == nil ? 0.6 : 1)
-            .accessibilityIdentifier("terminal-attachment")
+            if loadingReplyAttachment {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Adding attachment…")
+                        .font(Typography.app(12, .medium))
+                        .foregroundStyle(Palette.textDim)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+                .accessibilityIdentifier("terminal-attachment-loading")
+            }
+            // ONE progress block for the whole batch, not one per chip: the loop is
+            // serial, so exactly one file is ever in flight. The byte bar is shown while
+            // bytes move; between an upload finishing and its gram post landing only the
+            // file counter is true, and saying nothing there reads as a stall.
+            if let upload = replyUploadBytes {
+                Text(Self.uploadLabel(sent: upload.sent, total: upload.total,
+                                      file: replySendProgress))
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("terminal-attachment-progress")
+                ProgressView(value: upload.total > 0
+                    ? min(1, Double(upload.sent) / Double(upload.total))
+                    : 0)
+                    .tint(Palette.text)
+            } else if let progress = replySendProgress, progress.total > 1 {
+                Text("Sending \(progress.sent + 1) of \(progress.total)…")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .accessibilityIdentifier("terminal-attachment-progress")
+            }
         }
     }
 
-    /// "Uploading 42% · 8.4 MB / 20.0 MB", trimmed to just the percentage for small files
-    /// where the byte pair is noise. Sizes render through HerdrKit's one formatter.
-    static func uploadLabel(sent: Int, total: Int) -> String {
+    private func replyAttachmentChip(_ attachment: PromptAttachment) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: attachment.isImage ? "photo" : "doc")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+            Text(attachment.name)
+                .font(Typography.app(12, .medium))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                removeReplyAttachment(attachment)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.textFaint)
+            }
+            // No unlinking mid-send: the bytes of a file still queued in the batch are
+            // what a retry needs.
+            .disabled(sending)
+            .accessibilityLabel("Remove attachment")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: 220, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        .opacity(sending ? 0.6 : 1)
+        .accessibilityIdentifier("terminal-attachment")
+    }
+
+    /// "Uploading 42% · 8.4 MB / 20.0 MB", prefixed with "File 2 of 3 · " for a batch and
+    /// trimmed to just the percentage for small files where the byte pair is noise.
+    /// Sizes render through HerdrKit's one formatter.
+    static func uploadLabel(sent: Int, total: Int, file: (sent: Int, total: Int)?) -> String {
         let percent = total > 0 ? Int((Double(sent) / Double(total) * 100).rounded()) : 0
-        guard total >= 1024 * 1024 else { return "Uploading \(percent)%" }
-        return "Uploading \(percent)% · \(GramFile.displaySize(of: UInt64(sent)))"
+        let prefix = (file?.total ?? 1) > 1 ? "File \(file!.sent + 1) of \(file!.total) · " : ""
+        guard total >= 1024 * 1024 else { return prefix + "Uploading \(percent)%" }
+        return prefix + "Uploading \(percent)% · \(GramFile.displaySize(of: UInt64(sent)))"
             + " / \(GramFile.displaySize(of: UInt64(total)))"
     }
 
@@ -4946,7 +4975,7 @@ struct TerminalPaneContent: View {
                     },
                     onReturn: { currentText in
                         guard !sending, !replyDictating,
-                              replyAttachment != nil
+                              !replyAttachments.isEmpty
                                 || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         else { return }
                         ctrlArmed = false
@@ -5016,6 +5045,10 @@ struct TerminalPaneContent: View {
     @discardableResult
     private func pasteReplyAttachment(_ provider: NSItemProvider) -> Bool {
         guard !sending, !loadingReplyAttachment else { return false }
+        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            return false
+        }
         guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
               currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
@@ -5082,17 +5115,28 @@ struct TerminalPaneContent: View {
             actionNote = "Couldn't add that attachment."
             return
         }
-        if let previous = replyAttachment { removeReplyAttachment(previous) }
-        replyAttachment = attachment
+        // The cap is re-checked here, not only at the gate: staging is asynchronous, so
+        // two quick pastes can both pass the gate. A rejected one unlinks its bytes
+        // rather than leaving a secret-bearing temp file behind.
+        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+            if let staged = attachment.staged {
+                try? FileManager.default.removeItem(at: staged.dir)
+            }
+            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            return
+        }
+        replyAttachments.append(attachment)
         actionNote = nil
     }
 
     private func removeReplyAttachment(_ attachment: PromptAttachment) {
-        guard replyAttachment?.id == attachment.id else { return }
-        replyAttachment = nil
+        guard replyAttachments.contains(where: { $0.id == attachment.id }) else { return }
+        replyAttachments.removeAll { $0.id == attachment.id }
         if let staged = attachment.staged {
             try? FileManager.default.removeItem(at: staged.dir)
         }
+        // An attachment dropped AFTER its gram message posted (a batch that failed
+        // halfway) must not leave that message behind in the agent's inbox.
         if let messageID = attachment.gramMessageID {
             Task { try? await client.gramDelete(id: messageID) }
         }
@@ -5139,8 +5183,8 @@ struct TerminalPaneContent: View {
         // send and the raw sequences. The automatic pre-fill delivery is excluded on
         // purpose — nobody touched anything, so there is no user act to honour.
         if !autoDelivering { userInputToken += 1 }
-        if case .submitText(let text) = action, let attachment = replyAttachment {
-            sendPromptWithAttachment(text, attachment: attachment)
+        if case .submitText(let text) = action, !replyAttachments.isEmpty {
+            sendPromptWithAttachments(text, attachments: replyAttachments)
             return
         }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
@@ -5177,7 +5221,21 @@ struct TerminalPaneContent: View {
             }
         }
     }
-    private func sendPromptWithAttachment(_ text: String, attachment: PromptAttachment) {
+    /// Uploads and posts every staged attachment, then submits ONE prompt naming them
+    /// all.
+    ///
+    /// SERIAL on purpose. `gram.post` consumes each staging file, so one upload in
+    /// flight at a time keeps the daemon's 1 GiB aggregate staging budget clear no
+    /// matter how many files are staged; ten parallel 100 MiB uploads would fill it and
+    /// fail gram uploads for every client on the box.
+    ///
+    /// A file that already uploaded or already posted is skipped on a retry: each
+    /// attachment carries its own `uploadID` / `gramMessageID`, written back into
+    /// `replyAttachments` as soon as it is known, so tapping Send again after a mid-batch
+    /// failure re-sends only what did not land.
+    private func sendPromptWithAttachments(_ text: String, attachments: [PromptAttachment]) {
+        // The destination is captured BEFORE the first await: `agent` is re-resolved on
+        // every refresh, and a batch can span minutes.
         guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
               let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
               !target.isEmpty
@@ -5188,74 +5246,133 @@ struct TerminalPaneContent: View {
 
         Task {
             sending = true
-            defer { sending = false; replyUploadBytes = nil }
+            defer { sending = false; replyUploadBytes = nil; replySendProgress = nil }
+            var delivered: [(attachment: PromptAttachment, messageID: String)] = []
             do {
-                var current = attachment
-                var messageID = current.gramMessageID
-                if messageID == nil {
-                    let uploadID: String
-                    if let existing = current.uploadID {
-                        uploadID = existing
-                    } else {
-                        guard let staged = current.staged else {
-                            actionNote = "Couldn't read the attachment."
-                            return
+                for (index, attachment) in attachments.enumerated() {
+                    replySendProgress = (sent: index, total: attachments.count)
+                    var current = attachment
+                    var messageID = current.gramMessageID
+                    if messageID == nil {
+                        let uploadID: String
+                        if let existing = current.uploadID {
+                            uploadID = existing
+                        } else {
+                            guard let staged = current.staged else {
+                                actionNote = "Couldn't read \(current.name)."
+                                return
+                            }
+                            replyUploadBytes = (sent: 0, total: staged.size)
+                            uploadID = try await client.gramUploadFile(fileURL: staged.url) { sent, total in
+                                replyUploadBytes = (sent: sent, total: total)
+                            }
+                            replyUploadBytes = nil
+                            current = PromptAttachment(
+                                id: current.id, name: current.name, mime: current.mime,
+                                isImage: current.isImage, staged: staged, uploadID: uploadID,
+                                gramMessageID: nil)
+                            rememberReplyAttachment(current)
                         }
-                        replyUploadBytes = (sent: 0, total: staged.size)
-                        uploadID = try await client.gramUploadFile(fileURL: staged.url) { sent, total in
-                            replyUploadBytes = (sent: sent, total: total)
+
+                        let file = HerdrClient.GramFileAttachment(
+                            uploadID: uploadID, name: current.name, mime: current.mime)
+                        let posted = try await Self.postReplyAttachment(
+                            client: client, target: target, attachment: file)
+                        messageID = posted.id
+                        if let staged = current.staged {
+                            try? FileManager.default.removeItem(at: staged.dir)
                         }
-                        replyUploadBytes = nil
                         current = PromptAttachment(
                             id: current.id, name: current.name, mime: current.mime,
-                            isImage: current.isImage, staged: staged, uploadID: uploadID,
-                            gramMessageID: nil)
-                        if replyAttachment?.id == current.id { replyAttachment = current }
+                            isImage: current.isImage, staged: nil, uploadID: nil,
+                            gramMessageID: posted.id)
+                        rememberReplyAttachment(current)
                     }
 
-                    let file = HerdrClient.GramFileAttachment(
-                        uploadID: uploadID, name: current.name, mime: current.mime)
-                    let posted = try await Self.postReplyAttachment(
-                        client: client, target: target, attachment: file)
-                    messageID = posted.id
-                    if let staged = current.staged {
-                        try? FileManager.default.removeItem(at: staged.dir)
+                    guard let messageID else {
+                        actionNote = "Couldn't deliver \(current.name)."
+                        return
                     }
-                    current = PromptAttachment(
-                        id: current.id, name: current.name, mime: current.mime,
-                        isImage: current.isImage, staged: nil, uploadID: nil,
-                        gramMessageID: posted.id)
-                    if replyAttachment?.id == current.id { replyAttachment = current }
+                    delivered.append((attachment: current, messageID: messageID))
                 }
+                replyUploadBytes = nil
+                replySendProgress = nil
 
-                guard let messageID else {
-                    actionNote = "Couldn't deliver the attachment."
-                    return
-                }
-                let rawExtension = URL(fileURLWithPath: current.name).pathExtension.lowercased()
-                let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
-                let stem = current.isImage ? "photo" : "file"
-                let outputPath = "/tmp/herdr-\(stem)-\(messageID)"
-                    + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
-                let noun = current.isImage ? "Photo" : "File \(current.name)"
-                let reference = """
-                [\(noun) attached via Herdr Gram message \(messageID). Download it with \
-                `herdr gram get-file \(messageID) -o \(outputPath)`, then inspect \(outputPath).]
-                """
-                let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? reference
-                    : "\(text)\n\n\(reference)"
+                let prompt = Self.attachmentPrompt(text: text, delivered: delivered)
                 try await submitPrompt(pane: paneID, text: prompt)
-                if replyAttachment?.id == current.id { replyAttachment = nil }
+                // Only now: the prompt is what makes the posted grams meaningful, so a
+                // failure before this point keeps every chip (with its resume state) for
+                // a one-tap retry.
+                let deliveredIDs = Set(delivered.map(\.attachment.id))
+                replyAttachments.removeAll { deliveredIDs.contains($0.id) }
                 if reply == text { reply = "" }
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
-                actionNote = Self.promptFailureNote(for: apiError)
+                actionNote = Self.attachmentFailureNote(
+                    Self.promptFailureNote(for: apiError),
+                    delivered: delivered.count, total: attachments.count)
             } catch {
-                actionNote = "send failed: \(error)"
+                actionNote = Self.attachmentFailureNote(
+                    "send failed: \(error)",
+                    delivered: delivered.count, total: attachments.count)
             }
         }
+    }
+
+    /// Write an attachment's new upload/post state back into the staged list, so a retry
+    /// after a mid-batch failure skips the work that already succeeded.
+    private func rememberReplyAttachment(_ attachment: PromptAttachment) {
+        guard let index = replyAttachments.firstIndex(where: { $0.id == attachment.id })
+        else { return }
+        replyAttachments[index] = attachment
+    }
+
+    /// ONE prompt for the whole batch. A single attachment keeps its original wording;
+    /// several are listed with one download command each, because an agent that gets a
+    /// prompt per file cannot see them as one request.
+    static func attachmentPrompt(
+        text: String,
+        delivered: [(attachment: PromptAttachment, messageID: String)]
+    ) -> String {
+        func outputPath(_ attachment: PromptAttachment, _ messageID: String) -> String {
+            let rawExtension = URL(fileURLWithPath: attachment.name).pathExtension.lowercased()
+            let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
+            let stem = attachment.isImage ? "photo" : "file"
+            return "/tmp/herdr-\(stem)-\(messageID)"
+                + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+        }
+        let reference: String
+        if delivered.count == 1, let only = delivered.first {
+            let path = outputPath(only.attachment, only.messageID)
+            let noun = only.attachment.isImage ? "Photo" : "File \(only.attachment.name)"
+            reference = """
+            [\(noun) attached via Herdr Gram message \(only.messageID). Download it with \
+            `herdr gram get-file \(only.messageID) -o \(path)`, then inspect \(path).]
+            """
+        } else {
+            let lines = delivered.map { item -> String in
+                let path = outputPath(item.attachment, item.messageID)
+                return "`herdr gram get-file \(item.messageID) -o \(path)`  (\(item.attachment.name))"
+            }
+            let paths = delivered.map { outputPath($0.attachment, $0.messageID) }
+            reference = """
+            [\(delivered.count) files attached via Herdr Gram. Download them with:
+            \(lines.joined(separator: "\n"))
+            then inspect \(paths.joined(separator: ", ")).]
+            """
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? reference
+            : "\(text)\n\n\(reference)"
+    }
+
+    /// Says how much of a batch landed before the failure, so a retry is an informed act
+    /// rather than a guess. Posted grams are NOT rolled back: their chips keep their
+    /// message id and the retry skips straight to the prompt.
+    static func attachmentFailureNote(_ reason: String, delivered: Int, total: Int) -> String {
+        guard total > 1, delivered > 0 else { return reason }
+        return "Sent \(delivered) of \(total). \(reason)"
     }
 
     private static func postReplyAttachment(

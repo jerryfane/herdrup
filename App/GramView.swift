@@ -193,18 +193,9 @@ struct GramView: View {
         let size: Int
     }
 
-    // The pre-send size gate lives on `Staging` (nonisolated, so the photo importer
-    // can read it): `GramView.Staging.maxFileBytes`.
-    /// How many files can be staged at once. Each sends as its own gram message.
-    ///
-    /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
-    /// staged file was held in memory as `Data`: ten 100 MB picks would have been
-    /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads them
-    /// one frame at a time, so the resident ceiling is a single frame no matter how
-    /// many files are staged or how large they are. The send loop is serial and
-    /// `gram.post` consumes each staging file, so the daemon's 1 GiB aggregate
-    /// staging budget never sees more than one upload in flight.
-    private static let maxAttachments = 10
+    // The pre-send size gate and the count cap both live on `Staging` (nonisolated, so
+    // the photo importer and the terminal composer can read them):
+    // `GramView.Staging.maxFileBytes` and `GramView.Staging.maxAttachments`.
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -324,7 +315,7 @@ struct GramView: View {
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $photoItems,
-            maxSelectionCount: Self.maxAttachments,
+            maxSelectionCount: Staging.maxAttachments,
             matching: .any(of: [.images, .videos])
         )
         .onChange(of: photoItems) { _, newItems in
@@ -1322,7 +1313,7 @@ struct GramView: View {
     private func attachmentSkipNote(bad: String?, capped: Int) -> String? {
         var parts: [String] = []
         if let bad { parts.append(bad) }
-        if capped > 0 { parts.append("\(capped) over the \(Self.maxAttachments)-file limit") }
+        if capped > 0 { parts.append("\(capped) over the \(Staging.maxAttachments)-file limit") }
         guard !parts.isEmpty else { return nil }
         return "Skipped: " + parts.joined(separator: "; ") + "."
     }
@@ -1339,7 +1330,7 @@ struct GramView: View {
         var badNames: [String] = []
         var capped = 0
         for url in urls {
-            guard attachedFiles.count < Self.maxAttachments else {
+            guard attachedFiles.count < Staging.maxAttachments else {
                 capped += 1
                 continue
             }
@@ -1415,7 +1406,7 @@ struct GramView: View {
         var bad = 0
         var capped = 0
         for item in items {
-            guard attachedFiles.count < Self.maxAttachments else {
+            guard attachedFiles.count < Staging.maxAttachments else {
                 capped += 1
                 continue
             }
@@ -1590,6 +1581,18 @@ struct GramView: View {
         /// in frames, so any size uploads fine regardless of divisibility; this is
         /// just the pre-send size gate.
         static let maxFileBytes = 100 * 1024 * 1024
+
+        /// How many files can be staged at once, in EITHER composer. Each sends as its
+        /// own gram message.
+        ///
+        /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
+        /// staged file was held in memory as `Data`: ten 100 MB picks would have been
+        /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads
+        /// them one frame at a time, so the resident ceiling is a single frame no
+        /// matter how many files are staged or how large they are. Both send loops are
+        /// SERIAL and `gram.post` consumes each staging file, so the daemon's 1 GiB
+        /// aggregate staging budget never sees more than one upload in flight.
+        static let maxAttachments = 10
 
         static let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gram-staging", isDirectory: true)
