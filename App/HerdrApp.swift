@@ -6076,12 +6076,14 @@ struct SettingsView: View {
                     header
                     Divider().overlay(Palette.hairlineQuiet)
                     ScrollView {
-                        // Grouped subviews keep this builder well under SwiftUI's 10-child
-                        // ViewBuilder ceiling (7 children + the footers Group).
+                        // Grouped subviews keep this builder under SwiftUI's 10-child
+                        // ViewBuilder ceiling (8 children + the footers Group = 9, so
+                        // one slot left: the next section needs its own Group).
                         VStack(alignment: .leading, spacing: 0) {
                             atAGlanceSection
                             manageSection
                             appearanceSection
+                            previewsSection
                             troubleSection
                             helpSection
                             supportSection
@@ -6243,8 +6245,9 @@ struct SettingsView: View {
 
     /// iPad "App & About": the light sections that stay inline on the iPhone index.
     private func aboutDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "App & About", subtitle: "Trouble, help, support & legal",
+        detailScaffold(title: "App & About", subtitle: "Previews, trouble, help, support & legal",
                        showBack: showBack) {
+            previewsSection
             troubleSection
             helpSection
             supportSection
@@ -7133,6 +7136,42 @@ struct SettingsView: View {
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
     /// applies the new size in place via its own `@AppStorage` observer).
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// Whether a RECEIVED html/svg preview may run script. OFF by default — see
+    /// `previewsSection` and `HtmlWebView`.
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
+
+    /// "HTML previews" — the one switch that loosens how a RECEIVED html/svg attachment
+    /// is rendered. Off by default and stated plainly, because the document is written
+    /// by whoever sent it: script stays off unless the reader turns it on for this
+    /// device. The row under the switch has to be accurate about what stays true, and
+    /// what does not: remote loads and navigation are still blocked, but a script can
+    /// signal that the file was opened by a route no URL rule sees.
+    private var previewsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("HTML PREVIEWS")
+            VStack(spacing: 0) {
+                groupedToggleRow("Run JavaScript", $previewJavaScript)
+                rowDivider
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: previewJavaScript ? "exclamationmark.triangle" : "lock.shield")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(previewJavaScript ? Palette.waiting : Palette.textDim)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.surfaceRaised))
+                    Text(previewJavaScript
+                         ? "Scripts in a previewed file will run. It still can't load anything from the network or open another page, but a file written to do so could signal that you opened it. Applies to the next preview you open."
+                         : "Scripts in a previewed file are ignored, and it can't load anything from the network. Turn this on only for a file you trust that needs to be interactive.")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
 
     /// "Text size" section for the iPhone index: a heading over the shared controls.
     private var appearanceSection: some View {

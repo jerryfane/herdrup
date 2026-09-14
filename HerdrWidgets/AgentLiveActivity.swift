@@ -11,32 +11,30 @@ struct AgentLiveActivity: Widget {
                 isStale: context.isStale
             )
             .widgetURL(context.state.deepLinkURL)
-            .activityBackgroundTint(WidgetPalette.ground)
+            // NO TINT: passing nil leaves the system's own translucent background in
+            // place, which is what makes the activity read as glass over the wallpaper.
+            // The view paints its own blur + brand sheen on top of that (see
+            // `LockScreenView.body`), so the surface stays herdrup-coloured without
+            // going opaque.
+            .activityBackgroundTint(nil)
             .activitySystemActionForegroundColor(WidgetPalette.text)
         } dynamicIsland: { context in
             DynamicIsland {
+                // LEADING AND TRAILING ARE NARROW, and they squeeze whatever sits in
+                // `.center` between them — a headline there was reduced to a few
+                // characters, or vanished, which is how the expanded island looked
+                // broken. So the sides carry ONE short line each, and the real content
+                // gets the full-width bottom region.
                 DynamicIslandExpandedRegion(.leading) {
-                    ExpandedHero(state: context.state, isStale: context.isStale)
+                    ExpandedMark(state: context.state, isStale: context.isStale)
                         .padding(.leading, 4)
                 }
-                DynamicIslandExpandedRegion(.center) {
-                    ExpandedHeadline(state: context.state, isStale: context.isStale)
-                }
                 DynamicIslandExpandedRegion(.trailing) {
-                    FleetTotals(hostLabel: context.attributes.hostLabel, state: context.state)
+                    ExpandedHost(hostLabel: context.attributes.hostLabel)
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    if context.state.needsYouCount > 0 {
-                        ActivityAction(
-                            title: "Open",
-                            destination: context.state.deepLinkURL,
-                            tint: context.state.markColor,
-                            outlined: context.isStale
-                        )
-                        .padding(.horizontal, 8)
-                        .padding(.top, 6)
-                    }
+                    ExpandedBody(state: context.state, isStale: context.isStale)
                 }
             } compactLeading: {
                 StatusMark(
@@ -81,91 +79,153 @@ private struct CompactCount: View {
     }
 }
 
-private struct ExpandedHero: View {
+/// The expanded island's LEADING corner: one line, because the corner is about as wide
+/// as three characters before it starts stealing from everything else.
+private struct ExpandedMark: View {
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 6) {
+            StatusMark(
+                status: state.status,
+                diameter: 10,
+                isUnconfirmed: state.markIsUnconfirmed,
+                isStale: isStale
+            )
             if state.needsYouCount > 0 {
-                HStack(spacing: 7) {
-                    StatusMark(
-                        status: state.status,
-                        diameter: 10,
-                        isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale
-                    )
-                    if state.needsYouCount > 1 {
-                        Text(verbatim: "\(state.needsYouCount)")
-                            .font(WidgetFont.plexSemiBold(26))
-                            .monospacedDigit()
-                            .foregroundStyle(WidgetPalette.waiting)
-                    }
-                }
-                Text("need you")
-                    .font(WidgetFont.geist(12))
-                    .foregroundStyle(WidgetPalette.textDim)
-            } else {
-                StatusMark(status: state.status, diameter: 10, isStale: isStale)
+                // The SAME spelling the compact pill uses. Two presentations of one
+                // activity printing 100 here and 99+ there is the kind of detail that
+                // reads as a bug. It also bounds the corner: "99+" is the widest
+                // string it can ever have to fit.
+                Text(state.needsYouCount.compactCount)
+                    .font(WidgetFont.plexSemiBold(17))
+                    .monospacedDigit()
+                    .foregroundStyle(WidgetPalette.waiting)
             }
         }
+        // Truncates rather than taking its ideal width: the corner is narrow, and a
+        // corner that grows is what squeezed the rest of the island before.
+        .lineLimit(1)
+        .truncationMode(.tail)
     }
 }
 
-private struct ExpandedHeadline: View {
+/// The expanded island's TRAILING corner: WHICH MACHINE this is, because the counts
+/// already have a home in the bottom row and repeating them across three places is
+/// what made the expanded view read as clutter.
+private struct ExpandedHost: View {
+    let hostLabel: String
+
+    var body: some View {
+        Text(hostLabel)
+            .font(WidgetFont.plex(11))
+            .foregroundStyle(WidgetPalette.glassTextFaint)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+}
+
+/// The expanded island's real content, in the BOTTOM region where it has the full
+/// width of the island: what is happening, since when, how much of the fleet is busy,
+/// and the one action. Held in a glass card so the island reads like the rest of iOS
+/// rather than text floating on black.
+private struct ExpandedBody: View {
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(state.headline)
-                .font(WidgetFont.geistSemiBold(16))
-                .foregroundStyle(WidgetPalette.text)
-                .lineLimit(1)
-            if let question = state.question, !question.isEmpty, !isStale {
-                Text(question)
-                    .font(WidgetFont.plex(12))
-                    .foregroundStyle(WidgetPalette.textDim)
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(state.headline)
+                    .font(WidgetFont.geistSemiBold(16))
+                    .foregroundStyle(WidgetPalette.text)
                     .lineLimit(1)
+                // EXACTLY ONE secondary line. The expanded island's height budget is
+                // about 160pt and nothing here can compress — every line is
+                // `lineLimit(1)` and the button's 36 is a floor — so a third line plus
+                // the action is how the card gets clipped instead of shrunk. The
+                // question is the more useful of the two when there is one; the counts
+                // keep their place in every other state.
+                secondary
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if state.needsYouCount > 0 {
+                ActivityAction(
+                    title: "Open herdrup",
+                    destination: state.deepLinkURL,
+                    tint: state.markColor,
+                    outlined: isStale,
+                    minHeight: 36
+                )
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GlassSurface(cornerRadius: 16))
+        .padding(.horizontal, 2)
+    }
+
+    @ViewBuilder
+    private var secondary: some View {
+        if !isStale, let question = state.question, !question.isEmpty {
+            Text(question)
+                .font(WidgetFont.plex(12))
+                .foregroundStyle(WidgetPalette.glassTextDim)
+                .lineLimit(1)
+        } else {
+            footer
+        }
+    }
+
+    /// The timer that matters in this state, then the fleet counts. The machine's name
+    /// is the trailing corner's job, so it is not repeated here.
+    @ViewBuilder
+    private var footer: some View {
+        HStack(spacing: 4) {
             if isStale {
                 Text("Not updated recently")
-                    .font(WidgetFont.plex(11))
-                    .foregroundStyle(WidgetPalette.textFaint)
-                    .lineLimit(1)
-            } else if state.needsYouCount > 0, let since = state.blockedSince {
-                HStack(spacing: 4) {
+            } else {
+                if state.needsYouCount > 0, let since = state.blockedSince {
                     Text("waiting")
                     Text(Date(timeIntervalSince1970: since), style: .timer)
                         .monospacedDigit()
+                    Text("·")
+                } else if state.status == .working, let since = state.workingSince {
+                    Text(Date(timeIntervalSince1970: since), style: .timer)
+                        .monospacedDigit()
+                    Text("·")
                 }
-                .font(WidgetFont.plex(11))
-                .foregroundStyle(WidgetPalette.textFaint)
-                .lineLimit(1)
-            } else if state.status == .working, let since = state.workingSince {
-                Text(Date(timeIntervalSince1970: since), style: .timer)
-                    .font(WidgetFont.plex(11))
-                    .monospacedDigit()
-                    .foregroundStyle(WidgetPalette.textFaint)
-                    .lineLimit(1)
+                Text("\(state.workingCount) working · \(state.totalCount) agents")
             }
         }
+        .font(WidgetFont.plex(11))
+        .foregroundStyle(WidgetPalette.glassTextFaint)
+        .lineLimit(1)
+        .truncationMode(.tail)
     }
 }
 
-private struct FleetTotals: View {
-    let hostLabel: String
-    let state: AgentActivityAttributes.ContentState
+/// The iOS glass surface: the system's own blur, a brand-tinted wash so it still reads
+/// as herdrup, a top-leading sheen for depth, and a hairline edge. Used where the
+/// backdrop is the wallpaper or the island — never over an opaque fill, which would
+/// throw away the blur and leave only the wash.
+private struct GlassSurface: View {
+    var cornerRadius: CGFloat
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text(hostLabel)
-            Text("\(state.workingCount) working")
-            Text(state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
-        }
-        .font(WidgetFont.plex(11))
-        .foregroundStyle(WidgetPalette.textFaint)
-        .lineLimit(1)
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(WidgetPalette.glassWash)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(WidgetPalette.glassEdge, lineWidth: 0.75)
+            }
     }
 }
 
@@ -187,7 +247,7 @@ private struct LockScreenView: View {
                     if let question = state.question, !question.isEmpty, !isStale {
                         Text(question)
                             .font(WidgetFont.plex(15))
-                            .foregroundStyle(WidgetPalette.textDim)
+                            .foregroundStyle(dim)
                             .lineLimit(1)
                     } else if state.needsYouCount > 0, !isStale {
                         Text(AgentActivitySummary.line(state))
@@ -214,11 +274,26 @@ private struct LockScreenView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // A gradient, not a flat fill. `activityBackgroundTint` takes one Color, so the
-        // depth has to be painted inside the view; it sits UNDER the content and above
-        // that tint, which stays as the base so a system fallback still matches.
-        .background(WidgetPalette.backdrop)
+        // GLASS, not paint. With `activityBackgroundTint(nil)` the system leaves its own
+        // translucent surface behind this view, so the wallpaper shows through the blur;
+        // the wash keeps the herdrup hue and the sheen gives the pane an edge to catch.
+        // Under Always-On (luminance reduced) the wash goes solid: a blurred wallpaper
+        // at 1 Hz is both unreadable and wasteful, and the panel is meant to be dim.
+        .background {
+            if isLuminanceReduced {
+                WidgetPalette.backdrop
+            } else {
+                GlassSurface(cornerRadius: 0)
+            }
+        }
     }
+
+    /// Secondary and tertiary ink, picked for the surface actually behind them. On
+    /// glass the wallpaper is unknown, so the lifted pair is the only one that stays
+    /// legible over a bright one; on the Always-On backdrop the surface is the opaque
+    /// navy these were tuned against, and the dimmer pair is correct there.
+    private var dim: Color { isLuminanceReduced ? WidgetPalette.textDim : WidgetPalette.glassTextDim }
+    private var faint: Color { isLuminanceReduced ? WidgetPalette.textFaint : WidgetPalette.glassTextFaint }
 
     @ViewBuilder
     private var lockHero: some View {
@@ -238,7 +313,7 @@ private struct LockScreenView: View {
                 }
                 Text("need you")
                     .font(WidgetFont.geist(13))
-                    .foregroundStyle(WidgetPalette.textDim)
+                    .foregroundStyle(dim)
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
@@ -257,18 +332,18 @@ private struct LockScreenView: View {
                     Text("· no update from \(hostLabel)")
                 }
                 .font(WidgetFont.plex(11))
-                .foregroundStyle(WidgetPalette.textFaint)
+                .foregroundStyle(faint)
                 .lineLimit(1)
             } else {
                 Text("No update from \(hostLabel)")
                     .font(WidgetFont.plex(11))
-                    .foregroundStyle(WidgetPalette.textFaint)
+                    .foregroundStyle(faint)
                     .lineLimit(1)
             }
         } else {
             Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
                 .font(WidgetFont.plex(13))
-                .foregroundStyle(WidgetPalette.textFaint)
+                .foregroundStyle(faint)
                 .lineLimit(1)
         }
     }
@@ -280,11 +355,16 @@ private struct ActivityAction: View {
     let tint: Color
     let outlined: Bool
 
+    /// 44 on the lock screen, where it is a touch target with a whole widget to sit in.
+    /// The expanded island passes less: its height budget is finite and this control is
+    /// the only thing in the card that could give way before the system clips it.
+    var minHeight: CGFloat = 44
+
     var body: some View {
         Link(destination: destination) {
             Text(title)
                 .font(WidgetFont.geistSemiBold(15))
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .frame(maxWidth: .infinity, minHeight: minHeight)
                 .foregroundStyle(outlined ? WidgetPalette.text : WidgetPalette.ground)
                 .background(outlined ? Color.clear : tint)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -348,6 +428,24 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
+    /// The brand wash over the system blur. Translucent, but only by a fifth: the
+    /// surface sits over an UNKNOWN wallpaper, and a lighter wash let the faint text
+    /// fall to 1.05:1 against a bright one — invisible. At 0.80 the wallpaper still
+    /// moves behind the blur while the surface stays predictably dark.
+    static let glassWash = LinearGradient(
+        colors: [Color(hex6: 0x1B1F3A).opacity(0.80), Color(hex6: 0x13162A).opacity(0.80)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+    /// The lit edge of a glass pane — brighter than `hairline`, which is a divider on an
+    /// opaque surface and disappears against a blur.
+    static let glassEdge = Color.white.opacity(0.14)
+    /// Secondary and tertiary text ON GLASS. Lifted from `textDim` / `textFaint`,
+    /// which are tuned for the opaque navy: over the worst-case bright wallpaper they
+    /// measure 5.9:1 and 4.5:1 (WCAG AA for small text), where the opaque pair measured
+    /// 2.0:1 and 1.1:1 on the same surface. Only the glass paths use these.
+    static let glassTextDim = Color(hex6: 0xC9CFE2)
+    static let glassTextFaint = Color(hex6: 0xAEB6D0)
     static let ground = Color(hex6: 0x13162A)
     /// A top-leading lift on the ground colour. Two stops, eight points apart in
     /// lightness: enough to read as depth on the lock screen, not enough to fight the
