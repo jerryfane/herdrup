@@ -30,15 +30,11 @@ struct AgentLiveActivity: Widget {
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    ExpandedTotals(state: context.state)
+                    ExpandedHost(hostLabel: context.attributes.hostLabel)
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    ExpandedBody(
-                        hostLabel: context.attributes.hostLabel,
-                        state: context.state,
-                        isStale: context.isStale
-                    )
+                    ExpandedBody(state: context.state, isStale: context.isStale)
                 }
             } compactLeading: {
                 StatusMark(
@@ -109,33 +105,26 @@ private struct ExpandedMark: View {
     }
 }
 
-/// The expanded island's TRAILING corner: the single number worth reading at a glance
-/// from the other side of the notch. The host name and the full totals moved into the
-/// bottom region, which has the width to render them.
-private struct ExpandedTotals: View {
-    let state: AgentActivityAttributes.ContentState
+/// The expanded island's TRAILING corner: WHICH MACHINE this is, because the counts
+/// already have a home in the bottom row and repeating them across three places is
+/// what made the expanded view read as clutter.
+private struct ExpandedHost: View {
+    let hostLabel: String
 
     var body: some View {
-        Text(state.needsYouCount > 0 ? "need you" : totals)
-            .font(WidgetFont.geist(12))
-            .foregroundStyle(state.needsYouCount > 0 ? WidgetPalette.waiting : WidgetPalette.textDim)
+        Text(hostLabel)
+            .font(WidgetFont.plex(11))
+            .foregroundStyle(WidgetPalette.textFaint)
             .lineLimit(1)
-            .fixedSize()
-    }
-
-    private var totals: String {
-        state.workingCount > 0
-            ? "\(state.workingCount) working"
-            : (state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
+            .truncationMode(.tail)
     }
 }
 
 /// The expanded island's real content, in the BOTTOM region where it has the full
-/// width of the island: what is happening, since when, on which machine, and the one
-/// action. Held in a glass card so the island reads like the rest of iOS rather than
-/// text floating on black.
+/// width of the island: what is happening, since when, how much of the fleet is busy,
+/// and the one action. Held in a glass card so the island reads like the rest of iOS
+/// rather than text floating on black.
 private struct ExpandedBody: View {
-    let hostLabel: String
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
 
@@ -173,25 +162,25 @@ private struct ExpandedBody: View {
         .padding(.top, 4)
     }
 
-    /// One faint line: the timer that matters in this state, then the machine and its
-    /// totals. Truncates from the tail, so the timer survives a long host name.
+    /// One faint line: the timer that matters in this state, then the fleet counts. The
+    /// machine's name is the trailing corner's job, so it is not repeated here.
     @ViewBuilder
     private var footer: some View {
         HStack(spacing: 4) {
             if isStale {
                 Text("Not updated recently")
-            } else if state.needsYouCount > 0, let since = state.blockedSince {
-                Text("waiting")
-                Text(Date(timeIntervalSince1970: since), style: .timer)
-                    .monospacedDigit()
-                Text("·")
-            } else if state.status == .working, let since = state.workingSince {
-                Text(Date(timeIntervalSince1970: since), style: .timer)
-                    .monospacedDigit()
-                Text("·")
-            }
-            if !isStale {
-                Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
+            } else {
+                if state.needsYouCount > 0, let since = state.blockedSince {
+                    Text("waiting")
+                    Text(Date(timeIntervalSince1970: since), style: .timer)
+                        .monospacedDigit()
+                    Text("·")
+                } else if state.status == .working, let since = state.workingSince {
+                    Text(Date(timeIntervalSince1970: since), style: .timer)
+                        .monospacedDigit()
+                    Text("·")
+                }
+                Text("\(state.workingCount) working · \(state.totalCount) agents")
             }
         }
         .font(WidgetFont.plex(11))
