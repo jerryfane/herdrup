@@ -377,6 +377,24 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                        "and its path must not be pasted as text")
     }
 
+    /// A MAC FINDER COPY of a document also puts the document's ICON on the pasteboard,
+    /// as an image. The composer preferred images, so copying a PDF attached a 288 KB
+    /// .icns named "photo-….icns" — reported from TestFlight build 143. The file url
+    /// names what the reader actually copied, so it wins whenever one is present.
+    func testACopiedDocumentBeatsItsFinderIcon() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("finder-document-pasteboard")
+
+        XCTAssertTrue(pasteIntoReply(field), "a copied document should offer Paste")
+
+        XCTAssertTrue(app.staticTexts["quarterly-report.pdf"].waitForExistence(timeout: 10),
+                      "the document should stage under its own name, not its icon")
+        let icons = app.staticTexts.matching(NSPredicate(format: "label ENDSWITH %@", ".icns"))
+        XCTAssertEqual(icons.count, 0, "and no icon should be staged beside it")
+    }
+
     /// The staged-attachment chip. A container, so it is matched across element types
     /// rather than assumed to be an `otherElement`.
     private var replyAttachmentChip: XCUIElement {
