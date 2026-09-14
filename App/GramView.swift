@@ -1187,9 +1187,18 @@ struct GramView: View {
         do {
             // Conditional on the digest we hold. An unchanged store answers in a few
             // hundred bytes; only a real change ships the list.
+            //
+            // The limit COVERS WHAT IS LOADED, not just the first page. A changed answer
+            // replaces the list (see GramInbox.apply — a head page says nothing about
+            // what is older), so asking for one page would collapse a reader 200 rows
+            // deep back to 40 every time a message arrived, and the sentinel would then
+            // walk them down again one page at a time. Refreshing the whole window keeps
+            // their place and still costs a fraction of the store; beyond the daemon's
+            // own clamp there is nothing to gain by asking for more.
             let answer = try await client.gramList(
                 ifUnchangedDigest: inboxStore.inbox.conditionalDigest,
-                limit: Self.pageSize)
+                limit: min(max(Self.pageSize, inboxStore.inbox.messages.count),
+                           Self.maxRefreshLimit))
             let changed = inboxStore.inbox.apply(answer)
             phase = .loaded
             refreshNote = nil
@@ -1214,6 +1223,7 @@ struct GramView: View {
             } else {
                 refreshNote = "Gram is unavailable right now."
             }
+
         } catch {
             // A daemon predating the gram build answers an unknown-method error, NOT
             // `gram_unavailable`, so a first-load failure gets one honest message
@@ -1235,6 +1245,11 @@ struct GramView: View {
     /// costs a few tens of KB instead of the ~900 KB the whole store weighs. Older
     /// pages are the same size: a scroll that keeps going should keep costing the same.
     static let pageSize = 40
+
+    /// Ceiling for the head refresh, matching the daemon's own `GRAM_LIST_MAX_LIMIT`.
+    /// A reader who has paged past it keeps scrolling through the sentinel; the refresh
+    /// simply stops growing.
+    static let maxRefreshLimit = 500
 
     /// Ask for the page older than everything loaded. Driven by the sentinel at the end
     /// of the list, so it runs exactly when the reader reaches the bottom.

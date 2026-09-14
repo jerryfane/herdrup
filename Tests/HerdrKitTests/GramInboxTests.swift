@@ -208,6 +208,26 @@ final class GramInboxTests: XCTestCase {
         XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
     }
 
+    /// Read-all marks messages OLDER than the loaded page — it takes its ids from an
+    /// unread-only fetch. The badge is daemon-sourced now, so a mark for an id this
+    /// inbox does not hold still has to move the count, or a fully successful pass
+    /// leaves the badge and the Read-all button exactly where they were.
+    func testMarkingReadAnIDOutsideTheWindowStillMovesTheCount() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, unread: 3))
+        XCTAssertEqual(inbox.unreadCount, 3)
+
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2, "a server-confirmed read counts wherever it lives")
+        XCTAssertNil(inbox.conditionalDigest,
+                     "and the list no longer matches what the daemon fingerprinted")
+
+        inbox.markRead(id: "c")
+        XCTAssertEqual(inbox.unreadCount, 1)
+        inbox.markRead(id: "c")
+        XCTAssertEqual(inbox.unreadCount, 1, "a second mark of the same loaded id is a no-op")
+    }
+
     /// The badge counts the whole store. A paged client holds a window, so the daemon's
     /// count has to win — counting the window would under-count every unread message
     /// older than the first page.

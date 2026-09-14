@@ -150,9 +150,20 @@ public struct GramInbox: Sendable, Equatable {
 
     /// Marks a message read locally. Same digest reasoning as `remove`, and the same
     /// reason for moving the server count.
+    ///
+    /// An id this inbox does not HOLD still counts. Read-all takes its ids from an
+    /// unread-only fetch, so it legitimately marks messages older than the loaded page;
+    /// ignoring those left the daemon-sourced badge frozen after a fully successful
+    /// pass, with the Read-all button still sitting there and nothing to explain it.
+    /// Callers mark each id once (`markingRead` serialises them), so the count cannot
+    /// be double-decremented.
     public mutating func markRead(id: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }), messages[index].isUnread
-        else { return }
+        guard let index = messages.firstIndex(where: { $0.id == id }) else {
+            if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
+            digest = nil
+            return
+        }
+        guard messages[index].isUnread else { return }
         messages[index].readByOwner = true
         if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
         digest = nil
