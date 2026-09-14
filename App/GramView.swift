@@ -93,9 +93,6 @@ struct GramView: View {
     /// A failed page fetch, shown ON the sentinel so it survives the next successful
     /// head poll (which clears `refreshNote`) and gives the reader something to tap.
     @State private var pageError: String?
-    /// A whole-store walk (search) in progress, so the result list can say the answer is
-    /// still arriving instead of looking complete.
-    @State private var isLoadingEveryPage = false
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -303,11 +300,6 @@ struct GramView: View {
             guard new != old else { return }
             Task { await load(initial: false) }
         }
-        // The whole-store walk that search needs is driven from the two views that
-        // RENDER the search result — the instalment banner and the no-match state — so
-        // it is tied to a view's lifetime and cancelled with it. An `onChange` Task here
-        // as well spawned one unstructured walker per keystroke, and the losers each
-        // burned their wait and then manufactured a failure note.
         // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
         .onChange(of: readAllToken) { old, new in
             guard new != old else { return }
@@ -1339,6 +1331,10 @@ struct GramView: View {
                 // since nothing failed — the list simply did not grow.
                 guard inboxStore.inbox.generation != generation else { return false }
             } catch {
+                // A cancelled fetch is not a failure: the reader retyped or left, and the
+                // successor walk is already starting. Reporting it would flash an error
+                // for every keystroke.
+                guard !Task.isCancelled else { return false }
                 // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
                 // clears that note within six seconds and the reader would be left with a
                 // spinner, no message and no way to retry.
@@ -1361,18 +1357,19 @@ struct GramView: View {
     /// Pull every remaining page in. Search reads the whole store, so it says so by
     /// loading it rather than quietly answering from a window.
     ///
-    /// SINGLE-FLIGHTED: the two search views that drive it can both be alive, and a
-    /// keystroke re-keys their tasks, so without this guard several walkers contend on
-    /// the page fetch and the losers report failures that never happened.
+    /// NOT guarded on a walk-in-flight flag. It used to be, and that refused every
+    /// successor: SwiftUI cancels the predecessor's task without awaiting it, so a
+    /// predecessor suspended in a page fetch — where a healthy walk spends nearly all
+    /// its time — still held the flag when the next keystroke's walk began, and the
+    /// terminal query was never walked at all while the banner claimed it was. Overlap
+    /// is instead serialised one level down, where it belongs: `loadMore` waits for the
+    /// in-flight page and appends under a generation check, so a straggler can only
+    /// deliver a contiguous page or be dropped.
     ///
-    /// `loadMore` waits for an in-flight page rather than returning false straight away,
-    /// so a false answer here means a real failure — a stall budget of five with a pause
-    /// between tries covers a transient one. Giving up leaves `pageError` set, but a
-    /// CANCELLED walk (the reader retyped, or left) reports nothing: it did not fail.
+    /// A false answer from `loadMore` therefore means no progress, not necessarily a
+    /// failure — a stall budget of five with a pause between tries covers a transient
+    /// one. Giving up leaves `pageError` set, but a CANCELLED walk reports nothing.
     private func loadEveryPage() async {
-        guard !isLoadingEveryPage else { return }
-        isLoadingEveryPage = true
-        defer { isLoadingEveryPage = false }
         var stalls = 0
         while inboxStore.inbox.nextCursor != nil, !Task.isCancelled, stalls < 5 {
             if await loadMore() {
