@@ -3764,8 +3764,9 @@ private enum PastedFile {
     /// builds an edit menu. Reading `itemProviders` there instead is a content read, which
     /// raises the system "Allow Paste?" prompt for anything copied in another app.
     ///
-    /// A file url wins over the file's own concrete type when both are advertised: it is
-    /// the representation that survives a cross-process copy with its name intact.
+    /// A file url wins the LOOKUP when both are advertised — it is the representation
+    /// that survives a cross-process copy with its name intact — but staging still
+    /// prefers the file's concrete type, because a url is a reference and bytes are not.
     static func pasteboardType() -> UTType? {
         let types = UIPasteboard.general.types.lazy.compactMap { UTType($0) }
         return types.first { $0.conforms(to: .fileURL) } ?? types.first(where: isAttachment)
@@ -3930,9 +3931,21 @@ private struct TerminalReplyField: UIViewRepresentable {
             // A FILE URL overrides that: Finder and Files put the path on the pasteboard
             // beside the file, so deferring to text there pasted "/Users/…/main.pdf" and
             // attached nothing — which is exactly how Command-V looked broken on Mac and
-            // iPad. Every other bail-out still falls through to UIKit's own paste.
-            if PastedFile.pasteboardHasFileURL() || !UIPasteboard.general.hasStrings,
-               let type = PastedFile.pasteboardType(),
+            // iPad.
+            if PastedFile.pasteboardHasFileURL() {
+                if let type = PastedFile.pasteboardType(),
+                   let provider = UIPasteboard.general.itemProviders.first(where: {
+                       $0.hasItemConformingToTypeIdentifier(type.identifier)
+                   }) {
+                    _ = onPasteFile?(provider)
+                }
+                // Consumed either way. A decline here means the cap, a load already in
+                // flight, or a pane with no named agent — each of which says so in the
+                // note. Falling through would ALSO drop the path into the composer, which
+                // is the outcome this whole change exists to remove.
+                return
+            }
+            if !UIPasteboard.general.hasStrings, let type = PastedFile.pasteboardType(),
                let provider = UIPasteboard.general.itemProviders.first(where: {
                    $0.hasItemConformingToTypeIdentifier(type.identifier)
                }),
@@ -5065,7 +5078,7 @@ struct TerminalPaneContent: View {
         // through the SAME staging path as a paste, so the cap, the type rule and the
         // named-agent guard are shared rather than re-stated.
         .onDrop(of: [.item], isTargeted: $replyDropTargeted) { providers in
-            providers.map { pasteReplyAttachment($0) }.contains(true)
+            acceptDroppedFiles(providers)
         }
         .overlay {
             if replyDropTargeted {
@@ -5079,6 +5092,35 @@ struct TerminalPaneContent: View {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
+    /// Stages every DROPPED file, one after another.
+    ///
+    /// A drop hands over the whole selection at once, and staging is serialised by
+    /// `loadingReplyAttachment`: calling the paste handler for all of them in a loop
+    /// staged the first and dropped the rest on that guard — silently, because it is the
+    /// one bail-out with no note — while SwiftUI played the accept animation for the
+    /// whole drag. So each provider waits for the previous one to land.
+    ///
+    /// Returns true when at least one provider is worth staging, which is what tells
+    /// SwiftUI the drop was accepted.
+    private func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else { return false }
+        Task { @MainActor in
+            for provider in providers {
+                // Up to five seconds per file: a staged copy of a large document off a
+                // network volume is slow, and abandoning the rest of the drag is worse
+                // than waiting.
+                for _ in 0..<100 where loadingReplyAttachment {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                guard !loadingReplyAttachment else { break }
+                // A decline is either the cap or a pane that cannot take attachments;
+                // both have set their note, and both apply to every remaining file.
+                guard pasteReplyAttachment(provider) else { break }
+            }
+        }
+        return true
+    }
+
     /// Stages a pasted FILE of any kind — a photo, a PDF, a log, a zip — as the reply's
     /// attachment. Returns false when this composer cannot take it (a send in flight, a
     /// pane with no named intent agent, or an item that vends no file type), so the caller
@@ -5120,9 +5162,31 @@ struct TerminalPaneContent: View {
             loadingReplyAttachment = true
             ctrlArmed = false
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                var refusal: String?
                 let attachment: PromptAttachment? = url.flatMap { source in
                     let scoped = source.startAccessingSecurityScopedResource()
                     defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+                    let keys: Set<URLResourceKey> = [
+                        .isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
+                    ]
+                    let values = try? source.resourceValues(forKeys: keys)
+                    // A DIRECTORY, refused before the copy. `stageCopy` would happily
+                    // recurse a whole folder into tmp and only then fail its size check,
+                    // which is an unbounded copy for a message that cannot carry it.
+                    if values?.isDirectory == true {
+                        refusal = "Folders can't be attached — pick the files inside."
+                        return nil
+                    }
+                    // An iCloud placeholder has no bytes yet. Ask for the download and say
+                    // so, instead of reporting the generic "couldn't add" for a file the
+                    // reader can plainly see in Files.
+                    if values?.isUbiquitousItem == true,
+                       values?.ubiquitousItemDownloadingStatus != .current {
+                        try? FileManager.default.startDownloadingUbiquitousItem(at: source)
+                        refusal = "\(source.lastPathComponent) isn't downloaded yet — "
+                            + "opening it in Files once will fetch it."
+                        return nil
+                    }
                     let name = GramStaging.safeFileName(source.lastPathComponent)
                     guard !name.isEmpty,
                           let staged = GramView.Staging.copy(of: source, named: name)
@@ -5134,7 +5198,10 @@ struct TerminalPaneContent: View {
                         isImage: fileType?.conforms(to: .image) ?? false,
                         staged: staged, uploadID: nil, gramMessageID: nil)
                 }
-                Task { @MainActor in finishReplyAttachmentPaste(attachment) }
+                Task { @MainActor in
+                    finishReplyAttachmentPaste(attachment)
+                    if let refusal { actionNote = refusal }
+                }
             }
             return true
         }
