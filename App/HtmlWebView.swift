@@ -9,7 +9,8 @@ import WebKit
 /// untrusted file safe to display:
 ///
 ///   * **JavaScript is disabled** (`allowsContentJavaScript = false`), so no script
-///     in the file runs.
+///     in the file runs — unless the reader turns "Run JavaScript" on in Settings,
+///     which is off by default and leaves the other two protections in place.
 ///   * **All network is blocked** via a `WKContentRuleList` compiled from
 ///     `WebViewPolicy.blockNetworkRuleListJSON`, so a passive subresource load
 ///     (`<img>`, `<link>`, CSS `url()`, `<object>`) cannot beacon out. `data:` URIs
@@ -26,17 +27,27 @@ import WebKit
 /// dark system background rendered unstyled files black-on-black — the #92 symptom.)
 struct HtmlWebView: UIViewRepresentable {
     let html: String
+    /// Whether this document may run script. The caller reads the Settings switch
+    /// (`WebViewPolicy.javaScriptDefaultsKey`), which is OFF unless the reader turned
+    /// it on; flipping it applies to the NEXT preview, because the flag lives on the
+    /// configuration a `WKWebView` copies at init.
+    var allowsJavaScript: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // No script execution from the (untrusted) document. This is set on the config
-        // BEFORE the WKWebView is created (the init-time copy captures it), and the
-        // coordinator deliberately implements ONLY the 2-arg policy method — not the
-        // `preferences:` variant, which would hand back a fresh WKWebpagePreferences and
-        // silently re-enable JS. Do not add that overload without re-disabling JS there.
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        // Script execution from the (untrusted) document, off unless the reader asked
+        // for it. This is set on the config BEFORE the WKWebView is created (the
+        // init-time copy captures it), and the coordinator deliberately implements ONLY
+        // the 2-arg policy method — not the `preferences:` variant, which would hand
+        // back a fresh WKWebpagePreferences and silently re-enable JS. Do not add that
+        // overload without carrying this flag into it.
+        //
+        // Turning script ON does NOT loosen the other two protections: the network
+        // block below and the frozen navigation still apply, so a script can compute
+        // and repaint but cannot fetch, navigate or beacon.
+        config.defaultWebpagePreferences.allowsContentJavaScript = allowsJavaScript
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator

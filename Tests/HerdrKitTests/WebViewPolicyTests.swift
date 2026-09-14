@@ -20,6 +20,28 @@ final class WebViewPolicyTests: XCTestCase {
         }
     }
 
+    /// SCRIPT IS OFF UNTIL ASKED FOR. A reader who has never opened Settings has no
+    /// value stored under the key, and that absence must render an untrusted document
+    /// without script — the state the viewer's whole threat model assumes.
+    func testJavaScriptIsOffUntilTheSettingIsTurnedOn() throws {
+        let suite = "herdr.webviewpolicy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertNil(defaults.object(forKey: WebViewPolicy.javaScriptDefaultsKey),
+                     "a fresh install stores nothing under the key")
+        XCTAssertFalse(WebViewPolicy.javaScriptEnabled(in: defaults),
+                       "an unset preference must render without script")
+
+        defaults.set(true, forKey: WebViewPolicy.javaScriptDefaultsKey)
+        XCTAssertTrue(WebViewPolicy.javaScriptEnabled(in: defaults),
+                      "and turning it on must reach the viewer")
+
+        defaults.set(false, forKey: WebViewPolicy.javaScriptDefaultsKey)
+        XCTAssertFalse(WebViewPolicy.javaScriptEnabled(in: defaults),
+                       "turning it back off must stick")
+    }
+
     /// Every network scheme must be matched by some block rule, and the inline
     /// document + inline assets must NOT be — the exact split that keeps a hostile
     /// file from beaconing out while still letting the report render (issue #92: the

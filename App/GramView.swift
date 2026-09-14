@@ -154,6 +154,9 @@ struct GramView: View {
     /// does not re-run this separate child struct — without this, Gram would show
     /// old-size text after a size change until it re-rendered for another reason.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+    /// Whether a received html/svg preview may run script (Settings → HTML previews).
+    /// Off unless the reader turned it on; read here so the viewer is built with it.
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
     /// Momentary "Copied ✓" on the setup card's copy button.
     @State private var setupCommandCopied = false
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
@@ -353,12 +356,13 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
-        // Received HTML/SVG opens in a dedicated in-app viewer (JavaScript off, all
-        // network blocked) rather than QuickLook, which rendered these blank (#92).
+        // Received HTML/SVG opens in a dedicated in-app viewer (all network blocked,
+        // navigation frozen, and script off unless the reader turned it on in Settings)
+        // rather than QuickLook, which rendered these blank (#92).
         // Done dismisses; Share still lets the owner save the raw file.
         .fullScreenCover(item: $webDoc) { doc in
             NavigationStack {
-                HtmlWebView(html: doc.html)
+                HtmlWebView(html: doc.html, allowsJavaScript: previewJavaScript)
                     .ignoresSafeArea(edges: .bottom)
                     .navigationTitle(doc.title)
                     .navigationBarTitleDisplayMode(.inline)

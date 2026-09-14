@@ -37,4 +37,17 @@ public enum WebViewPolicy {
     /// Schemes that must remain loadable, or the viewer goes blank / loses inline
     /// assets: the inline document itself and `data:` URIs.
     public static let allowedInlineURLs = ["about:blank", "data:text/html,hi", "data:image/png;base64,AAAA"]
+
+    /// `UserDefaults` key behind the Settings switch that lets a previewed document run
+    /// script. Lives here beside the rest of the viewer's policy so the app's
+    /// `@AppStorage` and this default cannot drift apart.
+    public static let javaScriptDefaultsKey = "previews.javascript"
+
+    /// Whether a previewed document may run script. ABSENT MEANS OFF: a reader who has
+    /// never opened Settings gets the safe rendering, and `UserDefaults.bool(forKey:)`
+    /// already answers false for a missing key — this exists so the default is a tested
+    /// contract rather than an implicit one.
+    public static func javaScriptEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.bool(forKey: javaScriptDefaultsKey)
+    }
 }

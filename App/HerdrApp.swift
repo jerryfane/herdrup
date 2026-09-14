@@ -6075,6 +6075,7 @@ struct SettingsView: View {
                             atAGlanceSection
                             manageSection
                             appearanceSection
+                            previewsSection
                             troubleSection
                             helpSection
                             supportSection
@@ -6238,6 +6239,7 @@ struct SettingsView: View {
     private func aboutDetail(showBack: Bool) -> some View {
         detailScaffold(title: "App & About", subtitle: "Trouble, help, support & legal",
                        showBack: showBack) {
+            previewsSection
             troubleSection
             helpSection
             supportSection
@@ -7126,6 +7128,41 @@ struct SettingsView: View {
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
     /// applies the new size in place via its own `@AppStorage` observer).
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// Whether a RECEIVED html/svg preview may run script. OFF by default — see
+    /// `previewsSection` and `HtmlWebView`.
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
+
+    /// "HTML previews" — the one switch that loosens how a RECEIVED html/svg attachment
+    /// is rendered. Off by default and stated plainly, because the document is written
+    /// by whoever sent it: script stays off unless the reader turns it on for this
+    /// device. The other two protections (no network, no navigation) are not settings
+    /// and hold either way, which is what the row under the switch says.
+    private var previewsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("HTML PREVIEWS")
+            VStack(spacing: 0) {
+                groupedToggleRow("Run JavaScript", $previewJavaScript)
+                rowDivider
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: previewJavaScript ? "exclamationmark.triangle" : "lock.shield")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(previewJavaScript ? Palette.waiting : Palette.textDim)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.surfaceRaised))
+                    Text(previewJavaScript
+                         ? "Scripts in a previewed file will run. The preview still cannot reach the network or navigate anywhere, and the change applies to the next preview you open."
+                         : "Scripts in a previewed file are ignored. Turn this on only if you need an interactive report to work.")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
 
     /// "Text size" section for the iPhone index: a heading over the shared controls.
     private var appearanceSection: some View {
