@@ -3790,7 +3790,10 @@ private struct TerminalReplyField: UIViewRepresentable {
         view.autocapitalizationType = .none
         view.autocorrectionType = .no
         view.returnKeyType = .send
-        view.isScrollEnabled = false
+        // Scrolling is ON at every height (see `refreshScrollMode`); only bouncing tracks
+        // whether the content overflows.
+        view.isScrollEnabled = true
+        view.alwaysBounceVertical = false
         view.accessibilityIdentifier = "terminal-reply-input"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.updatePlaceholder()
@@ -3920,24 +3923,41 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         private var shouldRevealCaretAfterLayout = false
 
+        /// The height this text needs at `width`, measured from the STRING — not from
+        /// `UITextView.sizeThatFits`.
+        ///
+        /// `sizeThatFits` on a text view answers differently depending on `isScrollEnabled`
+        /// and on how much TextKit has lazily laid out, so while it drove the SwiftUI height
+        /// the box could still report a two-line height with three lines of text in it: the
+        /// third line — the one being typed — was clipped away, and typing looked like it did
+        /// nothing until a fourth line made the view scrollable and dragged the caret back
+        /// into view. A layout-independent measurement cannot lag the text.
         func fittingHeight(for width: CGFloat) -> CGFloat {
-            super.sizeThatFits(
-                CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
-            ).height
+            let padding = 2 * textContainer.lineFragmentPadding
+            let usable = max(1, width - textContainerInset.left - textContainerInset.right - padding)
+            // boundingRect drops a trailing newline, which would hide the empty line a
+            // pasted "a\n" ends on; the space gives that line something to measure.
+            var measured = text ?? ""
+            if measured.isEmpty || measured.hasSuffix("\n") { measured += " " }
+            let box = (measured as NSString).boundingRect(
+                with: CGSize(width: usable, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font ?? .systemFont(ofSize: 15)],
+                context: nil)
+            return ceil(box.height) + textContainerInset.top + textContainerInset.bottom
         }
 
+        /// Scrolling stays ON at every height. It used to be toggled with the content, which
+        /// meant the caret could not be scrolled into view in exactly the state where it had
+        /// gone out of view. Bouncing is what actually tracks the content, and a content that
+        /// fits is pinned back to the top so a stale offset can never blank the field.
         func refreshScrollMode() {
             guard bounds.width > 0 else { return }
-            let shouldScroll = fittingHeight(for: bounds.width) > maximumHeight + 0.5
-            guard isScrollEnabled != shouldScroll else { return }
-            isScrollEnabled = shouldScroll
-            alwaysBounceVertical = shouldScroll
-            if shouldScroll {
-                shouldRevealCaretAfterLayout = true
-            } else if contentOffset != .zero {
+            let overflows = fittingHeight(for: bounds.width) > maximumHeight + 0.5
+            alwaysBounceVertical = overflows
+            if !overflows, contentOffset.y != 0 {
                 setContentOffset(.zero, animated: false)
             }
-            setNeedsLayout()
         }
 
         func requestCaretReveal() {
@@ -3950,7 +3970,7 @@ private struct TerminalReplyField: UIViewRepresentable {
             refreshScrollMode()
             guard shouldRevealCaretAfterLayout else { return }
             shouldRevealCaretAfterLayout = false
-            guard isScrollEnabled, let selection = selectedTextRange else { return }
+            guard let selection = selectedTextRange else { return }
             let caret = caretRect(for: selection.end).insetBy(dx: 0, dy: -4)
             scrollRectToVisible(caret, animated: false)
         }
@@ -3997,6 +4017,10 @@ struct TerminalPaneContent: View {
     @State private var reply: String
     @State private var replyAttachment: PromptAttachment?
     @State private var loadingReplyAttachment = false
+    /// Bytes sent / total for the attachment currently uploading, nil when none is.
+    /// A 20 MB photo on a slow link takes long enough that a spinner alone reads as a
+    /// hang, so the chip shows a determinate bar driven by the upload channel itself.
+    @State private var replyUploadBytes: (sent: Int, total: Int)?
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -4808,32 +4832,60 @@ struct TerminalPaneContent: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
             .accessibilityIdentifier("terminal-attachment-loading")
         } else if let attachment = replyAttachment {
-            HStack(spacing: 8) {
-                Image(systemName: attachment.isImage ? "photo" : "doc")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Palette.textDim)
-                Text(attachment.name)
-                    .font(Typography.app(12, .medium))
-                    .foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Button {
-                    removeReplyAttachment(attachment)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Palette.textFaint)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Image(systemName: attachment.isImage ? "photo" : "doc")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.textDim)
+                    Text(attachment.name)
+                        .font(Typography.app(12, .medium))
+                        .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if let upload = replyUploadBytes {
+                        Text(Self.uploadLabel(sent: upload.sent, total: upload.total))
+                            .font(Typography.machine(11))
+                            .foregroundStyle(Palette.textFaint)
+                            .monospacedDigit()
+                            .accessibilityIdentifier("terminal-attachment-progress")
+                    } else {
+                        Button {
+                            removeReplyAttachment(attachment)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Palette.textFaint)
+                        }
+                        .disabled(sending)
+                        .accessibilityLabel("Remove attachment")
+                    }
                 }
-                .disabled(sending)
-                .accessibilityLabel("Remove attachment")
+                if let upload = replyUploadBytes {
+                    // Determinate, because the upload channel reports real byte progress:
+                    // an indeterminate spinner on a 100 MB attachment is indistinguishable
+                    // from a stall.
+                    ProgressView(value: upload.total > 0
+                        ? min(1, Double(upload.sent) / Double(upload.total))
+                        : 0)
+                        .tint(Palette.text)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-            .opacity(sending ? 0.6 : 1)
+            .opacity(sending && replyUploadBytes == nil ? 0.6 : 1)
             .accessibilityIdentifier("terminal-attachment")
         }
+    }
+
+    /// "Uploading 42% · 8.4 MB / 20.0 MB", trimmed to just the percentage for small files
+    /// where the byte pair is noise. Sizes render through HerdrKit's one formatter.
+    static func uploadLabel(sent: Int, total: Int) -> String {
+        let percent = total > 0 ? Int((Double(sent) / Double(total) * 100).rounded()) : 0
+        guard total >= 1024 * 1024 else { return "Uploading \(percent)%" }
+        return "Uploading \(percent)% · \(GramFile.displaySize(of: UInt64(sent)))"
+            + " / \(GramFile.displaySize(of: UInt64(total)))"
     }
 
 
@@ -5136,7 +5188,7 @@ struct TerminalPaneContent: View {
 
         Task {
             sending = true
-            defer { sending = false }
+            defer { sending = false; replyUploadBytes = nil }
             do {
                 var current = attachment
                 var messageID = current.gramMessageID
@@ -5149,7 +5201,11 @@ struct TerminalPaneContent: View {
                             actionNote = "Couldn't read the attachment."
                             return
                         }
-                        uploadID = try await client.gramUploadFile(fileURL: staged.url)
+                        replyUploadBytes = (sent: 0, total: staged.size)
+                        uploadID = try await client.gramUploadFile(fileURL: staged.url) { sent, total in
+                            replyUploadBytes = (sent: sent, total: total)
+                        }
+                        replyUploadBytes = nil
                         current = PromptAttachment(
                             id: current.id, name: current.name, mime: current.mime,
                             isImage: current.isImage, staged: staged, uploadID: uploadID,
