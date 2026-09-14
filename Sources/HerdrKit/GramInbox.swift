@@ -55,7 +55,19 @@ public struct GramInbox: Sendable, Equatable {
     /// loaded or nothing older remains.
     public var nextCursor: String? { hasMore ? messages.last?.id : nil }
 
+    /// Bumped every time the loaded list is REPLACED (a changed head answer, or a store
+    /// swap). A page fetch reads the cursor, suspends, and comes back with messages that
+    /// only continue the list the cursor came from: appending them after a replacement
+    /// would drop everything between the new oldest row and the old cursor. Carrying the
+    /// generation across the await is what lets `appendPage` refuse a stale page instead
+    /// of punching a hole in the timeline.
+    public private(set) var generation = 0
+
     private var serverUnreadCount: Int?
+    /// Ids marked read that the window does not hold, so a second mark of the same id
+    /// cannot decrement the daemon's count twice. Read-all marks deliberately twice: a
+    /// poll landing mid-pass reverts the local flips, so it re-applies them.
+    private var readOutsideWindow: Set<String> = []
 
     /// Folds in an answer to a HEAD request — the first page, or an unpaged full list.
     /// Returns whether `messages` changed, so a caller can skip work (re-render, badge
@@ -83,6 +95,8 @@ public struct GramInbox: Sendable, Equatable {
             hasLoaded = false
             hasMore = false
             serverUnreadCount = nil
+            readOutsideWindow = []
+            generation += 1
         }
         if let incoming = answer.storeID { storeID = incoming }
 
@@ -106,6 +120,10 @@ public struct GramInbox: Sendable, Equatable {
         hasLoaded = true
         serverUnreadCount = answer.unreadCount
         hasMore = answer.hasMore ?? false
+        // The list was replaced, so any page fetch that read the old cursor is now
+        // stale: its messages would land below rows this answer no longer contains.
+        generation += 1
+        readOutsideWindow = []
         return changed
     }
 
@@ -113,10 +131,20 @@ public struct GramInbox: Sendable, Equatable {
     /// below what is loaded, de-duped by id so a message that moved between pages
     /// cannot appear twice.
     ///
+    /// `generation` is the one the caller read BEFORE it asked for the page. A page
+    /// built on a cursor that a head replacement has since invalidated is DROPPED, not
+    /// appended: appending it would leave a gap between the new oldest row and the old
+    /// cursor that nothing would ever re-fetch.
+    ///
+    /// Returns whether the loaded list actually GREW — not whether the answer was
+    /// non-empty. A caller walking to the end uses this to stop, and an answer of
+    /// entirely known ids would otherwise loop forever.
+    ///
     /// The digest is NOT adopted: it fingerprints the whole store, and adopting it from
     /// a page would arm a conditional head poll for a list this inbox only partly holds.
     @discardableResult
-    public mutating func appendPage(_ answer: GramListAnswer) -> Bool {
+    public mutating func appendPage(_ answer: GramListAnswer, generation: Int) -> Bool {
+        guard generation == self.generation else { return false }
         if let known = storeID, let incoming = answer.storeID, known != incoming {
             // The page belongs to another store; the head refresh will reset us.
             return false
@@ -126,11 +154,12 @@ public struct GramInbox: Sendable, Equatable {
             return false
         }
         let known = Set(messages.map(\.id))
+        let before = messages.count
         messages.append(contentsOf: older.filter { !known.contains($0.id) })
         hasMore = answer.hasMore ?? false
         if let count = answer.unreadCount { serverUnreadCount = count }
         hasLoaded = true
-        return true
+        return messages.count > before
     }
 
     /// Drops a message the owner deleted, so the local list agrees with the server
@@ -155,10 +184,15 @@ public struct GramInbox: Sendable, Equatable {
     /// unread-only fetch, so it legitimately marks messages older than the loaded page;
     /// ignoring those left the daemon-sourced badge frozen after a fully successful
     /// pass, with the Read-all button still sitting there and nothing to explain it.
-    /// Callers mark each id once (`markingRead` serialises them), so the count cannot
-    /// be double-decremented.
+    ///
+    /// IDEMPOTENT on both paths. A loaded row is guarded by `isUnread`; an out-of-window
+    /// id is remembered, because Read-all marks each id TWICE on purpose — a poll
+    /// landing mid-pass reverts the local flips, so it re-applies them — and a second
+    /// decrement would walk the badge to zero while the pass was still reporting
+    /// failures.
     public mutating func markRead(id: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else {
+            guard readOutsideWindow.insert(id).inserted else { return }
             if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
             digest = nil
             return

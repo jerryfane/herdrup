@@ -93,6 +93,9 @@ struct GramView: View {
     /// A failed page fetch, shown ON the sentinel so it survives the next successful
     /// head poll (which clears `refreshNote`) and gives the reader something to tap.
     @State private var pageError: String?
+    /// A whole-store walk (search) in progress, so the result list can say the answer is
+    /// still arriving instead of looking complete.
+    @State private var isLoadingEveryPage = false
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -787,8 +790,7 @@ struct GramView: View {
                     }
                     // The sentinel. In a LazyVStack it is only built when the reader
                     // actually reaches the end of the loaded messages, which is exactly
-                    // when the next page is worth fetching. Search is excluded: it loads
-                    // every page up front, so a sentinel there would race it.
+                    // when the next page is worth fetching.
                     //
                     // Keyed on the cursor, so each new page arms the next fetch; a failed
                     // page says so and becomes a tap target, instead of spinning forever
@@ -816,6 +818,30 @@ struct GramView: View {
                         .disabled(pageError == nil)
                         .accessibilityIdentifier("gram-loading-older")
                         .task(id: cursor) { await loadMore() }
+                    }
+                    // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
+                    // already on screen otherwise look like the whole answer, which is
+                    // the same lie the empty state was fixed for.
+                    if !search.isEmpty, inboxStore.inbox.hasMore {
+                        HStack(spacing: 8) {
+                            if let pageError {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("\(pageError) These matches may be incomplete.")
+                            } else {
+                                ProgressView().controlSize(.small)
+                                Text("Searching older messages…")
+                            }
+                        }
+                        .font(Typography.app(12))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("gram-searching-older")
+                        .task(id: search) {
+                            guard !isLoadingEveryPage else { return }
+                            await loadEveryPage()
+                        }
                     }
                 }
                 .padding(16)
@@ -1256,26 +1282,28 @@ struct GramView: View {
     ///
     /// Its own in-flight flag, NOT `isLoading`: the 6-second head poll and a page fetch
     /// answer different questions, and sharing one flag would make each starve the
-    /// other precisely while the reader is scrolling. It WAITS for a head poll rather
-    /// than bailing, because bailing left the sentinel spinning with nothing to
-    /// re-trigger it.
+    /// other precisely while the reader is scrolling. Both WAIT for each other rather
+    /// than bailing — bailing left the sentinel spinning with nothing to re-trigger it,
+    /// and let a whole-store search give up in a second and a half.
     ///
-    /// Returns whether the loaded list grew, so a caller looping to the end can tell a
-    /// finished walk from a stuck one.
+    /// The inbox's `generation` is read BEFORE the request and handed back with the
+    /// answer, so a page built on a cursor that a head replacement has since invalidated
+    /// is dropped instead of landing below rows the new head no longer contains.
+    ///
+    /// Returns whether the loaded list actually grew, so a caller looping to the end can
+    /// tell a finished walk from a stuck one.
     @discardableResult
     private func loadMore() async -> Bool {
+        await waitWhile { isLoadingPage }
         guard !isLoadingPage else { return false }
         isLoadingPage = true
         defer { isLoadingPage = false }
-        // A head poll holds the channel for a moment; give it that moment instead of
-        // abandoning the page.
-        for _ in 0..<20 where isLoading {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
+        await waitWhile { isLoading }
         guard let cursor = inboxStore.inbox.nextCursor else { return false }
+        let generation = inboxStore.inbox.generation
         do {
             let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
-            let grew = inboxStore.inbox.appendPage(answer)
+            let grew = inboxStore.inbox.appendPage(answer, generation: generation)
             if grew { pageError = nil }
             return grew
         } catch {
@@ -1287,21 +1315,36 @@ struct GramView: View {
         }
     }
 
-    /// Pull every remaining page in. Search and Read-all both read the whole list, so
-    /// they say so by loading it rather than quietly answering from a window.
+    /// Up to two seconds of yielding while `condition` holds. Two seconds because that
+    /// is the scale of one gram round trip on the shared SSH channel; past that the
+    /// caller reports rather than waits.
+    private func waitWhile(_ condition: () -> Bool) async {
+        for _ in 0..<20 where condition() {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Pull every remaining page in. Search reads the whole store, so it says so by
+    /// loading it rather than quietly answering from a window.
     ///
-    /// Retries a stalled step a few times before giving up: `loadMore` can legitimately
-    /// return false while another page fetch is in flight, and treating that as "the
-    /// end" is what let a search filter a partial window and then claim "No matches".
+    /// `loadMore` now waits for an in-flight page instead of returning false straight
+    /// away, so a false answer here means a real failure — a stall budget of five with a
+    /// pause between tries covers a transient one, and giving up leaves `pageError` set
+    /// so the partial answer is not passed off as complete.
     private func loadEveryPage() async {
+        isLoadingEveryPage = true
+        defer { isLoadingEveryPage = false }
         var stalls = 0
         while inboxStore.inbox.nextCursor != nil, !Task.isCancelled, stalls < 5 {
             if await loadMore() {
                 stalls = 0
             } else {
                 stalls += 1
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
+        }
+        if inboxStore.inbox.nextCursor != nil, pageError == nil {
+            pageError = "Couldn't load every older message."
         }
     }
 
