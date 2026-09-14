@@ -94,14 +94,20 @@ private struct ExpandedMark: View {
                 isStale: isStale
             )
             if state.needsYouCount > 0 {
-                Text(verbatim: "\(state.needsYouCount)")
+                // The SAME spelling the compact pill uses. Two presentations of one
+                // activity printing 100 here and 99+ there is the kind of detail that
+                // reads as a bug. It also bounds the corner: "99+" is the widest
+                // string it can ever have to fit.
+                Text(state.needsYouCount.compactCount)
                     .font(WidgetFont.plexSemiBold(17))
                     .monospacedDigit()
                     .foregroundStyle(WidgetPalette.waiting)
             }
         }
+        // Truncates rather than taking its ideal width: the corner is narrow, and a
+        // corner that grows is what squeezed the rest of the island before.
         .lineLimit(1)
-        .fixedSize()
+        .truncationMode(.tail)
     }
 }
 

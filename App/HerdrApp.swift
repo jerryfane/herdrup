@@ -7136,8 +7136,9 @@ struct SettingsView: View {
     /// "HTML previews" — the one switch that loosens how a RECEIVED html/svg attachment
     /// is rendered. Off by default and stated plainly, because the document is written
     /// by whoever sent it: script stays off unless the reader turns it on for this
-    /// device. The other two protections (no network, no navigation) are not settings
-    /// and hold either way, which is what the row under the switch says.
+    /// device. The row under the switch has to be accurate about what stays true, and
+    /// what does not: remote loads and navigation are still blocked, but a script can
+    /// signal that the file was opened by a route no URL rule sees.
     private var previewsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("HTML PREVIEWS")
@@ -7151,8 +7152,8 @@ struct SettingsView: View {
                         .frame(width: 26, height: 26)
                         .background(Circle().fill(Palette.surfaceRaised))
                     Text(previewJavaScript
-                         ? "Scripts in a previewed file will run. The preview still cannot reach the network or navigate anywhere, and the change applies to the next preview you open."
-                         : "Scripts in a previewed file are ignored. Turn this on only if you need an interactive report to work.")
+                         ? "Scripts in a previewed file will run. It still can't load anything from the network or open another page, but a file written to do so could signal that you opened it. Applies to the next preview you open."
+                         : "Scripts in a previewed file are ignored, and it can't load anything from the network. Turn this on only for a file you trust that needs to be interactive.")
                         .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)

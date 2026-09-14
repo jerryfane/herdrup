@@ -2,13 +2,22 @@ import Foundation
 
 /// Security policy for rendering a RECEIVED web document (HTML / SVG) in-app.
 ///
-/// A gram attachment can be authored by anyone, so when we render one we disable
-/// JavaScript (at the WebView config level) and block ALL network egress, so a
-/// hostile file can neither execute script nor beacon its host's data out. The
-/// network block is expressed as a WebKit content-rule-list: every network scheme
-/// is blocked, while the inline document itself (loaded with no base URL, so it is
-/// `about:blank`) and `data:` URIs (already inline in the file) are untouched, so
-/// embedded images and styles still render.
+/// A gram attachment can be authored by anyone, so a rendered one gets no script by
+/// default and cannot LOAD anything over the network. The load block is expressed as
+/// a WebKit content-rule-list: every network scheme is blocked, while the inline
+/// document itself (loaded with no base URL, so it is `about:blank`) and `data:` URIs
+/// (already inline in the file) are untouched, so embedded images and styles still
+/// render.
+///
+/// WHAT THIS IS NOT: a content rule matches URL loads, so it stops fetch, XHR,
+/// beacons and subresources — everything a script-less document can attempt, which is
+/// why the block is absolute while script is off. It does not inspect egress that
+/// never presents a URL to the loader, `RTCPeerConnection` ICE gathering being the
+/// obvious one. So with script turned on (see `javaScriptEnabled(in:)`) a determined
+/// document may still be able to SIGNAL out. What it can signal is bounded by the
+/// origin: the document is `about:blank` with no base URL, so it reaches no app data,
+/// no other origin and no cookies — its own payload, the reader's IP and the time
+/// they opened it, which is a read receipt rather than data theft.
 ///
 /// Lives in HerdrKit so the rule list is unit-tested on Linux; the app compiles it
 /// into a `WKContentRuleList` and attaches it to the viewer's WebView. This replaces

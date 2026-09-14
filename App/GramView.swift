@@ -162,8 +162,9 @@ struct GramView: View {
     /// A downloaded file written to a temp URL, presented via QuickLook when set.
     @State private var previewURL: URL?
     /// A received web document (HTML/SVG) staged for the in-app viewer. Rendered by
-    /// `HtmlWebView` (JavaScript off, all network blocked) instead of QuickLook, whose
-    /// srcdoc-sandbox path showed a blank white screen for these files (issue #92).
+    /// `HtmlWebView` (no remote loads, navigation frozen, script only if the reader
+    /// turned it on) instead of QuickLook, whose srcdoc-sandbox path showed a blank
+    /// white screen for these files (issue #92).
     @State private var webDoc: WebDoc?
     /// The in-flight file-open download (see `openFile`), cancelled when the page goes
     /// away so a late completion can't strand a temp file after cleanup already ran.
@@ -356,7 +357,7 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
-        // Received HTML/SVG opens in a dedicated in-app viewer (all network blocked,
+        // Received HTML/SVG opens in a dedicated in-app viewer (no remote loads,
         // navigation frozen, and script off unless the reader turned it on in Settings)
         // rather than QuickLook, which rendered these blank (#92).
         // Done dismisses; Share still lets the owner save the raw file.
@@ -1719,7 +1720,7 @@ struct GramView: View {
                     try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
                 } else if Self.isWebDocument(name: name, mime: mime) {
                     // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
-                    // (JavaScript off + all network blocked), NOT QuickLook — the old
+                    // (no remote loads, script off by default), NOT QuickLook — the old
                     // srcdoc-sandbox path painted a blank white screen (#92). Decode
                     // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
                     // as text rather than being treated as a plain download. Keep the raw
