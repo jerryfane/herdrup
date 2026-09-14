@@ -87,6 +87,12 @@ struct GramView: View {
     /// longer tell a healthy poll from a failing one.
     @State private var loadFailures = 0
     @State private var isLoading = false
+    /// A page fetch (older messages) in flight, kept apart from `isLoading` so the head
+    /// poll and a scroll-driven page never block each other.
+    @State private var isLoadingPage = false
+    /// A failed page fetch, shown ON the sentinel so it survives the next successful
+    /// head poll (which clears `refreshNote`) and gives the reader something to tap.
+    @State private var pageError: String?
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -193,18 +199,9 @@ struct GramView: View {
         let size: Int
     }
 
-    // The pre-send size gate lives on `Staging` (nonisolated, so the photo importer
-    // can read it): `GramView.Staging.maxFileBytes`.
-    /// How many files can be staged at once. Each sends as its own gram message.
-    ///
-    /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
-    /// staged file was held in memory as `Data`: ten 100 MB picks would have been
-    /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads them
-    /// one frame at a time, so the resident ceiling is a single frame no matter how
-    /// many files are staged or how large they are. The send loop is serial and
-    /// `gram.post` consumes each staging file, so the daemon's 1 GiB aggregate
-    /// staging budget never sees more than one upload in flight.
-    private static let maxAttachments = 10
+    // The pre-send size gate and the count cap both live on `Staging` (nonisolated, so
+    // the photo importer and the terminal composer can read them):
+    // `GramView.Staging.maxFileBytes` and `GramView.Staging.maxAttachments`.
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -324,7 +321,7 @@ struct GramView: View {
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $photoItems,
-            maxSelectionCount: Self.maxAttachments,
+            maxSelectionCount: Staging.maxAttachments,
             matching: .any(of: [.images, .videos])
         )
         .onChange(of: photoItems) { _, newItems in
@@ -609,7 +606,12 @@ struct GramView: View {
         .padding(.vertical, 12)
     }
 
-    private var unreadCount: Int { messages.filter { $0.isUnread }.count }
+    /// The badge and the Read-all control read the WHOLE store's count, which the
+    /// daemon sends: counting the loaded window would hide Read-all exactly when every
+    /// unread message is older than the first page, and would disagree with the tab
+    /// badge, which already comes from the inbox. Optimistic posts are the owner's own
+    /// and never unread, so they are not added here.
+    private var unreadCount: Int { inboxStore.inbox.unreadCount }
 
     // MARK: - Content
 
@@ -620,24 +622,63 @@ struct GramView: View {
         // Let a drag on the message feed dismiss the keyboard too, so the composer
         // never gets stuck covering the tab bar with no way out.
         .scrollDismissesKeyboard(.interactively)
+        // THE WHOLE-STORE WALK LIVES HERE, on a view that outlives every result state.
+        // Hanging it on the result views instead meant the walk died the moment the
+        // screen switched between "no matches yet" and the first match: the successor
+        // task started while the cancelled predecessor was still suspended in its page
+        // fetch, the single-flight guard refused it, and the banner then promised a
+        // search that had stopped. One owner, re-keyed on the query, cancelled with it.
+        .task(id: searchWalkKey) {
+            guard !showingSaved, !search.isEmpty else { return }
+            await loadEveryPage()
+        }
     }
+
+    /// Identity for the search walk: the query, plus which section is showing. Saved is
+    /// local, so switching to it must cancel the walk rather than re-key it.
+    private var searchWalkKey: String { "\(showingSaved ? "saved" : "inbox")\u{1}\(search)" }
 
     /// Shown when the list HAS rows but the active search matches none of them. A distinct
     /// state from "nothing here yet": a blank scroll after typing reads as an empty inbox,
     /// which is the bug the agents list already avoids the same way.
-    private var noMatches: some View {
+    ///
+    /// `stillLoading` and `failure` are passed IN because this view is shared with the
+    /// Saved section, which is local and complete by construction: reading the inbox's
+    /// paging state here told a Saved filter with no hits that older gram messages were
+    /// still being searched, and counted inbox rows as its denominator.
+    private func noMatches(stillLoading: Bool, loadedCount: Int, failure: String?) -> some View {
         centered {
             VStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: failure == nil ? "magnifyingglass" : "exclamationmark.triangle")
                     .font(.system(size: 28))
                     .foregroundStyle(Palette.textFaint)
-                Text("No matches")
-                    .font(Typography.app(15, .medium))
-                    .foregroundStyle(Palette.textDim)
-                Text("Nothing in this list matches “\(search)”.")
-                    .font(Typography.app(13))
-                    .foregroundStyle(Palette.textFaint)
-                    .multilineTextAlignment(.center)
+                // "No matches" is a claim about the whole store, so while older pages are
+                // still coming in — or after the walk gave up — it says what is true.
+                if let failure {
+                    Text("Couldn't search everything")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("\(failure) Nothing in the \(loadedCount) loaded matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                } else if stillLoading {
+                    Text("Searching older messages…")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("Nothing in the \(loadedCount) loaded so far matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("No matches")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("Nothing in this list matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                }
             }
             .padding(.horizontal, 32)
         }
@@ -665,7 +706,8 @@ struct GramView: View {
                 .padding(.horizontal, 32)
             }
         } else if visibleSaved.isEmpty {
-            noMatches
+            // Saved is local and complete: there is no page still to arrive.
+            noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -747,7 +789,8 @@ struct GramView: View {
         // and without it one keystroke would replace the only affordance telling the owner how
         // to give their agents gram with "No matches" about a list that never had rows.
         case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
-            noMatches
+            noMatches(stillLoading: inboxStore.inbox.hasMore && pageError == nil,
+                      loadedCount: messages.count, failure: pageError)
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -763,6 +806,57 @@ struct GramView: View {
                             onDelete: { delete(message) }
                         )
                         .onAppear { markReadIfNeeded(message) }
+                    }
+                    // The sentinel. In a LazyVStack it is only built when the reader
+                    // actually reaches the end of the loaded messages, which is exactly
+                    // when the next page is worth fetching.
+                    //
+                    // Keyed on the cursor, so each new page arms the next fetch; a failed
+                    // page says so and becomes a tap target, instead of spinning forever
+                    // with nothing left to re-trigger it.
+                    if let cursor = inboxStore.inbox.nextCursor, search.isEmpty {
+                        Button {
+                            Task { await loadMore() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if let pageError {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text("\(pageError) Tap to retry.")
+                                } else {
+                                    ProgressView().controlSize(.small)
+                                    Text("Loading older messages…")
+                                }
+                            }
+                            .font(Typography.app(12))
+                            .foregroundStyle(Palette.textFaint)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(pageError == nil)
+                        .accessibilityIdentifier("gram-loading-older")
+                        .task(id: cursor) { await loadMore() }
+                    }
+                    // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
+                    // already on screen otherwise look like the whole answer, which is
+                    // the same lie the empty state was fixed for.
+                    if !search.isEmpty, inboxStore.inbox.hasMore {
+                        HStack(spacing: 8) {
+                            if let pageError {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("\(pageError) These matches may be incomplete.")
+                            } else {
+                                ProgressView().controlSize(.small)
+                                Text("Searching older messages…")
+                            }
+                        }
+                        .font(Typography.app(12))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("gram-searching-older")
                     }
                 }
                 .padding(16)
@@ -784,6 +878,12 @@ struct GramView: View {
 
     /// Show the "set up gram" card until an agent has actually messaged (proof the
     /// skill is in use) or the owner dismisses it.
+    ///
+    /// Reads the LOADED window on purpose, now that the window is a page. The store that
+    /// most needs this card is the one where no agent ever replied, and requiring every
+    /// page to be loaded would hide it there until the reader scrolled to the end. An
+    /// agent reply sitting in an older page only costs a card that is one tap to
+    /// dismiss; suppressing the card costs the reader the only instructions there are.
     private var shouldShowSetupCard: Bool {
         !setupCardDismissed && !messages.contains(where: \.isFromAgent)
     }
@@ -1128,8 +1228,18 @@ struct GramView: View {
         do {
             // Conditional on the digest we hold. An unchanged store answers in a few
             // hundred bytes; only a real change ships the list.
+            //
+            // The limit COVERS WHAT IS LOADED, not just the first page. A changed answer
+            // replaces the list (see GramInbox.apply — a head page says nothing about
+            // what is older), so asking for one page would collapse a reader 200 rows
+            // deep back to 40 every time a message arrived, and the sentinel would then
+            // walk them down again one page at a time. Refreshing the whole window keeps
+            // their place and still costs a fraction of the store; beyond the daemon's
+            // own clamp there is nothing to gain by asking for more.
             let answer = try await client.gramList(
-                ifUnchangedDigest: inboxStore.inbox.conditionalDigest)
+                ifUnchangedDigest: inboxStore.inbox.conditionalDigest,
+                limit: min(max(Self.pageSize, inboxStore.inbox.messages.count),
+                           Self.maxRefreshLimit))
             let changed = inboxStore.inbox.apply(answer)
             phase = .loaded
             refreshNote = nil
@@ -1154,6 +1264,7 @@ struct GramView: View {
             } else {
                 refreshNote = "Gram is unavailable right now."
             }
+
         } catch {
             // A daemon predating the gram build answers an unknown-method error, NOT
             // `gram_unavailable`, so a first-load failure gets one honest message
@@ -1165,6 +1276,111 @@ struct GramView: View {
             } else {
                 refreshNote = "Refresh failed. Showing the last loaded messages."
             }
+        }
+    }
+
+    /// How many messages one page carries.
+    ///
+    /// 40 fills more than a screen on every idiom, so the reader never sees the
+    /// sentinel do its work on the first draw, and it is small enough that the open
+    /// costs a few tens of KB instead of the ~900 KB the whole store weighs. Older
+    /// pages are the same size: a scroll that keeps going should keep costing the same.
+    static let pageSize = 40
+
+    /// Ceiling for the head refresh, matching the daemon's own `GRAM_LIST_MAX_LIMIT`.
+    /// A reader who has paged past it keeps scrolling through the sentinel; the refresh
+    /// simply stops growing.
+    static let maxRefreshLimit = 500
+
+    /// Ask for the page older than everything loaded. Driven by the sentinel at the end
+    /// of the list, so it runs exactly when the reader reaches the bottom.
+    ///
+    /// Its own in-flight flag, NOT `isLoading`: the 6-second head poll and a page fetch
+    /// answer different questions, and sharing one flag would make each starve the
+    /// other precisely while the reader is scrolling. Both WAIT for each other rather
+    /// than bailing — bailing left the sentinel spinning with nothing to re-trigger it,
+    /// and let a whole-store search give up in a second and a half.
+    ///
+    /// The inbox's `generation` is read BEFORE the request and handed back with the
+    /// answer, so a page built on a cursor that a head replacement has since invalidated
+    /// is dropped instead of landing below rows the new head no longer contains. A drop
+    /// is then RETRIED here, because the cursor may not have moved — an in-place row
+    /// change (a queue item being grabbed) counts as a change — and the sentinel's task
+    /// is keyed on the cursor, so nothing else would re-fire.
+    ///
+    /// Returns whether the loaded list actually grew, so a caller looping to the end can
+    /// tell a finished walk from a stuck one.
+    @discardableResult
+    private func loadMore() async -> Bool {
+        await waitWhile { isLoadingPage }
+        guard !isLoadingPage else { return false }
+        isLoadingPage = true
+        defer { isLoadingPage = false }
+        for _ in 0..<2 {
+            await waitWhile { isLoading }
+            guard let cursor = inboxStore.inbox.nextCursor else { return false }
+            let generation = inboxStore.inbox.generation
+            do {
+                let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
+                if inboxStore.inbox.appendPage(answer, generation: generation) {
+                    pageError = nil
+                    return true
+                }
+                // Refused as stale, or an answer of ids already held. Retry once against
+                // the current generation; a second miss ends the attempt without a note,
+                // since nothing failed — the list simply did not grow.
+                guard inboxStore.inbox.generation != generation else { return false }
+            } catch {
+                // A cancelled fetch is not a failure: the reader retyped or left, and the
+                // successor walk is already starting. Reporting it would flash an error
+                // for every keystroke.
+                guard !Task.isCancelled else { return false }
+                // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
+                // clears that note within six seconds and the reader would be left with a
+                // spinner, no message and no way to retry.
+                pageError = "Couldn't load older messages."
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Up to two seconds of yielding while `condition` holds. Two seconds because that
+    /// is the scale of one gram round trip on the shared SSH channel; past that the
+    /// caller reports rather than waits.
+    private func waitWhile(_ condition: () -> Bool) async {
+        for _ in 0..<20 where condition() {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Pull every remaining page in. Search reads the whole store, so it says so by
+    /// loading it rather than quietly answering from a window.
+    ///
+    /// NOT guarded on a walk-in-flight flag. It used to be, and that refused every
+    /// successor: SwiftUI cancels the predecessor's task without awaiting it, so a
+    /// predecessor suspended in a page fetch — where a healthy walk spends nearly all
+    /// its time — still held the flag when the next keystroke's walk began, and the
+    /// terminal query was never walked at all while the banner claimed it was. Overlap
+    /// is instead serialised one level down, where it belongs: `loadMore` waits for the
+    /// in-flight page and appends under a generation check, so a straggler can only
+    /// deliver a contiguous page or be dropped.
+    ///
+    /// A false answer from `loadMore` therefore means no progress, not necessarily a
+    /// failure — a stall budget of five with a pause between tries covers a transient
+    /// one. Giving up leaves `pageError` set, but a CANCELLED walk reports nothing.
+    private func loadEveryPage() async {
+        var stalls = 0
+        while inboxStore.inbox.nextCursor != nil, !Task.isCancelled, stalls < 5 {
+            if await loadMore() {
+                stalls = 0
+            } else {
+                stalls += 1
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+        if !Task.isCancelled, inboxStore.inbox.nextCursor != nil, pageError == nil {
+            pageError = "Couldn't load every older message."
         }
     }
 
@@ -1322,7 +1538,7 @@ struct GramView: View {
     private func attachmentSkipNote(bad: String?, capped: Int) -> String? {
         var parts: [String] = []
         if let bad { parts.append(bad) }
-        if capped > 0 { parts.append("\(capped) over the \(Self.maxAttachments)-file limit") }
+        if capped > 0 { parts.append("\(capped) over the \(Staging.maxAttachments)-file limit") }
         guard !parts.isEmpty else { return nil }
         return "Skipped: " + parts.joined(separator: "; ") + "."
     }
@@ -1339,7 +1555,7 @@ struct GramView: View {
         var badNames: [String] = []
         var capped = 0
         for url in urls {
-            guard attachedFiles.count < Self.maxAttachments else {
+            guard attachedFiles.count < Staging.maxAttachments else {
                 capped += 1
                 continue
             }
@@ -1415,7 +1631,7 @@ struct GramView: View {
         var bad = 0
         var capped = 0
         for item in items {
-            guard attachedFiles.count < Self.maxAttachments else {
+            guard attachedFiles.count < Staging.maxAttachments else {
                 capped += 1
                 continue
             }
@@ -1591,6 +1807,18 @@ struct GramView: View {
         /// just the pre-send size gate.
         static let maxFileBytes = 100 * 1024 * 1024
 
+        /// How many files can be staged at once, in EITHER composer. Each sends as its
+        /// own gram message.
+        ///
+        /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
+        /// staged file was held in memory as `Data`: ten 100 MB picks would have been
+        /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads
+        /// them one frame at a time, so the resident ceiling is a single frame no
+        /// matter how many files are staged or how large they are. Both send loops are
+        /// SERIAL and `gram.post` consumes each staging file, so the daemon's 1 GiB
+        /// aggregate staging budget never sees more than one upload in flight.
+        static let maxAttachments = 10
+
         static let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gram-staging", isDirectory: true)
         static let session = root
@@ -1722,7 +1950,19 @@ struct GramView: View {
         markAllNote = nil
         // Snapshot the ids first: `serverMessages` is mutated inside the loop and a poll may
         // replace it mid-pass, so iterating the live array could skip or repeat a message.
-        var pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        //
+        // The ids come from an unread-ONLY fetch, not from the loaded window. The inbox
+        // is paged, so the window holds the newest messages and an older unread one
+        // would otherwise be left unread while the badge — counted by the daemon over
+        // the whole store — kept showing it. That fetch is small by construction; on a
+        // daemon that cannot page it returns the same ids the window would have given.
+        var pending: [String]
+        do {
+            let unreadAnswer = try await client.gramList(unreadOnly: true)
+            pending = (unreadAnswer.messages ?? []).filter(\.isUnread).map(\.id)
+        } catch {
+            pending = serverMessages.filter { $0.isUnread }.map(\.id)
+        }
         // Ids this pass actually marked, re-applied after the loop: `load` REPLACES
         // `serverMessages` wholesale, so a poll landing mid-pass reverts the flips written
         // below and the badge would still show a count after a fully successful pass.
@@ -1738,7 +1978,11 @@ struct GramView: View {
                 // Reusing the existing in-flight set is what stops a duplicate `gram.mark_read`.
                 guard !markingRead.contains(id) else { stillInFlight.append(id); continue }
                 // Someone else's pass already read it; nothing left to do for this id.
-                guard serverMessages.first(where: { $0.id == id })?.isUnread ?? false else { continue }
+                // An id absent from the window is NOT skipped: it came from the
+                // unread-only fetch, so it is unread and simply older than the page.
+                if let loaded = serverMessages.first(where: { $0.id == id }), !loaded.isUnread {
+                    continue
+                }
                 markingRead.insert(id)
                 attempted += 1
                 do {

@@ -98,11 +98,17 @@ struct GramListResult: Decodable {
     let messages: [GramMessage]?
     let digest: String?
     let storeID: String?
+    /// Paging, absent on a daemon that predates it — which is exactly the same shape
+    /// as "this answer is the whole list".
+    let hasMore: Bool?
+    let unreadCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case messages
         case digest
         case storeID = "store_id"
+        case hasMore = "has_more"
+        case unreadCount = "unread_count"
     }
 }
 
@@ -116,6 +122,23 @@ public struct GramListAnswer: Sendable, Equatable {
     /// which simply means every poll stays unconditional.
     public let digest: String?
     public let storeID: String?
+    /// Whether older messages remain beyond this page. Nil on a daemon without paging,
+    /// where the answer IS everything, so nil must read as "no more" and never as
+    /// "unknown, keep asking".
+    public let hasMore: Bool?
+    /// Unread agent->owner count over the WHOLE store, not this page. It exists so a
+    /// windowed client's badge stays honest; nil on a daemon without paging, where the
+    /// client counts the full list it already holds.
+    public let unreadCount: Int?
+
+    public init(messages: [GramMessage]?, digest: String?, storeID: String?,
+                hasMore: Bool? = nil, unreadCount: Int? = nil) {
+        self.messages = messages
+        self.digest = digest
+        self.storeID = storeID
+        self.hasMore = hasMore
+        self.unreadCount = unreadCount
+    }
 
     public var isUnchanged: Bool { messages == nil }
 }
