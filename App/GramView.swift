@@ -90,6 +90,9 @@ struct GramView: View {
     /// A page fetch (older messages) in flight, kept apart from `isLoading` so the head
     /// poll and a scroll-driven page never block each other.
     @State private var isLoadingPage = false
+    /// A failed page fetch, shown ON the sentinel so it survives the next successful
+    /// head poll (which clears `refreshNote`) and gives the reader something to tap.
+    @State private var pageError: String?
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -610,7 +613,12 @@ struct GramView: View {
         .padding(.vertical, 12)
     }
 
-    private var unreadCount: Int { messages.filter { $0.isUnread }.count }
+    /// The badge and the Read-all control read the WHOLE store's count, which the
+    /// daemon sends: counting the loaded window would hide Read-all exactly when every
+    /// unread message is older than the first page, and would disagree with the tab
+    /// badge, which already comes from the inbox. Optimistic posts are the owner's own
+    /// and never unread, so they are not added here.
+    private var unreadCount: Int { inboxStore.inbox.unreadCount }
 
     // MARK: - Content
 
@@ -632,13 +640,25 @@ struct GramView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 28))
                     .foregroundStyle(Palette.textFaint)
-                Text("No matches")
-                    .font(Typography.app(15, .medium))
-                    .foregroundStyle(Palette.textDim)
-                Text("Nothing in this list matches “\(search)”.")
-                    .font(Typography.app(13))
-                    .foregroundStyle(Palette.textFaint)
-                    .multilineTextAlignment(.center)
+                // "No matches" is a claim about the whole store, so while older pages are
+                // still coming in it says what is actually true instead.
+                if inboxStore.inbox.hasMore {
+                    Text("Searching older messages…")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("Nothing in the \(messages.count) loaded so far matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("No matches")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("Nothing in this list matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                }
             }
             .padding(.horizontal, 32)
         }
@@ -767,19 +787,35 @@ struct GramView: View {
                     }
                     // The sentinel. In a LazyVStack it is only built when the reader
                     // actually reaches the end of the loaded messages, which is exactly
-                    // when the next page is worth fetching. Search is excluded: it
-                    // loads every page up front, so a sentinel there would race it.
-                    if inboxStore.inbox.hasMore, search.isEmpty {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Loading older messages…")
-                                .font(Typography.app(12))
-                                .foregroundStyle(Palette.textFaint)
+                    // when the next page is worth fetching. Search is excluded: it loads
+                    // every page up front, so a sentinel there would race it.
+                    //
+                    // Keyed on the cursor, so each new page arms the next fetch; a failed
+                    // page says so and becomes a tap target, instead of spinning forever
+                    // with nothing left to re-trigger it.
+                    if let cursor = inboxStore.inbox.nextCursor, search.isEmpty {
+                        Button {
+                            Task { await loadMore() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if let pageError {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text("\(pageError) Tap to retry.")
+                                } else {
+                                    ProgressView().controlSize(.small)
+                                    Text("Loading older messages…")
+                                }
+                            }
+                            .font(Typography.app(12))
+                            .foregroundStyle(Palette.textFaint)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .buttonStyle(.plain)
+                        .disabled(pageError == nil)
                         .accessibilityIdentifier("gram-loading-older")
-                        .task { await loadMore() }
+                        .task(id: cursor) { await loadMore() }
                     }
                 }
                 .padding(16)
@@ -801,11 +837,14 @@ struct GramView: View {
 
     /// Show the "set up gram" card until an agent has actually messaged (proof the
     /// skill is in use) or the owner dismisses it.
-    /// Not while older pages are unloaded: the card says "no agent has ever used gram
-    /// here", and the newest page alone cannot support that claim.
+    ///
+    /// Reads the LOADED window on purpose, now that the window is a page. The store that
+    /// most needs this card is the one where no agent ever replied, and requiring every
+    /// page to be loaded would hide it there until the reader scrolled to the end. An
+    /// agent reply sitting in an older page only costs a card that is one tap to
+    /// dismiss; suppressing the card costs the reader the only instructions there are.
     private var shouldShowSetupCard: Bool {
         !setupCardDismissed && !messages.contains(where: \.isFromAgent)
-            && !inboxStore.inbox.hasMore
     }
 
     /// A dismissable card teaching the owner how to give their agents the gram skill:
@@ -1197,34 +1236,57 @@ struct GramView: View {
     /// pages are the same size: a scroll that keeps going should keep costing the same.
     static let pageSize = 40
 
-    /// Ask for the page older than everything loaded. Driven by a sentinel at the end
+    /// Ask for the page older than everything loaded. Driven by the sentinel at the end
     /// of the list, so it runs exactly when the reader reaches the bottom.
     ///
     /// Its own in-flight flag, NOT `isLoading`: the 6-second head poll and a page fetch
     /// answer different questions, and sharing one flag would make each starve the
-    /// other precisely while the reader is scrolling.
-    private func loadMore() async {
-        guard !isLoadingPage, !isLoading else { return }
-        guard let cursor = inboxStore.inbox.nextCursor else { return }
+    /// other precisely while the reader is scrolling. It WAITS for a head poll rather
+    /// than bailing, because bailing left the sentinel spinning with nothing to
+    /// re-trigger it.
+    ///
+    /// Returns whether the loaded list grew, so a caller looping to the end can tell a
+    /// finished walk from a stuck one.
+    @discardableResult
+    private func loadMore() async -> Bool {
+        guard !isLoadingPage else { return false }
         isLoadingPage = true
         defer { isLoadingPage = false }
+        // A head poll holds the channel for a moment; give it that moment instead of
+        // abandoning the page.
+        for _ in 0..<20 where isLoading {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let cursor = inboxStore.inbox.nextCursor else { return false }
         do {
             let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
-            inboxStore.inbox.appendPage(answer)
+            let grew = inboxStore.inbox.appendPage(answer)
+            if grew { pageError = nil }
+            return grew
         } catch {
-            // Nothing to escalate: the loaded messages are still on screen and the
-            // sentinel will try again the next time it appears.
-            refreshNote = "Couldn't load older messages."
+            // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
+            // clears that note within six seconds and the reader would be left with a
+            // spinner, no message and no way to retry.
+            pageError = "Couldn't load older messages."
+            return false
         }
     }
 
     /// Pull every remaining page in. Search and Read-all both read the whole list, so
     /// they say so by loading it rather than quietly answering from a window.
+    ///
+    /// Retries a stalled step a few times before giving up: `loadMore` can legitimately
+    /// return false while another page fetch is in flight, and treating that as "the
+    /// end" is what let a search filter a partial window and then claim "No matches".
     private func loadEveryPage() async {
-        while inboxStore.inbox.nextCursor != nil, !Task.isCancelled {
-            let before = inboxStore.inbox.messages.count
-            await loadMore()
-            if inboxStore.inbox.messages.count == before { break }
+        var stalls = 0
+        while inboxStore.inbox.nextCursor != nil, !Task.isCancelled, stalls < 5 {
+            if await loadMore() {
+                stalls = 0
+            } else {
+                stalls += 1
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
         }
     }
 

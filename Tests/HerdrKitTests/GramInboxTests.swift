@@ -180,30 +180,32 @@ final class GramInboxTests: XCTestCase {
         XCTAssertNil(inbox.nextCursor, "nothing older left to ask for")
     }
 
-    /// THE POLL MUST NOT EAT THE PAGES. The head refresh returns only the newest page,
-    /// so replacing the list wholesale — what `apply` used to do — would throw away
-    /// everything the reader scrolled back through, every six seconds.
-    func testHeadRefreshKeepsAlreadyLoadedOlderPages() throws {
+    /// A CHANGED head answer replaces the list, deep pages included. Splicing the old
+    /// tail back on was tried and reverted: a head page says nothing about what is
+    /// older, so a message deleted (or pruned) below the head survived the splice and
+    /// was then frozen by the adopted whole-store digest, which answers every later
+    /// poll "unchanged". Losing scroll depth on a real change is the cheaper wrong.
+    func testChangedHeadAnswerDropsOlderPagesSoDeletionsCannotSurvive() throws {
         var inbox = GramInbox()
         inbox.apply(page([try message("c"), try message("b")], hasMore: true))
         inbox.appendPage(page([try message("a")], hasMore: false))
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
 
         inbox.apply(page([try message("d"), try message("c"), try message("b")], hasMore: true))
-        XCTAssertEqual(inbox.messages.map(\.id), ["d", "c", "b", "a"],
-                       "a new message joins the head and the loaded tail survives")
-        XCTAssertFalse(inbox.hasMore,
-                       "the tail already reached the end; the head answer cannot revoke that")
+        XCTAssertEqual(inbox.messages.map(\.id), ["d", "c", "b"],
+                       "the head is authoritative; older pages come back from the sentinel")
+        XCTAssertTrue(inbox.hasMore, "and the cursor points past the head again")
     }
 
-    /// When the store moved on by more than a page there is no overlap to splice onto,
-    /// and keeping the old tail would render a silent gap in the timeline.
-    func testHeadRefreshWithNoOverlapDropsTheStaleTail() throws {
+    /// An UNCHANGED answer must leave a deep reader exactly where they are — it is the
+    /// common case on a six-second poll, and it carries no messages to reconcile.
+    func testUnchangedAnswerKeepsDeepPagesLoaded() throws {
         var inbox = GramInbox()
-        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        inbox.apply(page([try message("c")], hasMore: true))
+        inbox.appendPage(page([try message("b"), try message("a")], hasMore: false))
 
-        inbox.apply(page([try message("z"), try message("y")], hasMore: true))
-        XCTAssertEqual(inbox.messages.map(\.id), ["z", "y"])
-        XCTAssertTrue(inbox.hasMore, "older messages are reachable again from this head")
+        XCTAssertFalse(inbox.apply(answer(nil, digest: "d")))
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
     }
 
     /// The badge counts the whole store. A paged client holds a window, so the daemon's

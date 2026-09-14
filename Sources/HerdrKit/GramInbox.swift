@@ -61,12 +61,16 @@ public struct GramInbox: Sendable, Equatable {
     /// Returns whether `messages` changed, so a caller can skip work (re-render, badge
     /// writes) on an unchanged poll.
     ///
-    /// A head answer SPLICES rather than replaces. Pages already loaded below the head
-    /// must survive a poll, or the reader who scrolled back through three pages would
-    /// watch them vanish every six seconds. The splice keeps the freshly-sent head and
-    /// whatever of the old list continues past it; when the two do not overlap at all
-    /// (the store moved on more than a page while the app was away) the tail is dropped,
-    /// because a gap would show messages in the wrong order with nothing to signal it.
+    /// A head answer with messages REPLACES the list, and that is deliberate even though
+    /// it costs a deep reader their scrolled-in pages. A head page says nothing about
+    /// what is older, so splicing the previous tail back on keeps rows the store may no
+    /// longer have: a message another client deleted below the head, or one the daemon
+    /// pruned, would be re-appended and then frozen in place by the adopted whole-store
+    /// digest, which from then on answers every poll "unchanged". A changed answer means
+    /// the store moved, so the only honest thing to hold is what the daemon just sent;
+    /// older pages come back from the sentinel as the reader scrolls. Unchanged answers
+    /// carry no messages and leave everything, including deep pages, exactly as it is —
+    /// which is the common case on a 6-second poll.
     @discardableResult
     public mutating func apply(_ answer: GramListAnswer) -> Bool {
         // A store swap invalidates everything we hold, INCLUDING on an "unchanged"
@@ -96,16 +100,12 @@ public struct GramInbox: Sendable, Equatable {
             // the pre-mutation list.
             return false
         }
-        let merged = Self.splice(head: fresh, onto: messages)
-        let changed = merged != messages
-        messages = merged
+        let changed = fresh != messages
+        messages = fresh
         digest = answer.digest
         hasLoaded = true
         serverUnreadCount = answer.unreadCount
-        // `hasMore` is about the OLDEST loaded message, so a head answer only decides
-        // it when the head is all we kept. When an older tail survived the splice, what
-        // lies past that tail is unchanged by this answer.
-        if merged.count == fresh.count { hasMore = answer.hasMore ?? false }
+        hasMore = answer.hasMore ?? false
         return changed
     }
 
@@ -133,35 +133,28 @@ public struct GramInbox: Sendable, Equatable {
         return true
     }
 
-    /// Head page first, then whatever of the previous list continues past it. Returns
-    /// just the head when the two share no message — see `apply`.
-    private static func splice(head: [GramMessage], onto existing: [GramMessage]) -> [GramMessage] {
-        guard !existing.isEmpty, let oldest = head.last else { return head }
-        guard let overlap = existing.firstIndex(where: { $0.id == oldest.id }) else {
-            // No overlap. Either the head IS the whole list (unpaged daemon) or the
-            // store moved on by more than a page.
-            return head
-        }
-        let tail = existing[existing.index(after: overlap)...]
-        let headIDs = Set(head.map(\.id))
-        return head + tail.filter { !headIDs.contains($0.id) }
-    }
-
     /// Drops a message the owner deleted, so the local list agrees with the server
     /// before the next poll confirms it. Clears the digest: our list no longer matches
     /// what the daemon fingerprinted, and a conditional poll against a stale digest
     /// would be answered "unchanged" against a list we have already altered.
     public mutating func remove(id: String) {
-        guard messages.contains(where: { $0.id == id }) else { return }
-        messages.removeAll { $0.id == id }
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        // The daemon's whole-store count has to move with the local edit too, or a
+        // paged inbox keeps rendering a badge for a message that is gone.
+        if messages[index].isUnread, let count = serverUnreadCount {
+            serverUnreadCount = max(0, count - 1)
+        }
+        messages.remove(at: index)
         digest = nil
     }
 
-    /// Marks a message read locally. Same digest reasoning as `remove`.
+    /// Marks a message read locally. Same digest reasoning as `remove`, and the same
+    /// reason for moving the server count.
     public mutating func markRead(id: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }), messages[index].isUnread
         else { return }
         messages[index].readByOwner = true
+        if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
         digest = nil
     }
 }

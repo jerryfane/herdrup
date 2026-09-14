@@ -4899,7 +4899,9 @@ struct TerminalPaneContent: View {
             // No unlinking mid-send: the bytes of a file still queued in the batch are
             // what a retry needs.
             .disabled(sending)
-            .accessibilityLabel("Remove attachment")
+            // Named, because the strip now holds up to ten of these: ten identical
+            // "Remove attachment" buttons tell a VoiceOver reader nothing about which.
+            .accessibilityLabel("Remove \(attachment.name)")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -5118,9 +5120,10 @@ struct TerminalPaneContent: View {
             actionNote = "Couldn't add that attachment."
             return
         }
-        // The cap is re-checked here, not only at the gate: staging is asynchronous, so
-        // two quick pastes can both pass the gate. A rejected one unlinks its bytes
-        // rather than leaving a secret-bearing temp file behind.
+        // Belt and braces: `loadingReplyAttachment` already serialises pastes, so this
+        // cannot currently fire. It stays because it is the only place that knows the
+        // staged bytes exist, and a future concurrent paste path would otherwise append
+        // past the cap and leak the temp file.
         guard replyAttachments.count < GramView.Staging.maxAttachments else {
             if let staged = attachment.staged {
                 try? FileManager.default.removeItem(at: staged.dir)
@@ -5262,7 +5265,9 @@ struct TerminalPaneContent: View {
                             uploadID = existing
                         } else {
                             guard let staged = current.staged else {
-                                actionNote = "Couldn't read \(current.name)."
+                                actionNote = Self.attachmentFailureNote(
+                                    "Couldn't read \(current.name).",
+                                    delivered: delivered.count, total: attachments.count)
                                 return
                             }
                             replyUploadBytes = (sent: 0, total: staged.size)
@@ -5293,7 +5298,9 @@ struct TerminalPaneContent: View {
                     }
 
                     guard let messageID else {
-                        actionNote = "Couldn't deliver \(current.name)."
+                        actionNote = Self.attachmentFailureNote(
+                            "Couldn't deliver \(current.name).",
+                            delivered: delivered.count, total: attachments.count)
                         return
                     }
                     delivered.append((attachment: current, messageID: messageID))
