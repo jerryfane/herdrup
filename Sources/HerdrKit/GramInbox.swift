@@ -65,8 +65,10 @@ public struct GramInbox: Sendable, Equatable {
 
     private var serverUnreadCount: Int?
     /// Ids marked read that the window does not hold, so a second mark of the same id
-    /// cannot decrement the daemon's count twice. Read-all marks deliberately twice: a
-    /// poll landing mid-pass reverts the local flips, so it re-applies them.
+    /// cannot decrement the daemon's count twice. Read-all marks deliberately twice —
+    /// a poll landing mid-pass reverts the local flips, so it re-applies them — and the
+    /// re-apply runs AFTER that poll, which is why this set survives a head answer and
+    /// is cleared only by a store swap.
     private var readOutsideWindow: Set<String> = []
 
     /// Folds in an answer to a HEAD request — the first page, or an unpaged full list.
@@ -120,10 +122,13 @@ public struct GramInbox: Sendable, Equatable {
         hasLoaded = true
         serverUnreadCount = answer.unreadCount
         hasMore = answer.hasMore ?? false
-        // The list was replaced, so any page fetch that read the old cursor is now
-        // stale: its messages would land below rows this answer no longer contains.
-        generation += 1
-        readOutsideWindow = []
+        // ONLY on a real change. An identical answer leaves the oldest loaded row — and
+        // therefore the cursor — exactly where it was, so a page fetch already in flight
+        // is still contiguous; bumping here anyway dropped that page and left the
+        // sentinel spinning with the same cursor and nothing to retry. Identical answers
+        // are ordinary: any local mark-read or delete clears the digest, so the next poll
+        // is unconditional and ships the same rows back.
+        if changed { generation += 1 }
         return changed
     }
 

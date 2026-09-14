@@ -303,13 +303,11 @@ struct GramView: View {
             guard new != old else { return }
             Task { await load(initial: false) }
         }
-        // SEARCH READS THE WHOLE STORE, so typing pulls the remaining pages in rather
-        // than filtering the window and calling a message the client never loaded "no
-        // match". One deliberate cost, paid only by someone who actually searched.
-        .onChange(of: search) { _, new in
-            guard !new.isEmpty else { return }
-            Task { await loadEveryPage() }
-        }
+        // The whole-store walk that search needs is driven from the two views that
+        // RENDER the search result — the instalment banner and the no-match state — so
+        // it is tied to a view's lifetime and cancelled with it. An `onChange` Task here
+        // as well spawned one unstructured walker per keystroke, and the losers each
+        // burned their wait and then manufactured a failure note.
         // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
         .onChange(of: readAllToken) { old, new in
             guard new != old else { return }
@@ -637,19 +635,32 @@ struct GramView: View {
     /// Shown when the list HAS rows but the active search matches none of them. A distinct
     /// state from "nothing here yet": a blank scroll after typing reads as an empty inbox,
     /// which is the bug the agents list already avoids the same way.
-    private var noMatches: some View {
+    ///
+    /// `stillLoading` and `failure` are passed IN because this view is shared with the
+    /// Saved section, which is local and complete by construction: reading the inbox's
+    /// paging state here told a Saved filter with no hits that older gram messages were
+    /// still being searched, and counted inbox rows as its denominator.
+    private func noMatches(stillLoading: Bool, loadedCount: Int, failure: String?) -> some View {
         centered {
             VStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: failure == nil ? "magnifyingglass" : "exclamationmark.triangle")
                     .font(.system(size: 28))
                     .foregroundStyle(Palette.textFaint)
                 // "No matches" is a claim about the whole store, so while older pages are
-                // still coming in it says what is actually true instead.
-                if inboxStore.inbox.hasMore {
+                // still coming in — or after the walk gave up — it says what is true.
+                if let failure {
+                    Text("Couldn't search everything")
+                        .font(Typography.app(15, .medium))
+                        .foregroundStyle(Palette.textDim)
+                    Text("\(failure) Nothing in the \(loadedCount) loaded matches “\(search)”.")
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .multilineTextAlignment(.center)
+                } else if stillLoading {
                     Text("Searching older messages…")
                         .font(Typography.app(15, .medium))
                         .foregroundStyle(Palette.textDim)
-                    Text("Nothing in the \(messages.count) loaded so far matches “\(search)”.")
+                    Text("Nothing in the \(loadedCount) loaded so far matches “\(search)”.")
                         .font(Typography.app(13))
                         .foregroundStyle(Palette.textFaint)
                         .multilineTextAlignment(.center)
@@ -689,7 +700,8 @@ struct GramView: View {
                 .padding(.horizontal, 32)
             }
         } else if visibleSaved.isEmpty {
-            noMatches
+            // Saved is local and complete: there is no page still to arrive.
+            noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -771,7 +783,11 @@ struct GramView: View {
         // and without it one keystroke would replace the only affordance telling the owner how
         // to give their agents gram with "No matches" about a list that never had rows.
         case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
-            noMatches
+            noMatches(stillLoading: inboxStore.inbox.hasMore && pageError == nil,
+                      loadedCount: messages.count, failure: pageError)
+                // The walk has to be driven from here too: this state renders INSTEAD of
+                // the list, so the instalment banner that normally carries it is absent.
+                .task(id: search) { await loadEveryPage() }
         case .loaded:
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -838,10 +854,7 @@ struct GramView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .accessibilityIdentifier("gram-searching-older")
-                        .task(id: search) {
-                            guard !isLoadingEveryPage else { return }
-                            await loadEveryPage()
-                        }
+                        .task(id: search) { await loadEveryPage() }
                     }
                 }
                 .padding(16)
@@ -1327,11 +1340,16 @@ struct GramView: View {
     /// Pull every remaining page in. Search reads the whole store, so it says so by
     /// loading it rather than quietly answering from a window.
     ///
-    /// `loadMore` now waits for an in-flight page instead of returning false straight
-    /// away, so a false answer here means a real failure — a stall budget of five with a
-    /// pause between tries covers a transient one, and giving up leaves `pageError` set
-    /// so the partial answer is not passed off as complete.
+    /// SINGLE-FLIGHTED: the two search views that drive it can both be alive, and a
+    /// keystroke re-keys their tasks, so without this guard several walkers contend on
+    /// the page fetch and the losers report failures that never happened.
+    ///
+    /// `loadMore` waits for an in-flight page rather than returning false straight away,
+    /// so a false answer here means a real failure — a stall budget of five with a pause
+    /// between tries covers a transient one. Giving up leaves `pageError` set, but a
+    /// CANCELLED walk (the reader retyped, or left) reports nothing: it did not fail.
     private func loadEveryPage() async {
+        guard !isLoadingEveryPage else { return }
         isLoadingEveryPage = true
         defer { isLoadingEveryPage = false }
         var stalls = 0
@@ -1343,7 +1361,7 @@ struct GramView: View {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
-        if inboxStore.inbox.nextCursor != nil, pageError == nil {
+        if !Task.isCancelled, inboxStore.inbox.nextCursor != nil, pageError == nil {
             pageError = "Couldn't load every older message."
         }
     }
