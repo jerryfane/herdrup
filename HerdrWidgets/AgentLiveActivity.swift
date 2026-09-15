@@ -136,7 +136,7 @@ private struct FleetTotals: View {
             Text(state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
         }
         .font(WidgetFont.plex(11))
-        .foregroundStyle(WidgetPalette.textFaint)
+        .foregroundStyle(WidgetPalette.islandTextFaint)
         .lineLimit(1)
         .truncationMode(.tail)
     }
@@ -210,7 +210,7 @@ private struct ExpandedHeadline: View {
             }
         }
         .font(WidgetFont.plex(11))
-        .foregroundStyle(WidgetPalette.textFaint)
+        .foregroundStyle(WidgetPalette.islandTextFaint)
         .lineLimit(1)
     }
 }
@@ -287,9 +287,14 @@ private struct LockScreenView: View {
                             .foregroundStyle(dim)
                             .lineLimit(1)
                     } else if state.needsYouCount > 0, !isStale {
+                        // INK, not the status tint. This is a 13pt TEXT run, and the
+                        // glass tints are lifted only to the 3:1 graphic bar that the
+                        // mark needs — #F2B85C measures 3.78:1 on the glass, under the
+                        // 4.5:1 small-text bar. The hue still carries meaning two
+                        // inches away, in the mark and the hero number.
                         Text(AgentActivitySummary.line(state))
                             .font(WidgetFont.plex(13))
-                            .foregroundStyle(accent)
+                            .foregroundStyle(dim)
                             .lineLimit(1)
                     }
                     // The fleet line and the age both go under Always-On: the spec drops
@@ -407,18 +412,19 @@ private struct LockScreenView: View {
     }
 }
 
-/// The spec's `Open` control: hairline outline, 44 pt, deep-linking to the agent it
-/// names. Its sibling `Approve` — ink fill on a `ground` label, an `AppIntent` that
+/// The spec's `Open` control: a hairline-weight outline, 44 pt, deep-linking to the
+/// agent it names. Its sibling `Approve` — ink fill on a `ground` label, an `AppIntent` that
 /// answers without opening the app — is deliberately absent: nothing writes
 /// `AgentActivityState.defaultAnswer`, and the spec hides Approve exactly then.
 private struct ActivityAction: View {
     let title: String
     let destination: URL
-    /// The outline has to be visible on the surface it sits on, and `hairline` is not:
-    /// measured, it is 1.7:1 against the glass AND 1.5:1 against the opaque Always-On
-    /// navy it was assumed to serve. So neither surface gets it — glass takes the glass
-    /// ink, which measures 4.7:1 at the card's lightest spot, and Always-On takes
-    /// `textFaint` at 3.5:1, the dimmest token that still reads as an edge there.
+    /// The outline has to be visible on the surface it sits on. The old `hairline`
+    /// token served neither — measured, 1.7:1 against the glass and 1.5:1 against the
+    /// opaque Always-On navy it was assumed to be for — so it is gone from this file
+    /// entirely. Glass takes the glass ink (4.7:1 at the card's lightest spot);
+    /// Always-On takes `textFaint` (3.5:1), the dimmest token that still reads as an
+    /// edge there.
     var onGlass = false
 
     var body: some View {
@@ -527,6 +533,11 @@ private enum WidgetPalette {
     /// rest of the hierarchy, as they do in the opaque palette.
     static let glassTextDim = Color(hex6: 0xE6EAF5)
     static let glassTextFaint = Color(hex6: 0xD2D7E8)
+    /// Tertiary text ON THE ISLAND, whose background is true black. `textFaint`
+    /// measures 4.16:1 there — under the small-text bar at the 11 pt this tier is
+    /// always set in — so the island gets its own step, at 5.2:1. It stays dimmer than
+    /// `textDim` (8.1:1 on black), which is what keeps the three tiers apart.
+    static let islandTextFaint = Color(hex6: 0x767DA3)
     static let ground = Color(hex6: 0x13162A)
     /// The status colours ON GLASS. Same hues — colour still carries meaning — lifted
     /// until each clears 3:1 against the measured 0.55 surface over a white wallpaper,
@@ -552,7 +563,6 @@ private enum WidgetPalette {
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
-    static let hairline = Color(hex6: 0x2E3358)
     static let text = Color(hex6: 0xEEF0F7)
     static let textDim = Color(hex6: 0x99A0BC)
     static let textFaint = Color(hex6: 0x666D91)
@@ -636,6 +646,11 @@ struct WidgetGallery: View {
             workingCount: 2, totalCount: 9, workingSince: nil,
             blockedSince: Date().addingTimeInterval(-41).timeIntervalSince1970,
             question: "Overwrite README?", agentID: "a2")),
+        ("needsYou · no question", AgentActivityState(
+            headline: "prod-deploy", status: .needsYou, needsYouCount: 4,
+            workingCount: 3, totalCount: 18, workingSince: nil,
+            blockedSince: Date().addingTimeInterval(-120).timeIntervalSince1970,
+            agentID: "a5")),
         ("working only", AgentActivityState(
             headline: "index-rebuild", status: .working, needsYouCount: 0,
             workingCount: 1, totalCount: 12,
