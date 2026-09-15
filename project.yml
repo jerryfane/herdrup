@@ -72,6 +72,14 @@ targets:
       # both encode/decode the same ContentState. Kept out of HerdrKit (which must stay
       # Linux-buildable) and out of App/ (widget can't see App/).
       - path: Shared
+      # The Live Activity RENDERING, compiled into the app as well as the widget, so a
+      # UI receipt can screenshot it. Nothing presents these views in the shipping app:
+      # the only entry point is the DEBUG gallery (`ScreenshotMock.widgets`), and the
+      # `Widget` declaration itself lives in HerdrWidgetBundle.swift, which stays out
+      # of this target. Without this the layout is unverifiable by construction —
+      # XCUITest cannot see a real Live Activity, so every round so far was judged by
+      # arithmetic over a model of the material rather than by looking at pixels.
+      - path: HerdrWidgets/AgentLiveActivity.swift
     dependencies:
       # Declared in step ONE rather than when a screen first needs it. Linking
       # HerdrKit into an iOS app exercises the libssh2 system library, the module

@@ -362,6 +362,8 @@ struct RootView: View {
             SettingsView(client: mockClient, agents: [], host: "mac.tail-scale.ts.net")
         case .htmlPreview:
             HtmlPreviewHarness()
+        case .widgets:
+            WidgetGallery()
         case .newAgent:
             NewAgentView(client: mockClient,
                          initialFolder: "/root/herdr-ios", initialKind: "codex",
@@ -7697,7 +7699,7 @@ struct HtmlPreviewHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -7716,6 +7718,10 @@ enum ScreenshotMock {
         // Settings switch let it run. Same view and same @AppStorage key the Gram page
         // uses, so the wiring under test is the shipping one.
         case "htmlpreview": return .htmlPreview
+        // `widgets` renders the Live Activity views themselves — the same file the
+        // widget extension compiles — over a bright and a dark backdrop, so the layout
+        // and its contrast can be LOOKED at. XCUITest cannot see a real Live Activity.
+        case "widgets": return .widgets
         case "newagent": return .newAgent
         // `scroll` drives the omp scroll receipt: a real SwiftTerm pane seeded with 200
         // distinct lines of scrollback so a swipe visibly moves the content.
