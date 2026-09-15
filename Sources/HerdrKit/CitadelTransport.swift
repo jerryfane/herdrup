@@ -310,9 +310,24 @@ public actor CitadelTransport: HerdrTransport {
     // MARK: - HerdrTransport
 
     public func roundTrip(_ requestLine: String) async throws -> String {
+        try await roundTrip(requestLine, onBytesReceived: nil)
+    }
+
+    /// `roundTrip` that reports how many reply BYTES have arrived so far.
+    ///
+    /// A gram download is one reply line carrying base64, so nothing about it is
+    /// chunked at the protocol level — but the SSH channel still delivers it in pieces,
+    /// and counting those is the only progress signal a caller can have. Used by
+    /// `gramGetFile` to drive a real progress bar instead of a spinner that says
+    /// nothing for twenty seconds on a 40 MB video.
+    public func roundTrip(
+        _ requestLine: String, onBytesReceived: ((Int) -> Void)?
+    ) async throws -> String {
         let client = try await connectedClient()
         let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
-        return try await Self.parseBridgeOutput(output, host: credentials.host)
+        return try await Self.parseBridgeOutput(
+            output, host: credentials.host, onBytesReceived: onBytesReceived
+        )
     }
 
     /// Consumes the api-bridge exec output stream into its single reply line, or throws
@@ -324,7 +339,8 @@ public actor CitadelTransport: HerdrTransport {
     /// injectable, but a test can feed this a fake `AsyncThrowingStream` that finishes
     /// `throwing:` a `RemoteExitError`, binding that the catch is present AND scoped.
     static func parseBridgeOutput(
-        _ output: AsyncThrowingStream<ExecCommandOutput, Error>, host: String
+        _ output: AsyncThrowingStream<ExecCommandOutput, Error>, host: String,
+        onBytesReceived: ((Int) -> Void)? = nil
     ) async throws -> String {
         // One request, one reply line. Accumulate RAW bytes and decode UTF-8 only at
         // newline boundaries: decoding each SSH channel-data chunk on its own
@@ -332,10 +348,13 @@ public actor CitadelTransport: HerdrTransport {
         // U+FFFD, silently corrupting the reply.
         var lines = LineAccumulator()
         var stderr = ""
+        var received = 0
         do {
             for try await chunk in output {
                 switch chunk {
                 case .stdout(let buffer):
+                    received += buffer.readableBytes
+                    onBytesReceived?(received)
                     if let first = lines.append(buffer).first { return first }
                 case .stderr(let buffer):
                     stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here

@@ -20,24 +20,31 @@ struct AgentLiveActivity: Widget {
             .activitySystemActionForegroundColor(WidgetPalette.text)
         } dynamicIsland: { context in
             DynamicIsland {
-                // THE REGION MAP IS THE SPEC'S, not a convenience: hero count on the
-                // leading side, the named agent and what it is asking in the centre,
-                // the fleet column trailing, the action along the bottom. Every size,
-                // weight and token below is quoted from the design's spec rows, so a
-                // deviation here is a bug rather than a preference.
+                // THE SPEC'S REGION MAP LOST ON DEVICE. It puts the hero leading, the
+                // agent and its question in `.center` and a three-line fleet column
+                // trailing; on a real island the corners are narrower than the design
+                // assumed, so the centre was squeezed to a few characters and the
+                // trailing column collapsed to a stack of ellipses — the owner's
+                // screenshot of build 145 shows exactly that, a mark, a name and "…".
+                //
+                // So the sides carry ONE short thing each and the real content gets the
+                // full-width bottom region, which is the arrangement the owner judged
+                // better on their phone. Type sizes, weights and tokens stay the
+                // spec's; only which region holds what has moved.
                 DynamicIslandExpandedRegion(.leading) {
                     ExpandedHero(state: context.state, isStale: context.isStale)
                         .padding(.leading, 4)
                 }
-                DynamicIslandExpandedRegion(.center) {
-                    ExpandedHeadline(state: context.state, isStale: context.isStale)
-                }
                 DynamicIslandExpandedRegion(.trailing) {
-                    FleetTotals(hostLabel: context.attributes.hostLabel, state: context.state)
+                    ExpandedHost(hostLabel: context.attributes.hostLabel)
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    ExpandedAction(state: context.state)
+                    ExpandedBody(
+                        hostLabel: context.attributes.hostLabel,
+                        state: context.state,
+                        isStale: context.isStale
+                    )
                 }
             } compactLeading: {
                 StatusMark(
@@ -122,36 +129,46 @@ private struct ExpandedHero: View {
     }
 }
 
-/// TRAILING · the fleet column. Spec: hostLabel, working count and total, all Plex
-/// Mono 11 pt `textFaint`, right-aligned, one line each. The machine is secondary
-/// detail by the brief's own decision, which is why it lives here and not in the hero.
-private struct FleetTotals: View {
+/// TRAILING · WHICH MACHINE, one line. The spec's three-line fleet column does not fit
+/// the real corner: on device it rendered as three ellipses. The counts move into the
+/// bottom row, which has the width for them.
+private struct ExpandedHost: View {
     let hostLabel: String
-    let state: AgentActivityAttributes.ContentState
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text(hostLabel)
-            Text("\(state.workingCount) working")
-            Text(state.totalCount == 1 ? "1 agent" : "\(state.totalCount) agents")
-        }
-        .font(WidgetFont.plex(11))
-        .foregroundStyle(WidgetPalette.islandTextFaint)
-        .lineLimit(1)
-        .truncationMode(.tail)
+        Text(hostLabel)
+            .font(WidgetFont.plex(11))
+            .foregroundStyle(WidgetPalette.islandTextFaint)
+            .lineLimit(1)
+            .truncationMode(.tail)
     }
 }
 
-/// CENTRE · what the card is about. Spec: headline Geist SemiBold 16 pt `text`,
-/// question Plex Mono 12 pt `textDim` on one line, age Plex Mono 11 pt `textFaint`.
-///
-/// The question is the difference between noticing and deciding, which is why it
-/// outranks the age and why the daemon truncates it at the source.
-private struct ExpandedHeadline: View {
+/// BOTTOM · what the card is about, across the island's full width: the agent, what it
+/// is asking, how long it has been waiting, how much of the fleet is busy, and the one
+/// action. Type stays the spec's — headline Geist SemiBold 16 pt `text`, question Plex
+/// Mono 12 pt `textDim`, the faint line Plex Mono 11 pt — only the region changed.
+private struct ExpandedBody: View {
+    let hostLabel: String
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            content
+            if state.needsYouCount > 0 {
+                ActivityAction(
+                    title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
+                    destination: state.deepLinkURL
+                )
+                .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 4)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(headline)
                 .font(WidgetFont.geistSemiBold(16))
@@ -182,94 +199,58 @@ private struct ExpandedHeadline: View {
         isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
     }
 
-    /// The age line: how long this has been waiting, how long the single working agent
-    /// has been running, or — when the card is stale, where the spec puts the age in
-    /// place of the question — when it was last heard from.
+    /// The faint line: the timer that matters in this state, then the fleet counts. The
+    /// counts live here rather than in a trailing column because the real corner cannot
+    /// hold three lines — on device it rendered them as three ellipses.
     @ViewBuilder
     private var age: some View {
-        Group {
+        HStack(spacing: 4) {
             if isStale {
                 if let updatedAt = state.updatedAt {
-                    HStack(spacing: 3) {
-                        Text("last update")
-                        Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
-                    }
+                    Text("last update")
+                    Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
                 } else {
                     Text("no recent update")
                 }
-            } else if state.needsYouCount > 0, let since = state.blockedSince {
-                HStack(spacing: 4) {
+            } else {
+                if state.needsYouCount > 0, let since = state.blockedSince {
                     Text("waiting")
                     Text(Date(timeIntervalSince1970: since), style: .timer)
                         .monospacedDigit()
+                    Text("·")
+                } else if state.status == .working, state.workingCount == 1,
+                          let since = state.workingSince {
+                    Text(Date(timeIntervalSince1970: since), style: .timer)
+                        .monospacedDigit()
+                    Text("·")
                 }
-            } else if state.status == .working, state.workingCount == 1,
-                      let since = state.workingSince {
-                Text(Date(timeIntervalSince1970: since), style: .timer)
-                    .monospacedDigit()
+                Text("\(state.workingCount) working · \(state.totalCount) agents")
             }
         }
         .font(WidgetFont.plex(11))
         .foregroundStyle(WidgetPalette.islandTextFaint)
         .lineLimit(1)
+        .truncationMode(.tail)
     }
 }
 
-/// BOTTOM · the one action, 44 pt, and only when there is something to act on.
-///
-/// The spec's primary is Approve, an `AppIntent` carrying the agent's own default
-/// answer — and it is explicitly hidden when that answer is absent, when the card is
-/// stale, or when nothing is blocked, because "a button that cannot answer honestly is
-/// worse than no button". Nothing produces `defaultAnswer` yet: it is decoded in
-/// `AgentActivityState` and written by nobody, so every card today takes the spec's own
-/// fallback, `Open`, which deep-links to the agent. When the daemon starts sending an
-/// answer this is where Approve goes, named after the agent so a mis-tap is visible.
-private struct ExpandedAction: View {
-    let state: AgentActivityAttributes.ContentState
-
-    @ViewBuilder
+#if DEBUG
+/// The gallery's STAND-IN for the system's own Live Activity surface. The real one is
+/// composited by iOS behind the card and is the thing that shows the wallpaper; a
+/// material drawn inside the card cannot see it (measured on device, builds 144 and
+/// 145). Here, in-app, a material DOES sample what is behind it, which is why this is
+/// only a stand-in and lives under DEBUG beside the gallery that uses it.
+private struct SystemSurfaceStandIn: View {
     var body: some View {
-        if state.needsYouCount > 0 {
-            ActivityAction(title: openTitle, destination: state.deepLinkURL)
-            .padding(.horizontal, 8)
-            .padding(.top, 6)
-        }
-    }
-
-    /// Named, like Approve would be: the button says which agent it lands on.
-    private var openTitle: String {
-        state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)"
+        Rectangle().fill(.ultraThinMaterial)
     }
 }
-
-/// The glass surface: the system's own blur under a brand-tinted wash, so the panel
-/// keeps the herdrup hue while the wallpaper still moves behind it. NO OUTER BORDER,
-/// per the spec's lock-screen row — the system owns the card's corners and its tint.
-private struct GlassSurface: View {
-    var cornerRadius: CGFloat
-    /// Overridable so the DEBUG gallery can render the same card at several alphas in
-    /// one screenshot and the choice can be measured off real pixels instead of a model
-    /// of the material, which turned out to be far off: the modelled worst case put the
-    /// composited surface near #B0B0B0, the render puts it at #404251.
-    var washAlpha: Double = WidgetPalette.glassWashAlpha
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(WidgetPalette.glassWash(alpha: washAlpha))
-            }
-    }
-}
+#endif
 
 private struct LockScreenView: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
-    /// DEBUG gallery only: renders the same card at a different wash so the alpha can
-    /// be chosen from pixels. Production always takes the palette's value.
-    var washAlpha: Double = WidgetPalette.glassWashAlpha
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
 
     var body: some View {
@@ -317,17 +298,24 @@ private struct LockScreenView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // GLASS, not paint. With `activityBackgroundTint(nil)` the system leaves its own
-        // translucent surface behind this view, so the wallpaper shows through the blur;
-        // the wash keeps the herdrup hue and the sheen gives the pane an edge to catch.
-        // Under Always-On (luminance reduced) the wash goes solid: a blurred wallpaper
-        // at 1 Hz is both unreadable and wasteful, and the panel is meant to be dim.
+        // NO BACKGROUND AT ALL, which is the only way this card is translucent.
+        //
+        // MEASURED ON DEVICE, twice: a material painted INSIDE a Live Activity does not
+        // sample the wallpaper. The system composites its own surface behind this view,
+        // so an in-view `.ultraThinMaterial` blurs THAT, and any wash over it simply
+        // darkens the panel — build 144 at 0.80 read as paint, and build 145 at 0.55
+        // came back darker still. The in-app gallery disagreed because there the
+        // material really does sample the wallpaper behind it; that is the one thing
+        // the gallery cannot stand in for.
+        //
+        // With `activityBackgroundTint(nil)` and nothing drawn here, the background IS
+        // the system's own translucent material — the thing that actually shows the
+        // wallpaper, and the thing every first-party activity uses.
+        //
+        // Always-On keeps the opaque backdrop: a translucent panel at 1 Hz is both
+        // unreadable and wasteful, and that panel is meant to be dim.
         .background {
-            if isLuminanceReduced {
-                WidgetPalette.backdrop
-            } else {
-                GlassSurface(cornerRadius: 0, washAlpha: washAlpha)
-            }
+            if isLuminanceReduced { WidgetPalette.backdrop }
         }
     }
 
@@ -501,27 +489,6 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
-    /// How much navy sits over the system blur. MEASURED, not modelled: the DEBUG
-    /// gallery renders the card over a bright and a dark backdrop and the composited
-    /// surface is read off the screenshot. Over a white wallpaper the alpha sweep that
-    /// chose this constant produced #404251 at 0.70, #555763 at 0.55 and #6B6C75 at
-    /// 0.40 in the card's middle; at 0.55 the card's LIGHTEST solid surface, which is
-    /// the one that decides legibility, is #595B67.
-    ///
-    /// 0.55 is the thinnest that keeps every text tier at WCAG AA against that
-    /// surface (see `glassTextDim` / `glassTextFaint` for the measured ratios), and
-    /// 0.70 — which shipped in build 144 — reads as paint rather than glass on a real
-    /// lock screen. The status marks do not survive 0.55 in their opaque tokens, which
-    /// is what `glassColor` is for.
-    static let glassWashAlpha: Double = 0.55
-
-    static func glassWash(alpha: Double) -> LinearGradient {
-        LinearGradient(
-            colors: [Color(hex6: 0x1B1F3A).opacity(alpha), Color(hex6: 0x13162A).opacity(alpha)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
     /// Secondary and tertiary text ON GLASS, measured at the card's WORST spot — the
     /// lightest solid surface any shipped card produces over a true white wallpaper,
     /// #595B67, rather than its middle. The previous pair measured 4.40:1 there, under
@@ -677,12 +644,10 @@ struct WidgetGallery: View {
             VStack(spacing: 18) {
                 ForEach(Array(Self.backdrops.enumerated()), id: \.offset) { _, backdrop in
                     ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
-                        card(item, backdrop: backdrop, alpha: WidgetPalette.glassWashAlpha)
+                        card(item, backdrop: backdrop)
                     }
-                    card(("needsYou · stale", Self.cases[0].1), backdrop: backdrop,
-                         alpha: WidgetPalette.glassWashAlpha, isStale: true)
-                    card(("needsYou · always-on", Self.cases[0].1), backdrop: backdrop,
-                         alpha: WidgetPalette.glassWashAlpha, dimmed: true)
+                    card(("needsYou · stale", Self.cases[0].1), backdrop: backdrop, isStale: true)
+                    card(("needsYou · always-on", Self.cases[0].1), backdrop: backdrop, dimmed: true)
                 }
                 ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
                     island(item, isStale: false)
@@ -699,24 +664,23 @@ struct WidgetGallery: View {
         .accessibilityIdentifier("widget-gallery")
     }
 
-    /// Only the SHIPPED wash is drawn. The alpha sweep that chose it (0.70 / 0.55 /
-    /// 0.40 / 0.25) lived here while the decision was open; leaving it in made every
-    /// later measurement ambiguous, because the lightest card in a frame was an
-    /// experiment rather than the thing that ships.
+    /// The lock-screen card over a wallpaper, with the system's translucent surface
+    /// STOOD IN FOR behind it — the card itself now draws no background of its own,
+    /// which is what makes it translucent on device.
     private func card(
         _ item: (String, AgentActivityState),
         backdrop: (String, LinearGradient),
-        alpha: Double,
         isStale: Bool = false,
         dimmed: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("\(item.0) · \(backdrop.0) · wash \(Int(alpha * 100))")
+            Text("\(item.0) · \(backdrop.0)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
-            LockScreenView(hostLabel: "tower", state: item.1, isStale: isStale, washAlpha: alpha)
+            LockScreenView(hostLabel: "tower", state: item.1, isStale: isStale)
                 .environment(\.isLuminanceReduced, dimmed)
                 .frame(width: 353)
+                .background { if !dimmed { SystemSurfaceStandIn() } }
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .background {
                     backdrop.1
@@ -726,31 +690,26 @@ struct WidgetGallery: View {
         }
     }
 
-    /// The expanded island's four regions, laid out by hand because ActivityKit owns
-    /// the real container and `DynamicIslandExpandedRegion` cannot be hosted outside
-    /// it. The corner widths here are CHOSEN (96 pt), not documented: nothing in this
-    /// repo or in the design file states the real split, and the system decides it at
-    /// render time. They are set narrow deliberately, so the centre column is squeezed
-    /// at least as hard here as on the device — the failure mode this layout exists to
-    /// avoid shows up in the receipt rather than hiding behind a generous mock.
-    ///
-    /// The corner insets ARE the shipped ones, copied from the region call sites.
+    /// The expanded island's regions, laid out by hand because ActivityKit owns the
+    /// real container. The corners are framed NARROW on purpose — 84 pt, tighter than
+    /// the device — so a layout that only survives a generous mock fails here first.
+    /// That is the failure build 145 shipped: a trailing column that became ellipses.
     private func island(_ item: (String, AgentActivityState), isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("island · \(item.0)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
             VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: 8) {
+                HStack(alignment: .top) {
                     ExpandedHero(state: item.1, isStale: isStale)
                         .padding(.leading, 4)
-                        .frame(width: 96, alignment: .leading)
-                    ExpandedHeadline(state: item.1, isStale: isStale)
-                    FleetTotals(hostLabel: "tower", state: item.1)
+                        .frame(width: 84, alignment: .leading)
+                    Spacer(minLength: 0)
+                    ExpandedHost(hostLabel: "hetzner-ts")
                         .padding(.trailing, 4)
-                        .frame(width: 96, alignment: .trailing)
+                        .frame(width: 84, alignment: .trailing)
                 }
-                ExpandedAction(state: item.1)
+                ExpandedBody(hostLabel: "hetzner-ts", state: item.1, isStale: isStale)
             }
             .padding(12)
             .frame(width: 353)
@@ -760,9 +719,7 @@ struct WidgetGallery: View {
     }
 
     /// The COMPACT pill and the MINIMAL circle, the two presentations that survive when
-    /// the island is not expanded. Drawn on black at their real diameters, because the
-    /// gallery's doc claims it renders the view types the widget renders and these are
-    /// two of them.
+    /// the island is not expanded.
     private func pills(_ item: (String, AgentActivityState)) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("compact + minimal · \(item.0)")

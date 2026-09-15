@@ -772,9 +772,26 @@ public actor HerdrClient {
     /// Downloads the file attached to a message and returns its name, mime, and
     /// bytes. As the owner the app sends no caller pane and may download any file.
     /// The bytes come back inline (base64) in one reply.
-    public func gramGetFile(id: String) async throws -> (name: String, mime: String, data: Data) {
-        let result = try await call("gram.get_file", GramGetFileParams(id: id),
+    ///
+    /// `onBytesReceived` reports REPLY bytes as the SSH channel delivers them, so a
+    /// caller that knows the file's size can show a real bar. It fires only on the
+    /// Citadel transport — a mock or a local socket gets the plain path and no
+    /// callbacks, which a caller must treat as "no progress available" rather than
+    /// "no bytes yet". The counted bytes are the BASE64 reply, about 4/3 of the file
+    /// plus the JSON envelope, which is why the caller scales rather than dividing by
+    /// the file size directly.
+    public func gramGetFile(
+        id: String, onBytesReceived: ((Int) -> Void)? = nil
+    ) async throws -> (name: String, mime: String, data: Data) {
+        let result: GramFileContentResult
+        if let onBytesReceived, let citadel = transport as? CitadelTransport {
+            let line = try encodeRequest("gram.get_file", GramGetFileParams(id: id))
+            let response = try await citadel.roundTrip(line, onBytesReceived: onBytesReceived)
+            result = try decodeResult(response, as: GramFileContentResult.self)
+        } else {
+            result = try await call("gram.get_file", GramGetFileParams(id: id),
                                     as: GramFileContentResult.self)
+        }
         guard let data = Data(base64Encoded: result.dataBase64) else {
             throw GramError.invalidFileData
         }

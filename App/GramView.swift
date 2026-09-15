@@ -171,6 +171,12 @@ struct GramView: View {
     @State private var openFileTask: Task<Void, Never>?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
+    /// Bytes of the reply received so far for the in-flight download, against the
+    /// bytes expected. The daemon returns a file in ONE base64 reply, so this counts
+    /// SSH channel bytes — about 4/3 of the file — which is the only progress signal
+    /// the protocol offers. nil while no size is known (an older message row), which
+    /// the row renders as the old indeterminate spinner rather than a lying bar.
+    @State private var downloadBytes: (received: Int, total: Int)?
     /// A Gram file downloaded and staged for export through the system document
     /// picker, so the owner saves it to a real, user-chosen location.
     @State private var exportFile: ExportFile?
@@ -720,6 +726,7 @@ struct GramView: View {
                         SavedGramRow(
                             saved: s,
                             isDownloadingFile: downloadingFileFor == s.id,
+                            downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
                             onOpenFile: { openFile(id: s.id) },
                             onSaveFile: { saveFile(id: s.id) },
                             onUnsave: { savedGrams.remove(s.id) }
@@ -804,6 +811,7 @@ struct GramView: View {
                         GramRow(
                             message: message,
                             isDownloadingFile: downloadingFileFor == message.id,
+                            downloadProgress: downloadingFileFor == message.id ? downloadBytes : nil,
                             isSaved: savedGrams.isSaved(message.id),
                             onOpenFile: { openFile(id: message.id) },
                             onSaveFile: { saveFile(id: message.id) },
@@ -1696,10 +1704,16 @@ struct GramView: View {
     private func openFile(id: String) {
         guard downloadingFileFor == nil else { return }
         downloadingFileFor = id
+        downloadBytes = Self.expectedBytes(for: id, in: inboxStore.inbox.messages).map { (0, $0) }
         openFileTask = Task {
-            defer { downloadingFileFor = nil }
+            defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
-                let (name, mime, data) = try await client.gramGetFile(id: id)
+                let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
+                    Task { @MainActor in
+                        guard let total = downloadBytes?.total else { return }
+                        downloadBytes = (min(received, total), total)
+                    }
+                })
                 // The page went away mid-download (task cancelled in .onDisappear): stop
                 // before writing any temp file, so a late completion can't strand one.
                 if Task.isCancelled { return }
@@ -1758,10 +1772,16 @@ struct GramView: View {
     private func saveFile(id: String) {
         guard downloadingFileFor == nil else { return }
         downloadingFileFor = id
+        downloadBytes = Self.expectedBytes(for: id, in: inboxStore.inbox.messages).map { (0, $0) }
         Task {
-            defer { downloadingFileFor = nil }
+            defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
-                let (name, _, data) = try await client.gramGetFile(id: id)
+                let (name, _, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
+                    Task { @MainActor in
+                        guard let total = downloadBytes?.total else { return }
+                        downloadBytes = (min(received, total), total)
+                    }
+                })
                 if Task.isCancelled { return }
                 // A per-export temp dir so the file keeps its real name (the picker uses
                 // the file's own name) without colliding with the preview temp file.
@@ -1777,6 +1797,17 @@ struct GramView: View {
                 sendError = "Couldn't save the file."
             }
         }
+    }
+
+    /// The reply size to expect for a download, in WIRE bytes: base64 inflates the
+    /// file by 4/3, and the JSON envelope adds a few hundred. Nil when the message row
+    /// carries no file size (nothing to measure against), which the chip renders as the
+    /// indeterminate spinner.
+    private static func expectedBytes(for id: String, in messages: [GramMessage]) -> Int? {
+        guard let file = messages.first(where: { $0.id == id })?.file, file.size > 0 else {
+            return nil
+        }
+        return Int(Double(file.size) * 4.0 / 3.0) + 512
     }
 
     /// Reduce a server-supplied file name to a safe single path component for the
@@ -2052,6 +2083,10 @@ private struct FileExportPicker: UIViewControllerRepresentable {
 private struct GramRow: View {
     let message: GramMessage
     var isDownloadingFile: Bool
+    /// Reply bytes received against bytes expected for THIS row's download, when the
+    /// transport reports them. nil means no measurement — the row falls back to the
+    /// indeterminate spinner rather than drawing a bar that is not driven by anything.
+    var downloadProgress: (received: Int, total: Int)?
     var isSaved: Bool
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
@@ -2125,6 +2160,17 @@ private struct GramRow: View {
         }
     }
 
+    /// While downloading with a real byte count, the size line becomes progress. The
+    /// received figure is SCALED back from base64 (the wire carries about 4/3 of the
+    /// file) so the numbers the reader sees are file bytes, not transport bytes.
+    private func downloadLabel(_ file: GramFile) -> String {
+        guard isDownloadingFile, let p = downloadProgress, p.total > 0 else {
+            return file.displaySize
+        }
+        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
+        return "\(GramFile.displaySize(of: done)) of \(file.displaySize)"
+    }
+
     /// A tappable chip for an attached file: tap to download + preview it.
     private func fileChip(_ file: GramFile) -> some View {
         Button(action: onOpenFile) {
@@ -2138,9 +2184,19 @@ private struct GramRow: View {
                         .foregroundStyle(Palette.text)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(file.displaySize)
+                    Text(downloadLabel(file))
                         .font(Typography.machine(11))
                         .foregroundStyle(Palette.textFaint)
+                    // The BAR, shown only while this row is downloading and only when
+                    // the byte count is real. A 40 MB video over SSH takes long enough
+                    // that a bare spinner reads as a hang.
+                    if isDownloadingFile, let p = downloadProgress, p.total > 0 {
+                        ProgressView(value: Double(p.received), total: Double(p.total))
+                            .progressViewStyle(.linear)
+                            .tint(Palette.brand)
+                            .frame(height: 2)
+                            .padding(.top, 3)
+                    }
                 }
                 Spacer(minLength: 0)
                 if isDownloadingFile {
