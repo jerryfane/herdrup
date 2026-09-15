@@ -43,4 +43,37 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(ignored.waitForExistence(timeout: 5),
                       "and turning it off must say they are ignored")
     }
+
+    /// THE BEHAVIOUR, not the copy: a received document whose script rewrites the page
+    /// is rendered by the shipping viewer, and what the page ends up SAYING is the
+    /// answer. With the switch off the script must not have run.
+    ///
+    /// The value is forced through the argument domain rather than left to whatever a
+    /// previous run on this simulator stored, so each direction is deterministic. The
+    /// DEFAULT — an absent key — is pinned on Linux, where a fresh `UserDefaults` suite
+    /// can actually be created.
+    func testAPreviewedScriptDoesNotRunWhenTheSwitchIsOff() {
+        let app = launchPreview(javaScript: false)
+        XCTAssertTrue(app.webViews.staticTexts["script did not run"].waitForExistence(timeout: 20),
+                      "the document must render unexecuted")
+        XCTAssertFalse(app.webViews.staticTexts["script ran"].exists,
+                       "and the script must not have rewritten it")
+    }
+
+    /// And the switch has to actually reach the viewer: with it on, the same document
+    /// rewrites itself. Without this direction the test above would pass just as well
+    /// against a viewer that ignored the setting entirely.
+    func testAPreviewedScriptRunsWhenTheSwitchIsOn() {
+        let app = launchPreview(javaScript: true)
+        XCTAssertTrue(app.webViews.staticTexts["script ran"].waitForExistence(timeout: 20),
+                      "turning the switch on must let the document's script run")
+    }
+
+    private func launchPreview(javaScript: Bool) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "htmlpreview"
+        app.launchArguments += ["-previews.javascript", javaScript ? "YES" : "NO"]
+        app.launch()
+        return app
+    }
 }
