@@ -417,8 +417,8 @@ private struct ActivityAction: View {
     /// The outline has to be visible on the surface it sits on, and `hairline` is not:
     /// measured, it is 1.7:1 against the glass AND 1.5:1 against the opaque Always-On
     /// navy it was assumed to serve. So neither surface gets it — glass takes the glass
-    /// ink (4.6:1), Always-On takes `textFaint` (3.5:1), which is the dimmest token that
-    /// still reads as an edge there.
+    /// ink, which measures 4.7:1 at the card's lightest spot, and Always-On takes
+    /// `textFaint` at 3.5:1, the dimmest token that still reads as an edge there.
     var onGlass = false
 
     var body: some View {
