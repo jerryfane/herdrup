@@ -101,16 +101,18 @@ private struct ExpandedHero: View {
                     isUnconfirmed: state.markIsUnconfirmed,
                     isStale: isStale
                 )
-                if state.needsYouCount > 1 {
+                if state.needsYouCount > 1, !isStale {
                     // `compactCount` so 100 waiting reads "99+" here and in the compact
-                    // pill alike; it also bounds the corner at three glyphs.
+                    // pill alike; it also bounds the corner at three glyphs. Suppressed
+                    // when stale, because the headline then reads "N may need you" and
+                    // the count has no business being printed twice.
                     Text(state.needsYouCount.compactCount)
                         .font(WidgetFont.plexSemiBold(26))
                         .monospacedDigit()
                         .foregroundStyle(WidgetPalette.waiting)
                 }
             }
-            if state.needsYouCount > 0 {
+            if state.needsYouCount > 0, !isStale {
                 Text("need you")
                     .font(WidgetFont.geist(12))
                     .foregroundStyle(WidgetPalette.textDim)
@@ -336,8 +338,12 @@ private struct LockScreenView: View {
         isLuminanceReduced ? state.markColor : WidgetPalette.glassColor(state.status)
     }
 
-    /// No headline override here either — see `ExpandedHeadline.headline`.
-    private var lockHeadline: String { state.headline }
+    /// STALE takes the summary's own doubt wording, the same substitution the island
+    /// makes and the only one either surface makes. No other headline rewriting lives
+    /// here — see `ExpandedHeadline.headline` for what that cost last time.
+    private var lockHeadline: String {
+        isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
+    }
 
     @ViewBuilder
     private var lockHero: some View {
@@ -355,7 +361,7 @@ private struct LockScreenView: View {
                     // the agent's name in the hero slot at that count, on the lock
                     // screen as well as in the island, so the digit is suppressed on
                     // both rather than printed on one.
-                    if state.needsYouCount > 1 {
+                    if state.needsYouCount > 1, !isStale {
                         Text(verbatim: "\(state.needsYouCount)")
                             .font(WidgetFont.plexSemiBold(34))
                             .monospacedDigit()
@@ -508,9 +514,11 @@ private enum WidgetPalette {
         )
     }
     /// Secondary and tertiary text ON GLASS. Against the surface `glassWashAlpha`
-    /// actually selects — #555763 over a white wallpaper — they measure 5.5:1 and
-    /// 4.6:1. The tertiary tier clears AA small text by 0.11, which is thin: any
-    /// further thinning of the wash has to be paid for here first.
+    /// actually selects — measured #545662 over a TRUE WHITE wallpaper — they come out
+    /// 5.6:1 and 4.7:1, with the primary at 6.4:1. The tertiary tier clears AA small
+    /// text by 0.2, which is thin: any further thinning of the wash has to be paid for
+    /// here first. The three tiers sit close together on glass by nature; size and
+    /// weight (16 / 12 / 11 pt) carry the rest of the hierarchy.
     static let glassTextDim = Color(hex6: 0xDDE2F0)
     static let glassTextFaint = Color(hex6: 0xC9CFE2)
     static let ground = Color(hex6: 0x13162A)
@@ -704,7 +712,7 @@ struct WidgetGallery: View {
     /// the rest to the centre, and the bottom spanning the whole island.
     private func island(_ item: (String, AgentActivityState), isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("island · \(item.0)\(isStale ? " · stale" : "")")
+            Text("island · \(item.0)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
             VStack(spacing: 0) {
