@@ -2405,6 +2405,15 @@ struct TerminalHomeView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: agentListPollIntervalNanoseconds)
                 await load()
+                // EVERY POLL, not only on a change. Recovery after the reader swipes
+                // the banner away cannot hang off `.onChange(of: fullList)` below: that
+                // fires when the roster MOVES, which is exactly what a blocked agent
+                // waiting for an answer does not do. `recoverIfEnded` mints only when
+                // nothing is live and pushes no content otherwise, so a stable roster
+                // costs one predicate per poll rather than an ActivityKit update.
+                LiveActivityController.shared.recoverIfEnded(
+                    LiveActivityController.state(from: fullList)
+                )
             }
         }
         // Ambient unread-gram poll for the tab badge, running ONLY while the Gram

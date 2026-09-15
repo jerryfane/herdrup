@@ -27,9 +27,27 @@ final class LiveActivityController: ObservableObject {
     /// and returned. The banner stayed gone for the rest of the process's life, and the
     /// only way back was force-quitting the app. Every decision about whether one
     /// exists goes through this.
+    ///
+    /// `.stale` COUNTS AS LIVE. A stale activity is still on screen and an update is
+    /// the documented cure for it — and this app's widget is built for that state, with
+    /// its own hedged headline and "last update" line off `context.isStale`. Treating
+    /// it as death would forget a visible banner and then mint a second one beside it.
+    /// Only `.dismissed` and `.ended` are dead.
     private var liveActivity: Activity<AgentActivityAttributes>? {
-        guard let activity, activity.activityState == .active else { return nil }
-        return activity
+        guard let activity else { return nil }
+        switch activity.activityState {
+        case .active, .stale: return activity
+        default: return nil
+        }
+    }
+
+    /// Whether an OS activity can still be updated, for the reclaim path. Same rule as
+    /// `liveActivity`, applied to somebody else's reference.
+    private static func isLive(_ activity: Activity<AgentActivityAttributes>) -> Bool {
+        switch activity.activityState {
+        case .active, .stale: return true
+        default: return false
+        }
     }
 
     /// The current activity's APNs push token (hex), or nil when there is no activity / no token
@@ -65,10 +83,15 @@ final class LiveActivityController: ObservableObject {
             // Drop a dismissed or ended reference before looking: it is not coming back,
             // and keeping it is what made a swiped-away banner permanent.
             activity = nil
-            let existing = Activity<AgentActivityAttributes>.activities.filter {
-                $0.activityState == .active
+            // THE SWEEP SEES EVERYTHING; only the RECLAIM is filtered. A non-active
+            // activity is not necessarily off screen — an `.ended` one lingers for up to
+            // four hours under the default dismissal policy, and a `.stale` one until it
+            // is updated — so filtering before the sweep would leave a visible banner
+            // neither adopted nor ended, and the fresh mint would sit beside it.
+            let existing = Activity<AgentActivityAttributes>.activities
+            activity = existing.first {
+                $0.attributes.hostLabel == hostLabel && Self.isLive($0)
             }
-            activity = existing.first { $0.attributes.hostLabel == hostLabel }
             let keep = activity?.id
             if existing.contains(where: { $0.id != keep }) {
                 Task {
@@ -120,11 +143,30 @@ final class LiveActivityController: ObservableObject {
         }
     }
 
+    /// Mint a replacement if the banner is gone, and do NOTHING otherwise.
+    ///
+    /// Called on every roster poll, which is the only signal that arrives while a herd
+    /// stands still — and standing still with one agent blocked is precisely the state
+    /// this activity exists for, so recovery cannot hang off `.onChange(of: fullList)`
+    /// alone. It deliberately does not push content when one IS live: ActivityKit
+    /// throttles frequent updates, and re-sending an unchanged state every five seconds
+    /// would spend that budget for nothing.
+    func recoverIfEnded(_ state: AgentActivityAttributes.ContentState) {
+        guard enabled, liveActivity == nil, hostLabel != nil else { return }
+        update(state)
+    }
+
     /// Push a new state to the live activity, if one is still live. A dismissed
     /// activity is forgotten here too, so the next `start` mints a fresh one instead of
     /// pushing into a banner the reader has already swiped away.
     func update(_ state: AgentActivityAttributes.ContentState) {
         guard let activity = liveActivity else {
+            // Stop watching the dead activity's token and stop publishing it: the
+            // re-mint below issues a fresh one, and `RootView` registers whatever this
+            // publishes with the server.
+            tokenTask?.cancel()
+            tokenTask = nil
+            pushToken = nil
             self.activity = nil
             // A DISMISSED banner comes back on the next roster change rather than only
             // on the next reconnect. Swiping it away is not "stop watching this
