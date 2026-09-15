@@ -673,6 +673,9 @@ struct WidgetGallery: View {
                     island(item, isStale: false)
                 }
                 island(("needsYou · stale", Self.cases[0].1), isStale: true)
+                ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
+                    pills(item)
+                }
             }
             .padding(20)
             .frame(maxWidth: .infinity)
@@ -709,8 +712,14 @@ struct WidgetGallery: View {
     }
 
     /// The expanded island's four regions, laid out by hand because ActivityKit owns
-    /// the real container. Widths are the documented ones: ~110 pt for each corner,
-    /// the rest to the centre, and the bottom spanning the whole island.
+    /// the real container and `DynamicIslandExpandedRegion` cannot be hosted outside
+    /// it. The corner widths here are CHOSEN (96 pt), not documented: nothing in this
+    /// repo or in the design file states the real split, and the system decides it at
+    /// render time. They are set narrow deliberately, so the centre column is squeezed
+    /// at least as hard here as on the device — the failure mode this layout exists to
+    /// avoid shows up in the receipt rather than hiding behind a generous mock.
+    ///
+    /// The corner insets ARE the shipped ones, copied from the region call sites.
     private func island(_ item: (String, AgentActivityState), isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("island · \(item.0)")
@@ -719,9 +728,11 @@ struct WidgetGallery: View {
             VStack(spacing: 0) {
                 HStack(alignment: .top, spacing: 8) {
                     ExpandedHero(state: item.1, isStale: isStale)
+                        .padding(.leading, 4)
                         .frame(width: 96, alignment: .leading)
                     ExpandedHeadline(state: item.1, isStale: isStale)
                     FleetTotals(hostLabel: "tower", state: item.1)
+                        .padding(.trailing, 4)
                         .frame(width: 96, alignment: .trailing)
                 }
                 ExpandedAction(state: item.1)
@@ -730,6 +741,35 @@ struct WidgetGallery: View {
             .frame(width: 353)
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+        }
+    }
+
+    /// The COMPACT pill and the MINIMAL circle, the two presentations that survive when
+    /// the island is not expanded. Drawn on black at their real diameters, because the
+    /// gallery's doc claims it renders the view types the widget renders and these are
+    /// two of them.
+    private func pills(_ item: (String, AgentActivityState)) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("compact + minimal · \(item.0)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            HStack(spacing: 16) {
+                HStack(spacing: 8) {
+                    StatusMark(
+                        status: item.1.status,
+                        diameter: 10,
+                        isUnconfirmed: item.1.markIsUnconfirmed
+                    )
+                    CompactCount(state: item.1)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(Color.black))
+
+                StatusMark(status: item.1.status, diameter: 14)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.black))
+            }
         }
     }
 }
