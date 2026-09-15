@@ -333,7 +333,7 @@ private struct LockScreenView: View {
 
     /// STALE takes the summary's own doubt wording, the same substitution the island
     /// makes and the only one either surface makes. No other headline rewriting lives
-    /// here — see `ExpandedHeadline.headline` for what that cost last time.
+    /// here — see `ExpandedBody.headline` for what that cost last time.
     private var lockHeadline: String {
         isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
     }
