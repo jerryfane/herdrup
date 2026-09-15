@@ -428,24 +428,25 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
-    /// The brand wash over the system blur. Translucent, but only by a fifth: the
-    /// surface sits over an UNKNOWN wallpaper, and a lighter wash let the faint text
-    /// fall to 1.05:1 against a bright one — invisible. At 0.80 the wallpaper still
-    /// moves behind the blur while the surface stays predictably dark.
+    /// The brand wash over the system blur. 0.70, because 0.80 did not read as glass on
+    /// a real lock screen — the panel looked painted. Thinner than this and the small
+    /// text loses: the surface sits over an UNKNOWN wallpaper, and modelling the worst
+    /// case (a white one, through the material) puts the tertiary ink at 2.1:1 by 0.45.
+    /// Every drop in this alpha has to be paid for in the inks below.
     static let glassWash = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A).opacity(0.80), Color(hex6: 0x13162A).opacity(0.80)],
+        colors: [Color(hex6: 0x1B1F3A).opacity(0.70), Color(hex6: 0x13162A).opacity(0.70)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
     /// The lit edge of a glass pane — brighter than `hairline`, which is a divider on an
     /// opaque surface and disappears against a blur.
     static let glassEdge = Color.white.opacity(0.14)
-    /// Secondary and tertiary text ON GLASS. Lifted from `textDim` / `textFaint`,
-    /// which are tuned for the opaque navy: over the worst-case bright wallpaper they
-    /// measure 5.9:1 and 4.5:1 (WCAG AA for small text), where the opaque pair measured
-    /// 2.0:1 and 1.1:1 on the same surface. Only the glass paths use these.
-    static let glassTextDim = Color(hex6: 0xC9CFE2)
-    static let glassTextFaint = Color(hex6: 0xAEB6D0)
+    /// Secondary and tertiary text ON GLASS, lifted again to pay for the thinner wash.
+    /// Over the worst-case bright wallpaper they measure 5.2:1 and 4.3:1 — the pair
+    /// tuned for the opaque navy measures 1.5:1 and 1.0:1 there. Only glass paths use
+    /// these; the Always-On panel is opaque and keeps `textDim` / `textFaint`.
+    static let glassTextDim = Color(hex6: 0xDDE2F0)
+    static let glassTextFaint = Color(hex6: 0xC9CFE2)
     static let ground = Color(hex6: 0x13162A)
     /// A top-leading lift on the ground colour. Two stops, eight points apart in
     /// lightness: enough to read as depth on the lock screen, not enough to fight the
