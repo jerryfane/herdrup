@@ -513,6 +513,16 @@ private enum WidgetPalette {
         endPoint: .bottomTrailing
     )
     static let text = Color(hex6: 0xEEF0F7)
+    /// Tertiary text ON THE ISLAND, whose background is true black and is ours to
+    /// measure against — unlike the lock screen, which now sits on the system's
+    /// surface and asks the system for ink. `textFaint` measures 4.16:1 on black,
+    /// under the small-text bar at the 11 pt this tier is always set in; this is
+    /// 5.23:1, and stays dimmer than `textDim` (8.11:1) so the tiers remain three.
+    ///
+    /// Deleted by accident in the glass-palette cleanup and restored: it broke both
+    /// targets, and the gallery run that looked green had been dispatched one commit
+    /// earlier.
+    static let islandTextFaint = Color(hex6: 0x767DA3)
     static let textDim = Color(hex6: 0x99A0BC)
     static let textFaint = Color(hex6: 0x666D91)
     static let waiting = Color(hex6: 0xE9A63C)
