@@ -514,9 +514,10 @@ private enum WidgetPalette {
         )
     }
     /// Secondary and tertiary text ON GLASS, measured at the card's WORST spot — the
-    /// top of the wash gradient over a true white wallpaper, #585A66, not the middle.
-    /// #C9CFE2 measured 4.40:1 there, under the AA small-text bar, so the tertiary tier
-    /// is #D2D7E8 (4.8:1) and the secondary #E6EAF5 (5.7:1), with the primary at 6.0:1.
+    /// lightest solid surface any shipped card produces over a true white wallpaper,
+    /// #595B67, rather than its middle. The previous pair measured 4.40:1 there, under
+    /// the AA small-text bar; this pair measures 5.60:1 and 4.69:1, with the primary at
+    /// 5.92:1 and the lifted status marks at 3.78 / 3.62 / 3.18.
     ///
     /// The tiers sit close together on glass by nature: the surface is light enough that
     /// there is little room below white. Size and weight — 16 / 12 / 11 pt — carry the
