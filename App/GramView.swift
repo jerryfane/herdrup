@@ -174,8 +174,13 @@ struct GramView: View {
     /// Bytes of the reply received so far for the in-flight download, against the
     /// bytes expected. The daemon returns a file in ONE base64 reply, so this counts
     /// SSH channel bytes — about 4/3 of the file — which is the only progress signal
-    /// the protocol offers. nil while no size is known (an older message row), which
-    /// the row renders as the old indeterminate spinner rather than a lying bar.
+    /// the protocol offers.
+    ///
+    /// STAYS NIL UNTIL A CALLBACK ACTUALLY ARRIVES. Only the Citadel transport reports
+    /// bytes; a mock or a local socket reports none, and seeding this from the file
+    /// size alone would pin a determinate bar at 0% for the whole download, which is
+    /// exactly the lying bar the spinner exists to avoid. The row shows the spinner
+    /// while this is nil.
     @State private var downloadBytes: (received: Int, total: Int)?
     /// A Gram file downloaded and staged for export through the system document
     /// picker, so the owner saves it to a real, user-chosen location.
@@ -727,8 +732,8 @@ struct GramView: View {
                             saved: s,
                             isDownloadingFile: downloadingFileFor == s.id,
                             downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
-                            onOpenFile: { openFile(id: s.id) },
-                            onSaveFile: { saveFile(id: s.id) },
+                            onOpenFile: { openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
+                            onSaveFile: { saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
                             onUnsave: { savedGrams.remove(s.id) }
                         )
                     }
@@ -813,8 +818,8 @@ struct GramView: View {
                             isDownloadingFile: downloadingFileFor == message.id,
                             downloadProgress: downloadingFileFor == message.id ? downloadBytes : nil,
                             isSaved: savedGrams.isSaved(message.id),
-                            onOpenFile: { openFile(id: message.id) },
-                            onSaveFile: { saveFile(id: message.id) },
+                            onOpenFile: { openFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
+                            onSaveFile: { saveFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
                             onToggleSave: { savedGrams.toggle(message) },
                             onDelete: { delete(message) }
                         )
@@ -1701,18 +1706,20 @@ struct GramView: View {
 
     /// Download a message's file to a temp URL and present it in QuickLook (which
     /// offers the system share action to save it).
-    private func openFile(id: String) {
+    /// `expectedBytes` comes from the ROW, not from a lookup: the Saved tab is local
+    /// and outlives the server copy, so resolving a size through the inbox returned nil
+    /// for exactly the rows the saved bar was added for. Each caller passes the size it
+    /// already renders.
+    private func openFile(id: String, expectedBytes: Int? = nil) {
         guard downloadingFileFor == nil else { return }
         downloadingFileFor = id
-        downloadBytes = Self.expectedBytes(for: id, in: inboxStore.inbox.messages).map { (0, $0) }
+        downloadBytes = nil
+        let expected = expectedBytes
         openFileTask = Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
                 let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
-                    Task { @MainActor in
-                        guard let total = downloadBytes?.total else { return }
-                        downloadBytes = (min(received, total), total)
-                    }
+                    Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 // The page went away mid-download (task cancelled in .onDisappear): stop
                 // before writing any temp file, so a late completion can't strand one.
@@ -1769,18 +1776,16 @@ struct GramView: View {
     /// to a real, user-chosen location (Finder ~/Documents / ~/Downloads on Mac, Files
     /// on iOS). Unlike QuickLook's "Save to Files", this does not land in the hidden
     /// app-sandbox container on Mac, so the saved file is where the owner expects it.
-    private func saveFile(id: String) {
+    private func saveFile(id: String, expectedBytes: Int? = nil) {
         guard downloadingFileFor == nil else { return }
         downloadingFileFor = id
-        downloadBytes = Self.expectedBytes(for: id, in: inboxStore.inbox.messages).map { (0, $0) }
+        downloadBytes = nil
+        let expected = expectedBytes
         Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
                 let (name, _, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
-                    Task { @MainActor in
-                        guard let total = downloadBytes?.total else { return }
-                        downloadBytes = (min(received, total), total)
-                    }
+                    Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 if Task.isCancelled { return }
                 // A per-export temp dir so the file keeps its real name (the picker uses
@@ -1799,15 +1804,32 @@ struct GramView: View {
         }
     }
 
-    /// The reply size to expect for a download, in WIRE bytes: base64 inflates the
-    /// file by 4/3, and the JSON envelope adds a few hundred. Nil when the message row
-    /// carries no file size (nothing to measure against), which the chip renders as the
-    /// indeterminate spinner.
-    private static func expectedBytes(for id: String, in messages: [GramMessage]) -> Int? {
-        guard let file = messages.first(where: { $0.id == id })?.file, file.size > 0 else {
-            return nil
+    /// Apply one progress callback. Three rules the raw callback cannot enforce:
+    ///
+    /// - IDENTITY: a callback still in flight when the reader starts another download
+    ///   must not write into that one's bar, so it carries the id it began with.
+    /// - MONOTONIC: each chunk hops onto the main actor in its own task, and that
+    ///   enqueue order is not FIFO-guaranteed, so a late-landing smaller value would
+    ///   run the bar backwards. The received figure only ever grows.
+    /// - COALESCED: a 40 MB file is ~56 MB of base64 in ~32 KB chunks, i.e. ~1.7k
+    ///   callbacks, each of which would otherwise re-evaluate this whole page. One
+    ///   percent of the file is the smallest step worth a redraw; the final chunk
+    ///   always lands so the bar reaches its end.
+    @MainActor
+    private func report(_ received: Int, of expected: Int?, for id: String) {
+        guard downloadingFileFor == id, let total = expected, total > 0 else { return }
+        let clamped = min(received, total)
+        if let current = downloadBytes {
+            guard clamped >= current.received + total / 100 || clamped >= total else { return }
         }
-        return Int(Double(file.size) * 4.0 / 3.0) + 512
+        downloadBytes = (max(clamped, downloadBytes?.received ?? 0), total)
+    }
+
+    /// The reply size to expect for a file of `size` bytes, in WIRE bytes: base64
+    /// inflates it by 4/3 and the JSON envelope adds a few hundred.
+    static func expectedReplyBytes(for size: UInt64) -> Int? {
+        guard size > 0 else { return nil }
+        return Int(Double(size) * 4.0 / 3.0) + 512
     }
 
     /// Reduce a server-supplied file name to a safe single path component for the

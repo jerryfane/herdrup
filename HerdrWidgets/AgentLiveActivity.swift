@@ -17,7 +17,9 @@ struct AgentLiveActivity: Widget {
             // `LockScreenView.body`), so the surface stays herdrup-coloured without
             // going opaque.
             .activityBackgroundTint(nil)
-            .activitySystemActionForegroundColor(WidgetPalette.text)
+            // NIL, not our ink: this tints a control the SYSTEM draws on the surface it
+            // owns, and a fixed near-white measures 2.2:1 over a light wallpaper there.
+            .activitySystemActionForegroundColor(nil)
         } dynamicIsland: { context in
             DynamicIsland {
                 // THE SPEC'S REGION MAP LOST ON DEVICE. It puts the hero leading, the
@@ -368,7 +370,8 @@ private struct LockScreenView: View {
                         status: state.status,
                         diameter: 12,
                         isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale
+                        isStale: isStale,
+                        onSystemSurface: !isLuminanceReduced
                     )
                     // ONE waiting agent is not counted — the spec's state matrix puts
                     // the agent's name in the hero slot at that count, on the lock
@@ -387,7 +390,8 @@ private struct LockScreenView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
-            StatusMark(status: state.status, diameter: 12, isStale: isStale)
+            StatusMark(status: state.status, diameter: 12, isStale: isStale,
+                       onSystemSurface: !isLuminanceReduced)
                 .frame(width: 34, height: 34)
         }
     }
@@ -438,7 +442,11 @@ private struct ActivityAction: View {
             Text(title)
                 .font(WidgetFont.geistSemiBold(15))
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(WidgetPalette.text)
+                // The LABEL follows its border: system ink on the system surface, our
+                // token only on the Always-On panel we paint ourselves.
+                .foregroundStyle(onSystemSurface
+                    ? AnyShapeStyle(.primary)
+                    : AnyShapeStyle(WidgetPalette.text))
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(
@@ -459,8 +467,18 @@ private struct StatusMark: View {
     var isStale = false
     private var tint: Color { WidgetPalette.color(status) }
 
-    @ViewBuilder
     var body: some View {
+        if onSystemSurface {
+            mark
+                .padding(diameter * 0.42)
+                .background(Circle().fill(WidgetPalette.ground))
+        } else {
+            mark
+        }
+    }
+
+    @ViewBuilder
+    private var mark: some View {
         switch status {
         case .needsYou:
             if isStale || isUnconfirmed {
