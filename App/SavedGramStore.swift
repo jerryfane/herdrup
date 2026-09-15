@@ -104,6 +104,10 @@ final class SavedGramStore: ObservableObject {
 struct SavedGramRow: View {
     let saved: SavedGram
     var isDownloadingFile: Bool
+    /// Reply bytes received against bytes expected for THIS row's download. nil means
+    /// the transport reports nothing measurable, and the chip keeps its spinner rather
+    /// than drawing a bar nothing drives. Same contract as `GramRow`.
+    var downloadProgress: (received: Int, total: Int)?
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
     var onUnsave: () -> Void
@@ -145,6 +149,17 @@ struct SavedGramRow: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
     }
 
+    /// While downloading with a real byte count, the size line becomes progress. The
+    /// received figure is scaled back from base64 — the wire carries about 4/3 of the
+    /// file — so the numbers name file bytes, not transport bytes.
+    private func sizeLabel(_ file: SavedGramFile) -> String {
+        guard isDownloadingFile, let p = downloadProgress, p.total > 0 else {
+            return file.displaySize
+        }
+        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
+        return "\(GramFile.displaySize(of: done)) of \(file.displaySize)"
+    }
+
     /// A tappable chip that fetches the attachment from the server on demand (`gramGetFile`) and
     /// previews it — works while the original message still exists (it fails gracefully if the
     /// owner has since deleted it, since the bytes were never copied locally).
@@ -159,7 +174,14 @@ struct SavedGramRow: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(file.name).font(Typography.app(12, .medium)).foregroundStyle(Palette.text).lineLimit(1)
-                    Text(file.displaySize).font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
+                    Text(sizeLabel(file)).font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
+                    if isDownloadingFile, let p = downloadProgress, p.total > 0 {
+                        ProgressView(value: Double(p.received), total: Double(p.total))
+                            .progressViewStyle(.linear)
+                            .tint(Palette.brand)
+                            .frame(height: 2)
+                            .padding(.top, 3)
+                    }
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.down.circle").font(.system(size: 13)).foregroundStyle(Palette.textFaint)
