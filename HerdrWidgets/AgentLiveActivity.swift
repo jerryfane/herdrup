@@ -653,19 +653,10 @@ struct WidgetGallery: View {
                                 startPoint: .top, endPoint: .bottom)),
     ]
 
-    /// The alphas under consideration. The owner rejected the shipped surface as
-    /// "not glass"; these are rendered side by side over the same wallpapers so the
-    /// thinnest one that still carries the tertiary ink can be MEASURED off the
-    /// screenshot rather than argued from a model.
-    private static let alphas: [Double] = [0.70, 0.55, 0.40, 0.25]
-
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 ForEach(Array(Self.backdrops.enumerated()), id: \.offset) { _, backdrop in
-                    ForEach(Array(Self.alphas.enumerated()), id: \.offset) { _, alpha in
-                        card(Self.cases[0], backdrop: backdrop, alpha: alpha)
-                    }
                     ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
                         card(item, backdrop: backdrop, alpha: WidgetPalette.glassWashAlpha)
                     }
@@ -686,6 +677,10 @@ struct WidgetGallery: View {
         .accessibilityIdentifier("widget-gallery")
     }
 
+    /// Only the SHIPPED wash is drawn. The alpha sweep that chose it (0.70 / 0.55 /
+    /// 0.40 / 0.25) lived here while the decision was open; leaving it in made every
+    /// later measurement ambiguous, because the lightest card in a frame was an
+    /// experiment rather than the thing that ships.
     private func card(
         _ item: (String, AgentActivityState),
         backdrop: (String, LinearGradient),
