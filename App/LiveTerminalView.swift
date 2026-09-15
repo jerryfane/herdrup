@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import CoreText
 import SwiftUI
 import UIKit
 import SwiftTerm
@@ -842,9 +843,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// live (plug in → the front pane takes focus; unplug → it resigns). Removed in `stop()`.
         private var keyboardObservers: [NSObjectProtocol] = []
 
-        /// IBM Plex Mono (the design's MACHINE voice) at the pane size, falling back
-        /// to the system monospace if the bundled face is unavailable. The
-        /// PostScript name matches `DesignSystem.Typography`'s mono regular cut.
+        /// IBM Plex Mono (the design's MACHINE voice) with Nerd Fonts' monospaced
+        /// symbols as its first fallback. Keeping the symbols in the cascade preserves
+        /// IBM Plex's text metrics while letting Core Text split missing private-use
+        /// glyphs into `SymbolsNFM` runs for SwiftTerm to draw.
         static let minFontSize: CGFloat = 9
         static let maxFontSize: CGFloat = 24
         static let defaultFontSize: CGFloat = 12.5
@@ -854,8 +856,24 @@ struct LiveTerminalView: UIViewRepresentable {
         /// → requestGeometry, which re-locks the PTY at the new grid and cell metrics.
         var paneFontSize: CGFloat = 12.5
         var paneFont: UIFont {
-            UIFont(name: "IBMPlexMono", size: paneFontSize)
-                ?? UIFont.monospacedSystemFont(ofSize: paneFontSize, weight: .regular)
+            Self.makePaneFont(size: paneFontSize)
+        }
+
+        static func makePaneFont(size: CGFloat) -> UIFont {
+            let primary = UIFont(name: "IBMPlexMono", size: size)
+                ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            guard let symbols = UIFont(name: "SymbolsNFM", size: size) else {
+                return primary
+            }
+            let systemFallbacks =
+                CTFontCopyDefaultCascadeListForLanguages(primary as CTFont, nil)
+                as? [CTFontDescriptor] ?? []
+            var cascade: [Any] = [symbols.fontDescriptor]
+            cascade.append(contentsOf: systemFallbacks)
+            let descriptor = primary.fontDescriptor.addingAttributes([
+                .cascadeList: cascade
+            ])
+            return UIFont(descriptor: descriptor, size: size)
         }
 
         /// Apply a new terminal font size (clamped to [minFontSize, maxFontSize]).
