@@ -496,14 +496,17 @@ private enum WidgetFont {
 
 private enum WidgetPalette {
     /// How much navy sits over the system blur. MEASURED, not modelled: the DEBUG
-    /// gallery renders the card at several alphas over a bright and a dark backdrop,
-    /// and the composited surface is read off the screenshot. Over a WHITE wallpaper
-    /// the surface comes out #404251 at 0.70, #555763 at 0.55, #6B6C75 at 0.40.
+    /// gallery renders the card over a bright and a dark backdrop and the composited
+    /// surface is read off the screenshot. Over a white wallpaper the alpha sweep that
+    /// chose this constant produced #404251 at 0.70, #555763 at 0.55 and #6B6C75 at
+    /// 0.40 in the card's middle; at 0.55 the card's LIGHTEST solid surface, which is
+    /// the one that decides legibility, is #595B67.
     ///
-    /// 0.55 is the thinnest that keeps the text at WCAG AA there — tertiary 4.6:1,
-    /// primary 6.3:1 — and 0.70, which is what shipped, reads as paint rather than
-    /// glass. The status marks do not survive 0.55 in their opaque tokens, which is
-    /// what `glassColor` is for.
+    /// 0.55 is the thinnest that keeps every text tier at WCAG AA against that
+    /// surface (see `glassTextDim` / `glassTextFaint` for the measured ratios), and
+    /// 0.70 — which shipped in build 144 — reads as paint rather than glass on a real
+    /// lock screen. The status marks do not survive 0.55 in their opaque tokens, which
+    /// is what `glassColor` is for.
     static let glassWashAlpha: Double = 0.55
 
     static func glassWash(alpha: Double) -> LinearGradient {
