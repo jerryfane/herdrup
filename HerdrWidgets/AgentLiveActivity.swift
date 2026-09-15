@@ -351,10 +351,16 @@ private struct LockScreenView: View {
                         isStale: isStale,
                         onGlass: !isLuminanceReduced
                     )
-                    Text(verbatim: "\(state.needsYouCount)")
-                        .font(WidgetFont.plexSemiBold(34))
-                        .monospacedDigit()
-                        .foregroundStyle(accent)
+                    // ONE waiting agent is not counted — the spec's state matrix puts
+                    // the agent's name in the hero slot at that count, on the lock
+                    // screen as well as in the island, so the digit is suppressed on
+                    // both rather than printed on one.
+                    if state.needsYouCount > 1 {
+                        Text(verbatim: "\(state.needsYouCount)")
+                            .font(WidgetFont.plexSemiBold(34))
+                            .monospacedDigit()
+                            .foregroundStyle(accent)
+                    }
                 }
                 Text("need you")
                     .font(WidgetFont.geist(13))
@@ -402,9 +408,11 @@ private struct LockScreenView: View {
 private struct ActivityAction: View {
     let title: String
     let destination: URL
-    /// The outline has to be visible on the surface it sits on. `hairline` is a divider
-    /// for the opaque navy and measures 1.2:1 against the glass — an invisible border on
-    /// the card's only control. The glass ink measures 4.6:1 there.
+    /// The outline has to be visible on the surface it sits on, and `hairline` is not:
+    /// measured, it is 1.7:1 against the glass AND 1.5:1 against the opaque Always-On
+    /// navy it was assumed to serve. So neither surface gets it — glass takes the glass
+    /// ink (4.6:1), Always-On takes `textFaint` (3.5:1), which is the dimmest token that
+    /// still reads as an edge there.
     var onGlass = false
 
     var body: some View {
@@ -416,7 +424,7 @@ private struct ActivityAction: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(
-                            onGlass ? WidgetPalette.glassTextFaint : WidgetPalette.hairline,
+                            onGlass ? WidgetPalette.glassTextFaint : WidgetPalette.textFaint,
                             lineWidth: 1
                         )
                 }
@@ -499,10 +507,10 @@ private enum WidgetPalette {
             endPoint: .bottomTrailing
         )
     }
-    /// Secondary and tertiary text ON GLASS. Against the surface the render actually
-    /// produces they measure 7.7:1 and 6.4:1 over a bright wallpaper — the earlier
-    /// figures in this comment came from a model of the material that put the surface
-    /// four times lighter than it is.
+    /// Secondary and tertiary text ON GLASS. Against the surface `glassWashAlpha`
+    /// actually selects — #555763 over a white wallpaper — they measure 5.5:1 and
+    /// 4.6:1. The tertiary tier clears AA small text by 0.11, which is thin: any
+    /// further thinning of the wash has to be paid for here first.
     static let glassTextDim = Color(hex6: 0xDDE2F0)
     static let glassTextFaint = Color(hex6: 0xC9CFE2)
     static let ground = Color(hex6: 0x13162A)
@@ -588,11 +596,17 @@ private extension Color {
 /// Live Activity, so the lock-screen card and the expanded island shipped unlooked-at
 /// three times, and twice came back wrong from the owner's phone.
 ///
-/// This gallery renders the SAME views the widget renders — same file, same private
-/// types — inside the app, over the two backdrops that decide legibility: a bright
-/// wallpaper and a dark one. It is not the system's own composition (the island's mask
-/// and the banner's container belong to iOS), so it proves type, colour, spacing and
-/// contrast, NOT the outer geometry.
+/// This gallery renders the SAME view types the widget renders — same file, same
+/// private types — over the two backdrops that decide legibility, plus the STALE card
+/// and the ALWAYS-ON card, which `.environment(\.isLuminanceReduced, true)` reaches
+/// without a real dimmed screen.
+///
+/// WHAT IT DOES NOT PROVE: the system's own composition. The island's expanded regions
+/// are laid out here by hand inside a black container at roughly the island's width —
+/// so the types, colours and spacing inside each region are real, and the geometry
+/// around them is an approximation, because `DynamicIslandExpandedRegion` cannot be
+/// hosted outside ActivityKit. The banner's container and corner radius are likewise
+/// the system's, not this view's.
 ///
 /// Reached only through `ScreenshotMock.widgets`; the shipping app has no path to it.
 struct WidgetGallery: View {
@@ -619,8 +633,11 @@ struct WidgetGallery: View {
     ]
 
     /// A bright wallpaper is the worst case for the glass, a dark one the common case.
+    /// The bright one is TRUE WHITE at its top stop, not 0.96 — an earlier version
+    /// measured at sRGB 245 and the figures were quoted as "over white", which flattered
+    /// the tertiary tier by a little under 5%.
     private static let backdrops: [(String, LinearGradient)] = [
-        ("bright", LinearGradient(colors: [Color(white: 0.96), Color(white: 0.78)],
+        ("bright", LinearGradient(colors: [Color(white: 1.0), Color(white: 0.82)],
                                   startPoint: .top, endPoint: .bottom)),
         ("dark", LinearGradient(colors: [Color(white: 0.16), Color(white: 0.04)],
                                 startPoint: .top, endPoint: .bottom)),
@@ -642,7 +659,15 @@ struct WidgetGallery: View {
                     ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
                         card(item, backdrop: backdrop, alpha: WidgetPalette.glassWashAlpha)
                     }
+                    card(("needsYou · stale", Self.cases[0].1), backdrop: backdrop,
+                         alpha: WidgetPalette.glassWashAlpha, isStale: true)
+                    card(("needsYou · always-on", Self.cases[0].1), backdrop: backdrop,
+                         alpha: WidgetPalette.glassWashAlpha, dimmed: true)
                 }
+                ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
+                    island(item, isStale: false)
+                }
+                island(("needsYou · stale", Self.cases[0].1), isStale: true)
             }
             .padding(20)
             .frame(maxWidth: .infinity)
@@ -654,13 +679,16 @@ struct WidgetGallery: View {
     private func card(
         _ item: (String, AgentActivityState),
         backdrop: (String, LinearGradient),
-        alpha: Double
+        alpha: Double,
+        isStale: Bool = false,
+        dimmed: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("\(item.0) · \(backdrop.0) · wash \(Int(alpha * 100))")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
-            LockScreenView(hostLabel: "tower", state: item.1, isStale: false, washAlpha: alpha)
+            LockScreenView(hostLabel: "tower", state: item.1, isStale: isStale, washAlpha: alpha)
+                .environment(\.isLuminanceReduced, dimmed)
                 .frame(width: 353)
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .background {
@@ -668,6 +696,31 @@ struct WidgetGallery: View {
                         .frame(width: 373)
                         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
                 }
+        }
+    }
+
+    /// The expanded island's four regions, laid out by hand because ActivityKit owns
+    /// the real container. Widths are the documented ones: ~110 pt for each corner,
+    /// the rest to the centre, and the bottom spanning the whole island.
+    private func island(_ item: (String, AgentActivityState), isStale: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("island · \(item.0)\(isStale ? " · stale" : "")")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 8) {
+                    ExpandedHero(state: item.1, isStale: isStale)
+                        .frame(width: 96, alignment: .leading)
+                    ExpandedHeadline(state: item.1, isStale: isStale)
+                    FleetTotals(hostLabel: "tower", state: item.1)
+                        .frame(width: 96, alignment: .trailing)
+                }
+                ExpandedAction(state: item.1)
+            }
+            .padding(12)
+            .frame(width: 353)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
         }
     }
 }
