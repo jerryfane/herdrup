@@ -166,15 +166,18 @@ private struct ExpandedHeadline: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// STALE reads as the summary's own doubt wording — "N may need you" — because a
-    /// name stated plainly is a claim the card cannot back. Nothing waiting and nothing
-    /// working is the ZERO STATE, which says so in words rather than printing an
-    /// agent's name under a hero that is not there.
+    /// STALE reads as the summary's own doubt wording — "N may need you" — because the
+    /// agent's name stated plainly is a claim the card cannot back once the roster is
+    /// unconfirmed. That is the ONLY substitution made here.
+    ///
+    /// The design's zero card says "Nothing needs you", and that wording deliberately
+    /// does NOT get synthesised in this file: the comment on `AgentActivityState` below
+    /// records what happened last time a view rewrote the headline on
+    /// `needsYouCount == 0` — an all-clear printed over a red stopped mark, and over the
+    /// connect handshake. A quiet roster has to say so from `AgentList.activityContent`,
+    /// where a test can execute the rule.
     private var headline: String {
-        if isStale, state.needsYouCount > 0 { return AgentActivitySummary.line(state) }
-        return state.needsYouCount == 0 && state.workingCount == 0
-            ? "Nothing needs you"
-            : state.headline
+        isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
     }
 
     /// The age line: how long this has been waiting, how long the single working agent
@@ -323,11 +326,8 @@ private struct LockScreenView: View {
     private var dim: Color { isLuminanceReduced ? WidgetPalette.textDim : WidgetPalette.glassTextDim }
     private var faint: Color { isLuminanceReduced ? WidgetPalette.textFaint : WidgetPalette.glassTextFaint }
 
-    /// The zero card says so in words. A name under a suppressed hero reads as though
-    /// that agent wants something, which is the one thing this state must not imply.
-    private var lockHeadline: String {
-        state.needsYouCount == 0 && state.workingCount == 0 ? "Nothing needs you" : state.headline
-    }
+    /// No headline override here either — see `ExpandedHeadline.headline`.
+    private var lockHeadline: String { state.headline }
 
     @ViewBuilder
     private var lockHero: some View {
@@ -532,3 +532,77 @@ private extension Color {
         )
     }
 }
+
+#if DEBUG
+/// EVERY PREVIOUS ROUND OF THIS LAYOUT WAS JUDGED BY ARITHMETIC. XCUITest cannot see a
+/// Live Activity, so the lock-screen card and the expanded island shipped unlooked-at
+/// three times, and twice came back wrong from the owner's phone.
+///
+/// This gallery renders the SAME views the widget renders — same file, same private
+/// types — inside the app, over the two backdrops that decide legibility: a bright
+/// wallpaper and a dark one. It is not the system's own composition (the island's mask
+/// and the banner's container belong to iOS), so it proves type, colour, spacing and
+/// contrast, NOT the outer geometry.
+///
+/// Reached only through `ScreenshotMock.widgets`; the shipping app has no path to it.
+struct WidgetGallery: View {
+    /// Four states worth looking at, chosen from the design's own state matrix.
+    private static let cases: [(String, AgentActivityState)] = [
+        ("needsYou · many", AgentActivityState(
+            headline: "api-refactor", status: .needsYou, needsYouCount: 23,
+            workingCount: 7, totalCount: 31, workingSince: nil,
+            blockedSince: Date().addingTimeInterval(-252).timeIntervalSince1970,
+            question: "Run migration on prod db?", agentID: "a1")),
+        ("needsYou · one", AgentActivityState(
+            headline: "docs-sweep", status: .needsYou, needsYouCount: 1,
+            workingCount: 2, totalCount: 9, workingSince: nil,
+            blockedSince: Date().addingTimeInterval(-41).timeIntervalSince1970,
+            question: "Overwrite README?", agentID: "a2")),
+        ("working only", AgentActivityState(
+            headline: "index-rebuild", status: .working, needsYouCount: 0,
+            workingCount: 1, totalCount: 12,
+            workingSince: Date().addingTimeInterval(-903).timeIntervalSince1970,
+            agentID: "a3")),
+        ("stopped", AgentActivityState(
+            headline: "flaky-e2e", status: .stopped, needsYouCount: 0,
+            workingCount: 0, totalCount: 5, workingSince: nil, agentID: "a4")),
+    ]
+
+    /// A bright wallpaper is the worst case for the glass, a dark one the common case.
+    private static let backdrops: [(String, LinearGradient)] = [
+        ("bright", LinearGradient(colors: [Color(white: 0.96), Color(white: 0.78)],
+                                  startPoint: .top, endPoint: .bottom)),
+        ("dark", LinearGradient(colors: [Color(white: 0.16), Color(white: 0.04)],
+                                startPoint: .top, endPoint: .bottom)),
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                ForEach(Array(Self.backdrops.enumerated()), id: \.offset) { _, backdrop in
+                    ForEach(Array(Self.cases.enumerated()), id: \.offset) { index, item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(item.0) · \(backdrop.0)")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                            LockScreenView(hostLabel: "tower", state: item.1, isStale: false)
+                                .frame(width: 353)
+                                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                                .background {
+                                    backdrop.1
+                                        .frame(width: 373)
+                                        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                                }
+                                .accessibilityIdentifier("widget-card-\(index)")
+                        }
+                    }
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color.black)
+        .accessibilityIdentifier("widget-gallery")
+    }
+}
+#endif
