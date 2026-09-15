@@ -12,7 +12,7 @@ struct AgentLiveActivity: Widget {
             )
             .widgetURL(context.state.deepLinkURL)
             // NO TINT: passing nil leaves the system's own translucent background in
-            // place, which is what makes the activity read as glass over the wallpaper.
+            // place, and that surface is the one that actually shows the wallpaper.
             // The view paints its own blur + brand sheen on top of that (see
             // `LockScreenView.body`), so the surface stays herdrup-coloured without
             // going opaque.
@@ -260,22 +260,20 @@ private struct LockScreenView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(lockHeadline)
                         .font(WidgetFont.geistSemiBold(17))
-                        .foregroundStyle(WidgetPalette.text)
+                        .foregroundStyle(primaryInk)
                         .lineLimit(1)
                     if let question = state.question, !question.isEmpty, !isStale {
                         Text(question)
                             .font(WidgetFont.plex(13))
-                            .foregroundStyle(dim)
+                            .foregroundStyle(secondaryInk)
                             .lineLimit(1)
                     } else if state.needsYouCount > 0, !isStale {
-                        // INK, not the status tint. This is a 13pt TEXT run, and the
-                        // glass tints are lifted only to the 3:1 graphic bar that the
-                        // mark needs — #F2B85C measures 3.78:1 on the glass, under the
-                        // 4.5:1 small-text bar. The hue still carries meaning two
-                        // inches away, in the mark and the hero number.
+                        // INK, not the status hue: a 13pt text run on a surface whose
+                        // brightness we do not control. The hue keeps its meaning in
+                        // the mark beside it, which is a shape as well as a colour.
                         Text(AgentActivitySummary.line(state))
                             .font(WidgetFont.plex(13))
-                            .foregroundStyle(dim)
+                            .foregroundStyle(secondaryInk)
                             .lineLimit(1)
                     }
                     // The fleet line and the age both go under Always-On: the spec drops
@@ -291,7 +289,7 @@ private struct LockScreenView: View {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
                     destination: state.deepLinkURL,
-                    onGlass: !isLuminanceReduced
+                    onSystemSurface: !isLuminanceReduced
                 )
             }
         }
@@ -319,16 +317,39 @@ private struct LockScreenView: View {
         }
     }
 
-    /// Secondary and tertiary ink, picked for the surface actually behind them. On
-    /// glass the wallpaper is unknown, so the lifted pair is the only one that stays
-    /// legible over a bright one; on the Always-On backdrop the surface is the opaque
-    /// navy these were tuned against, and the dimmer pair is correct there.
-    private var dim: Color { isLuminanceReduced ? WidgetPalette.textDim : WidgetPalette.glassTextDim }
-    private var faint: Color { isLuminanceReduced ? WidgetPalette.textFaint : WidgetPalette.glassTextFaint }
-    /// The status hue for this surface: lifted on glass, the token itself on the
-    /// opaque Always-On panel.
-    private var accent: Color {
-        isLuminanceReduced ? state.markColor : WidgetPalette.glassColor(state.status)
+    // INK ON A SURFACE WE DO NOT OWN.
+    //
+    // With no background of our own (see `body`), the card sits on the system's
+    // translucent material over an unknown wallpaper. Measured, that surface can land
+    // anywhere: #1D1F2E over a dark wallpaper, #A3A3A3 over a white one. NO fixed
+    // colour carries three text tiers across that range — near-white measures 2.2:1 on
+    // the light end, and a dark ink measures 2.6:1 on the dark end.
+    //
+    // So the text asks the system instead. `.primary` / `.secondary` / `.tertiary` in a
+    // widget get VIBRANCY, which blends with whatever iOS composited behind the card
+    // and is the only mechanism that holds at both ends. It is also what every
+    // first-party activity uses. The honest cost: the gallery cannot reproduce
+    // vibrancy, so the lock screen's contrast is now the system's guarantee rather
+    // than a number this repo measured.
+    //
+    // Always-On is different: there the card paints its own opaque navy, so the tokens
+    // tuned for it are correct and are used.
+    private var primaryInk: AnyShapeStyle {
+        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.text) : AnyShapeStyle(.primary)
+    }
+    private var secondaryInk: AnyShapeStyle {
+        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.textDim) : AnyShapeStyle(.secondary)
+    }
+    private var tertiaryInk: AnyShapeStyle {
+        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.textFaint) : AnyShapeStyle(.tertiary)
+    }
+    /// The hero number's ink. On Always-On it takes the status hue, which is legible
+    /// against the card's own navy. On the system surface it takes `.primary`: the hue
+    /// there would sit on an unknown backdrop — amber measures 1.4:1 over a white
+    /// wallpaper — and the number is the hero by SIZE, with the mark beside it carrying
+    /// the colour and the shape.
+    private var heroInk: AnyShapeStyle {
+        isLuminanceReduced ? AnyShapeStyle(state.markColor) : AnyShapeStyle(.primary)
     }
 
     /// STALE takes the summary's own doubt wording, the same substitution the island
@@ -347,8 +368,7 @@ private struct LockScreenView: View {
                         status: state.status,
                         diameter: 12,
                         isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale,
-                        onGlass: !isLuminanceReduced
+                        isStale: isStale
                     )
                     // ONE waiting agent is not counted — the spec's state matrix puts
                     // the agent's name in the hero slot at that count, on the lock
@@ -358,17 +378,16 @@ private struct LockScreenView: View {
                         Text(verbatim: "\(state.needsYouCount)")
                             .font(WidgetFont.plexSemiBold(34))
                             .monospacedDigit()
-                            .foregroundStyle(accent)
+                            .foregroundStyle(heroInk)
                     }
                 }
                 Text("need you")
                     .font(WidgetFont.geist(13))
-                    .foregroundStyle(dim)
+                    .foregroundStyle(secondaryInk)
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
-            StatusMark(status: state.status, diameter: 12, isStale: isStale,
-                       onGlass: !isLuminanceReduced)
+            StatusMark(status: state.status, diameter: 12, isStale: isStale)
                 .frame(width: 34, height: 34)
         }
     }
@@ -383,18 +402,18 @@ private struct LockScreenView: View {
                     Text("· no update from \(hostLabel)")
                 }
                 .font(WidgetFont.plex(11))
-                .foregroundStyle(faint)
+                .foregroundStyle(tertiaryInk)
                 .lineLimit(1)
             } else {
                 Text("No update from \(hostLabel)")
                     .font(WidgetFont.plex(11))
-                    .foregroundStyle(faint)
+                    .foregroundStyle(tertiaryInk)
                     .lineLimit(1)
             }
         } else {
             Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
                 .font(WidgetFont.plex(11))
-                .foregroundStyle(faint)
+                .foregroundStyle(tertiaryInk)
                 .lineLimit(1)
         }
     }
@@ -407,13 +426,12 @@ private struct LockScreenView: View {
 private struct ActivityAction: View {
     let title: String
     let destination: URL
-    /// The outline has to be visible on the surface it sits on. The old `hairline`
-    /// token served neither — measured, 1.7:1 against the glass and 1.5:1 against the
-    /// opaque Always-On navy it was assumed to be for — so it is gone from this file
-    /// entirely. Glass takes the glass ink (4.7:1 at the card's lightest spot);
-    /// Always-On takes `textFaint` (3.5:1), the dimmest token that still reads as an
-    /// edge there.
-    var onGlass = false
+    /// Which surface this sits on. On the system's translucent material the border
+    /// asks the system too (`.tertiary`, vibrancy-treated) for the same reason the text
+    /// does; on the opaque Always-On navy it takes `textFaint`, which measures 3.5:1
+    /// there. The old `hairline` token served neither — 1.7:1 and 1.5:1 measured — and
+    /// is gone from this file.
+    var onSystemSurface = false
 
     var body: some View {
         Link(destination: destination) {
@@ -424,7 +442,9 @@ private struct ActivityAction: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(
-                            onGlass ? WidgetPalette.glassTextFaint : WidgetPalette.textFaint,
+                            onSystemSurface
+                                ? AnyShapeStyle(.tertiary)
+                                : AnyShapeStyle(WidgetPalette.textFaint),
                             lineWidth: 1
                         )
                 }
@@ -437,13 +457,7 @@ private struct StatusMark: View {
     var diameter: CGFloat = 10
     var isUnconfirmed = false
     var isStale = false
-    /// The lock screen's glass needs the lifted tints; the island is drawn on black and
-    /// the Always-On panel on the opaque navy, where the tokens themselves are right.
-    var onGlass = false
-
-    private var tint: Color {
-        onGlass ? WidgetPalette.glassColor(status) : WidgetPalette.color(status)
-    }
+    private var tint: Color { WidgetPalette.color(status) }
 
     @ViewBuilder
     var body: some View {
@@ -489,39 +503,7 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
-    /// Secondary and tertiary text ON GLASS, measured at the card's WORST spot — the
-    /// lightest solid surface any shipped card produces over a true white wallpaper,
-    /// #595B67, rather than its middle. The previous pair measured 4.40:1 there, under
-    /// the AA small-text bar; this pair measures 5.60:1 and 4.69:1, with the primary at
-    /// 5.92:1 and the lifted status marks at 3.78 / 3.62 / 3.18.
-    ///
-    /// The tiers sit close together on glass by nature: the surface is light enough that
-    /// there is little room below white. Size and weight — 16 / 12 / 11 pt — carry the
-    /// rest of the hierarchy, as they do in the opaque palette.
-    static let glassTextDim = Color(hex6: 0xE6EAF5)
-    static let glassTextFaint = Color(hex6: 0xD2D7E8)
-    /// Tertiary text ON THE ISLAND, whose background is true black. `textFaint`
-    /// measures 4.16:1 there — under the small-text bar at the 11 pt this tier is
-    /// always set in — so the island gets its own step, at 5.2:1. It stays dimmer than
-    /// `textDim` (8.1:1 on black), which is what keeps the three tiers apart.
-    static let islandTextFaint = Color(hex6: 0x767DA3)
     static let ground = Color(hex6: 0x13162A)
-    /// The status colours ON GLASS. Same hues — colour still carries meaning — lifted
-    /// until each clears 3:1 against the measured 0.55 surface over a white wallpaper,
-    /// where the opaque tokens fall to 2.5:1 (working) and 2.0:1 (died). The mark is
-    /// the one graphic the whole card rests on; it does not get to be marginal.
-    static let glassWaiting = Color(hex6: 0xF2B85C)
-    static let glassWorking = Color(hex6: 0x8FC3F5)
-    static let glassDied = Color(hex6: 0xF59A92)
-
-    static func glassColor(_ status: AgentActivityAttributes.Status) -> Color {
-        switch status {
-        case .needsYou: return glassWaiting
-        case .working: return glassWorking
-        case .idle: return glassTextFaint
-        case .stopped: return glassDied
-        }
-    }
     /// A top-leading lift on the ground colour. Two stops, eight points apart in
     /// lightness: enough to read as depth on the lock screen, not enough to fight the
     /// status marks, which are the only saturated things on the surface.
@@ -628,7 +610,10 @@ struct WidgetGallery: View {
             workingCount: 0, totalCount: 5, workingSince: nil, agentID: "a4")),
     ]
 
-    /// A bright wallpaper is the worst case for the glass, a dark one the common case.
+    /// A bright wallpaper is the worst case for a translucent card, a dark one the
+    /// common case. NOTE the gallery's limit: the system applies VIBRANCY to `.primary`
+    /// and friends on the real lock screen, and nothing here reproduces it, so these
+    /// frames show layout faithfully and contrast only approximately.
     /// The bright one is TRUE WHITE at its top stop, not 0.96 — an earlier version
     /// measured at sRGB 245 and the figures were quoted as "over white", which flattered
     /// the tertiary tier by a little under 5%.
