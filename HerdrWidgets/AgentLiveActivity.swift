@@ -465,6 +465,16 @@ private struct StatusMark: View {
     var diameter: CGFloat = 10
     var isUnconfirmed = false
     var isStale = false
+    /// On the SYSTEM surface the mark gets a small disc of our own `ground` behind it.
+    /// Without one the hue has nothing to work against: over the measured #A3A3A3 the
+    /// tokens fall to 1.14–1.45:1, so the working ring is effectively invisible on a
+    /// white wallpaper — and this mark is what the lock screen's hero handed its
+    /// meaning to when the amber number became system ink. On the disc they measure
+    /// 4.9–8.5:1, against a surface this file owns rather than a guess about what iOS
+    /// composited. The island and the Always-On panel need no disc: both are already
+    /// surfaces we paint.
+    var onSystemSurface = false
+
     private var tint: Color { WidgetPalette.color(status) }
 
     var body: some View {
