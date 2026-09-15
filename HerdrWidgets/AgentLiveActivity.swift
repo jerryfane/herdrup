@@ -302,7 +302,8 @@ private struct LockScreenView: View {
             if state.needsYouCount > 0 {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
-                    destination: state.deepLinkURL
+                    destination: state.deepLinkURL,
+                    onGlass: !isLuminanceReduced
                 )
             }
         }
@@ -401,6 +402,10 @@ private struct LockScreenView: View {
 private struct ActivityAction: View {
     let title: String
     let destination: URL
+    /// The outline has to be visible on the surface it sits on. `hairline` is a divider
+    /// for the opaque navy and measures 1.2:1 against the glass — an invisible border on
+    /// the card's only control. The glass ink measures 4.6:1 there.
+    var onGlass = false
 
     var body: some View {
         Link(destination: destination) {
@@ -410,7 +415,10 @@ private struct ActivityAction: View {
                 .foregroundStyle(WidgetPalette.text)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(WidgetPalette.hairline, lineWidth: 1)
+                        .strokeBorder(
+                            onGlass ? WidgetPalette.glassTextFaint : WidgetPalette.hairline,
+                            lineWidth: 1
+                        )
                 }
         }
     }
