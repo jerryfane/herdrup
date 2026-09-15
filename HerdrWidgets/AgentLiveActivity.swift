@@ -241,21 +241,22 @@ private struct ExpandedAction: View {
 }
 
 /// The glass surface: the system's own blur under a brand-tinted wash, so the panel
-/// keeps the herdrup hue while the wallpaper still moves behind it. Never used over an
-/// opaque fill, which would throw away the blur and leave only the wash.
-///
-/// NO OUTER BORDER, per the spec's lock-screen row: the system owns the card's corners
-/// and its tint, so a border drawn inside it is a second, wrong edge a few points in
-/// from the real one.
+/// keeps the herdrup hue while the wallpaper still moves behind it. NO OUTER BORDER,
+/// per the spec's lock-screen row — the system owns the card's corners and its tint.
 private struct GlassSurface: View {
     var cornerRadius: CGFloat
+    /// Overridable so the DEBUG gallery can render the same card at several alphas in
+    /// one screenshot and the choice can be measured off real pixels instead of a model
+    /// of the material, which turned out to be far off: the modelled worst case put the
+    /// composited surface near #B0B0B0, the render puts it at #404251.
+    var washAlpha: Double = WidgetPalette.glassWashAlpha
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(.ultraThinMaterial)
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(WidgetPalette.glassWash)
+                    .fill(WidgetPalette.glassWash(alpha: washAlpha))
             }
     }
 }
@@ -264,6 +265,9 @@ private struct LockScreenView: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
     let isStale: Bool
+    /// DEBUG gallery only: renders the same card at a different wash so the alpha can
+    /// be chosen from pixels. Production always takes the palette's value.
+    var washAlpha: Double = WidgetPalette.glassWashAlpha
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
 
     var body: some View {
@@ -314,7 +318,7 @@ private struct LockScreenView: View {
             if isLuminanceReduced {
                 WidgetPalette.backdrop
             } else {
-                GlassSurface(cornerRadius: 0)
+                GlassSurface(cornerRadius: 0, washAlpha: washAlpha)
             }
         }
     }
@@ -455,20 +459,24 @@ private enum WidgetFont {
 }
 
 private enum WidgetPalette {
-    /// The brand wash over the system blur. 0.70, because 0.80 did not read as glass on
-    /// a real lock screen — the panel looked painted. Thinner than this and the small
-    /// text loses: the surface sits over an UNKNOWN wallpaper, and modelling the worst
-    /// case (a white one, through the material) puts the tertiary ink at 2.1:1 by 0.45.
-    /// Every drop in this alpha has to be paid for in the inks below.
-    static let glassWash = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A).opacity(0.70), Color(hex6: 0x13162A).opacity(0.70)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-    /// Secondary and tertiary text ON GLASS, lifted again to pay for the thinner wash.
-    /// Over the worst-case bright wallpaper they measure 5.2:1 and 4.3:1 — the pair
-    /// tuned for the opaque navy measures 1.5:1 and 1.0:1 there. Only glass paths use
-    /// these; the Always-On panel is opaque and keeps `textDim` / `textFaint`.
+    /// How much navy sits over the system blur. MEASURED, not modelled: the DEBUG
+    /// gallery renders the card over a bright and a dark backdrop and the composited
+    /// surface is read off the screenshot. At 0.70 that surface is #404251 over a
+    /// bright wallpaper and #1D1F2E over a dark one — a 35-point spread, which is why
+    /// the panel read as painted rather than as glass.
+    static let glassWashAlpha: Double = 0.70
+
+    static func glassWash(alpha: Double) -> LinearGradient {
+        LinearGradient(
+            colors: [Color(hex6: 0x1B1F3A).opacity(alpha), Color(hex6: 0x13162A).opacity(alpha)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+    /// Secondary and tertiary text ON GLASS. Against the surface the render actually
+    /// produces they measure 7.7:1 and 6.4:1 over a bright wallpaper — the earlier
+    /// figures in this comment came from a model of the material that put the surface
+    /// four times lighter than it is.
     static let glassTextDim = Color(hex6: 0xDDE2F0)
     static let glassTextFaint = Color(hex6: 0xC9CFE2)
     static let ground = Color(hex6: 0x13162A)
@@ -576,25 +584,21 @@ struct WidgetGallery: View {
                                 startPoint: .top, endPoint: .bottom)),
     ]
 
+    /// The alphas under consideration. The owner rejected the shipped surface as
+    /// "not glass"; these are rendered side by side over the same wallpapers so the
+    /// thinnest one that still carries the tertiary ink can be MEASURED off the
+    /// screenshot rather than argued from a model.
+    private static let alphas: [Double] = [0.70, 0.55, 0.40, 0.25]
+
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 ForEach(Array(Self.backdrops.enumerated()), id: \.offset) { _, backdrop in
-                    ForEach(Array(Self.cases.enumerated()), id: \.offset) { index, item in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("\(item.0) · \(backdrop.0)")
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                            LockScreenView(hostLabel: "tower", state: item.1, isStale: false)
-                                .frame(width: 353)
-                                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                                .background {
-                                    backdrop.1
-                                        .frame(width: 373)
-                                        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-                                }
-                                .accessibilityIdentifier("widget-card-\(index)")
-                        }
+                    ForEach(Array(Self.alphas.enumerated()), id: \.offset) { _, alpha in
+                        card(Self.cases[0], backdrop: backdrop, alpha: alpha)
+                    }
+                    ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
+                        card(item, backdrop: backdrop, alpha: WidgetPalette.glassWashAlpha)
                     }
                 }
             }
@@ -603,6 +607,26 @@ struct WidgetGallery: View {
         }
         .background(Color.black)
         .accessibilityIdentifier("widget-gallery")
+    }
+
+    private func card(
+        _ item: (String, AgentActivityState),
+        backdrop: (String, LinearGradient),
+        alpha: Double
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(item.0) · \(backdrop.0) · wash \(Int(alpha * 100))")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            LockScreenView(hostLabel: "tower", state: item.1, isStale: false, washAlpha: alpha)
+                .frame(width: 353)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .background {
+                    backdrop.1
+                        .frame(width: 373)
+                        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                }
+        }
     }
 }
 #endif
