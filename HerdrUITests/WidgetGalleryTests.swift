@@ -20,7 +20,7 @@ final class WidgetGalleryTests: XCTestCase {
         // Queried as TEXT, not as the container's identifier: a SwiftUI ScrollView does
         // not surface one to XCUITest, which is how the first version of this receipt
         // failed while the gallery was on screen the whole time.
-        XCTAssertTrue(app.staticTexts["needsYou · many · bright · wash 70"].waitForExistence(timeout: 20),
+        XCTAssertTrue(app.staticTexts["needsYou · many · bright · wash 55"].waitForExistence(timeout: 20),
                       "the gallery must render before anything is captured")
         XCTAssertTrue(app.staticTexts["api-refactor"].firstMatch.waitForExistence(timeout: 10),
                       "and it must contain the cards, not just their captions")
