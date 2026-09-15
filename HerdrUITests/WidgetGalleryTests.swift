@@ -17,10 +17,13 @@ final class WidgetGalleryTests: XCTestCase {
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "widgets"
         app.launch()
 
-        XCTAssertTrue(app.otherElements["widget-gallery"].waitForExistence(timeout: 20),
+        // Queried as TEXT, not as the container's identifier: a SwiftUI ScrollView does
+        // not surface one to XCUITest, which is how the first version of this receipt
+        // failed while the gallery was on screen the whole time.
+        XCTAssertTrue(app.staticTexts["needsYou · many · bright"].waitForExistence(timeout: 20),
                       "the gallery must render before anything is captured")
-        XCTAssertTrue(app.otherElements["widget-card-0"].waitForExistence(timeout: 10),
-                      "and it must contain the cards, not just its own container")
+        XCTAssertTrue(app.staticTexts["api-refactor"].firstMatch.waitForExistence(timeout: 10),
+                      "and it must contain the cards, not just their captions")
 
         // The material and the timers settle a beat after the first paint.
         Thread.sleep(forTimeInterval: 1.5)
