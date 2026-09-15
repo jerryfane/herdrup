@@ -287,7 +287,7 @@ private struct LockScreenView: View {
                     } else if state.needsYouCount > 0, !isStale {
                         Text(AgentActivitySummary.line(state))
                             .font(WidgetFont.plex(13))
-                            .foregroundStyle(state.markColor)
+                            .foregroundStyle(accent)
                             .lineLimit(1)
                     }
                     // The fleet line and the age both go under Always-On: the spec drops
@@ -329,6 +329,11 @@ private struct LockScreenView: View {
     /// navy these were tuned against, and the dimmer pair is correct there.
     private var dim: Color { isLuminanceReduced ? WidgetPalette.textDim : WidgetPalette.glassTextDim }
     private var faint: Color { isLuminanceReduced ? WidgetPalette.textFaint : WidgetPalette.glassTextFaint }
+    /// The status hue for this surface: lifted on glass, the token itself on the
+    /// opaque Always-On panel.
+    private var accent: Color {
+        isLuminanceReduced ? state.markColor : WidgetPalette.glassColor(state.status)
+    }
 
     /// No headline override here either — see `ExpandedHeadline.headline`.
     private var lockHeadline: String { state.headline }
@@ -342,12 +347,13 @@ private struct LockScreenView: View {
                         status: state.status,
                         diameter: 12,
                         isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale
+                        isStale: isStale,
+                        onGlass: !isLuminanceReduced
                     )
                     Text(verbatim: "\(state.needsYouCount)")
                         .font(WidgetFont.plexSemiBold(34))
                         .monospacedDigit()
-                        .foregroundStyle(WidgetPalette.waiting)
+                        .foregroundStyle(accent)
                 }
                 Text("need you")
                     .font(WidgetFont.geist(13))
@@ -355,7 +361,8 @@ private struct LockScreenView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
-            StatusMark(status: state.status, diameter: 12, isStale: isStale)
+            StatusMark(status: state.status, diameter: 12, isStale: isStale,
+                       onGlass: !isLuminanceReduced)
                 .frame(width: 34, height: 34)
         }
     }
@@ -414,6 +421,13 @@ private struct StatusMark: View {
     var diameter: CGFloat = 10
     var isUnconfirmed = false
     var isStale = false
+    /// The lock screen's glass needs the lifted tints; the island is drawn on black and
+    /// the Always-On panel on the opaque navy, where the tokens themselves are right.
+    var onGlass = false
+
+    private var tint: Color {
+        onGlass ? WidgetPalette.glassColor(status) : WidgetPalette.color(status)
+    }
 
     @ViewBuilder
     var body: some View {
@@ -421,28 +435,28 @@ private struct StatusMark: View {
         case .needsYou:
             if isStale || isUnconfirmed {
                 Circle()
-                    .strokeBorder(WidgetPalette.waiting, lineWidth: max(1.5, diameter * 0.16))
+                    .strokeBorder(tint, lineWidth: max(1.5, diameter * 0.16))
                     .frame(width: diameter, height: diameter)
             } else {
                 Circle()
-                    .fill(WidgetPalette.waiting)
+                    .fill(tint)
                     .frame(width: diameter, height: diameter)
             }
         case .working:
             Circle()
-                .strokeBorder(WidgetPalette.working, lineWidth: max(1.5, diameter * 0.16))
+                .strokeBorder(tint, lineWidth: max(1.5, diameter * 0.16))
                 .frame(width: diameter, height: diameter)
         case .idle:
             Circle()
-                .fill(WidgetPalette.textFaint)
+                .fill(tint)
                 .frame(width: max(4, diameter * 0.42), height: max(4, diameter * 0.42))
                 .frame(width: diameter, height: diameter)
         case .stopped:
             ZStack {
                 Circle()
-                    .strokeBorder(WidgetPalette.died, lineWidth: max(1.5, diameter * 0.15))
+                    .strokeBorder(tint, lineWidth: max(1.5, diameter * 0.15))
                 Capsule()
-                    .fill(WidgetPalette.died)
+                    .fill(tint)
                     .frame(width: diameter * 0.62, height: max(1.5, diameter * 0.14))
             }
             .frame(width: diameter, height: diameter)
@@ -460,11 +474,15 @@ private enum WidgetFont {
 
 private enum WidgetPalette {
     /// How much navy sits over the system blur. MEASURED, not modelled: the DEBUG
-    /// gallery renders the card over a bright and a dark backdrop and the composited
-    /// surface is read off the screenshot. At 0.70 that surface is #404251 over a
-    /// bright wallpaper and #1D1F2E over a dark one — a 35-point spread, which is why
-    /// the panel read as painted rather than as glass.
-    static let glassWashAlpha: Double = 0.70
+    /// gallery renders the card at several alphas over a bright and a dark backdrop,
+    /// and the composited surface is read off the screenshot. Over a WHITE wallpaper
+    /// the surface comes out #404251 at 0.70, #555763 at 0.55, #6B6C75 at 0.40.
+    ///
+    /// 0.55 is the thinnest that keeps the text at WCAG AA there — tertiary 4.6:1,
+    /// primary 6.3:1 — and 0.70, which is what shipped, reads as paint rather than
+    /// glass. The status marks do not survive 0.55 in their opaque tokens, which is
+    /// what `glassColor` is for.
+    static let glassWashAlpha: Double = 0.55
 
     static func glassWash(alpha: Double) -> LinearGradient {
         LinearGradient(
@@ -480,6 +498,22 @@ private enum WidgetPalette {
     static let glassTextDim = Color(hex6: 0xDDE2F0)
     static let glassTextFaint = Color(hex6: 0xC9CFE2)
     static let ground = Color(hex6: 0x13162A)
+    /// The status colours ON GLASS. Same hues — colour still carries meaning — lifted
+    /// until each clears 3:1 against the measured 0.55 surface over a white wallpaper,
+    /// where the opaque tokens fall to 2.5:1 (working) and 2.0:1 (died). The mark is
+    /// the one graphic the whole card rests on; it does not get to be marginal.
+    static let glassWaiting = Color(hex6: 0xF2B85C)
+    static let glassWorking = Color(hex6: 0x8FC3F5)
+    static let glassDied = Color(hex6: 0xF59A92)
+
+    static func glassColor(_ status: AgentActivityAttributes.Status) -> Color {
+        switch status {
+        case .needsYou: return glassWaiting
+        case .working: return glassWorking
+        case .idle: return glassTextFaint
+        case .stopped: return glassDied
+        }
+    }
     /// A top-leading lift on the ground colour. Two stops, eight points apart in
     /// lightness: enough to read as depth on the lock screen, not enough to fight the
     /// status marks, which are the only saturated things on the surface.
