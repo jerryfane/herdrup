@@ -513,14 +513,16 @@ private enum WidgetPalette {
             endPoint: .bottomTrailing
         )
     }
-    /// Secondary and tertiary text ON GLASS. Against the surface `glassWashAlpha`
-    /// actually selects — measured #545662 over a TRUE WHITE wallpaper — they come out
-    /// 5.6:1 and 4.7:1, with the primary at 6.4:1. The tertiary tier clears AA small
-    /// text by 0.2, which is thin: any further thinning of the wash has to be paid for
-    /// here first. The three tiers sit close together on glass by nature; size and
-    /// weight (16 / 12 / 11 pt) carry the rest of the hierarchy.
-    static let glassTextDim = Color(hex6: 0xDDE2F0)
-    static let glassTextFaint = Color(hex6: 0xC9CFE2)
+    /// Secondary and tertiary text ON GLASS, measured at the card's WORST spot — the
+    /// top of the wash gradient over a true white wallpaper, #585A66, not the middle.
+    /// #C9CFE2 measured 4.40:1 there, under the AA small-text bar, so the tertiary tier
+    /// is #D2D7E8 (4.8:1) and the secondary #E6EAF5 (5.7:1), with the primary at 6.0:1.
+    ///
+    /// The tiers sit close together on glass by nature: the surface is light enough that
+    /// there is little room below white. Size and weight — 16 / 12 / 11 pt — carry the
+    /// rest of the hierarchy, as they do in the opaque palette.
+    static let glassTextDim = Color(hex6: 0xE6EAF5)
+    static let glassTextFaint = Color(hex6: 0xD2D7E8)
     static let ground = Color(hex6: 0x13162A)
     /// The status colours ON GLASS. Same hues — colour still carries meaning — lifted
     /// until each clears 3:1 against the measured 0.55 surface over a white wallpaper,
