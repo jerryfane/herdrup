@@ -844,9 +844,8 @@ struct LiveTerminalView: UIViewRepresentable {
         private var keyboardObservers: [NSObjectProtocol] = []
 
         /// IBM Plex Mono (the design's MACHINE voice) with Nerd Fonts' monospaced
-        /// symbols as its first fallback. Keeping the symbols in the cascade preserves
-        /// IBM Plex's text metrics while letting Core Text split missing private-use
-        /// glyphs into `SymbolsNFM` runs for SwiftTerm to draw.
+        /// symbols in its cascade, so IBM Plex keeps its text metrics while Core Text
+        /// splits missing private-use glyphs into `SymbolsNFM` runs for SwiftTerm to draw.
         static let minFontSize: CGFloat = 9
         static let maxFontSize: CGFloat = 24
         static let defaultFontSize: CGFloat = 12.5
@@ -859,7 +858,22 @@ struct LiveTerminalView: UIViewRepresentable {
             Self.makePaneFont(size: paneFontSize)
         }
 
+        /// CACHED, because this is read on the hot path. The PTY geometry helper and the
+        /// scroll/mouse gesture handlers all ask for `paneFont`, so a computed property
+        /// that rebuilt the cascade would materialise the entire system fallback list as
+        /// `CTFontDescriptor`s on every wheel tick — and `view.font`'s setter rebuilds
+        /// SwiftTerm's `FontSet` and calls `resetFont()` on top. Keyed by size because
+        /// the pinch gesture is the only thing that varies it, over a 16-step range.
+        private static var paneFontCache: [CGFloat: UIFont] = [:]
+
         static func makePaneFont(size: CGFloat) -> UIFont {
+            if let cached = paneFontCache[size] { return cached }
+            let font = buildPaneFont(size: size)
+            paneFontCache[size] = font
+            return font
+        }
+
+        private static func buildPaneFont(size: CGFloat) -> UIFont {
             let primary = UIFont(name: "IBMPlexMono", size: size)
                 ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
             guard let symbols = UIFont(name: "SymbolsNFM", size: size) else {
@@ -868,12 +882,42 @@ struct LiveTerminalView: UIViewRepresentable {
             let systemFallbacks =
                 CTFontCopyDefaultCascadeListForLanguages(primary as CTFont, nil)
                 as? [CTFontDescriptor] ?? []
-            var cascade: [Any] = [symbols.fontDescriptor]
-            cascade.append(contentsOf: systemFallbacks)
+
+            // SYMBOLS GO LAST, NOT FIRST — but ahead of LastResort.
+            //
+            // Prepending them looked right (the symbols are why this font is here) and
+            // was wrong: SymbolsNFM's cmap is not confined to the private-use area. It
+            // also maps U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771 and U+2B58,
+            // none of which IBM Plex Mono covers, so a first-position cascade entry won
+            // all six away from the system. U+26A1 has Emoji_Presentation=Yes: agent
+            // output containing ⚡ rendered as a monochrome Nerd glyph instead of the
+            // colour emoji, and ♥ and ⭘ changed face the same way.
+            //
+            // Ordering after the system fallbacks restores every one of those, and still
+            // reaches SymbolsNFM for the private-use glyphs this feature exists for,
+            // because no system font claims them. The one entry that would swallow them
+            // is LastResort, whose whole job is to answer for any codepoint, so the
+            // symbols are inserted just before it.
+            var cascade: [Any] = []
+            var placed = false
+            for descriptor in systemFallbacks {
+                if !placed, isLastResort(descriptor) {
+                    cascade.append(symbols.fontDescriptor)
+                    placed = true
+                }
+                cascade.append(descriptor)
+            }
+            if !placed { cascade.append(symbols.fontDescriptor) }
+
             let descriptor = primary.fontDescriptor.addingAttributes([
                 .cascadeList: cascade
             ])
             return UIFont(descriptor: descriptor, size: size)
+        }
+
+        private static func isLastResort(_ descriptor: CTFontDescriptor) -> Bool {
+            let name = CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute) as? String
+            return name == "LastResort"
         }
 
         /// Apply a new terminal font size (clamped to [minFontSize, maxFontSize]).

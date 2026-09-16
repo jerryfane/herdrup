@@ -327,8 +327,23 @@ targets:
     sources:
       - path: HerdrWidgets
       - path: Shared
+      # ONLY THE FACES THE WIDGET REGISTERS. `App/Fonts` is shared with the app, and
+      # pulling the whole directory in put a second copy of SymbolsNerdFontMono
+      # (2.6 MB, more than twice every other bundled face combined) inside the appex,
+      # where nothing lists it in UIAppFonts and nothing can use it. The excludes below
+      # are the faces and licence texts the widget's own UIAppFonts does not name; keep
+      # them in step with that list.
       - path: App/Fonts
         buildPhase: resources
+        excludes:
+          - SymbolsNerdFontMono-Regular.ttf
+          # Its licence goes with it: nothing in the appex carries a Nerd Fonts glyph.
+          - NerdFonts-LICENSE.txt
+          - Geist-Bold.ttf
+          - Geist-Medium.ttf
+          - IBMPlexMono-Bold.ttf
+          # Geist-OFL.txt and IBMPlexMono-OFL.txt STAY. The OFL requires its text to
+          # travel with the fonts, and this bundle does ship Geist and IBM Plex faces.
     dependencies:
       - sdk: WidgetKit.framework
       - sdk: SwiftUI.framework

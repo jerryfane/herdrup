@@ -1,3 +1,65 @@
+# Attribution for SymbolsNerdFontMono-Regular.ttf
+
+The bundled `SymbolsNerdFontMono-Regular.ttf` is the upstream
+`NerdFontsSymbolsOnly` artifact from Nerd Fonts v3.5.1, shipped byte-for-byte
+and unmodified.
+
+It is an AGGREGATE: the binary contains glyphs from fourteen icon sets, each
+under its own terms. The Nerd Fonts root licence below covers the project's own
+source and patched fonts, and defers the rest to an out-of-band audit URL —
+which is not a notice, and not something a shipped app can rely on. The sets
+actually inside this binary, from upstream's own
+`patched-fonts/NerdFontsSymbolsOnly/README.md` at v3.5.1:
+
+| Icon set               | Version         | Licence      |
+|------------------------|-----------------|--------------|
+| Codicons               | 0.0.45          | CC BY 4.0    |
+| Devicons               | 2.17.0          | MIT          |
+| extraglyphs (Hack)     | -               | MIT          |
+| Font Awesome           | 6.5.1           | CC BY 4.0    |
+| Font Awesome Extension | 0.0.3           | MIT          |
+| Font Logos             | 1.3.0           | The Unlicense (public domain) |
+| MaterialDesign         | Oct 6, 2022     | Apache 2.0   |
+| Octicons               | 18.3.0          | MIT          |
+| Seti and original      | 0.8.1           | MIT          |
+| Pomicons               | 1.001           | OFL 1.1, Reserved Font Name |
+| Powerline Extra        | 1.200           | MIT          |
+| Powerline Symbols      | 1.000           | MIT          |
+| Power Symbols IEC      | Feb 2015        | MIT          |
+| Weather Icons          | 2.0.10          | OFL 1.1      |
+
+Attribution, as CC BY 4.0 requires for Codicons and Font Awesome:
+
+* Codicons — © Microsoft Corporation, https://github.com/microsoft/vscode-codicons,
+  licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+* Font Awesome Free — © Fonticons, Inc., https://fontawesome.com, icons licensed
+  CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+
+Apache 2.0 notice, as its section 4(d) requires for MaterialDesign:
+
+* Material Design Icons — © Google, Inc. and Austin Andrews / Templarian,
+  https://github.com/Templarian/MaterialDesign-Font, licensed under the Apache
+  License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Pictograms
+  by Google are also available under Apache 2.0.
+
+OFL 1.1 sets carry the full licence text below (it is the same OFL 1.1 the Nerd
+Fonts root licence reproduces). Pomicons is OFL with a RESERVED FONT NAME: the
+font must not be redistributed under the Pomicons name if modified. This app
+ships the artifact unmodified, so that condition is met — a SUBSET or any other
+edit would break it and require a rename, which is why the binary is shipped
+whole rather than trimmed.
+
+Font Logos is listed as "unlicensed" in upstream's table. That label is
+misleading and worth recording: its repository (https://github.com/lukas-w/font-logos)
+ships The Unlicense, a public-domain dedication, so redistribution IS granted.
+A review flagged this as a blocker on the upstream wording; the upstream
+repository is the authority and it grants the right.
+
+MIT-licensed sets are covered by the MIT text below; copyright remains with each
+upstream project listed above.
+
+---
+
 # Nerd Fonts Licensing
 
 There are various sources used under various licenses:

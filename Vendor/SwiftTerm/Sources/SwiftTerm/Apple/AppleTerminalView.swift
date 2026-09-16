@@ -370,6 +370,16 @@ extension TerminalView {
     func fittedGlyphSlot (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
     {
         guard columnWidth >= 1 else { return .identity }
+        // `cellDimension` is non-optional on iOS but declared `CellDimension!` on the
+        // macOS side of this fork (Mac/MacTerminalView.swift), where reading it before
+        // `setupOptions` assigns it would trap rather than return identity. Dropping the
+        // old `cellDimension != nil` check was right for iOS, where it warned as dead,
+        // and silently removed that macOS floor — so the check comes back platform-
+        // scoped instead of deleted. Unreachable today by init ordering; this is a
+        // vendored tree whose macOS path still compiles, so it does not rely on that.
+        #if os(macOS)
+        guard cellDimension != nil else { return .identity }
+        #endif
         let cellWidth = cellDimension.width
         let cellHeight = cellDimension.height
         let slotWidth = CGFloat(columnWidth) * cellWidth
