@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+import tempfile
 from pathlib import Path
 
 from fontTools.subset import Options, Subsetter
@@ -131,10 +132,13 @@ def build(source: Path) -> bytes:
     font.recalcTimestamp = False
     font["head"].created, font["head"].modified = created, modified
 
-    out = OUTPUT.parent / (OUTPUT.name + ".tmp")
-    font.save(out)
-    data = out.read_bytes()
-    out.unlink()
+    # Built in a TEMP DIRECTORY, not beside the output: writing `<output>.tmp` into the
+    # repository made `--check` fail in a read-only checkout, which is exactly where a
+    # reviewer wants to verify the binary without being able to modify anything.
+    with tempfile.TemporaryDirectory() as scratch:
+        out = Path(scratch) / OUTPUT.name
+        font.save(out)
+        data = out.read_bytes()
     print(f"kept {len(keep)} private-use codepoints; dropped {len(dropped)}: "
           + ", ".join(f"U+{cp:04X}" for cp in sorted(dropped)))
     return data
