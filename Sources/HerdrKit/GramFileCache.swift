@@ -138,11 +138,19 @@ public enum GramFileCache {
 
     /// Drop one entry, so the bytes do not outlive the thing that referenced them.
     ///
-    /// Wired to the routes the reader drives: deleting a message, and unsaving one. NOT
-    /// wired to server-side disappearance (a message the poll stops returning), because
-    /// that path has no single call site to hang it on; such an entry is reclaimed by
-    /// the LRU ceiling or by `removeAll` on sign-out. Said plainly here because the
-    /// first version of this comment claimed every route and the claim was false.
+    /// WIRED TO DELETE ONLY, plus `removeAll` on sign-out. Two routes deliberately do
+    /// NOT evict, and the reasoning is worth keeping because review and a second opinion
+    /// pulled in opposite directions here:
+    ///
+    ///  * UNSAVE. Unsaving stops keeping a message in the Saved tab; the message may
+    ///    still exist in the inbox, so discarding the bytes would re-download on the
+    ///    next open — defeating the feature this cache exists for. An earlier version
+    ///    evicted here and it was the wrong call.
+    ///  * SERVER-SIDE DISAPPEARANCE. A message the poll stops returning has no single
+    ///    call site to hang eviction on.
+    ///
+    /// Both are reclaimed by the LRU ceiling. The first version of this comment claimed
+    /// every removal route evicted, and that claim was simply false.
     public static func remove(id: String, in root: URL) {
         try? FileManager.default.removeItem(at: directory(for: id, in: root))
     }

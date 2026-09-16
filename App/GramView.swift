@@ -744,13 +744,12 @@ struct GramView: View {
                             downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
                             onOpenFile: { openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
-                            onUnsave: {
-                                savedGrams.remove(s.id)
-                                // The Saved tab outlives the server copy, so for a saved
-                                // message the download may be the only copy left:
-                                // unsaving discards it rather than leaving it on disk.
-                                Downloads.remove(id: s.id)
-                            }
+                            // UNSAVE DOES NOT EVICT. Unsaving stops keeping the message
+                            // in the Saved tab; the message itself may still be in the
+                            // inbox, and discarding its bytes here would re-download the
+                            // next open — defeating the feature. Bytes go on DELETE
+                            // (the message is gone), on sign-out, or by the LRU ceiling.
+                            onUnsave: { savedGrams.remove(s.id) }
                         )
                     }
                 }
@@ -836,12 +835,7 @@ struct GramView: View {
                             isSaved: savedGrams.isSaved(message.id),
                             onOpenFile: { openFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
-                            onToggleSave: {
-                                let wasSaved = savedGrams.isSaved(message.id)
-                                savedGrams.toggle(message)
-                                // Only the un-saving direction drops bytes.
-                                if wasSaved { Downloads.remove(id: message.id) }
-                            },
+                            onToggleSave: { savedGrams.toggle(message) },
                             onDelete: { delete(message) }
                         )
                         .onAppear { markReadIfNeeded(message) }
@@ -2052,10 +2046,17 @@ struct GramView: View {
         }
 
         /// Whether `url` is a cache entry, so the page's temp-file cleanup leaves it
-        /// alone. Compared on the standardized path so a `/private/var` vs `/var`
-        /// difference cannot make a cached file look temporary and get unlinked.
+        /// alone. Standardized first, so a `/private/var` vs `/var` difference cannot
+        /// make a cached file look temporary and get unlinked.
+        ///
+        /// Compared by PATH COMPONENTS, not by string prefix: `hasPrefix` on the raw
+        /// path also accepts a sibling directory like `gram-downloads-old`, which would
+        /// exempt files that are not ours from cleanup and leave them on disk.
         static func isCached(_ url: URL) -> Bool {
-            url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path)
+            let rootParts = root.standardizedFileURL.pathComponents
+            let urlParts = url.standardizedFileURL.pathComponents
+            guard urlParts.count > rootParts.count else { return false }
+            return Array(urlParts.prefix(rootParts.count)) == rootParts
         }
     }
 

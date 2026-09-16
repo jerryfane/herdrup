@@ -76,7 +76,7 @@ final class GramFileCacheTests: XCTestCase {
         GramFileCache.remove(id: "msg-1", in: root)
         XCTAssertNil(
             GramFileCache.cached(id: "msg-1", in: root),
-            "deleting or unsaving a message must not leave its file readable on disk")
+            "deleting a message must not leave its file readable on disk")
     }
 
     /// An id is an opaque daemon string. A traversal attempt must land inside the root,
