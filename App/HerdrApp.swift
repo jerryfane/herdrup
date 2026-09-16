@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
+import UniformTypeIdentifiers
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
 import UserNotifications // notification authorization status (Settings notify section)
@@ -25,7 +26,13 @@ struct HerdrApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                .onOpenURL { url in
+                    guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
+                    PushCenter.shared.tapped(paneID: paneID)
+                }
+        }
     }
 }
 
@@ -353,6 +360,10 @@ struct RootView: View {
             }
         case .settings:
             SettingsView(client: mockClient, agents: [], host: "mac.tail-scale.ts.net")
+        case .htmlPreview:
+            HtmlPreviewHarness()
+        case .widgets:
+            WidgetGallery()
         case .newAgent:
             NewAgentView(client: mockClient,
                          initialFolder: "/root/herdr-ios", initialKind: "codex",
@@ -2394,6 +2405,15 @@ struct TerminalHomeView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: agentListPollIntervalNanoseconds)
                 await load()
+                // EVERY POLL, not only on a change. Recovery after the reader swipes
+                // the banner away cannot hang off `.onChange(of: fullList)` below: that
+                // fires when the roster MOVES, which is exactly what a blocked agent
+                // waiting for an answer does not do. `recoverIfEnded` mints only when
+                // nothing is live and pushes no content otherwise, so a stable roster
+                // costs one predicate per poll rather than an ActivityKit update.
+                LiveActivityController.shared.recoverIfEnded(
+                    LiveActivityController.state(from: fullList)
+                )
             }
         }
         // Ambient unread-gram poll for the tab badge, running ONLY while the Gram
@@ -3730,6 +3750,286 @@ struct EdgeSwipeBack: UIViewRepresentable {
     }
 }
 
+/// WHICH PASTEBOARD ITEMS THE REPLY COMPOSER TREATS AS A FILE rather than as text.
+///
+/// Shared by the UIKit text view (which decides whether to offer and intercept Paste) and
+/// the pane (which stages the item), so the two can never disagree about what "a pasted
+/// file" is.
+private enum PastedFile {
+    /// Concrete bytes, or a package like an .rtfd bundle — but never text, a web link or
+    /// a contact card, which are ordinary pastes the reader expects to land as
+    /// characters.
+    ///
+    /// A FILE URL is the exception, and it is the whole reason Copy in Finder or Files
+    /// used to paste a path instead of attaching the file: `public.file-url` conforms to
+    /// `public.url`, so the link exclusion swallowed it. A file url names bytes; a web
+    /// url names a page.
+    static func isAttachment(_ type: UTType) -> Bool {
+        if type.conforms(to: .fileURL) { return true }
+        guard type.conforms(to: .data) || type.conforms(to: .package) else { return false }
+        return !type.conforms(to: .text) && !type.conforms(to: .url)
+            && !type.conforms(to: .vCard) && type != .rtf && type != .flatRTFD
+    }
+
+    /// The first attachable type on the general pasteboard, read from TYPE METADATA ONLY.
+    ///
+    /// `UIPasteboard.types` never touches the items, so this is safe to call while UIKit
+    /// builds an edit menu. Reading `itemProviders` there instead is a content read, which
+    /// raises the system "Allow Paste?" prompt for anything copied in another app.
+    ///
+    /// A file url wins the LOOKUP when both are advertised — it is the representation
+    /// that survives a cross-process copy with its name intact — but staging still
+    /// prefers the file's concrete type, because a url is a reference and bytes are not.
+    static func pasteboardType() -> UTType? {
+        let types = UIPasteboard.general.types.lazy.compactMap { UTType($0) }
+        return types.first { $0.conforms(to: .fileURL) } ?? types.first(where: isAttachment)
+    }
+
+    /// Whether the pasteboard names a FILE. Metadata only, and the one case where an
+    /// accompanying text representation must not win: Finder and Files put the path on
+    /// the pasteboard beside the file, and pasting that path is never what was meant.
+    static func pasteboardHasFileURL() -> Bool {
+        UIPasteboard.general.contains(pasteboardTypes: [UTType.fileURL.identifier])
+    }
+}
+
+private struct TerminalReplyField: UIViewRepresentable {
+    @Binding var text: String
+    let isEnabled: Bool
+    let isFocused: Bool
+    let onFocusChange: (Bool) -> Void
+    let onChange: (String, String) -> Void
+    let onReturn: (String) -> Void
+    /// Returns false when the composer declines the file, so `paste(_:)` can fall through
+    /// to UIKit instead of turning the paste into a no-op.
+    let onPasteFile: (NSItemProvider) -> Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> ReplyTextView {
+        let view = ReplyTextView()
+        view.onPasteFile = onPasteFile
+        view.delegate = context.coordinator
+        view.backgroundColor = UIColor(Palette.surface)
+        view.layer.cornerRadius = 20
+        view.textColor = UIColor(Palette.text)
+        view.tintColor = UIColor(Palette.brand)
+        view.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+        view.textContainerInset = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
+        let lineHeight = view.font?.lineHeight ?? 18
+        view.minimumHeight = lineHeight + 22
+        view.maximumHeight = lineHeight * 3 + 22
+        view.autocapitalizationType = .none
+        view.autocorrectionType = .no
+        view.returnKeyType = .send
+        // Scrolling is ON at every height (see `refreshScrollMode`); only bouncing tracks
+        // whether the content overflows.
+        view.isScrollEnabled = true
+        view.alwaysBounceVertical = false
+        view.accessibilityIdentifier = "terminal-reply-input"
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.updatePlaceholder()
+        return view
+    }
+
+    func updateUIView(_ view: ReplyTextView, context: Context) {
+        context.coordinator.parent = self
+        view.onPasteFile = onPasteFile
+        if view.text != text {
+            view.text = text
+            view.updatePlaceholder()
+            view.invalidateIntrinsicContentSize()
+            view.refreshScrollMode()
+        }
+        view.isEditable = isEnabled
+        if isFocused {
+            context.coordinator.nativeFocusPendingStateSync = false
+            if !view.isFirstResponder {
+                view.becomeFirstResponder()
+            }
+        } else if view.isFirstResponder, !context.coordinator.nativeFocusPendingStateSync {
+            view.resignFirstResponder()
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ReplyTextView,
+                      context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        let natural = uiView.fittingHeight(for: width)
+        return CGSize(
+            width: width,
+            height: min(max(natural, uiView.minimumHeight), uiView.maximumHeight))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: TerminalReplyField
+        /// A native tap reaches UIKit before SwiftUI commits the FocusState update.
+        /// Keep that responder alive through text-binding renders until the true state arrives.
+        var nativeFocusPendingStateSync = false
+
+        init(_ parent: TerminalReplyField) {
+            self.parent = parent
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            nativeFocusPendingStateSync = true
+            parent.onFocusChange(true)
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            nativeFocusPendingStateSync = false
+            // `resignFirstResponder()` and `isEditable = false` both run from INSIDE
+            // updateUIView and both end editing synchronously, so writing the focus binding
+            // straight through from here mutates SwiftUI state during its own update pass
+            // ("Modifying state during view update, this will cause undefined behavior").
+            // Hop off the pass, and skip the write when the declared state already agrees —
+            // @State has no same-value short circuit, so an equal write still publishes.
+            guard parent.isFocused else { return }
+            let notify = parent.onFocusChange
+            Task { @MainActor in notify(false) }
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            let old = parent.text
+            let new = textView.text ?? ""
+            parent.text = new
+            parent.onChange(old, new)
+            (textView as? ReplyTextView)?.updatePlaceholder()
+            textView.invalidateIntrinsicContentSize()
+            (textView as? ReplyTextView)?.refreshScrollMode()
+            (textView as? ReplyTextView)?.requestCaretReveal()
+        }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                      replacementText replacement: String) -> Bool {
+            guard replacement == "\n" else { return true }
+            parent.onReturn(textView.text ?? "")
+            return false
+        }
+    }
+
+    final class ReplyTextView: UITextView {
+        var onPasteFile: ((NSItemProvider) -> Bool)?
+        private let placeholder = UILabel()
+        var minimumHeight: CGFloat = 40
+        var maximumHeight: CGFloat = 76
+
+        override init(frame: CGRect, textContainer: NSTextContainer?) {
+            super.init(frame: frame, textContainer: textContainer)
+            placeholder.text = "type a reply…"
+            placeholder.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
+            placeholder.textColor = UIColor(Palette.textFaint)
+            placeholder.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(placeholder)
+            NSLayoutConstraint.activate([
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(paste(_:)), PastedFile.pasteboardType() != nil {
+                return true
+            }
+            return super.canPerformAction(action, withSender: sender)
+        }
+
+        override func paste(_ sender: Any?) {
+            // Text wins when the pasteboard carries both. Copying an image out of Safari
+            // registers a URL alongside the image, and a composer that swallowed the item
+            // as a file dropped the text the user was actually after.
+            //
+            // A FILE URL overrides that: Finder and Files put the path on the pasteboard
+            // beside the file, so deferring to text there pasted "/Users/…/main.pdf" and
+            // attached nothing — which is exactly how Command-V looked broken on Mac and
+            // iPad.
+            if PastedFile.pasteboardHasFileURL() {
+                if let type = PastedFile.pasteboardType(),
+                   let provider = UIPasteboard.general.itemProviders.first(where: {
+                       $0.hasItemConformingToTypeIdentifier(type.identifier)
+                   }) {
+                    _ = onPasteFile?(provider)
+                }
+                // Consumed either way. A decline here means the cap, a load already in
+                // flight, or a pane with no named agent — each of which says so in the
+                // note. Falling through would ALSO drop the path into the composer, which
+                // is the outcome this whole change exists to remove.
+                return
+            }
+            if !UIPasteboard.general.hasStrings, let type = PastedFile.pasteboardType(),
+               let provider = UIPasteboard.general.itemProviders.first(where: {
+                   $0.hasItemConformingToTypeIdentifier(type.identifier)
+               }),
+               onPasteFile?(provider) == true
+            {
+                return
+            }
+            super.paste(sender)
+        }
+
+        private var shouldRevealCaretAfterLayout = false
+
+        /// The height this text needs at `width`, measured from the STRING — not from
+        /// `UITextView.sizeThatFits`.
+        ///
+        /// `sizeThatFits` on a text view answers differently depending on `isScrollEnabled`
+        /// and on how much TextKit has lazily laid out, so while it drove the SwiftUI height
+        /// the box could still report a two-line height with three lines of text in it: the
+        /// third line — the one being typed — was clipped away, and typing looked like it did
+        /// nothing until a fourth line made the view scrollable and dragged the caret back
+        /// into view. A layout-independent measurement cannot lag the text.
+        func fittingHeight(for width: CGFloat) -> CGFloat {
+            let padding = 2 * textContainer.lineFragmentPadding
+            let usable = max(1, width - textContainerInset.left - textContainerInset.right - padding)
+            // boundingRect drops a trailing newline, which would hide the empty line a
+            // pasted "a\n" ends on; the space gives that line something to measure.
+            var measured = text ?? ""
+            if measured.isEmpty || measured.hasSuffix("\n") { measured += " " }
+            let box = (measured as NSString).boundingRect(
+                with: CGSize(width: usable, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font ?? .systemFont(ofSize: 15)],
+                context: nil)
+            return ceil(box.height) + textContainerInset.top + textContainerInset.bottom
+        }
+
+        /// Scrolling stays ON at every height. It used to be toggled with the content, which
+        /// meant the caret could not be scrolled into view in exactly the state where it had
+        /// gone out of view. Bouncing is what actually tracks the content, and a content that
+        /// fits is pinned back to the top so a stale offset can never blank the field.
+        func refreshScrollMode() {
+            guard bounds.width > 0 else { return }
+            let overflows = fittingHeight(for: bounds.width) > maximumHeight + 0.5
+            alwaysBounceVertical = overflows
+            if !overflows, contentOffset.y != 0 {
+                setContentOffset(.zero, animated: false)
+            }
+        }
+
+        func requestCaretReveal() {
+            shouldRevealCaretAfterLayout = true
+            setNeedsLayout()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            refreshScrollMode()
+            guard shouldRevealCaretAfterLayout else { return }
+            shouldRevealCaretAfterLayout = false
+            guard let selection = selectedTextRange else { return }
+            let caret = caretRect(for: selection.end).insetBy(dx: 0, dy: -4)
+            scrollRectToVisible(caret, animated: false)
+        }
+
+
+        func updatePlaceholder() {
+            placeholder.isHidden = !text.isEmpty
+        }
+    }
+}
+
 /// One agent's live terminal + controls. Its identity (pane id, per-pane @State, terminal
 /// stream) is fixed for its lifetime — it is hosted MOUNTED by `PaneKeepAliveContainer` and
 /// never torn down while its slot exists, so reopening it (and swiping/paging to it) is
@@ -3749,8 +4049,32 @@ struct TerminalPaneContent: View {
     /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
     /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
     let onClose: () -> Void
+    /// One staged file on its way to the agent: a pasted photo, a PDF, a log, anything
+    /// the pasteboard can vend as a file. `isImage` only chooses the chip glyph and the
+    /// wording of the prompt reference; the delivery path is identical either way.
+    private struct PromptAttachment: Identifiable, Sendable {
+        let id: UUID
+        let name: String
+        let mime: String
+        let isImage: Bool
+        let staged: StagedAttachment?
+        let uploadID: String?
+        let gramMessageID: String?
+    }
 
     @State private var reply: String
+    /// Every staged attachment, in paste order. Each sends as its own gram message and
+    /// they are all named by ONE prompt, so the agent gets a single turn that points at
+    /// the whole set. Capped at `GramView.Staging.maxAttachments`.
+    @State private var replyAttachments: [PromptAttachment] = []
+    @State private var loadingReplyAttachment = false
+    /// Bytes sent / total for the attachment currently uploading, nil when none is.
+    /// A 20 MB photo on a slow link takes long enough that a spinner alone reads as a
+    /// hang, so the strip shows a determinate bar driven by the upload channel itself.
+    @State private var replyUploadBytes: (sent: Int, total: Int)?
+    /// Which file of how many is in flight, so the gap between one upload finishing and
+    /// its gram post landing still says something. Nil for a single attachment.
+    @State private var replySendProgress: (sent: Int, total: Int)?
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -3762,6 +4086,8 @@ struct TerminalPaneContent: View {
     /// Per-agent push mute, toggled from the header's ⋯ menu (keyed by this pane's
     /// public id — the same id the push payload carries).
     @ObservedObject private var mute = MuteStore.shared
+    /// A drag is hovering the reply bar, so the target says so before the drop lands.
+    @State private var replyDropTargeted = false
     /// Saved prompts, shown from the reply bar when the input is empty (the send arrow would be
     /// dead then). Tapping one inserts it and sends it via the normal path.
     @ObservedObject private var savedPrompts = SavedPromptsStore.shared
@@ -3814,7 +4140,7 @@ struct TerminalPaneContent: View {
     @State private var replyDictating = false
     /// Focus of the reply field, so the software keyboard can be DISMISSED — via the
     /// keyboard-toolbar chevron or a tap on the (read-only) terminal.
-    @FocusState private var replyFocused: Bool
+    @State private var replyFocused = false
     /// Terminal-input focus is explicit on touch devices. A terminal tap enables
     /// direct PTY typing; reply submission and keyboard collapse clear it so the
     /// software keyboard can genuinely dismiss instead of immediately moving focus
@@ -3904,7 +4230,12 @@ struct TerminalPaneContent: View {
     // owns delivery then). A pending pre-fill does NOT disable the button once the
     // loop stops — instead the button ROUTES a pre-fill through the prompt-only
     // path (see the replyBar action), so it can never fall to rawKeys send_text.
-    private var canSend: Bool { !reply.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !replyDictating }
+    private var hasReplyContent: Bool {
+        !replyAttachments.isEmpty || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var canSend: Bool {
+        hasReplyContent && !sending && !replyDictating && !loadingReplyAttachment
+    }
 
     /// Whether to offer the one-time "switch to smooth (classic) scrolling" banner:
     /// ONLY for Claude Code panes (agent kind contains "claude") and only until the reader
@@ -4006,6 +4337,9 @@ struct TerminalPaneContent: View {
                 if let note = actionNote {
                     Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
+                        // Identified so a failing receipt can quote the refusal instead of
+                        // reporting only that nothing happened.
+                        .accessibilityIdentifier("terminal-action-note")
                 }
                 controlBar
                 replyBar
@@ -4543,9 +4877,104 @@ struct TerminalPaneContent: View {
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
         .accessibilityIdentifier("terminal-ctrl")
     }
+    @ViewBuilder
+    private var replyAttachmentStrip: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if !replyAttachments.isEmpty {
+                // Horizontal, and pinned to the chips' own height: a ScrollView is
+                // greedy in both axes, and a greedy strip would steal the vertical slack
+                // the composer needs (the same trap GramView's strip documents).
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(replyAttachments) { attachment in
+                            replyAttachmentChip(attachment)
+                        }
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if loadingReplyAttachment {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Adding attachment…")
+                        .font(Typography.app(12, .medium))
+                        .foregroundStyle(Palette.textDim)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+                .accessibilityIdentifier("terminal-attachment-loading")
+            }
+            // ONE progress block for the whole batch, not one per chip: the loop is
+            // serial, so exactly one file is ever in flight. The byte bar is shown while
+            // bytes move; between an upload finishing and its gram post landing only the
+            // file counter is true, and saying nothing there reads as a stall.
+            if let upload = replyUploadBytes {
+                Text(Self.uploadLabel(sent: upload.sent, total: upload.total,
+                                      file: replySendProgress))
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("terminal-attachment-progress")
+                ProgressView(value: upload.total > 0
+                    ? min(1, Double(upload.sent) / Double(upload.total))
+                    : 0)
+                    .tint(Palette.text)
+            } else if let progress = replySendProgress, progress.total > 1 {
+                Text("Sending \(progress.sent + 1) of \(progress.total)…")
+                    .font(Typography.machine(11))
+                    .foregroundStyle(Palette.textFaint)
+                    .accessibilityIdentifier("terminal-attachment-progress")
+            }
+        }
+    }
+
+    private func replyAttachmentChip(_ attachment: PromptAttachment) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: attachment.isImage ? "photo" : "doc")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.textDim)
+            Text(attachment.name)
+                .font(Typography.app(12, .medium))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                removeReplyAttachment(attachment)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.textFaint)
+            }
+            // No unlinking mid-send: the bytes of a file still queued in the batch are
+            // what a retry needs.
+            .disabled(sending)
+            // Named, because the strip now holds up to ten of these: ten identical
+            // "Remove attachment" buttons tell a VoiceOver reader nothing about which.
+            .accessibilityLabel("Remove \(attachment.name)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: 220, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
+        .opacity(sending ? 0.6 : 1)
+        .accessibilityIdentifier("terminal-attachment")
+    }
+
+    /// "Uploading 42% · 8.4 MB / 20.0 MB", prefixed with "File 2 of 3 · " for a batch and
+    /// trimmed to just the percentage for small files where the byte pair is noise.
+    /// Sizes render through HerdrKit's one formatter.
+    static func uploadLabel(sent: Int, total: Int, file: (sent: Int, total: Int)?) -> String {
+        let percent = total > 0 ? Int((Double(sent) / Double(total) * 100).rounded()) : 0
+        let prefix = (file?.total ?? 1) > 1 ? "File \(file!.sent + 1) of \(file!.total) · " : ""
+        guard total >= 1024 * 1024 else { return prefix + "Uploading \(percent)%" }
+        return prefix + "Uploading \(percent)% · \(GramFile.displaySize(of: UInt64(sent)))"
+            + " / \(GramFile.displaySize(of: UInt64(total)))"
+    }
+
 
     private var replyBar: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .bottom, spacing: 8) {
             // Collapse-keyboard button — shown while EITHER input owner holds the
             // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
             // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
@@ -4582,42 +5011,35 @@ struct TerminalPaneContent: View {
                 }
                 .accessibilityLabel("Collapse keyboard")
             }
-            TextField("type a reply…", text: $reply)
-                .font(Typography.app(15)).foregroundStyle(Palette.text)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .padding(.horizontal, 16).padding(.vertical, 11)
-                .background(Palette.surface).clipShape(Capsule())
-                .focused($replyFocused)
-                .disabled(replyDictating)   // dictation owns the field while live
-                // Ctrl-toggle interception: while armed, the next character typed
-                // here becomes a control byte instead of message text.
-                .onChange(of: reply) { oldValue, newValue in
-                    handleReplyChange(old: oldValue, new: newValue)
-                }
-                .submitLabel(.send)
-                // Return sends the reply and releases only the TERMINAL's claim on key input,
-                // keeping the reply field focused on every idiom — which is what the pre-PR code
-                // did, and why.
-                //
-                // The problem this has to solve is `wantsTerminalKeyFocus`, which carries
-                // `|| idiom == .pad`: if Return clears BOTH owners, that disjunct re-asserts on
-                // iPad and hands key focus to the terminal, so everything typed after Return goes
-                // to the agent's shell as raw keystrokes instead of composing the next reply.
-                // Clearing `terminalInputFocused` alone fixes that without touching the field.
-                //
-                // AN EARLIER VERSION OF THIS ALSO CLEARED `replyFocused` ON iPHONE, to dismiss the
-                // software keyboard. A review pointed out the cost: the reader then has to tap the
-                // field again for every subsequent message, and pre-PR behaviour deliberately kept
-                // focus so a back-and-forth exchange did not cost a tap per message. Dismissal was
-                // a side effect of needing to release the terminal, not a goal, and this PR already
-                // adds the affordance for doing it on purpose — the collapse chevron now renders
-                // for a terminal-raised keyboard too. So the keyboard stays up and the reader
-                // decides when it goes.
-                .onSubmit {
-                    if canSend { sendTapped() }
-                    replyFocused = true
-                    terminalInputFocused = false
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                replyAttachmentStrip
+                TerminalReplyField(
+                    text: $reply,
+                    // ONLY dictation disables the field. Gating it on `sending` (and on the
+                    // attachment upload, which holds for upload + post + prompt) set
+                    // `isEditable = false` on a first-responder text view, which ends editing:
+                    // the keyboard visibly dropped on EVERY reply and nothing re-acquired it,
+                    // so consecutive replies needed a re-tap each time. Double sends are
+                    // already prevented where they happen — `canSend` disables the button and
+                    // `onReturn` bails while `sending`.
+                    isEnabled: !replyDictating,
+                    isFocused: replyFocused,
+                    onFocusChange: { replyFocused = $0 },
+                    onChange: { oldValue, newValue in
+                        handleReplyChange(old: oldValue, new: newValue)
+                    },
+                    onReturn: { currentText in
+                        guard !sending, !replyDictating,
+                              !replyAttachments.isEmpty
+                                || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        else { return }
+                        ctrlArmed = false
+                        sendTapped(currentText)
+                    },
+                    onPasteFile: pasteReplyAttachment
+                )
+            }
+            .frame(minWidth: 0, maxWidth: .infinity)
             // Dictate into the reply (on-device). isActive: isForeground stops the mic
             // if this pane stops being the front one (no hot mic behind a hidden pane);
             // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
@@ -4625,6 +5047,7 @@ struct TerminalPaneContent: View {
             MicButton(text: $reply, diameter: 40, iconSize: 15,
                       isActive: isForeground && !autoDelivering, recording: $replyDictating,
                       onStart: { ctrlArmed = false })
+                .fixedSize()
                 // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
                 // isActive drops on autoDelivering so an in-flight dictation stops before
                 // the auto-deliver clears the reply, and it can't be started during either.
@@ -4632,47 +5055,15 @@ struct TerminalPaneContent: View {
             // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
             // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
             // by the same empty predicate `canSend` uses).
-            if reply.trimmingCharacters(in: .whitespaces).isEmpty {
+            if !hasReplyContent {
                 savedPromptsButton
             } else {
-                // THE BUTTON DISMISSES THE KEYBOARD ON iPHONE; RETURN DELIBERATELY DOES NOT.
-                //
-                // Reported by the owner on a real iPhone: tapping send left the keyboard up over
-                // ~40% of the pane, so the reply you just sent — and the agent's response to it —
-                // were behind the keyboard until you dismissed it by hand.
-                //
-                // The distinction from `.onSubmit` above is intent, not inconsistency. Return is
-                // pressed WITH your thumbs already on the keys, and the note on that path records a
-                // review's reasoning for keeping focus: a back-and-forth exchange should not cost a
-                // tap per message. Reaching for the send BUTTON is a deliberate move away from the
-                // keys, so treating it as "I am done typing" matches what the hand just did.
-                //
-                // iPHONE ONLY, and clearing `replyFocused` is the part that must be gated. On iPad
-                // `wantsTerminalKeyFocus` carries `|| idiom == .pad`, so releasing the field hands
-                // key focus straight to the terminal and everything typed next would go to the
-                // agent's shell as raw keystrokes — the exact hazard documented on `.onSubmit`.
-                // iPad also has no software keyboard to dismiss (zero-frame `emptyInputView`), so
-                // there is nothing to gain there and a real regression to cause.
-                // AND IT MUST BUMP THE COLLAPSE TOKEN, not just clear the flags. Found by review:
-                // clearing the two focus flags alone reproduces the ORIGINAL #203 defect through a
-                // new door. With a word selected, `updateUIView`'s resign is gated on
-                // `deliberateCollapse || !hasActiveSelection`, so it refuses — while clearing the
-                // flags has already hidden the collapse chevron. Net result: keyboard up over the
-                // pane, selection held, and no visible way to dismiss it. That is exactly the state
-                // the chevron fix existed to eliminate, and my send-button change walked back into
-                // it because it copied the flag-clearing and not the token.
-                //
-                // Bumping the token marks this resign DELIBERATE, which is what it is: the reader
-                // pressed send. Same mechanism as the chevron, so there is one way to express
-                // "collapse on purpose" rather than two that disagree. This is the "what did last
-                // round's fix make POSSIBLE" question answered: the chevron fix made a token the
-                // only honest way to resign past a selection, and any new path that clears focus
-                // has to use it.
-                // SCOPED TO iPHONE for the same reason the flag is: on iPad the terminal's
-                // `wantsTerminalKeyFocus` carries the `.pad` disjunct, so the pass after this can
-                // take the become-focus branch and never reach `consumeCollapse` — the token would
-                // sit unconsumed and could fire on some later, unrelated collapse (herdrup#213).
-                // iPad has no software keyboard to dismiss, so there is nothing to request there.
+                // Tapping the arrow deliberately dismisses the iPhone keyboard. The
+                // keyboard's Return key activates this same button and delivery path.
+                // Dismissal bumps the collapse token so SwiftTerm will resign
+                // even while a selection is active. Keep that request phone-only: iPad has
+                // no software keyboard here, and its terminal-focus branch would leave an
+                // unconsumed token that could fire during a later unrelated collapse.
                 Button {
                     sendTapped()
                     terminalInputFocused = false
@@ -4687,13 +5078,233 @@ struct TerminalPaneContent: View {
                         .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
                 }
                 .disabled(!canSend)
+                .fixedSize()
+                .accessibilityLabel("Send reply")
+                .accessibilityIdentifier("terminal-send-button")
             }
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+        // DRAG AND DROP, the other half of "get a file in from a Mac or an iPad". The
+        // whole bar is the target, not just the field: a dragged file is aimed at the
+        // composer, and a 40-point text view is a cruel thing to hit with a trackpad.
+        // `.item` covers everything a Finder or Files drag vends, and each provider goes
+        // through the SAME staging path as a paste, so the cap, the type rule and the
+        // named-agent guard are shared rather than re-stated.
+        .onDrop(of: [.item], isTargeted: $replyDropTargeted) { providers in
+            acceptDroppedFiles(providers)
+        }
+        .overlay {
+            if replyDropTargeted {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(Palette.brand, lineWidth: 2)
+                    .padding(.horizontal, 8)
+                    .allowsHitTesting(false)
+            }
+        }
         .sheet(isPresented: $showSavePrompt) {
             SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
+    /// Stages every DROPPED file, one after another.
+    ///
+    /// A drop hands over the whole selection at once, and staging is serialised by
+    /// `loadingReplyAttachment`: calling the paste handler for all of them in a loop
+    /// staged the first and dropped the rest on that guard — silently, because it is the
+    /// one bail-out with no note — while SwiftUI played the accept animation for the
+    /// whole drag. So each provider waits for the previous one to land.
+    ///
+    /// Returns true when at least one provider is worth staging, which is what tells
+    /// SwiftUI the drop was accepted.
+    private func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else { return false }
+        Task { @MainActor in
+            for provider in providers {
+                // Up to five seconds per file: a staged copy of a large document off a
+                // network volume is slow, and abandoning the rest of the drag is worse
+                // than waiting.
+                for _ in 0..<100 where loadingReplyAttachment {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                guard !loadingReplyAttachment else { break }
+                // A decline is either the cap or a pane that cannot take attachments;
+                // both have set their note, and both apply to every remaining file.
+                guard pasteReplyAttachment(provider) else { break }
+            }
+        }
+        return true
+    }
+
+    /// Stages a pasted FILE of any kind — a photo, a PDF, a log, a zip — as the reply's
+    /// attachment. Returns false when this composer cannot take it (a send in flight, a
+    /// pane with no named intent agent, or an item that vends no file type), so the caller
+    /// pastes normally instead of swallowing the gesture.
+    ///
+    /// Only IMAGES used to be accepted, which made "paste a photo" work and "paste the log
+    /// you just copied" silently do nothing. The delivery path never cared: staging, the
+    /// Gram upload channel and the prompt reference are all byte-agnostic, so the image
+    /// restriction was in the type filter alone.
+    @discardableResult
+    private func pasteReplyAttachment(_ provider: NSItemProvider) -> Bool {
+        guard !sending, !loadingReplyAttachment else { return false }
+        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            return false
+        }
+        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            actionNote = "Attachments need a named agent with a ready prompt."
+            return false
+        }
+        let types = provider.registeredTypeIdentifiers.lazy.compactMap { UTType($0) }
+        // A FILE URL WINS when the item carries one. A Finder copy of a document vends
+        // the file url AND the document's ICON (com.apple.icns, which conforms to
+        // public.image), so preferring the image staged a 288 KB icon called
+        // "photo-31ec1fb2.icns" instead of the PDF the reader copied. Any image beside a
+        // file url is derived from that file — an icon, a thumbnail, or, when the file IS
+        // an image, the same bytes under a worse name.
+        //
+        // Without a file url the item is in-memory: a screenshot, an image copied out of
+        // Safari, a PDF put on the pasteboard as data. Then an image wins over any other
+        // concrete type, as before.
+        guard let type = types.first(where: { $0.conforms(to: .fileURL) })
+                ?? types.first(where: { $0.conforms(to: .image) })
+                ?? types.first(where: { PastedFile.isAttachment($0) })
+        else {
+            return false
+        }
+
+        // A file url is a REFERENCE, not bytes: loading it as a file representation
+        // yields a temp file containing the path text. Resolve it to the real file and
+        // copy from there, inside a security scope, because a document picked outside the
+        // app's container is only readable while that scope is open.
+        if type.conforms(to: .fileURL) {
+            loadingReplyAttachment = true
+            ctrlArmed = false
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                var refusal: String?
+                let attachment: PromptAttachment? = url.flatMap { source in
+                    let scoped = source.startAccessingSecurityScopedResource()
+                    defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+                    let keys: Set<URLResourceKey> = [
+                        .isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
+                    ]
+                    let values = try? source.resourceValues(forKeys: keys)
+                    // A DIRECTORY, refused before the copy. `stageCopy` would happily
+                    // recurse a whole folder into tmp and only then fail its size check,
+                    // which is an unbounded copy for a message that cannot carry it.
+                    if values?.isDirectory == true {
+                        refusal = "Folders can't be attached — pick the files inside."
+                        return nil
+                    }
+                    // An iCloud placeholder has no bytes yet. Ask for the download and say
+                    // so, instead of reporting the generic "couldn't add" for a file the
+                    // reader can plainly see in Files.
+                    if values?.isUbiquitousItem == true,
+                       values?.ubiquitousItemDownloadingStatus != .current {
+                        try? FileManager.default.startDownloadingUbiquitousItem(at: source)
+                        refusal = "\(source.lastPathComponent) isn't downloaded yet — "
+                            + "opening it in Files once will fetch it."
+                        return nil
+                    }
+                    let name = GramStaging.safeFileName(source.lastPathComponent)
+                    guard !name.isEmpty,
+                          let staged = GramView.Staging.copy(of: source, named: name)
+                    else { return nil }
+                    let fileType = UTType(filenameExtension: source.pathExtension)
+                    return PromptAttachment(
+                        id: UUID(), name: name,
+                        mime: fileType?.preferredMIMEType ?? "application/octet-stream",
+                        isImage: fileType?.conforms(to: .image) ?? false,
+                        staged: staged, uploadID: nil, gramMessageID: nil)
+                }
+                Task { @MainActor in
+                    finishReplyAttachmentPaste(attachment)
+                    if let refusal { actionNote = refusal }
+                }
+            }
+            return true
+        }
+
+        loadingReplyAttachment = true
+        ctrlArmed = false
+        let typeIdentifier = type.identifier
+        let isImage = type.conforms(to: .image)
+        let ext = type.preferredFilenameExtension ?? (isImage ? "jpg" : "dat")
+        let name: String = {
+            var candidate = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if candidate.isEmpty {
+                let stem = isImage ? "photo" : "file"
+                candidate = "\(stem)-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
+            }
+            if URL(fileURLWithPath: candidate).pathExtension.isEmpty { candidate += ".\(ext)" }
+            return GramStaging.safeFileName(candidate)
+        }()
+        let mime = type.preferredMIMEType ?? (isImage ? "image/jpeg" : "application/octet-stream")
+
+        provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { source, _ in
+            let fileAttachment: PromptAttachment? = source.flatMap { url in
+                guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
+                return PromptAttachment(
+                    id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
+                    uploadID: nil, gramMessageID: nil)
+            }
+            if let fileAttachment {
+                Task { @MainActor in finishReplyAttachmentPaste(fileAttachment) }
+                return
+            }
+
+            // In-memory pasteboards can vend encoded bytes but no file URL.
+            provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
+                let dataAttachment: PromptAttachment? = data.flatMap {
+                    guard let staged = GramStaging.stageData(
+                        $0, named: name, in: GramView.Staging.session,
+                        maxBytes: GramView.Staging.maxFileBytes)
+                    else { return nil }
+                    return PromptAttachment(
+                        id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
+                        uploadID: nil, gramMessageID: nil)
+                }
+                Task { @MainActor in finishReplyAttachmentPaste(dataAttachment) }
+            }
+        }
+        return true
+    }
+
+    private func finishReplyAttachmentPaste(_ attachment: PromptAttachment?) {
+        loadingReplyAttachment = false
+        guard let attachment else {
+            actionNote = "Couldn't add that attachment."
+            return
+        }
+        // Belt and braces: `loadingReplyAttachment` already serialises pastes, so this
+        // cannot currently fire. It stays because it is the only place that knows the
+        // staged bytes exist, and a future concurrent paste path would otherwise append
+        // past the cap and leak the temp file.
+        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+            if let staged = attachment.staged {
+                try? FileManager.default.removeItem(at: staged.dir)
+            }
+            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            return
+        }
+        replyAttachments.append(attachment)
+        actionNote = nil
+    }
+
+    private func removeReplyAttachment(_ attachment: PromptAttachment) {
+        guard replyAttachments.contains(where: { $0.id == attachment.id }) else { return }
+        replyAttachments.removeAll { $0.id == attachment.id }
+        if let staged = attachment.staged {
+            try? FileManager.default.removeItem(at: staged.dir)
+        }
+        // An attachment dropped AFTER its gram message posted (a batch that failed
+        // halfway) must not leave that message behind in the agent's inbox.
+        if let messageID = attachment.gramMessageID {
+            Task { try? await client.gramDelete(id: messageID) }
+        }
+    }
+
 
     /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
     /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
@@ -4735,6 +5346,10 @@ struct TerminalPaneContent: View {
         // send and the raw sequences. The automatic pre-fill delivery is excluded on
         // purpose — nobody touched anything, so there is no user act to honour.
         if !autoDelivering { userInputToken += 1 }
+        if case .submitText(let text) = action, !replyAttachments.isEmpty {
+            sendPromptWithAttachments(text, attachments: replyAttachments)
+            return
+        }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
         Task {
@@ -4754,7 +5369,11 @@ struct TerminalPaneContent: View {
                 case .refused(let reason):
                     actionNote = "not sent: \(reason)"; return
                 }
-                if case .submitText = action { reply = "" }
+                // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
+                // whole round trip now (see the `isEnabled` comment on TerminalReplyField),
+                // so an unconditional clear here would wipe a reply typed while the prompt
+                // was in flight — the very flow that fix exists to allow.
+                if case .submitText(let sent) = action, reply == sent { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
@@ -4765,6 +5384,183 @@ struct TerminalPaneContent: View {
             }
         }
     }
+    /// Uploads and posts every staged attachment, then submits ONE prompt naming them
+    /// all.
+    ///
+    /// SERIAL on purpose. `gram.post` consumes each staging file, so one upload in
+    /// flight at a time keeps the daemon's 1 GiB aggregate staging budget clear no
+    /// matter how many files are staged; ten parallel 100 MiB uploads would fill it and
+    /// fail gram uploads for every client on the box.
+    ///
+    /// A file that already uploaded or already posted is skipped on a retry: each
+    /// attachment carries its own `uploadID` / `gramMessageID`, written back into
+    /// `replyAttachments` as soon as it is known, so tapping Send again after a mid-batch
+    /// failure re-sends only what did not land.
+    private func sendPromptWithAttachments(_ text: String, attachments: [PromptAttachment]) {
+        // The destination is captured BEFORE the first await: `agent` is re-resolved on
+        // every refresh, and a batch can span minutes.
+        guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !target.isEmpty
+        else {
+            actionNote = "Attachments need a named agent with a ready prompt."
+            return
+        }
+
+        Task {
+            sending = true
+            defer { sending = false; replyUploadBytes = nil; replySendProgress = nil }
+            var delivered: [(attachment: PromptAttachment, messageID: String)] = []
+            do {
+                for (index, attachment) in attachments.enumerated() {
+                    replySendProgress = (sent: index, total: attachments.count)
+                    var current = attachment
+                    var messageID = current.gramMessageID
+                    if messageID == nil {
+                        let uploadID: String
+                        if let existing = current.uploadID {
+                            uploadID = existing
+                        } else {
+                            guard let staged = current.staged else {
+                                actionNote = Self.attachmentFailureNote(
+                                    "Couldn't read \(current.name).",
+                                    delivered: delivered.count, total: attachments.count)
+                                return
+                            }
+                            replyUploadBytes = (sent: 0, total: staged.size)
+                            uploadID = try await client.gramUploadFile(fileURL: staged.url) { sent, total in
+                                replyUploadBytes = (sent: sent, total: total)
+                            }
+                            replyUploadBytes = nil
+                            current = PromptAttachment(
+                                id: current.id, name: current.name, mime: current.mime,
+                                isImage: current.isImage, staged: staged, uploadID: uploadID,
+                                gramMessageID: nil)
+                            rememberReplyAttachment(current)
+                        }
+
+                        let file = HerdrClient.GramFileAttachment(
+                            uploadID: uploadID, name: current.name, mime: current.mime)
+                        let posted = try await Self.postReplyAttachment(
+                            client: client, target: target, attachment: file)
+                        messageID = posted.id
+                        if let staged = current.staged {
+                            try? FileManager.default.removeItem(at: staged.dir)
+                        }
+                        current = PromptAttachment(
+                            id: current.id, name: current.name, mime: current.mime,
+                            isImage: current.isImage, staged: nil, uploadID: nil,
+                            gramMessageID: posted.id)
+                        rememberReplyAttachment(current)
+                    }
+
+                    guard let messageID else {
+                        actionNote = Self.attachmentFailureNote(
+                            "Couldn't deliver \(current.name).",
+                            delivered: delivered.count, total: attachments.count)
+                        return
+                    }
+                    delivered.append((attachment: current, messageID: messageID))
+                }
+                replyUploadBytes = nil
+                replySendProgress = nil
+
+                let prompt = Self.attachmentPrompt(text: text, delivered: delivered)
+                try await submitPrompt(pane: paneID, text: prompt)
+                // Only now: the prompt is what makes the posted grams meaningful, so a
+                // failure before this point keeps every chip (with its resume state) for
+                // a one-tap retry.
+                let deliveredIDs = Set(delivered.map(\.attachment.id))
+                replyAttachments.removeAll { deliveredIDs.contains($0.id) }
+                if reply == text { reply = "" }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await refresh()
+            } catch let apiError as APIError {
+                actionNote = Self.attachmentFailureNote(
+                    Self.promptFailureNote(for: apiError),
+                    delivered: delivered.count, total: attachments.count)
+            } catch {
+                actionNote = Self.attachmentFailureNote(
+                    "send failed: \(error)",
+                    delivered: delivered.count, total: attachments.count)
+            }
+        }
+    }
+
+    /// Write an attachment's new upload/post state back into the staged list, so a retry
+    /// after a mid-batch failure skips the work that already succeeded.
+    private func rememberReplyAttachment(_ attachment: PromptAttachment) {
+        guard let index = replyAttachments.firstIndex(where: { $0.id == attachment.id })
+        else { return }
+        replyAttachments[index] = attachment
+    }
+
+    /// ONE prompt for the whole batch. A single attachment keeps its original wording;
+    /// several are listed with one download command each, because an agent that gets a
+    /// prompt per file cannot see them as one request.
+    private static func attachmentPrompt(
+        text: String,
+        delivered: [(attachment: PromptAttachment, messageID: String)]
+    ) -> String {
+        func outputPath(_ attachment: PromptAttachment, _ messageID: String) -> String {
+            let rawExtension = URL(fileURLWithPath: attachment.name).pathExtension.lowercased()
+            let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
+            let stem = attachment.isImage ? "photo" : "file"
+            return "/tmp/herdr-\(stem)-\(messageID)"
+                + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+        }
+        let reference: String
+        if delivered.count == 1, let only = delivered.first {
+            let path = outputPath(only.attachment, only.messageID)
+            let noun = only.attachment.isImage ? "Photo" : "File \(only.attachment.name)"
+            reference = """
+            [\(noun) attached via Herdr Gram message \(only.messageID). Download it with \
+            `herdr gram get-file \(only.messageID) -o \(path)`, then inspect \(path).]
+            """
+        } else {
+            let lines = delivered.map { item -> String in
+                let path = outputPath(item.attachment, item.messageID)
+                return "`herdr gram get-file \(item.messageID) -o \(path)`  (\(item.attachment.name))"
+            }
+            let paths = delivered.map { outputPath($0.attachment, $0.messageID) }
+            reference = """
+            [\(delivered.count) files attached via Herdr Gram. Download them with:
+            \(lines.joined(separator: "\n"))
+            then inspect \(paths.joined(separator: ", ")).]
+            """
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? reference
+            : "\(text)\n\n\(reference)"
+    }
+
+    /// Says how much of a batch landed before the failure, so a retry is an informed act
+    /// rather than a guess. Posted grams are NOT rolled back: their chips keep their
+    /// message id and the retry skips straight to the prompt.
+    static func attachmentFailureNote(_ reason: String, delivered: Int, total: Int) -> String {
+        guard total > 1, delivered > 0 else { return reason }
+        return "Sent \(delivered) of \(total). \(reason)"
+    }
+
+    private static func postReplyAttachment(
+        client: HerdrClient,
+        target: String,
+        attachment: HerdrClient.GramFileAttachment
+    ) async throws -> GramMessage {
+        for attempt in 0..<3 {
+            do {
+                return try await client.gramPost(
+                    text: "Attachment from the terminal composer.",
+                    to: target,
+                    attachment: attachment)
+            } catch let error as APIError where error.code == "upload_in_progress" {
+                if attempt == 2 { throw error }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        throw GramError.invalidFileData
+    }
+
 
     /// While the Ctrl toggle is armed, consume the next TYPED character and send it
     /// as its control byte instead of adding it to the message. Only reacts to a
@@ -4930,13 +5726,13 @@ struct TerminalPaneContent: View {
 
     /// The reply-bar send action. A pending pre-fill is delivered PROMPT-ONLY
     /// (never rawKeys, at any time); a normal reply uses the usual routing.
-    private func sendTapped() {
+    private func sendTapped(_ text: String? = nil) {
         // An explicit Send ALWAYS takes over from any pending auto-deliver and goes
         // through the normal prompt path (`send` → agent.prompt, server-gated). It must
         // never be gated on the pre-fill delivery succeeding — that is exactly what could
         // trap the reader on a stuck pre-fill with the reply bar locked.
         pendingPrefill = false
-        send(.submitText(reply))
+        send(.submitText(text ?? reply))
     }
 }
 
@@ -5293,12 +6089,14 @@ struct SettingsView: View {
                     header
                     Divider().overlay(Palette.hairlineQuiet)
                     ScrollView {
-                        // Grouped subviews keep this builder well under SwiftUI's 10-child
-                        // ViewBuilder ceiling (7 children + the footers Group).
+                        // Grouped subviews keep this builder under SwiftUI's 10-child
+                        // ViewBuilder ceiling (8 children + the footers Group = 9, so
+                        // one slot left: the next section needs its own Group).
                         VStack(alignment: .leading, spacing: 0) {
                             atAGlanceSection
                             manageSection
                             appearanceSection
+                            previewsSection
                             troubleSection
                             helpSection
                             supportSection
@@ -5460,8 +6258,9 @@ struct SettingsView: View {
 
     /// iPad "App & About": the light sections that stay inline on the iPhone index.
     private func aboutDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "App & About", subtitle: "Trouble, help, support & legal",
+        detailScaffold(title: "App & About", subtitle: "Previews, trouble, help, support & legal",
                        showBack: showBack) {
+            previewsSection
             troubleSection
             helpSection
             supportSection
@@ -6350,6 +7149,42 @@ struct SettingsView: View {
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
     /// applies the new size in place via its own `@AppStorage` observer).
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// Whether a RECEIVED html/svg preview may run script. OFF by default — see
+    /// `previewsSection` and `HtmlWebView`.
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
+
+    /// "HTML previews" — the one switch that loosens how a RECEIVED html/svg attachment
+    /// is rendered. Off by default and stated plainly, because the document is written
+    /// by whoever sent it: script stays off unless the reader turns it on for this
+    /// device. The row under the switch has to be accurate about what stays true, and
+    /// what does not: remote loads and navigation are still blocked, but a script can
+    /// signal that the file was opened by a route no URL rule sees.
+    private var previewsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("HTML PREVIEWS")
+            VStack(spacing: 0) {
+                groupedToggleRow("Run JavaScript", $previewJavaScript)
+                rowDivider
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: previewJavaScript ? "exclamationmark.triangle" : "lock.shield")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(previewJavaScript ? Palette.waiting : Palette.textDim)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.surfaceRaised))
+                    Text(previewJavaScript
+                         ? "Scripts in a previewed file will run. It still can't load anything from the network or open another page, but a file written to do so could signal that you opened it. Applies to the next preview you open."
+                         : "Scripts in a previewed file are ignored, and it can't load anything from the network. Turn this on only for a file you trust that needs to be interactive.")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.top, 10)
+        }
+    }
 
     /// "Text size" section for the iPhone index: a heading over the shared controls.
     private var appearanceSection: some View {
@@ -6846,8 +7681,34 @@ struct PagingTestHarness: View {
 }
 #endif
 
+/// Renders the received-document viewer over a file that tries to REWRITE ITSELF with
+/// script, so a UI receipt can read the rendered text and see whether the Settings
+/// switch let it run. Reads the same `@AppStorage` key `GramView` reads and passes it
+/// to the same view, so the receipt covers the shipping wiring rather than a stand-in.
+#if DEBUG
+struct HtmlPreviewHarness: View {
+    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
+
+    /// The paragraph says the safe thing; the script replaces it. Whichever sentence
+    /// the webview ends up showing IS the answer, and it is plain DOM text, which
+    /// XCUITest reads out of the web view.
+    private static let document = """
+    <!doctype html><meta charset="utf-8">
+    <body style="font:17px -apple-system;padding:24px">
+    <p id="out">script did not run</p>
+    <script>document.getElementById("out").textContent = "script ran";</script>
+    </body>
+    """
+
+    var body: some View {
+        HtmlWebView(html: Self.document, allowsJavaScript: previewJavaScript)
+            .ignoresSafeArea(edges: .bottom)
+    }
+}
+#endif
+
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control
+    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -6861,6 +7722,15 @@ enum ScreenshotMock {
         case "rosterstress": return .rosterStress
         case "pane": return .pane
         case "settings": return .settings
+        // `htmlpreview` renders the received-document viewer over a file whose script
+        // REWRITES the page, so a receipt can read off the rendered text whether the
+        // Settings switch let it run. Same view and same @AppStorage key the Gram page
+        // uses, so the wiring under test is the shipping one.
+        case "htmlpreview": return .htmlPreview
+        // `widgets` renders the Live Activity views themselves — the same file the
+        // widget extension compiles — over a bright and a dark backdrop, so the layout
+        // and its contrast can be LOOKED at. XCUITest cannot see a real Live Activity.
+        case "widgets": return .widgets
         case "newagent": return .newAgent
         // `scroll` drives the omp scroll receipt: a real SwiftTerm pane seeded with 200
         // distinct lines of scrollback so a swipe visibly moves the content.
@@ -6933,6 +7803,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("gram.get_file") { return Self.gramFileContent }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
+        if requestLine.contains("agent.prompt") { return Self.agentPrompted }
         if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
@@ -7162,6 +8033,9 @@ struct MockTransport: HerdrTransport {
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
+    static let agentPrompted =
+        #"{"id":"mock","result":{"type":"agent_prompted","delivery":"submitted"}}"#
+
 
     // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
     // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is

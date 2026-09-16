@@ -18,6 +18,38 @@ final class LiveActivityController: ObservableObject {
 
     private var activity: Activity<AgentActivityAttributes>?
 
+    /// The tracked activity ONLY while it is still live.
+    ///
+    /// SWIPING THE BANNER AWAY ON THE LOCK SCREEN ENDS IT. ActivityKit leaves our
+    /// reference in place with `activityState == .dismissed`, and `update` on a
+    /// dismissed activity is silently dropped — so the plain `activity != nil` check in
+    /// `start` reported "one is already live", pushed a state nobody would ever see,
+    /// and returned. The banner stayed gone for the rest of the process's life, and the
+    /// only way back was force-quitting the app. Every decision about whether one
+    /// exists goes through this.
+    ///
+    /// `.stale` COUNTS AS LIVE. A stale activity is still on screen and an update is
+    /// the documented cure for it — and this app's widget is built for that state, with
+    /// its own hedged headline and "last update" line off `context.isStale`. Treating
+    /// it as death would forget a visible banner and then mint a second one beside it.
+    /// Only `.dismissed` and `.ended` are dead.
+    private var liveActivity: Activity<AgentActivityAttributes>? {
+        guard let activity else { return nil }
+        switch activity.activityState {
+        case .active, .stale: return activity
+        default: return nil
+        }
+    }
+
+    /// Whether an OS activity can still be updated, for the reclaim path. Same rule as
+    /// `liveActivity`, applied to somebody else's reference.
+    private static func isLive(_ activity: Activity<AgentActivityAttributes>) -> Bool {
+        switch activity.activityState {
+        case .active, .stale: return true
+        default: return false
+        }
+    }
+
     /// The current activity's APNs push token (hex), or nil when there is no activity / no token
     /// yet. RootView observes this and registers it with the server so the widget can update in
     /// the BACKGROUND. Published because the token arrives asynchronously after `start`.
@@ -25,6 +57,13 @@ final class LiveActivityController: ObservableObject {
 
     /// Watches `activity.pushTokenUpdates`; cancelled/replaced whenever the activity changes.
     private var tokenTask: Task<Void, Never>?
+
+    /// The host the session is for, remembered from `start` so `update` can mint a
+    /// REPLACEMENT after the reader swipes the banner away. `hostLabel` is a static
+    /// attribute, so a new activity needs it and there is no other way to recover it
+    /// mid-session. Cleared by `end`, which is what keeps a disconnected session from
+    /// resurrecting its banner.
+    private var hostLabel: String?
 
     /// Whether the system currently permits Live Activities (user toggle + capability).
     private var enabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
@@ -40,9 +79,19 @@ final class LiveActivityController: ObservableObject {
         // host. `hostLabel` is a static attribute we cannot update, so a reclaimed activity
         // from a different machine would keep showing the wrong host. End every activity we
         // are not keeping (wrong host, or leftover orphans).
-        if activity == nil {
+        if liveActivity == nil {
+            // Drop a dismissed or ended reference before looking: it is not coming back,
+            // and keeping it is what made a swiped-away banner permanent.
+            activity = nil
+            // THE SWEEP SEES EVERYTHING; only the RECLAIM is filtered. A non-active
+            // activity is not necessarily off screen — an `.ended` one lingers for up to
+            // four hours under the default dismissal policy, and a `.stale` one until it
+            // is updated — so filtering before the sweep would leave a visible banner
+            // neither adopted nor ended, and the fresh mint would sit beside it.
             let existing = Activity<AgentActivityAttributes>.activities
-            activity = existing.first { $0.attributes.hostLabel == hostLabel }
+            activity = existing.first {
+                $0.attributes.hostLabel == hostLabel && Self.isLive($0)
+            }
             let keep = activity?.id
             if existing.contains(where: { $0.id != keep }) {
                 Task {
@@ -52,12 +101,22 @@ final class LiveActivityController: ObservableObject {
                 }
             }
         }
-        if activity != nil { observePushToken(); update(state); return }
+        self.hostLabel = hostLabel
+        if liveActivity != nil { observePushToken(); update(state); return }
         let attributes = AgentActivityAttributes(hostLabel: hostLabel)
         do {
             // pushType: .token so ActivityKit issues a per-activity push token — the server uses
             // it to update the widget in the BACKGROUND (locked / app closed). Foreground updates
             // still go through update() directly.
+            //
+            // staleDate IS DELIBERATELY nil. A stale window only says something true if
+            // something re-pushes inside it; the only caller of update() is
+            // `.onChange(of: fullList)`, AgentList is Equatable, and no timer or heartbeat
+            // re-pushes anywhere in this client. A 90s window therefore marked a HEALTHY,
+            // stable roster — one agent blocked, waiting for you, the state this activity
+            // exists for — as "stale", and the widget then asserted the host was unreachable
+            // while the app was connected in the foreground. Until a real liveness signal
+            // drives it, this claims nothing.
             activity = try Activity.request(
                 attributes: attributes,
                 content: ActivityContent(state: state, staleDate: nil),
@@ -84,9 +143,42 @@ final class LiveActivityController: ObservableObject {
         }
     }
 
-    /// Push a new state to the live activity, if there is one.
+    /// Mint a replacement if the banner is gone, and do NOTHING otherwise.
+    ///
+    /// Called on every roster poll, which is the only signal that arrives while a herd
+    /// stands still — and standing still with one agent blocked is precisely the state
+    /// this activity exists for, so recovery cannot hang off `.onChange(of: fullList)`
+    /// alone. It deliberately does not push content when one IS live: ActivityKit
+    /// throttles frequent updates, and re-sending an unchanged state every five seconds
+    /// would spend that budget for nothing.
+    func recoverIfEnded(_ state: AgentActivityAttributes.ContentState) {
+        guard enabled, liveActivity == nil, hostLabel != nil else { return }
+        update(state)
+    }
+
+    /// Push a new state to the live activity, if one is still live. A dismissed
+    /// activity is forgotten here too, so the next `start` mints a fresh one instead of
+    /// pushing into a banner the reader has already swiped away.
     func update(_ state: AgentActivityAttributes.ContentState) {
-        guard let activity else { return }
+        guard let activity = liveActivity else {
+            // Stop watching the dead activity's token and stop publishing it: the
+            // re-mint below issues a fresh one, and `RootView` registers whatever this
+            // publishes with the server.
+            tokenTask?.cancel()
+            tokenTask = nil
+            pushToken = nil
+            self.activity = nil
+            // A DISMISSED banner comes back on the next roster change rather than only
+            // on the next reconnect. Swiping it away is not "stop watching this
+            // machine" — the session is still live and the app still has something to
+            // report — and before this the only cure was force-quitting the app.
+            // Guarded by `hostLabel`, which `end` clears, so a session that really did
+            // disconnect stays gone.
+            if let hostLabel { start(hostLabel: hostLabel, state: state) }
+            return
+        }
+        // staleDate nil for the same reason as in `start`: nothing re-pushes on a cadence,
+        // so an elapsed window would mean "the roster did not change", not "the host is gone".
         Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
     }
 
@@ -98,6 +190,7 @@ final class LiveActivityController: ObservableObject {
         tokenTask = nil
         pushToken = nil
         activity = nil
+        hostLabel = nil
         Task {
             for a in Activity<AgentActivityAttributes>.activities {
                 await a.end(nil, dismissalPolicy: .immediate)
@@ -132,7 +225,10 @@ final class LiveActivityController: ObservableObject {
             unconfirmedCount: c.unconfirmedCount,
             workingCount: c.workingCount,
             totalCount: c.totalCount,
-            workingSince: c.workingSinceUnixSeconds
+            workingSince: c.workingSinceUnixSeconds,
+            blockedSince: c.blockedSinceUnixSeconds,
+            agentID: c.agentID,
+            updatedAt: Date().timeIntervalSince1970
         )
     }
 

@@ -9,16 +9,24 @@ import WebKit
 /// untrusted file safe to display:
 ///
 ///   * **JavaScript is disabled** (`allowsContentJavaScript = false`), so no script
-///     in the file runs.
-///   * **All network is blocked** via a `WKContentRuleList` compiled from
-///     `WebViewPolicy.blockNetworkRuleListJSON`, so a passive subresource load
-///     (`<img>`, `<link>`, CSS `url()`, `<object>`) cannot beacon out. `data:` URIs
-///     and the inline document are untouched, so embedded images/styles still render.
-///     If the rule cannot be installed the viewer FAILS CLOSED (shows a placeholder)
-///     rather than rendering the untrusted document unprotected.
+///     in the file runs — unless the reader turns "Run JavaScript" on in Settings,
+///     which is off by default and leaves the other two protections in place.
+///   * **Remote loads are blocked** via a `WKContentRuleList` compiled from
+///     `WebViewPolicy.blockNetworkRuleListJSON`, so no subresource — `<img>`,
+///     `<link>`, CSS `url()`, `<object>` — and no script-issued fetch, XHR or beacon
+///     can reach the network. `data:` URIs and the inline document are untouched, so
+///     embedded images/styles still render. If the rule cannot be installed the
+///     viewer FAILS CLOSED (shows a placeholder) rather than rendering the untrusted
+///     document unprotected.
 ///   * **Navigation is frozen** to the initial document (see the coordinator): link
 ///     taps, `<form>` submits and `<meta http-equiv=refresh>` are all cancelled, so
-///     the file cannot navigate or egress even by a route the content rule misses.
+///     the file cannot navigate away.
+///
+/// With script ON the first protection narrows to what it literally is — a rule over
+/// URL LOADS. Egress that never presents a URL to the loader (`RTCPeerConnection`
+/// ICE gathering is the known one) is outside it, so a determined document may signal
+/// that it was opened. It still has no base URL, hence no access to app data, other
+/// origins or cookies: the leak is a read receipt, not the reader's data.
 ///
 /// The webview keeps WKWebView's default OPAQUE white base: an unstyled document then
 /// renders black-on-white (readable in both light and dark), and our reports, which
@@ -26,17 +34,28 @@ import WebKit
 /// dark system background rendered unstyled files black-on-black — the #92 symptom.)
 struct HtmlWebView: UIViewRepresentable {
     let html: String
+    /// Whether this document may run script. The caller reads the Settings switch
+    /// (`WebViewPolicy.javaScriptDefaultsKey`), which is OFF unless the reader turned
+    /// it on; flipping it applies to the NEXT preview, because the flag lives on the
+    /// configuration a `WKWebView` copies at init.
+    var allowsJavaScript: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // No script execution from the (untrusted) document. This is set on the config
-        // BEFORE the WKWebView is created (the init-time copy captures it), and the
-        // coordinator deliberately implements ONLY the 2-arg policy method — not the
-        // `preferences:` variant, which would hand back a fresh WKWebpagePreferences and
-        // silently re-enable JS. Do not add that overload without re-disabling JS there.
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        // Script execution from the (untrusted) document, off unless the reader asked
+        // for it. This is set on the config BEFORE the WKWebView is created (the
+        // init-time copy captures it), and the coordinator deliberately implements ONLY
+        // the 2-arg policy method — not the `preferences:` variant, which would hand
+        // back a fresh WKWebpagePreferences and silently re-enable JS. Do not add that
+        // overload without carrying this flag into it.
+        //
+        // Turning script ON does not remove the other two protections: the load block
+        // below and the frozen navigation still apply, so a script can compute and
+        // repaint but cannot fetch, load a subresource or navigate. It is not a
+        // hermetic seal — see the type doc on egress that carries no URL.
+        config.defaultWebpagePreferences.allowsContentJavaScript = allowsJavaScript
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator

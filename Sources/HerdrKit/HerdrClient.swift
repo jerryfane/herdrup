@@ -381,11 +381,17 @@ public actor HerdrClient {
         /// Omitted when nil, so an unconditional fetch sends the same JSON it always
         /// did and a daemon without the feature sees no new field at all.
         var ifUnchangedDigest: String?
+        /// Newest-first page size. Omitted when nil — the whole list, as before.
+        var limit: Int?
+        /// Cursor: only messages older than this id. Omitted for the first page.
+        var beforeID: String?
         enum CodingKeys: String, CodingKey {
             case callerPaneID = "caller_pane_id"
             case onlyQueue = "only_queue"
             case unreadOnly = "unread_only"
             case ifUnchangedDigest = "if_unchanged_digest"
+            case limit
+            case beforeID = "before_id"
         }
     }
 
@@ -398,20 +404,30 @@ public actor HerdrClient {
     /// replies "unchanged" with no messages, which is the difference between a few
     /// hundred bytes and the whole store on a 6-second poll.
     ///
+    /// `limit` and `beforeID` page it: the inbox opens on the newest `limit` messages
+    /// and asks for older ones as the reader scrolls, instead of paying ~900 KB for
+    /// ~870 messages before it can draw anything. Conditional fetch is head-only — a
+    /// daemon ignores `ifUnchangedDigest` when `beforeID` is set, because "unchanged"
+    /// answers a question about the whole list, not about one page.
+    ///
     /// Needs no capability gate. `GramListParams` is not `deny_unknown_fields`, and a
-    /// daemon predating this (0.8.2, measured) IGNORES the field and returns the full
-    /// list — which decodes as a normal changed answer. An old daemon therefore behaves
-    /// exactly as before rather than erroring.
+    /// daemon predating any of these fields IGNORES them and returns the full list —
+    /// which decodes as a normal changed answer with `hasMore` nil, i.e. "this is
+    /// everything". An old daemon therefore behaves exactly as before rather than
+    /// erroring or paging half an inbox.
     public func gramList(
-        unreadOnly: Bool = false, ifUnchangedDigest: String? = nil
+        unreadOnly: Bool = false, ifUnchangedDigest: String? = nil,
+        limit: Int? = nil, beforeID: String? = nil
     ) async throws -> GramListAnswer {
         let result = try await call(
             "gram.list",
             GramListParams(callerPaneID: nil, onlyQueue: false, unreadOnly: unreadOnly,
-                           ifUnchangedDigest: ifUnchangedDigest),
+                           ifUnchangedDigest: ifUnchangedDigest, limit: limit,
+                           beforeID: beforeID),
             as: GramListResult.self)
         return GramListAnswer(
-            messages: result.messages, digest: result.digest, storeID: result.storeID)
+            messages: result.messages, digest: result.digest, storeID: result.storeID,
+            hasMore: result.hasMore, unreadCount: result.unreadCount)
     }
 
     /// Whether the connected daemon is our fork or the upstream base.
@@ -756,9 +772,26 @@ public actor HerdrClient {
     /// Downloads the file attached to a message and returns its name, mime, and
     /// bytes. As the owner the app sends no caller pane and may download any file.
     /// The bytes come back inline (base64) in one reply.
-    public func gramGetFile(id: String) async throws -> (name: String, mime: String, data: Data) {
-        let result = try await call("gram.get_file", GramGetFileParams(id: id),
+    ///
+    /// `onBytesReceived` reports REPLY bytes as the SSH channel delivers them, so a
+    /// caller that knows the file's size can show a real bar. It fires only on the
+    /// Citadel transport — a mock or a local socket gets the plain path and no
+    /// callbacks, which a caller must treat as "no progress available" rather than
+    /// "no bytes yet". The counted bytes are the BASE64 reply, about 4/3 of the file
+    /// plus the JSON envelope, which is why the caller scales rather than dividing by
+    /// the file size directly.
+    public func gramGetFile(
+        id: String, onBytesReceived: ((Int) -> Void)? = nil
+    ) async throws -> (name: String, mime: String, data: Data) {
+        let result: GramFileContentResult
+        if let onBytesReceived, let citadel = transport as? CitadelTransport {
+            let line = try encodeRequest("gram.get_file", GramGetFileParams(id: id))
+            let response = try await citadel.roundTrip(line, onBytesReceived: onBytesReceived)
+            result = try decodeResult(response, as: GramFileContentResult.self)
+        } else {
+            result = try await call("gram.get_file", GramGetFileParams(id: id),
                                     as: GramFileContentResult.self)
+        }
         guard let data = Data(base64Encoded: result.dataBase64) else {
             throw GramError.invalidFileData
         }

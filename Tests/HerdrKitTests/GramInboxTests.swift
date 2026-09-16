@@ -157,4 +157,173 @@ final class GramInboxTests: XCTestCase {
                        "re-sending identical messages is not a content change")
         XCTAssertTrue(inbox.apply(answer([try message("g1"), try message("g2")], digest: "d2")))
     }
+
+    private func page(
+        _ messages: [GramMessage], hasMore: Bool, unread: Int? = nil, digest: String? = "d"
+    ) -> GramListAnswer {
+        GramListAnswer(messages: messages, digest: digest, storeID: "store-1",
+                       hasMore: hasMore, unreadCount: unread)
+    }
+
+    /// Scrolling loads older pages BELOW what is held, de-duped, and the cursor walks
+    /// to the oldest loaded message. Without the de-dupe a message that shifted between
+    /// pages renders twice.
+    func testAppendingAPageExtendsTheListAndMovesTheCursor() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        XCTAssertEqual(inbox.nextCursor, "b")
+
+        inbox.appendPage(page([try message("b"), try message("a")], hasMore: false), generation: inbox.generation)
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"],
+                       "the page must append older messages once, keeping newest-first order")
+        XCTAssertFalse(inbox.hasMore)
+        XCTAssertNil(inbox.nextCursor, "nothing older left to ask for")
+    }
+
+    /// A CHANGED head answer replaces the list, deep pages included. Splicing the old
+    /// tail back on was tried and reverted: a head page says nothing about what is
+    /// older, so a message deleted (or pruned) below the head survived the splice and
+    /// was then frozen by the adopted whole-store digest, which answers every later
+    /// poll "unchanged". Losing scroll depth on a real change is the cheaper wrong.
+    func testChangedHeadAnswerDropsOlderPagesSoDeletionsCannotSurvive() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        inbox.appendPage(page([try message("a")], hasMore: false), generation: inbox.generation)
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
+
+        inbox.apply(page([try message("d"), try message("c"), try message("b")], hasMore: true))
+        XCTAssertEqual(inbox.messages.map(\.id), ["d", "c", "b"],
+                       "the head is authoritative; older pages come back from the sentinel")
+        XCTAssertTrue(inbox.hasMore, "and the cursor points past the head again")
+    }
+
+    /// An UNCHANGED answer must leave a deep reader exactly where they are — it is the
+    /// common case on a six-second poll, and it carries no messages to reconcile.
+    func testUnchangedAnswerKeepsDeepPagesLoaded() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true))
+        inbox.appendPage(page([try message("b"), try message("a")], hasMore: false), generation: inbox.generation)
+
+        XCTAssertFalse(inbox.apply(answer(nil, digest: "d")))
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
+    }
+
+    /// Read-all marks messages OLDER than the loaded page — it takes its ids from an
+    /// unread-only fetch. The badge is daemon-sourced now, so a mark for an id this
+    /// inbox does not hold still has to move the count, or a fully successful pass
+    /// leaves the badge and the Read-all button exactly where they were.
+    func testMarkingReadAnIDOutsideTheWindowStillMovesTheCount() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, unread: 3))
+        XCTAssertEqual(inbox.unreadCount, 3)
+
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2, "a server-confirmed read counts wherever it lives")
+        XCTAssertNil(inbox.conditionalDigest,
+                     "and the list no longer matches what the daemon fingerprinted")
+
+        inbox.markRead(id: "c")
+        XCTAssertEqual(inbox.unreadCount, 1)
+        inbox.markRead(id: "c")
+        XCTAssertEqual(inbox.unreadCount, 1, "a second mark of the same loaded id is a no-op")
+    }
+
+    /// A page fetched against the OLD cursor must be dropped after a head refresh
+    /// replaced the list, not appended. Appending it leaves a hole between the new
+    /// oldest row and the old cursor that nothing re-fetches: the reader scrolls past
+    /// messages that were silently skipped.
+    func testAPageBuiltBeforeAHeadRefreshIsDropped() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        let generation = inbox.generation
+
+        // A message arrives; the head answer replaces the list.
+        inbox.apply(page([try message("d"), try message("c")], hasMore: true))
+        // The page that was already in flight comes back, built on the old cursor "b".
+        XCTAssertFalse(inbox.appendPage(page([try message("a")], hasMore: false),
+                                        generation: generation),
+                       "a stale page must not land")
+        XCTAssertEqual(inbox.messages.map(\.id), ["d", "c"])
+        XCTAssertEqual(inbox.nextCursor, "c", "and the cursor still points at the real end")
+    }
+
+    /// `appendPage` reports GROWTH, not "the answer was non-empty". A walk to the end
+    /// stops on that answer, and a page of ids already held would otherwise loop
+    /// forever while looking like progress.
+    func testAPageOfAlreadyKnownMessagesReportsNoGrowth() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        XCTAssertFalse(inbox.appendPage(page([try message("c"), try message("b")], hasMore: true),
+                                        generation: inbox.generation),
+                       "nothing new arrived, so nothing grew")
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b"])
+    }
+
+    /// Read-all marks each id TWICE on purpose (a poll landing mid-pass reverts the
+    /// local flips), so the out-of-window decrement has to be idempotent or a partial
+    /// pass walks the badge to zero while still reporting failures.
+    func testMarkingReadTwiceOutsideTheWindowDecrementsOnce() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c", unread: false)], hasMore: true, unread: 2))
+        inbox.markRead(id: "older-1")
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 1)
+    }
+
+    /// An IDENTICAL head answer must not invalidate a page already in flight. Any local
+    /// mark-read or delete clears the digest, so the next poll is unconditional and
+    /// ships the same rows straight back; bumping the generation there dropped a
+    /// perfectly contiguous page and left the sentinel spinning on an unchanged cursor.
+    func testAnIdenticalHeadAnswerKeepsAnInFlightPageValid() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c"), try message("b")], hasMore: true))
+        let generation = inbox.generation
+
+        // The unconditional poll returns exactly what is held.
+        XCTAssertFalse(inbox.apply(page([try message("c"), try message("b")], hasMore: true)))
+        XCTAssertTrue(inbox.appendPage(page([try message("a")], hasMore: false),
+                                       generation: generation),
+                      "the page was still contiguous, so it must land")
+        XCTAssertEqual(inbox.messages.map(\.id), ["c", "b", "a"])
+    }
+
+    /// Read-all marks each id twice with a poll landing in between — that poll is the
+    /// reason the second pass exists. The out-of-window ledger therefore has to survive
+    /// a head answer, or the re-apply decrements the badge a second time.
+    func testAnOutOfWindowReadSurvivesAHeadRefresh() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, unread: 3))
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2)
+
+        // A poll lands mid-pass: the daemon's count already excludes the id it marked.
+        inbox.apply(page([try message("d"), try message("c")], hasMore: true, unread: 2))
+        inbox.markRead(id: "older-1")
+        XCTAssertEqual(inbox.unreadCount, 2, "the re-apply must not decrement again")
+    }
+
+    /// The badge counts the whole store. A paged client holds a window, so the daemon's
+    /// count has to win — counting the window would under-count every unread message
+    /// older than the first page.
+    func testUnreadCountPrefersTheServerCountOverTheWindow() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c", unread: false)], hasMore: true, unread: 7))
+        XCTAssertEqual(inbox.unreadCount, 7)
+
+        // An unpaged daemon sends no count, and then the window IS the whole list.
+        var unpaged = GramInbox()
+        unpaged.apply(answer([try message("c"), try message("b", unread: false)], digest: "d"))
+        XCTAssertEqual(unpaged.unreadCount, 1)
+        XCTAssertFalse(unpaged.hasMore, "no paging fields means this answer is everything")
+    }
+
+    /// A page must not arm the conditional poll: the digest fingerprints the whole
+    /// store, and adopting it from a page would have the daemon answer "unchanged" for
+    /// a list this inbox only partly holds.
+    func testAppendingAPageNeverAdoptsItsDigest() throws {
+        var inbox = GramInbox()
+        inbox.apply(page([try message("c")], hasMore: true, digest: "head"))
+        inbox.appendPage(page([try message("b")], hasMore: false, digest: "page"), generation: inbox.generation)
+        XCTAssertEqual(inbox.conditionalDigest, "head")
+    }
 }
