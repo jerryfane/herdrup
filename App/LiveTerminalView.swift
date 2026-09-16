@@ -858,26 +858,39 @@ struct LiveTerminalView: UIViewRepresentable {
             Self.makePaneFont(size: paneFontSize)
         }
 
-        /// CACHED, because this is read on the hot path. The PTY geometry helper and the
-        /// scroll/mouse gesture handlers all ask for `paneFont`, so a computed property
-        /// that rebuilt the cascade would materialise the entire system fallback list as
-        /// `CTFontDescriptor`s on every wheel tick — and `view.font`'s setter rebuilds
-        /// SwiftTerm's `FontSet` and calls `resetFont()` on top. Keyed by size because
-        /// the pinch gesture is the only thing that varies it, over a 16-step range.
-        private static var paneFontCache: [CGFloat: UIFont] = [:]
+        /// The cascade, built ONCE and immutable.
+        ///
+        /// `paneFont` is read on the hot path — the PTY geometry helper and the
+        /// scroll/mouse gesture handlers all ask for it — and rebuilding the cascade
+        /// there materialised the entire system fallback list as `CTFontDescriptor`s per
+        /// wheel tick, on top of `view.font`'s setter rebuilding SwiftTerm's `FontSet`.
+        ///
+        /// A `[CGFloat: UIFont]` cache keyed by size would be the obvious fix and is the
+        /// wrong one: `Coordinator` is deliberately NOT `@MainActor` (see `applyFont`),
+        /// so a mutable static would be a data race on dictionary storage, not merely a
+        /// concurrency warning under this target's Swift 5.9 mode. A `static let` is
+        /// initialised exactly once under the runtime's own guarantee, and size is then
+        /// applied by `UIFont(descriptor:size:)`, which does no cascade work. Safe to
+        /// resolve lazily because the faces come from `UIAppFonts` at launch — nothing
+        /// in this app registers a font at runtime — so the answer cannot change.
+        private static let paneFontDescriptor: UIFontDescriptor? = makePaneFontDescriptor()
 
         static func makePaneFont(size: CGFloat) -> UIFont {
-            if let cached = paneFontCache[size] { return cached }
-            let font = buildPaneFont(size: size)
-            paneFontCache[size] = font
-            return font
+            guard let descriptor = paneFontDescriptor else {
+                return UIFont(name: "IBMPlexMono", size: size)
+                    ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            }
+            return UIFont(descriptor: descriptor, size: size)
         }
 
-        private static func buildPaneFont(size: CGFloat) -> UIFont {
-            let primary = UIFont(name: "IBMPlexMono", size: size)
-                ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
-            guard let symbols = UIFont(name: "SymbolsNFM", size: size) else {
-                return primary
+        /// Nil when the symbol font is missing, which sends `makePaneFont` down the plain
+        /// IBM Plex path rather than inventing a cascade with nothing in it.
+        private static func makePaneFontDescriptor() -> UIFontDescriptor? {
+            let referenceSize = defaultFontSize
+            let primary = UIFont(name: "IBMPlexMono", size: referenceSize)
+                ?? UIFont.monospacedSystemFont(ofSize: referenceSize, weight: .regular)
+            guard let symbols = UIFont(name: "SymbolsNFM", size: referenceSize) else {
+                return nil
             }
             let systemFallbacks =
                 CTFontCopyDefaultCascadeListForLanguages(primary as CTFont, nil)
@@ -909,10 +922,9 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             if !placed { cascade.append(symbols.fontDescriptor) }
 
-            let descriptor = primary.fontDescriptor.addingAttributes([
-                .cascadeList: cascade
-            ])
-            return UIFont(descriptor: descriptor, size: size)
+            // The descriptor, not a font: `makePaneFont` applies the size, which is the
+            // only thing the pinch gesture varies.
+            return primary.fontDescriptor.addingAttributes([.cascadeList: cascade])
         }
 
         private static func isLastResort(_ descriptor: CTFontDescriptor) -> Bool {
