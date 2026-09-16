@@ -169,6 +169,9 @@ struct GramView: View {
     /// The in-flight file-open download (see `openFile`), cancelled when the page goes
     /// away so a late completion can't strand a temp file after cleanup already ran.
     @State private var openFileTask: Task<Void, Never>?
+    /// The in-flight export download, cancelled with the page for the same reason as
+    /// `openFileTask`.
+    @State private var saveFileTask: Task<Void, Never>?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
     /// Bytes of the reply received so far for the in-flight download, against the
@@ -416,6 +419,7 @@ struct GramView: View {
         // that root are unlinked.
         .onDisappear {
             openFileTask?.cancel()
+            saveFileTask?.cancel()
             if let previewURL, !Downloads.isCached(previewURL) {
                 try? FileManager.default.removeItem(at: previewURL)
             }
@@ -1761,6 +1765,7 @@ struct GramView: View {
         downloadingFileFor = id
         downloadBytes = nil
         let expected = expectedBytes
+        let epoch = Downloads.currentEpoch
         openFileTask = Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
@@ -1772,7 +1777,7 @@ struct GramView: View {
                 if Task.isCancelled { return }
                 // Keep the bytes for next time. A failure here is not an error: the open
                 // proceeds from a temp file and the next open simply downloads again.
-                let cached = Downloads.store(data, id: id, name: name, mime: mime)
+                let cached = Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
                 present(data: data, name: name, mime: mime, cachedAt: cached?.url)
             } catch let error as APIError {
                 sendError = "Couldn't open the file: \(error.message)"
@@ -1877,7 +1882,10 @@ struct GramView: View {
         downloadingFileFor = id
         downloadBytes = nil
         let expected = expectedBytes
-        Task {
+        let epoch = Downloads.currentEpoch
+        // TRACKED, so the page's cleanup can cancel it. This task was untracked, which
+        // made its own `Task.isCancelled` check unreachable: nothing ever cancelled it.
+        saveFileTask = Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
                 let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
@@ -1885,7 +1893,7 @@ struct GramView: View {
                 })
                 if Task.isCancelled { return }
                 // Keep them for the next open or save.
-                Downloads.store(data, id: id, name: name, mime: mime)
+                Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
                 // A per-export temp dir so the file keeps its real name (the picker uses
                 // the file's own name) without colliding with the preview temp file.
                 let dir = FileManager.default.temporaryDirectory
@@ -2030,9 +2038,28 @@ struct GramView: View {
             GramFileCache.cached(id: id, in: root)
         }
 
+        /// Session epoch. Sign-out bumps it BEFORE wiping, and a store carrying a stale
+        /// epoch is refused — see `invalidate()` for why that is needed.
+        private static let lock = NSLock()
+        private static var epoch = 0
+
+        static var currentEpoch: Int { lock.withLock { epoch } }
+
+        /// Store bytes downloaded during `epoch`. Refused when the session has ended
+        /// since, and re-checked AFTER the write, because `disconnect()` can wipe the
+        /// root while this is mid-flight and a late write would otherwise leave an
+        /// attachment on disk after sign-out.
         @discardableResult
-        static func store(_ data: Data, id: String, name: String, mime: String) -> CachedGramFile? {
-            GramFileCache.store(data, id: id, name: name, mime: mime, in: root)
+        static func store(
+            _ data: Data, id: String, name: String, mime: String, epoch storeEpoch: Int
+        ) -> CachedGramFile? {
+            guard currentEpoch == storeEpoch else { return nil }
+            let stored = GramFileCache.store(data, id: id, name: name, mime: mime, in: root)
+            guard currentEpoch == storeEpoch else {
+                GramFileCache.remove(id: id, in: root)
+                return nil
+            }
+            return stored
         }
 
         static func remove(id: String) {
@@ -2041,7 +2068,15 @@ struct GramView: View {
 
         /// Sign-out and account removal: downloaded bytes must not survive the account
         /// that could read them.
-        static func removeAll() {
+        ///
+        /// The epoch is bumped FIRST. `disconnect()` is synchronous and cancels nothing:
+        /// the only cancellation is the Gram page's `onDisappear`, which SwiftUI runs
+        /// during the teardown that `disconnect()` itself triggers — strictly after this
+        /// has already returned. So a download whose bytes have landed can reach `store`
+        /// after the wipe. Bumping first makes that store a no-op, and `store` re-checks
+        /// afterwards so a write that slipped through is removed again.
+        static func invalidate() {
+            lock.withLock { epoch += 1 }
             GramFileCache.removeAll(in: root)
         }
 
