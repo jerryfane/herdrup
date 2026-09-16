@@ -7,8 +7,7 @@ struct AgentLiveActivity: Widget {
         ActivityConfiguration(for: AgentActivityAttributes.self) { context in
             LockScreenView(
                 hostLabel: context.attributes.hostLabel,
-                state: context.state,
-                isStale: context.isStale
+                state: context.state
             )
             .widgetURL(context.state.deepLinkURL)
             // Match the card's bottom stop at the system-owned edges.
@@ -28,7 +27,7 @@ struct AgentLiveActivity: Widget {
                 // better on their phone. Type sizes, weights and tokens stay the
                 // spec's; only which region holds what has moved.
                 DynamicIslandExpandedRegion(.leading) {
-                    ExpandedHero(state: context.state, isStale: context.isStale)
+                    ExpandedHero(state: context.state)
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -38,16 +37,14 @@ struct AgentLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.bottom) {
                     ExpandedBody(
                         hostLabel: context.attributes.hostLabel,
-                        state: context.state,
-                        isStale: context.isStale
+                        state: context.state
                     )
                 }
             } compactLeading: {
                 StatusMark(
                     status: context.state.status,
                     diameter: 10,
-                    isUnconfirmed: context.state.markIsUnconfirmed,
-                    isStale: context.isStale
+                    isUnconfirmed: context.state.markIsUnconfirmed
                 )
             } compactTrailing: {
                 CompactCount(state: context.state)
@@ -55,8 +52,7 @@ struct AgentLiveActivity: Widget {
                 StatusMark(
                     status: context.state.status,
                     diameter: 14,
-                    isUnconfirmed: context.state.markIsUnconfirmed,
-                    isStale: context.isStale
+                    isUnconfirmed: context.state.markIsUnconfirmed
                 )
                 .frame(width: 36, height: 36)
             }
@@ -93,7 +89,6 @@ private struct CompactCount: View {
 /// says "need you" over nothing is a lie the zero state exists to avoid.
 private struct ExpandedHero: View {
     let state: AgentActivityAttributes.ContentState
-    let isStale: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -101,21 +96,18 @@ private struct ExpandedHero: View {
                 StatusMark(
                     status: state.status,
                     diameter: 10,
-                    isUnconfirmed: state.markIsUnconfirmed,
-                    isStale: isStale
+                    isUnconfirmed: state.markIsUnconfirmed
                 )
-                if state.needsYouCount > 1, !isStale {
+                if state.needsYouCount > 1 {
                     // `compactCount` so 100 waiting reads "99+" here and in the compact
-                    // pill alike; it also bounds the corner at three glyphs. Suppressed
-                    // when stale, because the headline then reads "N may need you" and
-                    // the count has no business being printed twice.
+                    // pill alike; it also bounds the corner at three glyphs.
                     Text(state.needsYouCount.compactCount)
                         .font(WidgetFont.plexSemiBold(26))
                         .monospacedDigit()
                         .foregroundStyle(WidgetPalette.waiting)
                 }
             }
-            if state.needsYouCount > 0, !isStale {
+            if state.needsYouCount > 0 {
                 Text(state.markIsUnconfirmed ? "may need you" : "need you")
                     .font(WidgetFont.geist(12))
                     .foregroundStyle(WidgetPalette.textDim)
@@ -147,12 +139,11 @@ private struct ExpandedHost: View {
 private struct ExpandedBody: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
-    let isStale: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             content
-            if state.needsYouCount > 0 || state.status == .stopped || isStale {
+            if state.needsYouCount > 0 || state.status == .stopped {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
                     destination: state.deepLinkURL
@@ -170,7 +161,7 @@ private struct ExpandedBody: View {
                 .font(WidgetFont.geistSemiBold(16))
                 .foregroundStyle(WidgetPalette.text)
                 .lineLimit(1)
-            if let question = state.question, !question.isEmpty, !isStale {
+            if let question = state.question, !question.isEmpty {
                 Text(question)
                     .font(WidgetFont.plex(12))
                     .foregroundStyle(WidgetPalette.textDim)
@@ -182,7 +173,7 @@ private struct ExpandedBody: View {
     }
 
     private var headline: String {
-        state.presentationHeadline(isStale: isStale)
+        state.presentationHeadline
     }
 
     /// The faint line: the timer that matters in this state, then the fleet counts. The
@@ -191,27 +182,18 @@ private struct ExpandedBody: View {
     @ViewBuilder
     private var age: some View {
         HStack(spacing: 4) {
-            if isStale {
-                if let updatedAt = state.updatedAt {
-                    Text("last update")
-                    Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
-                } else {
-                    Text("no recent update")
-                }
-            } else {
-                if state.needsYouCount > 0, let since = state.blockedSince {
-                    Text("waiting")
-                    Text(Date(timeIntervalSince1970: since), style: .timer)
-                        .monospacedDigit()
-                    Text("·")
-                } else if state.status == .working, state.workingCount == 1,
-                          let since = state.workingSince {
-                    Text(Date(timeIntervalSince1970: since), style: .timer)
-                        .monospacedDigit()
-                    Text("·")
-                }
-                Text("\(state.workingCount) working · \(state.totalCount) agents")
+            if state.needsYouCount > 0, let since = state.blockedSince {
+                Text("waiting")
+                Text(Date(timeIntervalSince1970: since), style: .timer)
+                    .monospacedDigit()
+                Text("·")
+            } else if state.status == .working, state.workingCount == 1,
+                      let since = state.workingSince {
+                Text(Date(timeIntervalSince1970: since), style: .timer)
+                    .monospacedDigit()
+                Text("·")
             }
+            Text("\(state.workingCount) working · \(state.totalCount) agents")
         }
         .font(WidgetFont.plex(11))
         .foregroundStyle(WidgetPalette.islandTextFaint)
@@ -223,7 +205,6 @@ private struct ExpandedBody: View {
 private struct LockScreenView: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
-    let isStale: Bool
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
 
     var body: some View {
@@ -236,20 +217,19 @@ private struct LockScreenView: View {
                         StatusMark(
                             status: state.status,
                             diameter: 12,
-                            isUnconfirmed: state.markIsUnconfirmed,
-                            isStale: isStale
+                            isUnconfirmed: state.markIsUnconfirmed
                         )
                         Text(lockHeadline)
                             .font(WidgetFont.geistSemiBold(17))
                             .foregroundStyle(primaryInk)
                             .lineLimit(1)
                     }
-                    if let question = state.question, !question.isEmpty, !isStale {
+                    if let question = state.question, !question.isEmpty {
                         Text(question)
                             .font(WidgetFont.plex(13))
                             .foregroundStyle(secondaryInk)
                             .lineLimit(1)
-                    } else if state.needsYouCount > 0, !isStale {
+                    } else if state.needsYouCount > 0 {
                         // INK, not the status hue: a 13pt text run on a surface whose
                         // brightness we do not control. The hue keeps its meaning in
                         // the mark beside it, which is a shape as well as a colour.
@@ -283,7 +263,7 @@ private struct LockScreenView: View {
                     .accessibilityHidden(true)
             }
 
-            if state.needsYouCount > 0 || state.status == .stopped || isStale {
+            if state.needsYouCount > 0 || state.status == .stopped {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
                     destination: state.deepLinkURL
@@ -308,7 +288,7 @@ private struct LockScreenView: View {
     private var heroInk: AnyShapeStyle { AnyShapeStyle(state.markColor) }
 
     private var lockHeadline: String {
-        state.presentationHeadline(isStale: isStale)
+        state.presentationHeadline
     }
 
     /// HERO: the number and its caption, nothing else. The mark moved to the centre
@@ -317,7 +297,7 @@ private struct LockScreenView: View {
     /// rather than a stray dot.
     @ViewBuilder
     private var lockHero: some View {
-        if state.needsYouCount > 1, !isStale {
+        if state.needsYouCount > 1 {
             VStack(alignment: .leading, spacing: -1) {
                 Text(verbatim: "\(state.needsYouCount)")
                     .font(WidgetFont.plexSemiBold(34))
@@ -331,30 +311,11 @@ private struct LockScreenView: View {
         }
     }
 
-    @ViewBuilder
     private var lockDetail: some View {
-        if isStale {
-            if let updatedAt = state.updatedAt {
-                HStack(spacing: 3) {
-                    Text("last update")
-                    Text(Date(timeIntervalSince1970: updatedAt), style: .relative)
-                    Text("· no update from \(hostLabel)")
-                }
-                .font(WidgetFont.plex(11))
-                .foregroundStyle(tertiaryInk)
-                .lineLimit(1)
-            } else {
-                Text("No update from \(hostLabel)")
-                    .font(WidgetFont.plex(11))
-                    .foregroundStyle(tertiaryInk)
-                    .lineLimit(1)
-            }
-        } else {
-            Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
-                .font(WidgetFont.plex(11))
-                .foregroundStyle(tertiaryInk)
-                .lineLimit(1)
-        }
+        Text("\(hostLabel) · \(state.workingCount) working · \(state.totalCount) agents")
+            .font(WidgetFont.plex(11))
+            .foregroundStyle(tertiaryInk)
+            .lineLimit(1)
     }
 }
 
@@ -389,7 +350,6 @@ private struct StatusMark: View {
     let status: AgentActivityAttributes.Status
     var diameter: CGFloat = 10
     var isUnconfirmed = false
-    var isStale = false
 
     private var tint: Color { WidgetPalette.color(status) }
 
@@ -401,7 +361,7 @@ private struct StatusMark: View {
     var body: some View {
         switch status {
         case .needsYou:
-            if isStale || isUnconfirmed {
+            if isUnconfirmed {
                 Circle()
                     .strokeBorder(tint, lineWidth: max(1.5, diameter * 0.16))
                     .frame(width: diameter, height: diameter)
@@ -501,9 +461,9 @@ private extension Color {
 /// three times, and twice came back wrong from the owner's phone.
 ///
 /// This gallery renders the SAME view types the widget renders — same file, same
-/// private types — over the two backdrops that decide legibility, plus the STALE card
-/// and the ALWAYS-ON card, which `.environment(\.isLuminanceReduced, true)` reaches
-/// without a real dimmed screen.
+/// private types — over the two backdrops that decide legibility, plus the ALWAYS-ON
+/// card, which `.environment(\.isLuminanceReduced, true)` reaches without a real
+/// dimmed screen.
 ///
 /// WHAT IT DOES NOT PROVE: the system's own composition. The island's expanded regions
 /// are laid out here by hand inside a black container at roughly the island's width —
@@ -566,13 +526,11 @@ struct WidgetGallery: View {
                     ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
                         card(item, backdrop: backdrop)
                     }
-                    card(("needsYou · stale", Self.cases[0].1), backdrop: backdrop, isStale: true)
                     card(("needsYou · always-on", Self.cases[0].1), backdrop: backdrop, dimmed: true)
                 }
                 ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
-                    island(item, isStale: false)
+                    island(item)
                 }
-                island(("needsYou · stale", Self.cases[0].1), isStale: true)
                 ForEach(Array(Self.cases.enumerated()), id: \.offset) { _, item in
                     pills(item)
                 }
@@ -588,14 +546,13 @@ struct WidgetGallery: View {
     private func card(
         _ item: (String, AgentActivityState),
         backdrop: (String, LinearGradient),
-        isStale: Bool = false,
         dimmed: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("\(item.0) · \(backdrop.0)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
-            LockScreenView(hostLabel: "tower", state: item.1, isStale: isStale)
+            LockScreenView(hostLabel: "tower", state: item.1)
                 .environment(\.isLuminanceReduced, dimmed)
                 .frame(width: 353)
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -611,14 +568,14 @@ struct WidgetGallery: View {
     /// real container. The corners are framed NARROW on purpose — 84 pt, tighter than
     /// the device — so a layout that only survives a generous mock fails here first.
     /// That is the failure build 145 shipped: a trailing column that became ellipses.
-    private func island(_ item: (String, AgentActivityState), isStale: Bool) -> some View {
+    private func island(_ item: (String, AgentActivityState)) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("island · \(item.0)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
             VStack(spacing: 0) {
                 HStack(alignment: .top) {
-                    ExpandedHero(state: item.1, isStale: isStale)
+                    ExpandedHero(state: item.1)
                         .padding(.leading, 4)
                         .frame(width: 84, alignment: .leading)
                     Spacer(minLength: 0)
@@ -626,7 +583,7 @@ struct WidgetGallery: View {
                         .padding(.trailing, 4)
                         .frame(width: 84, alignment: .trailing)
                 }
-                ExpandedBody(hostLabel: "hetzner-ts", state: item.1, isStale: isStale)
+                ExpandedBody(hostLabel: "hetzner-ts", state: item.1)
             }
             .padding(12)
             .frame(width: 353)

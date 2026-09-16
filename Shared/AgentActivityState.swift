@@ -128,12 +128,17 @@ struct AgentActivityState: Codable, Hashable {
     }
 
     /// The same headline rule serves the lock screen and expanded island.
-    func presentationHeadline(isStale: Bool) -> String {
-        if isStale {
-            return needsYouCount > 0
-                ? AgentActivitySummary.line(self, isStale: true)
-                : "No recent update"
-        }
+    ///
+    /// It took an `isStale` flag until the staleness it described was proved
+    /// unreachable. ActivityKit only reports `context.isStale` when something supplies
+    /// a stale date, and NOTHING DOES, at either end: `LiveActivityController` passes
+    /// `staleDate: nil` deliberately — a 90s window once marked a healthy roster
+    /// unreachable while the app was connected — and the daemon's APNs payload carries
+    /// only `event`, `timestamp` and `content-state` (`src/push/apns.rs`), never
+    /// `stale-date`. So the hedged headline, the hollow mark and the "no recent update"
+    /// line rendered in tests and never on a device. They are gone rather than kept as
+    /// scenery; if a real liveness signal ever lands, restore them WITH it.
+    var presentationHeadline: String {
         if needsYouCount == 0, totalCount > 0, status == .idle || status == .working {
             return "Nothing needs you"
         }
@@ -196,11 +201,11 @@ enum AgentActivityStatus: String, Codable, Hashable {
 /// target would put these symbols in the app binary twice. So the wording is duplicated on
 /// purpose, and BOTH copies are now pinned by tests against the same table.
 enum AgentActivitySummary {
-    static func line(_ s: AgentActivityState, isStale: Bool = false) -> String {
+    static func line(_ s: AgentActivityState) -> String {
         if s.needsYouCount > 0 {
             // Every waiting agent rests on an unconfirmed state, so the whole claim is a
             // maybe: say so rather than appending a qualifier to an assertion.
-            if isStale || s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
+            if s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
             // Some confirmed and some not. Lead with the fact, name the doubt.
             if s.unconfirmedCount > 0 {
                 return "\(s.needsYouCount) need you · \(s.unconfirmedCount) stale"
