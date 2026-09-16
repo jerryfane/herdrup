@@ -20,9 +20,24 @@ two fonts:
     codepoints shared a glyph.
   * tables GDEF and PfEd are dropped (fontTools cannot subset PfEd, an editor
     private table).
-  * head.yMin -473 -> -472, because a removed glyph carried the extreme.
-  * per-glyph bounding boxes are recompiled on save by fontTools.
+  * head.yMin -473 -> -472, hhea.minLeftSideBearing -123 -> -122 and
+    hhea.xMaxExtent 2171 -> 2170, all because the same removed glyph carried
+    those extremes.
+  * head.flags bit 1 cleared (0b1011 -> 0b1001) and head.checkSumAdjustment
+    0x74c7a366 -> 0x07ec140b.
+  * hhea.numberOfHMetrics 4 -> 1 (hmtx trailing-width compression); all 10610
+    surviving advance widths are unchanged.
+  * OS/2.usFirstCharIndex 9211 (U+23FB) -> 57344 (U+E000),
+    OS/2.ulUnicodeRange2 0x1200C0A0 -> 0x12000000, and OS/2.ulCodePageRange1
+    bit 31 (Macintosh character set) cleared, consistent with dropping the Mac
+    cmap subtable.
+  * post drops the 14 removed glyph names.
+  * 2833 per-glyph bounding boxes are recompiled on save by fontTools.
   * name table retitled to "Herdrup Symbols" / PostScript "HerdrupSymbols".
+
+Everything after the first three entries is bookkeeping the subsetter and the
+compiler regenerate, and none of it is legally substantive — but it is listed
+because this paragraph twice claimed a narrower scope than the binary had.
 
 NO GLYPH CONTOUR IS EDITED: surviving outlines are the upstream outlines.
 
@@ -34,7 +49,12 @@ cascade order satisfies both, so the coverage changed instead. The reduction is
 reproducible and CI-enforced: see `Tools/subset-symbols-font.py`.
 
 The OFL permits modification and restricts only RESERVED FONT NAMES; the rename
-above keeps that condition met, and Pomicons' reserved name is not used.
+above keeps that condition met. No reserved name is used by this font: not
+Pomicons, and not "Font Awesome" — Font Awesome's own LICENSE.txt grants its
+SVG/JS icons under CC BY 4.0 and its FONT FILES under OFL 1.1 with that reserved
+name, and although Nerd Fonts patches from the SVGs (which is why both upstream's
+table and the one below say CC BY 4.0), the artifact shipped here is a desktop
+font file, so the stricter reading is assumed and satisfied.
 
 It is an AGGREGATE: the binary contains glyphs from fourteen icon sets, each
 under its own terms. The Nerd Fonts root licence below covers the project's own
@@ -86,17 +106,20 @@ two sets distributed under their own OFL grants are named here:
   Bischoff (https://github.com/erikflowers/weather-icons), licensed SIL OFL 1.1.
   Upstream ships no OFL text file with a copyright line; these are the holders
   its README names, cited as such rather than invented.
- Pomicons is OFL with a RESERVED FONT NAME: the
-font must not be redistributed under the Pomicons name if modified.
 
-THE SHIPPED FONT IS MODIFIED — see the top of this file. This paragraph
-previously claimed the opposite ("ships the artifact unmodified ... shipped
-whole rather than trimmed"), which was written when that was true and left
-standing when it stopped being true. The OFL condition is met by the RENAME, not
-by being unmodified: the modified font is titled "Herdrup Symbols"
-(PostScript "HerdrupSymbols"), it is not distributed under the Pomicons name or
-any other reserved name, and the reduction is limited to the character map and
-name table with no outline altered.
+
+THE SHIPPED FONT IS MODIFIED — the measured scope is at the top of this file and
+is the only description of it that should be trusted. Two earlier versions of
+this paragraph were wrong in turn: first it claimed the artifact "ships
+unmodified ... shipped whole rather than trimmed", true when written and left
+standing once it stopped being true; then its replacement narrowed the claim to
+"limited to the character map and name table with no outline altered", which
+parsing the binary also refuted — GDEF and PfEd are dropped, head, hhea, OS/2
+and post all move, and 2833 bounding boxes are recompiled.
+
+What holds: no glyph CONTOUR is edited, and the OFL condition is met by the
+RENAME rather than by being unmodified. The font is titled "Herdrup Symbols"
+(PostScript "HerdrupSymbols") and is not distributed under any reserved name.
 
 Font Logos is listed as "unlicensed" in upstream's table. That label is
 misleading and worth recording: its repository (https://github.com/lukas-w/font-logos)
