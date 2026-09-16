@@ -7,7 +7,7 @@ struct AgentLiveActivity: Widget {
         ActivityConfiguration(for: AgentActivityAttributes.self) { context in
             LockScreenView(
                 hostLabel: context.attributes.hostLabel,
-                state: context.state,
+                state: context.state
             )
             .widgetURL(context.state.deepLinkURL)
             // Match the card's bottom stop at the system-owned edges.
@@ -37,23 +37,23 @@ struct AgentLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.bottom) {
                     ExpandedBody(
                         hostLabel: context.attributes.hostLabel,
-                        state: context.state,
-                            )
+                        state: context.state
+                    )
                 }
             } compactLeading: {
                 StatusMark(
                     status: context.state.status,
                     diameter: 10,
-                    isUnconfirmed: context.state.markIsUnconfirmed,
-                    )
+                    isUnconfirmed: context.state.markIsUnconfirmed
+                )
             } compactTrailing: {
                 CompactCount(state: context.state)
             } minimal: {
                 StatusMark(
                     status: context.state.status,
                     diameter: 14,
-                    isUnconfirmed: context.state.markIsUnconfirmed,
-                    )
+                    isUnconfirmed: context.state.markIsUnconfirmed
+                )
                 .frame(width: 36, height: 36)
             }
             .widgetURL(context.state.deepLinkURL)
