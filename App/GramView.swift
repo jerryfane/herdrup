@@ -1892,6 +1892,12 @@ struct GramView: View {
                     Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 if Task.isCancelled { return }
+                // The SAME window the epoch exists for applies to the export copy: the
+                // continuation can run after disconnect() wiped the cache but before
+                // SwiftUI delivers onDisappear, so Task.isCancelled is still false here.
+                // Writing the export dir then would leave the whole payload on disk
+                // after sign-out — the cache guard alone does not cover it.
+                guard Downloads.currentEpoch == epoch else { return }
                 // Keep them for the next open or save.
                 Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
                 // A per-export temp dir so the file keeps its real name (the picker uses

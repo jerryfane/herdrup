@@ -56,6 +56,13 @@ public enum GramFileCache {
     public static let defaultMaxBytes = 512 * 1024 * 1024
 
     private static let metaName = "meta.json"
+    /// The payload lives in a SUBDIRECTORY, not beside the metadata. An attachment is
+    /// free to be called `meta.json` — `GramStaging.safeFileName` only strips directory
+    /// parts — and when it was, the payload write and the metadata write hit the same
+    /// path: the metadata destroyed the file, and the reader's first open previewed the
+    /// cache's own JSON. A separate directory makes the collision impossible rather than
+    /// blacklisting one name.
+    private static let payloadDir = "payload"
 
     private struct Meta: Codable {
         let id: String
@@ -87,7 +94,7 @@ public enum GramFileCache {
         // not serve one message's bytes as another's.
         guard meta.id == id else { return nil }
 
-        let url = dir.appendingPathComponent(meta.name)
+        let url = dir.appendingPathComponent(payloadDir).appendingPathComponent(meta.name)
         guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
             size == meta.size, size > 0
         else { return nil }   // truncated or replaced since it was written
@@ -119,8 +126,9 @@ public enum GramFileCache {
         try? FileManager.default.removeItem(at: dir)
         let safeName = GramStaging.safeFileName(name)
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent(safeName)
+            let payload = dir.appendingPathComponent(payloadDir, isDirectory: true)
+            try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
+            let url = payload.appendingPathComponent(safeName)
             // Payload first, metadata last: the order is what makes an interrupted write
             // read as a miss instead of a permanently truncated hit.
             try data.write(to: url, options: [.atomic])

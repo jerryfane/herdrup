@@ -57,11 +57,11 @@ final class GramFileCacheTests: XCTestCase {
         GramFileCache.store(Data("old".utf8), id: "msg-1", name: "old-name.txt", in: root)
         GramFileCache.store(Data("new bytes".utf8), id: "msg-1", name: "new-name.txt", in: root)
 
-        let dir = GramFileCache.directory(for: "msg-1", in: root)
+        let payloadDir = GramFileCache.directory(for: "msg-1", in: root)
+            .appendingPathComponent("payload")
         let payloads = try FileManager.default
-            .contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent != "meta.json" }
-        XCTAssertEqual(payloads, [dir.appendingPathComponent("new-name.txt")],
+            .contentsOfDirectory(at: payloadDir, includingPropertiesForKeys: nil)
+        XCTAssertEqual(payloads, [payloadDir.appendingPathComponent("new-name.txt")],
                        "a replaced entry must not leave the previous payload behind")
 
         let hit = try XCTUnwrap(GramFileCache.cached(id: "msg-1", in: root))
@@ -189,5 +189,18 @@ final class GramFileCacheTests: XCTestCase {
         XCTAssertNil(GramFileCache.cached(id: "one", in: root))
         XCTAssertNil(GramFileCache.cached(id: "two", in: root))
         XCTAssertEqual(GramFileCache.totalBytes(in: root), 0)
+    }
+
+    /// An attachment is free to be named `meta.json`: safeFileName only strips directory
+    /// parts. When the payload sat beside the metadata, the metadata write destroyed the
+    /// file and the reader's first open previewed the cache's own JSON.
+    func testAnAttachmentNamedLikeTheMetadataStillRoundTrips() throws {
+        let bytes = Data("the real attachment".utf8)
+        XCTAssertNotNil(GramFileCache.store(bytes, id: "msg-1", name: "meta.json",
+                                            mime: "application/json", in: root))
+        let hit = try XCTUnwrap(GramFileCache.cached(id: "msg-1", in: root))
+        XCTAssertEqual(hit.name, "meta.json")
+        XCTAssertEqual(try Data(contentsOf: hit.url), bytes,
+                       "the payload must survive: the reader tapped an attachment, not the cache's metadata")
     }
 }
