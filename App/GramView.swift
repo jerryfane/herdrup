@@ -744,7 +744,13 @@ struct GramView: View {
                             downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
                             onOpenFile: { openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
-                            onUnsave: { savedGrams.remove(s.id) }
+                            onUnsave: {
+                                savedGrams.remove(s.id)
+                                // The Saved tab outlives the server copy, so for a saved
+                                // message the download may be the only copy left:
+                                // unsaving discards it rather than leaving it on disk.
+                                Downloads.remove(id: s.id)
+                            }
                         )
                     }
                 }
@@ -830,7 +836,12 @@ struct GramView: View {
                             isSaved: savedGrams.isSaved(message.id),
                             onOpenFile: { openFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
-                            onToggleSave: { savedGrams.toggle(message) },
+                            onToggleSave: {
+                                let wasSaved = savedGrams.isSaved(message.id)
+                                savedGrams.toggle(message)
+                                // Only the un-saving direction drops bytes.
+                                if wasSaved { Downloads.remove(id: message.id) }
+                            },
                             onDelete: { delete(message) }
                         )
                         .onAppear { markReadIfNeeded(message) }
@@ -1731,8 +1742,25 @@ struct GramView: View {
 
         // CACHE HIT: no task, no spinner, no request. Presented synchronously so the
         // reader sees the file on the same frame as the tap.
-        if let hit = Downloads.cached(id: id), let data = try? Data(contentsOf: hit.url) {
-            present(data: data, name: hit.name, cachedAt: hit.url)
+        //
+        // The bytes are read ONLY when a viewer needs them. QuickLook takes the cached
+        // file by URL, so reading it here would pull a whole video into memory on the
+        // main actor and then discard it — the exact case this feature exists to make
+        // fast. Markdown and web documents do need the bytes, and the routing decision
+        // needs only the name and the stored mime.
+        if let hit = Downloads.cached(id: id) {
+            if Self.isMarkdown(name: hit.name, mime: hit.mime)
+                || Self.isWebDocument(name: hit.name, mime: hit.mime)
+            {
+                guard let data = try? Data(contentsOf: hit.url, options: .mappedIfSafe) else {
+                    sendError = "Couldn't open the file."
+                    return
+                }
+                present(data: data, name: hit.name, mime: hit.mime, cachedAt: hit.url)
+            } else {
+                // nil bytes: QuickLook opens the cached file itself.
+                present(data: nil, name: hit.name, mime: hit.mime, cachedAt: hit.url)
+            }
             return
         }
 
@@ -1750,7 +1778,7 @@ struct GramView: View {
                 if Task.isCancelled { return }
                 // Keep the bytes for next time. A failure here is not an error: the open
                 // proceeds from a temp file and the next open simply downloads again.
-                let cached = Downloads.store(data, id: id, name: name)
+                let cached = Downloads.store(data, id: id, name: name, mime: mime)
                 present(data: data, name: name, mime: mime, cachedAt: cached?.url)
             } catch let error as APIError {
                 sendError = "Couldn't open the file: \(error.message)"
@@ -1770,7 +1798,7 @@ struct GramView: View {
     /// open; derived artifacts (markdown rendered to HTML) still go to a temp file,
     /// because what the cache holds is the source, not the rendering.
     @MainActor
-    private func present(data: Data, name: String, mime: String = "", cachedAt: URL? = nil) {
+    private func present(data: Data?, name: String, mime: String = "", cachedAt: URL? = nil) {
         // Remove any previously-previewed TEMP file so a viewed secret does not
         // accumulate; cache entries are left alone.
         if let previous = previewURL, !Downloads.isCached(previous) {
@@ -1779,7 +1807,7 @@ struct GramView: View {
         let tmp = FileManager.default.temporaryDirectory
         do {
             if Self.isMarkdown(name: name, mime: mime),
-                let text = String(data: data, encoding: .utf8)
+                let data, let text = String(data: data, encoding: .utf8)
             {
                 // Render markdown to styled HTML so it previews FORMATTED —
                 // QuickLook shows a raw .md file as plain source otherwise. This is a
@@ -1789,7 +1817,7 @@ struct GramView: View {
                 let url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
                 try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
                 previewURL = url
-            } else if Self.isWebDocument(name: name, mime: mime) {
+            } else if Self.isWebDocument(name: name, mime: mime), let data {
                 // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
                 // (no remote loads, script off by default), NOT QuickLook — the old
                 // srcdoc-sandbox path painted a blank white screen (#92). Decode
@@ -1819,7 +1847,7 @@ struct GramView: View {
                 // Never trust the server name to be a safe path component; reduce
                 // it to a bare basename. Write encrypted-at-rest.
                 let url = tmp.appendingPathComponent(Self.safeTempFileName(name))
-                try data.write(to: url, options: [.atomic, .completeFileProtection])
+                try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
                 previewURL = url
             }
         } catch {
@@ -1858,12 +1886,12 @@ struct GramView: View {
         Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
-                let (name, _, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
+                let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
                     Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 if Task.isCancelled { return }
                 // Keep them for the next open or save.
-                Downloads.store(data, id: id, name: name)
+                Downloads.store(data, id: id, name: name, mime: mime)
                 // A per-export temp dir so the file keeps its real name (the picker uses
                 // the file's own name) without colliding with the preview temp file.
                 let dir = FileManager.default.temporaryDirectory
@@ -2009,12 +2037,18 @@ struct GramView: View {
         }
 
         @discardableResult
-        static func store(_ data: Data, id: String, name: String) -> CachedGramFile? {
-            GramFileCache.store(data, id: id, name: name, in: root)
+        static func store(_ data: Data, id: String, name: String, mime: String) -> CachedGramFile? {
+            GramFileCache.store(data, id: id, name: name, mime: mime, in: root)
         }
 
         static func remove(id: String) {
             GramFileCache.remove(id: id, in: root)
+        }
+
+        /// Sign-out and account removal: downloaded bytes must not survive the account
+        /// that could read them.
+        static func removeAll() {
+            GramFileCache.removeAll(in: root)
         }
 
         /// Whether `url` is a cache entry, so the page's temp-file cleanup leaves it

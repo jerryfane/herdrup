@@ -1,14 +1,19 @@
 import Foundation
+import Crypto
 
 /// A downloaded gram file kept on disk, so opening it a second time costs nothing.
 public struct CachedGramFile: Equatable, Sendable {
     public let url: URL
     public let name: String
+    /// The sender-supplied mime, carried through the cache because the viewer routing
+    /// depends on it. Dropping it made a second open route differently from the first.
+    public let mime: String
     public let size: Int
 
-    public init(url: URL, name: String, size: Int) {
+    public init(url: URL, name: String, mime: String, size: Int) {
         self.url = url
         self.name = name
+        self.mime = mime
         self.size = size
     }
 }
@@ -23,11 +28,26 @@ public struct CachedGramFile: Equatable, Sendable {
 /// is what makes caching by id CORRECT rather than merely convenient. There is no
 /// revalidation here because there is nothing to revalidate against.
 ///
+/// THAT ABSENCE OF REVALIDATION IS ALSO THE RISK, and it drives two decisions below.
+/// A bad entry is permanent — nothing would ever refetch it — so:
+///
+///  * an entry is only a hit once its `meta.json` exists, and that file is written
+///    LAST, after the payload is fully in place. A crash inside the write window of a
+///    100 MB attachment therefore leaves an entry that reads as a MISS and downloads
+///    again, rather than a truncated file served forever.
+///  * the recorded byte count is checked on every lookup. A payload that no longer
+///    matches its metadata is discarded rather than presented.
+///
+/// Keys are `sha256(id)`, not a sanitised id. Mapping unsafe scalars to `_` collapsed
+/// distinct ids onto one directory — `msg/1`, `msg.1`, `msg 1` and `msg:1` all became
+/// `msg_1`, and two ids differing only past the truncation length became identical —
+/// so whichever stored last owned the bytes and the other message served them.
+///
 /// This lives in HerdrKit for the same reason `GramStaging` does: the app target cannot
 /// compile on Linux CI, so cache logic kept beside the view would be verified by
 /// reading. A cache that silently never hits behaves exactly like no cache at all —
 /// the feature would look implemented and do nothing — so the lookup, the eviction
-/// order and the name handling are exercised on every CI run.
+/// order, the integrity gate and the key distinctness are exercised on every CI run.
 public enum GramFileCache {
 
     /// Default ceiling for the whole cache. Gram carries up to ten 100 MB attachments
@@ -35,41 +55,58 @@ public enum GramFileCache {
     /// cache lives under Caches, which the system may also purge on its own.
     public static let defaultMaxBytes = 512 * 1024 * 1024
 
-    /// The per-message directory. One directory per id, holding the file under its own
-    /// name, so the name is preserved for QuickLook and the share sheet without
-    /// colliding with another message that shipped a file of the same name.
-    public static func directory(for id: String, in root: URL) -> URL {
-        root.appendingPathComponent(safeComponent(id), isDirectory: true)
+    private static let metaName = "meta.json"
+
+    private struct Meta: Codable {
+        let id: String
+        let name: String
+        let mime: String
+        let size: Int
     }
 
-    /// The cached file for `id`, or nil when it was never downloaded or has been
-    /// evicted. Returns whatever single file the directory holds rather than requiring
-    /// the caller to know the name, because the Saved tab can outlive the server copy
-    /// and no longer knows it.
+    /// The per-message directory, named by a digest of the id so two different ids can
+    /// never share one. Holds the payload under its own file name — preserved for
+    /// QuickLook and the share sheet — plus `meta.json`.
+    public static func directory(for id: String, in root: URL) -> URL {
+        root.appendingPathComponent(key(for: id), isDirectory: true)
+    }
+
+    /// A collision-free, filesystem-safe directory name for an opaque daemon id.
+    public static func key(for id: String) -> String {
+        SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The cached file for `id`, or nil when it was never downloaded, is incomplete, or
+    /// has been evicted.
     public static func cached(id: String, in root: URL) -> CachedGramFile? {
         let dir = directory(for: id, in: root)
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.fileSizeKey])
-        else { return nil }
-        guard let url = entries.first(where: { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true })
-        else { return nil }
-        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0
-        else { return nil }
-        // Touched on read so eviction is least-RECENTLY-USED rather than oldest-stored:
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(metaName)),
+            let meta = try? JSONDecoder().decode(Meta.self, from: data)
+        else { return nil }   // no metadata == a write that never finished
+        // The recorded id must match: a digest collision, or a hand-edited cache, must
+        // not serve one message's bytes as another's.
+        guard meta.id == id else { return nil }
+
+        let url = dir.appendingPathComponent(meta.name)
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+            size == meta.size, size > 0
+        else { return nil }   // truncated or replaced since it was written
+
+        // Touched on read so eviction is least-RECENTLY-used rather than oldest-stored:
         // the file the reader keeps opening is the one worth keeping.
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: dir.path)
-        return CachedGramFile(url: url, name: url.lastPathComponent, size: size)
+        return CachedGramFile(url: url, name: meta.name, mime: meta.mime, size: size)
     }
 
-    /// Store `data` for `id` and return its cached location. Replaces any existing
-    /// entry for the same id, so a partial or renamed earlier copy cannot linger.
-    /// Returns nil only when the write fails — the caller then falls back to a temp
-    /// file, because failing to cache must never fail the open.
+    /// Store `data` for `id` and return its cached location. Replaces any existing entry
+    /// for the same id. Returns nil when the write fails — the caller then falls back to
+    /// a temp file, because failing to cache must never fail the open.
     @discardableResult
     public static func store(
         _ data: Data,
         id: String,
         name: String,
+        mime: String = "",
         in root: URL,
         maxBytes: Int = defaultMaxBytes
     ) -> CachedGramFile? {
@@ -80,25 +117,37 @@ public enum GramFileCache {
 
         let dir = directory(for: id, in: root)
         try? FileManager.default.removeItem(at: dir)
+        let safeName = GramStaging.safeFileName(name)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent(GramStaging.safeFileName(name))
+            let url = dir.appendingPathComponent(safeName)
+            // Payload first, metadata last: the order is what makes an interrupted write
+            // read as a miss instead of a permanently truncated hit.
             try data.write(to: url, options: [.atomic])
             protect(url)
+            let meta = Meta(id: id, name: safeName, mime: mime, size: data.count)
+            try JSONEncoder().encode(meta).write(to: dir.appendingPathComponent(metaName),
+                                                 options: [.atomic])
             evict(in: root, maxBytes: maxBytes)
-            return CachedGramFile(url: url, name: url.lastPathComponent, size: data.count)
+            return CachedGramFile(url: url, name: safeName, mime: mime, size: data.count)
         } catch {
             try? FileManager.default.removeItem(at: dir)
             return nil
         }
     }
 
-    /// Drop one entry — used when the reader deletes or unsaves the message, so the
-    /// bytes do not outlive the thing that referenced them.
+    /// Drop one entry, so the bytes do not outlive the thing that referenced them.
+    ///
+    /// Wired to the routes the reader drives: deleting a message, and unsaving one. NOT
+    /// wired to server-side disappearance (a message the poll stops returning), because
+    /// that path has no single call site to hang it on; such an entry is reclaimed by
+    /// the LRU ceiling or by `removeAll` on sign-out. Said plainly here because the
+    /// first version of this comment claimed every route and the claim was false.
     public static func remove(id: String, in root: URL) {
         try? FileManager.default.removeItem(at: directory(for: id, in: root))
     }
 
+    /// Drop everything. Called on sign-out and account removal.
     public static func removeAll(in root: URL) {
         try? FileManager.default.removeItem(at: root)
     }
@@ -146,21 +195,6 @@ public enum GramFileCache {
                 .contentModificationDate) ?? .distantPast
             return Entry(dir: dir, size: size, touched: touched)
         }
-    }
-
-    /// Message ids come from the daemon. They are opaque strings, so they are reduced
-    /// to one safe path component before being used as a directory name — an id
-    /// containing a slash or `..` must not be able to write outside the cache root.
-    public static func safeComponent(_ id: String) -> String {
-        let cleaned = id.unicodeScalars.map { scalar -> Character in
-            let allowed = CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_"
-            return allowed ? Character(scalar) : "_"
-        }
-        let joined = String(cleaned)
-        let trimmed = joined.isEmpty ? "unnamed" : String(joined.prefix(120))
-        // "." and ".." survive the filter above as "_" already, but an all-underscore
-        // result from a pathological id is still a valid, distinct component.
-        return trimmed
     }
 
     private static func protect(_ url: URL) {

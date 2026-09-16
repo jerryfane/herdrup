@@ -21,13 +21,18 @@ final class GramFileCacheTests: XCTestCase {
 
     func testAStoredFileIsFoundAgainWithItsBytesAndName() throws {
         let data = Data("report contents".utf8)
-        let stored = GramFileCache.store(data, id: "msg-1", name: "report.pdf", in: root)
+        let stored = GramFileCache.store(data, id: "msg-1", name: "report.pdf", mime: "application/pdf", in: root)
         XCTAssertNotNil(stored)
 
         let hit = try XCTUnwrap(
             GramFileCache.cached(id: "msg-1", in: root),
             "a file that was just stored must be found, or the open path re-downloads it")
         XCTAssertEqual(hit.name, "report.pdf", "the real name must survive, QuickLook shows it")
+        XCTAssertEqual(
+            hit.mime, "application/pdf",
+            """
+            the mime must survive too: the viewer routing ORs the extension test with a             mime test, so a hit that forgot it routed the second open differently from             the first — markdown formatted once, then raw source forever.
+            """)
         XCTAssertEqual(hit.size, data.count)
         XCTAssertEqual(try Data(contentsOf: hit.url), data)
     }
@@ -53,8 +58,11 @@ final class GramFileCacheTests: XCTestCase {
         GramFileCache.store(Data("new bytes".utf8), id: "msg-1", name: "new-name.txt", in: root)
 
         let dir = GramFileCache.directory(for: "msg-1", in: root)
-        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-        XCTAssertEqual(files.count, 1, "a replaced entry must not leave the previous file behind")
+        let payloads = try FileManager.default
+            .contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent != "meta.json" }
+        XCTAssertEqual(payloads, [dir.appendingPathComponent("new-name.txt")],
+                       "a replaced entry must not leave the previous payload behind")
 
         let hit = try XCTUnwrap(GramFileCache.cached(id: "msg-1", in: root))
         XCTAssertEqual(hit.name, "new-name.txt")
@@ -80,6 +88,8 @@ final class GramFileCacheTests: XCTestCase {
             dir.deletingLastPathComponent().standardizedFileURL.path,
             root.standardizedFileURL.path,
             "the entry directory must be a direct child of the cache root")
+        XCTAssertEqual(dir.lastPathComponent, GramFileCache.key(for: hostile))
+        XCTAssertFalse(dir.lastPathComponent.contains("."), "a digest key cannot contain path syntax")
 
         GramFileCache.store(Data("x".utf8), id: hostile, name: "p.txt", in: root)
         let hit = try XCTUnwrap(GramFileCache.cached(id: hostile, in: root))
@@ -127,5 +137,57 @@ final class GramFileCacheTests: XCTestCase {
     func testEmptyBytesAreNotCached() {
         XCTAssertNil(GramFileCache.store(Data(), id: "empty", name: "e.txt", in: root))
         XCTAssertNil(GramFileCache.cached(id: "empty", in: root))
+    }
+
+    /// The findings this file exists for, after review. Each of these would have passed
+    /// silently before, and each is a permanent defect once it happens, because a cache
+    /// with no revalidation never refetches a bad entry.
+
+    /// Distinct ids must never share a directory. The first key scheme mapped every
+    /// unsafe scalar to "_", so all of these collapsed onto one entry and whichever
+    /// stored last owned the bytes.
+    func testIdsThatDifferOnlyInPunctuationOrLengthStayDistinct() throws {
+        let ids = ["msg/1", "msg.1", "msg 1", "msg:1", "msg+1", "msg_1",
+                   String(repeating: "a", count: 130) + "X",
+                   String(repeating: "a", count: 130) + "Y"]
+        for (index, id) in ids.enumerated() {
+            GramFileCache.store(Data("payload-\(index)".utf8), id: id, name: "f.txt", in: root)
+        }
+        XCTAssertEqual(Set(ids.map { GramFileCache.key(for: $0) }).count, ids.count,
+                       "two different ids produced the same cache key")
+        for (index, id) in ids.enumerated() {
+            let hit = try XCTUnwrap(GramFileCache.cached(id: id, in: root), "lost entry for \(id)")
+            XCTAssertEqual(try Data(contentsOf: hit.url), Data("payload-\(index)".utf8),
+                           "\(id) served another message's bytes")
+        }
+    }
+
+    /// An interrupted write leaves a payload with no metadata. That must read as a MISS
+    /// and download again, not as a truncated hit served forever.
+    func testAnEntryWithoutMetadataIsAMiss() throws {
+        GramFileCache.store(Data("complete".utf8), id: "msg-1", name: "f.txt", in: root)
+        let dir = GramFileCache.directory(for: "msg-1", in: root)
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("meta.json"))
+        XCTAssertNil(GramFileCache.cached(id: "msg-1", in: root),
+                     "a half-written entry must not be served")
+    }
+
+    /// The recorded size is the integrity gate: a payload truncated after the fact is
+    /// discarded rather than presented.
+    func testATruncatedPayloadIsNotServed() throws {
+        GramFileCache.store(Data(repeating: 0x41, count: 4096), id: "msg-1", name: "f.bin", in: root)
+        let hit = try XCTUnwrap(GramFileCache.cached(id: "msg-1", in: root))
+        try Data(repeating: 0x41, count: 10).write(to: hit.url)
+        XCTAssertNil(GramFileCache.cached(id: "msg-1", in: root),
+                     "the size recorded at store time must be checked on every lookup")
+    }
+
+    func testRemoveAllClearsEveryEntry() {
+        GramFileCache.store(Data("a".utf8), id: "one", name: "a.txt", in: root)
+        GramFileCache.store(Data("b".utf8), id: "two", name: "b.txt", in: root)
+        GramFileCache.removeAll(in: root)
+        XCTAssertNil(GramFileCache.cached(id: "one", in: root))
+        XCTAssertNil(GramFileCache.cached(id: "two", in: root))
+        XCTAssertEqual(GramFileCache.totalBytes(in: root), 0)
     }
 }
