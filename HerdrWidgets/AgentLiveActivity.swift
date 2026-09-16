@@ -255,14 +255,26 @@ private struct LockScreenView: View {
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
 
     var body: some View {
+        // THE SPEC'S THREE COLUMNS: hero (the number), centre (mark + what + which
+        // machine), trailing (the app icon, and nothing else). The mark belongs to the
+        // CENTRE beside the headline — it sat in the hero column until now, which is one
+        // of the ways this card did not match the design file.
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
                 lockHero
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(lockHeadline)
-                        .font(WidgetFont.geistSemiBold(17))
-                        .foregroundStyle(primaryInk)
-                        .lineLimit(1)
+                    HStack(spacing: 7) {
+                        StatusMark(
+                            status: state.status,
+                            diameter: 12,
+                            isUnconfirmed: state.markIsUnconfirmed,
+                            isStale: isStale
+                        )
+                        Text(lockHeadline)
+                            .font(WidgetFont.geistSemiBold(17))
+                            .foregroundStyle(primaryInk)
+                            .lineLimit(1)
+                    }
                     if let question = state.question, !question.isEmpty, !isStale {
                         Text(question)
                             .font(WidgetFont.plex(13))
@@ -284,6 +296,10 @@ private struct LockScreenView: View {
                     }
                 }
                 Spacer(minLength: 0)
+                // TRAILING: the app icon, per the spec's row — "hostLabel moved into the
+                // fleet line, it was never worth a column". Drawn, not an asset: the
+                // mark is circles and two strokes, so the widget needs no catalogue.
+                AppMark(size: 30)
             }
 
             if state.needsYouCount > 0 {
@@ -333,36 +349,23 @@ private struct LockScreenView: View {
         isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
     }
 
+    /// HERO: the number and its caption, nothing else. The mark moved to the centre
+    /// column where the spec puts it, so at a count of one — where the matrix drops the
+    /// digit and makes the agent's name the hero — this column renders nothing at all
+    /// rather than a stray dot.
     @ViewBuilder
     private var lockHero: some View {
-        if state.needsYouCount > 0 {
+        if state.needsYouCount > 1, !isStale {
             VStack(alignment: .leading, spacing: -1) {
-                HStack(alignment: .center, spacing: 7) {
-                    StatusMark(
-                        status: state.status,
-                        diameter: 12,
-                        isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale
-                    )
-                    // ONE waiting agent is not counted — the spec's state matrix puts
-                    // the agent's name in the hero slot at that count, on the lock
-                    // screen as well as in the island, so the digit is suppressed on
-                    // both rather than printed on one.
-                    if state.needsYouCount > 1, !isStale {
-                        Text(verbatim: "\(state.needsYouCount)")
-                            .font(WidgetFont.plexSemiBold(34))
-                            .monospacedDigit()
-                            .foregroundStyle(heroInk)
-                    }
-                }
+                Text(verbatim: "\(state.needsYouCount)")
+                    .font(WidgetFont.plexSemiBold(34))
+                    .monospacedDigit()
+                    .foregroundStyle(heroInk)
                 Text("need you")
                     .font(WidgetFont.geist(13))
                     .foregroundStyle(secondaryInk)
             }
             .fixedSize(horizontal: true, vertical: false)
-        } else {
-            StatusMark(status: state.status, diameter: 12, isStale: isStale)
-                .frame(width: 34, height: 34)
         }
     }
 
@@ -415,6 +418,55 @@ private struct ActivityAction: View {
                         .strokeBorder(WidgetPalette.textFaint, lineWidth: 1)
                 }
         }
+    }
+}
+
+/// The herdrup mark, for the lock card's trailing column.
+///
+/// DRAWN, not an asset: `design/herdrup-appicon.svg` is five circles/ellipses plus two
+/// strokes, so reproducing it here costs twenty lines and saves giving the widget
+/// extension an asset catalogue (and a second copy of the artwork to keep in step).
+/// Geometry and colours are taken from that file's 100x100 user space verbatim.
+private struct AppMark: View {
+    var size: CGFloat
+
+    private static let ink = Color(hex6: 0xB8C1F0)
+    private static let ground = Color(hex6: 0x1A1B26)
+
+    var body: some View {
+        Canvas { context, canvasSize in
+            let s = min(canvasSize.width, canvasSize.height) / 100
+            func scaled(_ rect: CGRect) -> CGRect {
+                CGRect(x: rect.minX * s, y: rect.minY * s, width: rect.width * s, height: rect.height * s)
+            }
+            // The head and ears, as in the source: body circle, two ear ellipses, three
+            // crown circles.
+            for rect in [
+                CGRect(x: 24, y: 36, width: 52, height: 52),
+                CGRect(x: 10, y: 53.5, width: 18, height: 13),
+                CGRect(x: 72, y: 53.5, width: 18, height: 13),
+                CGRect(x: 19, y: 25, width: 26, height: 26),
+                CGRect(x: 36, y: 16, width: 28, height: 28),
+                CGRect(x: 55, y: 25, width: 26, height: 26),
+            ] {
+                context.fill(Path(ellipseIn: scaled(rect)), with: .color(Self.ink))
+            }
+            // The prompt glyph cut into the face: a chevron and a bar, stroked in the
+            // ground colour so they read as negative space.
+            var glyph = Path()
+            glyph.move(to: CGPoint(x: 40 * s, y: 54 * s))
+            glyph.addLine(to: CGPoint(x: 46 * s, y: 61 * s))
+            glyph.addLine(to: CGPoint(x: 40 * s, y: 68 * s))
+            glyph.move(to: CGPoint(x: 56 * s, y: 64 * s))
+            glyph.addLine(to: CGPoint(x: 66 * s, y: 64 * s))
+            context.stroke(
+                glyph,
+                with: .color(Self.ground),
+                style: StrokeStyle(lineWidth: 8 * s, lineCap: .round, lineJoin: .round)
+            )
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
 
@@ -481,12 +533,15 @@ private enum WidgetPalette {
     ///
     /// The top stop is #1B1F3A, the same lift the old flat backdrop used, and NOT a
     /// point lighter: `textFaint` — the fleet line's tier — measures 3.19:1 there, and
-    /// a brighter head took it to 2.98:1, which would have been a regression smuggled
-    /// in under a cosmetic change. The foot is #0B0E1A, darker than the old ground, so
-    /// the sweep comes from deepening the bottom rather than raising the top. Against
-    /// the light stop: text 13.7:1, textDim 6.2:1, amber 7.7:1.
+    /// a brighter head took it to 2.98:1, a contrast regression smuggled in under a
+    /// cosmetic change.
+    ///
+    /// The foot was #0B0E1A and read as near-black on device; it is #171B30 now, one
+    /// step under the head rather than five. The sweep is quieter but it is still a
+    /// sweep, and the ink tiers hold across both ends — against the FOOT: text 14.7:1,
+    /// textDim 6.7:1, textFaint 3.42:1, amber 8.2:1.
     static let cardGradient = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x0B0E1A)],
+        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x171B30)],
         startPoint: .top,
         endPoint: .bottom
     )
