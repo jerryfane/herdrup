@@ -11,15 +11,14 @@ struct AgentLiveActivity: Widget {
                 isStale: context.isStale
             )
             .widgetURL(context.state.deepLinkURL)
-            // NO TINT: passing nil leaves the system's own translucent background in
-            // place, and that surface is the one that actually shows the wallpaper.
-            // The view paints its own blur + brand sheen on top of that (see
-            // `LockScreenView.body`), so the surface stays herdrup-coloured without
-            // going opaque.
-            .activityBackgroundTint(nil)
-            // NIL, not our ink: this tints a control the SYSTEM draws on the surface it
-            // owns, and a fixed near-white measures 2.2:1 over a light wallpaper there.
-            .activitySystemActionForegroundColor(nil)
+            // The card paints its own top-to-bottom gradient, so this tint is only the
+            // base the system falls back to — at the edges, and in any presentation
+            // that skips the view. It matches the gradient's foot so the seam is not
+            // visible. Passing nil instead gives real translucency but hands the ink
+            // to vibrancy and the herdrup palette with it; that was builds 145–146 and
+            // the owner chose the gradient.
+            .activityBackgroundTint(WidgetPalette.ground)
+            .activitySystemActionForegroundColor(WidgetPalette.text)
         } dynamicIsland: { context in
             DynamicIsland {
                 // THE SPEC'S REGION MAP LOST ON DEVICE. It puts the hero leading, the
@@ -290,69 +289,42 @@ private struct LockScreenView: View {
             if state.needsYouCount > 0 {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
-                    destination: state.deepLinkURL,
-                    onSystemSurface: !isLuminanceReduced
+                    destination: state.deepLinkURL
                 )
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // NO BACKGROUND AT ALL, which is the only way this card is translucent.
+        // OUR OWN GRADIENT, top to bottom, on the owner's call after seeing the
+        // alternatives on a device.
         //
-        // MEASURED ON DEVICE, twice: a material painted INSIDE a Live Activity does not
-        // sample the wallpaper. The system composites its own surface behind this view,
-        // so an in-view `.ultraThinMaterial` blurs THAT, and any wash over it simply
-        // darkens the panel — build 144 at 0.80 read as paint, and build 145 at 0.55
-        // came back darker still. The in-app gallery disagreed because there the
-        // material really does sample the wallpaper behind it; that is the one thing
-        // the gallery cannot stand in for.
+        // The glass route is closed, and it is worth recording why rather than trying
+        // it a fourth time: a material painted INSIDE a Live Activity does not sample
+        // the wallpaper. iOS composites its own surface behind this view, so the blur
+        // blurs THAT and any wash only darkens the panel (builds 144 and 145). Leaving
+        // the background to the system does give real translucency, but then the ink
+        // has to be vibrancy-driven and the herdrup palette goes with it.
         //
-        // With `activityBackgroundTint(nil)` and nothing drawn here, the background IS
-        // the system's own translucent material — the thing that actually shows the
-        // wallpaper, and the thing every first-party activity uses.
-        //
-        // Always-On keeps the opaque backdrop: a translucent panel at 1 Hz is both
-        // unreadable and wasteful, and that panel is meant to be dim.
-        .background {
-            if isLuminanceReduced { WidgetPalette.backdrop }
-        }
+        // Painting our own surface takes the translucency back off the table and
+        // returns everything else: the tuned tokens, the amber hero, and a mark that
+        // needs no disc behind it. Vertical, deep at the bottom.
+        .background(WidgetPalette.cardGradient)
     }
 
-    // INK ON A SURFACE WE DO NOT OWN.
-    //
-    // With no background of our own (see `body`), the card sits on the system's
-    // translucent material over an unknown wallpaper. Measured, that surface can land
-    // anywhere: #1D1F2E over a dark wallpaper, #A3A3A3 over a white one. NO fixed
-    // colour carries three text tiers across that range — near-white measures 2.2:1 on
-    // the light end, and a dark ink measures 2.6:1 on the dark end.
-    //
-    // So the text asks the system instead. `.primary` / `.secondary` / `.tertiary` in a
-    // widget get VIBRANCY, which blends with whatever iOS composited behind the card
-    // and is the only mechanism that holds at both ends. It is also what every
-    // first-party activity uses. The honest cost: the gallery cannot reproduce
-    // vibrancy, so the lock screen's contrast is now the system's guarantee rather
-    // than a number this repo measured.
-    //
-    // Always-On is different: there the card paints its own opaque navy, so the tokens
-    // tuned for it are correct and are used.
-    private var primaryInk: AnyShapeStyle {
-        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.text) : AnyShapeStyle(.primary)
-    }
-    private var secondaryInk: AnyShapeStyle {
-        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.textDim) : AnyShapeStyle(.secondary)
-    }
-    private var tertiaryInk: AnyShapeStyle {
-        isLuminanceReduced ? AnyShapeStyle(WidgetPalette.textFaint) : AnyShapeStyle(.tertiary)
-    }
-    /// The hero number's ink. On Always-On it takes the status hue, which is legible
-    /// against the card's own navy. On the system surface it takes `.primary`: the hue
-    /// there would sit on an unknown backdrop — amber measures 1.4:1 over a white
-    /// wallpaper — and the number is the hero by SIZE, with the mark beside it carrying
-    /// the colour and the shape.
-    private var heroInk: AnyShapeStyle {
-        isLuminanceReduced ? AnyShapeStyle(state.markColor) : AnyShapeStyle(.primary)
-    }
+    // INK ON A SURFACE WE OWN AGAIN. The card paints `cardGradient`, #1B1F3A to
+    // #0B0E1A, so the tuned tokens hold at both ends: against the LIGHTEST stop, text
+    // 13.7:1, textDim 6.2:1, textFaint 3.19:1 — the last unchanged from the flat
+    // backdrop it replaces, and the reason the faint tier only ever carries the fleet
+    // line. No vibrancy, no unknown wallpaper, nothing this repo cannot measure.
+    private var primaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.text) }
+    private var secondaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.textDim) }
+    private var tertiaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.textFaint) }
+    /// The hero number takes the status hue again. It went system-ink while the card
+    /// sat on the system's surface, where amber measured 1.4:1 over a white wallpaper;
+    /// on our own gradient it measures 7.7:1 at the lightest stop, so the design's
+    /// amber hero comes back.
+    private var heroInk: AnyShapeStyle { AnyShapeStyle(state.markColor) }
 
     /// STALE takes the summary's own doubt wording, the same substitution the island
     /// makes and the only one either surface makes. No other headline rewriting lives
@@ -370,8 +342,7 @@ private struct LockScreenView: View {
                         status: state.status,
                         diameter: 12,
                         isUnconfirmed: state.markIsUnconfirmed,
-                        isStale: isStale,
-                        onSystemSurface: !isLuminanceReduced
+                        isStale: isStale
                     )
                     // ONE waiting agent is not counted — the spec's state matrix puts
                     // the agent's name in the hero slot at that count, on the lock
@@ -390,8 +361,7 @@ private struct LockScreenView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         } else {
-            StatusMark(status: state.status, diameter: 12, isStale: isStale,
-                       onSystemSurface: !isLuminanceReduced)
+            StatusMark(status: state.status, diameter: 12, isStale: isStale)
                 .frame(width: 34, height: 34)
         }
     }
@@ -430,31 +400,19 @@ private struct LockScreenView: View {
 private struct ActivityAction: View {
     let title: String
     let destination: URL
-    /// Which surface this sits on. On the system's translucent material the border
-    /// asks the system too (`.tertiary`, vibrancy-treated) for the same reason the text
-    /// does; on the opaque Always-On navy it takes `textFaint`, which measures 3.5:1
-    /// there. The old `hairline` token served neither — 1.7:1 and 1.5:1 measured — and
-    /// is gone from this file.
-    var onSystemSurface = false
 
     var body: some View {
         Link(destination: destination) {
             Text(title)
                 .font(WidgetFont.geistSemiBold(15))
                 .frame(maxWidth: .infinity, minHeight: 44)
-                // The LABEL follows its border: system ink on the system surface, our
-                // token only on the Always-On panel we paint ourselves.
-                .foregroundStyle(onSystemSurface
-                    ? AnyShapeStyle(.primary)
-                    : AnyShapeStyle(WidgetPalette.text))
+                .foregroundStyle(WidgetPalette.text)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(
-                            onSystemSurface
-                                ? AnyShapeStyle(.tertiary)
-                                : AnyShapeStyle(WidgetPalette.textFaint),
-                            lineWidth: 1
-                        )
+                        // `textFaint` measures 3.5:1 against the gradient's foot, the
+                        // dimmest token that still reads as an edge there. The old
+                        // `hairline` measured 1.5:1 and is gone from this file.
+                        .strokeBorder(WidgetPalette.textFaint, lineWidth: 1)
                 }
         }
     }
@@ -465,30 +423,15 @@ private struct StatusMark: View {
     var diameter: CGFloat = 10
     var isUnconfirmed = false
     var isStale = false
-    /// On the SYSTEM surface the mark gets a small disc of our own `ground` behind it.
-    /// Without one the hue has nothing to work against: over the measured #A3A3A3 the
-    /// tokens fall to 1.14–1.45:1, so the working ring is effectively invisible on a
-    /// white wallpaper — and this mark is what the lock screen's hero handed its
-    /// meaning to when the amber number became system ink. On the disc they measure
-    /// 4.9–8.5:1, against a surface this file owns rather than a guess about what iOS
-    /// composited. The island and the Always-On panel need no disc: both are already
-    /// surfaces we paint.
-    var onSystemSurface = false
 
     private var tint: Color { WidgetPalette.color(status) }
 
-    var body: some View {
-        if onSystemSurface {
-            mark
-                .padding(diameter * 0.42)
-                .background(Circle().fill(WidgetPalette.ground))
-        } else {
-            mark
-        }
-    }
-
+    /// No disc behind the mark any more: every surface this renders on — the island's
+    /// black, the lock card's gradient, the Always-On panel — is one this file paints,
+    /// and the hue measures 4.9:1 or better against all three. The disc existed only
+    /// while the card sat on the system's surface over an unknown wallpaper.
     @ViewBuilder
-    private var mark: some View {
+    var body: some View {
         switch status {
         case .needsYou:
             if isStale || isUnconfirmed {
@@ -532,13 +475,20 @@ private enum WidgetFont {
 
 private enum WidgetPalette {
     static let ground = Color(hex6: 0x13162A)
-    /// A top-leading lift on the ground colour. Two stops, eight points apart in
-    /// lightness: enough to read as depth on the lock screen, not enough to fight the
-    /// status marks, which are the only saturated things on the surface.
-    static let backdrop = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x13162A)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
+    /// The lock-screen card's own surface: TOP TO BOTTOM, lifted at the head and deep
+    /// at the foot, so the hero and the agent's name sit on the lighter end and the
+    /// fleet line on the darker one.
+    ///
+    /// The top stop is #1B1F3A, the same lift the old flat backdrop used, and NOT a
+    /// point lighter: `textFaint` — the fleet line's tier — measures 3.19:1 there, and
+    /// a brighter head took it to 2.98:1, which would have been a regression smuggled
+    /// in under a cosmetic change. The foot is #0B0E1A, darker than the old ground, so
+    /// the sweep comes from deepening the bottom rather than raising the top. Against
+    /// the light stop: text 13.7:1, textDim 6.2:1, amber 7.7:1.
+    static let cardGradient = LinearGradient(
+        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x0B0E1A)],
+        startPoint: .top,
+        endPoint: .bottom
     )
     static let text = Color(hex6: 0xEEF0F7)
     /// Tertiary text ON THE ISLAND, whose background is true black and is ours to
