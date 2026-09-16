@@ -6,11 +6,25 @@ The bundled `HerdrupSymbols-Regular.ttf` is a MODIFIED version of the upstream
 fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749, retained at
 `Tools/upstream/` so the modification can be re-derived and audited).
 
-WHAT WAS CHANGED, and nothing else: the character map was reduced to private-use
-codepoints only, dropping the 14 the upstream font maps outside that area
-(U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771, U+2B58), and the name
-table was retitled to "Herdrup Symbols" so the modified font does not present
-itself as the upstream release. NO GLYPH OUTLINE IS ALTERED.
+WHAT WAS CHANGED. The intent is a private-use-only character map and a rename;
+the full measured difference against the upstream binary, since an earlier
+version of this file claimed "and nothing else" and was refuted by parsing the
+two fonts:
+
+  * cmap reduced from 10629 to 10610 codepoints. 19 dropped: the 14 outside the
+    private-use area (U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771,
+    U+2B58) and 5 control codepoints (U+0000, U+0008, U+0009, U+000D, U+001D).
+  * cmap subtables 5 -> 4; the (platform 1, encoding 0) format-0 Macintosh
+    subtable is dropped.
+  * glyph records 10627 -> 10611, i.e. 16 removed, not 19: some dropped
+    codepoints shared a glyph.
+  * tables GDEF and PfEd are dropped (fontTools cannot subset PfEd, an editor
+    private table).
+  * head.yMin -473 -> -472, because a removed glyph carried the extreme.
+  * per-glyph bounding boxes are recompiled on save by fontTools.
+  * name table retitled to "Herdrup Symbols" / PostScript "HerdrupSymbols".
+
+NO GLYPH CONTOUR IS EDITED: surviving outlines are the upstream outlines.
 
 Why: the terminal needs the symbols ahead of Apple Color Emoji, which still maps
 the legacy SoftBank private-use block and would otherwise hide 170 of these
@@ -60,8 +74,19 @@ Apache 2.0 notice, as its section 4(d) requires for MaterialDesign:
   License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Pictograms
   by Google are also available under Apache 2.0.
 
-OFL 1.1 sets carry the full licence text below (it is the same OFL 1.1 the Nerd
-Fonts root licence reproduces). Pomicons is OFL with a RESERVED FONT NAME: the
+OFL 1.1 sets: clause 2 conditions redistribution on each copy carrying "the
+above copyright notice and this license", where "the above" is THAT SET'S own
+notice. The OFL text reproduced below carries only Nerd Fonts' own line, so the
+two sets distributed under their own OFL grants are named here:
+
+* Pomicons — Copyright (c) 2021, Gabriele Lana <gabriele.lana@gmail.com>, with
+  Reserved Font Name Pomicons (https://github.com/gabrielelana/pomicons),
+  licensed SIL OFL 1.1.
+* Weather Icons — Copyright (c) Erik Flowers, icon designs originally by Lukas
+  Bischoff (https://github.com/erikflowers/weather-icons), licensed SIL OFL 1.1.
+  Upstream ships no OFL text file with a copyright line; these are the holders
+  its README names, cited as such rather than invented.
+ Pomicons is OFL with a RESERVED FONT NAME: the
 font must not be redistributed under the Pomicons name if modified.
 
 THE SHIPPED FONT IS MODIFIED — see the top of this file. This paragraph

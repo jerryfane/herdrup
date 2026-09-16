@@ -114,7 +114,12 @@ def build(source: Path) -> bytes:
 
     options = Options()
     options.glyph_names = True
-    options.recalc_bounds = True
+    # Left OFF, though measurement says it changes nothing here: the output is
+    # byte-identical with it True or False (sha256 c3f70b69…), because fontTools
+    # recompiles glyph bounding boxes on save either way. Off is still the honest
+    # setting — this subset has no reason to ask for a recalculation — but the licence
+    # must not claim the bboxes are untouched, and it no longer does.
+    options.recalc_bounds = False
     options.drop_tables = []
     options.notdef_outline = True
     subsetter = Subsetter(options=options)

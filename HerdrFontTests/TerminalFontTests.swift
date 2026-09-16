@@ -191,27 +191,29 @@ final class TerminalFontTests: XCTestCase {
     /// only on `normal` would leave bold or italic terminal output with no symbol
     /// coverage — and the fit path would then treat those runs as non-primary.
     ///
-    /// Derived EXACTLY as `FontSet.init` does (iOSTerminalView.swift:74-99), including
-    /// its fallback: when a trait cannot be derived it keeps the base font. The first
-    /// version of this test failed that case on the simulator — `withSymbolicTraits`
-    /// returns nil for italic because IBM Plex Mono ships no italic cut, which is the
-    /// normal path through that initialiser and not a defect. Asserting the property on
-    /// whichever font SwiftTerm would actually use holds in both branches.
+    /// Builds the same four faces `FontSet.init` builds (iOSTerminalView.swift:74-99),
+    /// including its fallbacks, which are NOT uniform: bold and italic keep the base
+    /// font when the trait cannot be derived, but `boldItalic` falls back to italic if
+    /// italic differs from base, else bold if bold differs, else base. IBM Plex Mono has
+    /// no italic cut, so in production italic IS base and boldItalic is the BOLD font.
+    ///
+    /// Two earlier versions of this got that wrong: the first XCTFailed when italic
+    /// could not be derived — the normal path, which the simulator caught — and the
+    /// second assigned base for boldItalic while claiming to mirror the initialiser
+    /// "EXACTLY", so it exercised a font SwiftTerm never uses for that face.
     func testTheCascadeSurvivesIntoEveryFontSetFace() {
         let base = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
-        let faces: [(UIFontDescriptor.SymbolicTraits, String)] = [
-            ([.traitBold], "bold"),
-            ([.traitItalic], "italic"),
-            ([.traitBold, .traitItalic], "boldItalic"),
-        ]
 
-        for (traits, label) in faces {
-            let face: UIFont
-            if let descriptor = base.fontDescriptor.withSymbolicTraits(traits) {
-                face = UIFont(descriptor: descriptor, size: 0)
-            } else {
-                face = base   // SwiftTerm's own fallback
-            }
+        func derive(_ traits: UIFontDescriptor.SymbolicTraits) -> UIFont? {
+            base.fontDescriptor.withSymbolicTraits(traits).map { UIFont(descriptor: $0, size: 0) }
+        }
+        let bold = derive([.traitBold]) ?? base
+        let italic = derive([.traitItalic]) ?? base
+        let boldItalic: UIFont = derive([.traitBold, .traitItalic])
+            ?? (italic != base ? italic : (bold != base ? bold : base))
+
+        for (face, label) in [(base, "normal"), (bold, "bold"), (italic, "italic"),
+                              (boldItalic, "boldItalic")] {
             XCTAssertEqual(
                 postScriptName(resolvedFont(for: string(0xE0B0), from: face)),
                 Self.symbolFontName,
