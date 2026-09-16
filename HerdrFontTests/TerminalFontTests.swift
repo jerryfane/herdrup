@@ -129,14 +129,26 @@ final class TerminalFontTests: XCTestCase {
         let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
         let line = CTLineCreateWithAttributedString(
             NSAttributedString(string: "plain ascii", attributes: [.font: font]))
-        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
-        XCTAssertEqual(runs.count, 1, "unsubstituted ASCII should not be split into runs")
 
-        guard let run = runs.first else { return }
+        // CFArray/CF type reads go through the C API rather than `as? [CTRun]` / `as?
+        // CTFont`: a conditional downcast to a CoreFoundation type always succeeds, and
+        // this target builds warnings as errors, so those spellings do not compile. The
+        // type ID check below is also the honest assertion — it verifies the attribute
+        // really is a font instead of assuming the cast proved it.
+        let runs = CTLineGetGlyphRuns(line)
+        XCTAssertEqual(CFArrayGetCount(runs), 1, "unsubstituted ASCII should not be split into runs")
+        guard CFArrayGetCount(runs) == 1, let first = CFArrayGetValueAtIndex(runs, 0) else { return }
+        let run = unsafeBitCast(first, to: CTRun.self)
+
         let attributes = CTRunGetAttributes(run) as NSDictionary
-        guard let runFont = attributes[kCTFontAttributeName as String] as? CTFont else {
+        guard let value = attributes[kCTFontAttributeName as String] else {
             return XCTFail("the run carries no font attribute")
         }
+        let cfValue = value as CFTypeRef
+        guard CFGetTypeID(cfValue) == CTFontGetTypeID() else {
+            return XCTFail("the run's font attribute is not a CTFont")
+        }
+        let runFont = unsafeBitCast(cfValue, to: CTFont.self)
         XCTAssertTrue(
             CFEqual(runFont, font as CTFont),
             """
