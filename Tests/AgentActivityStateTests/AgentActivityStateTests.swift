@@ -165,4 +165,28 @@ final class AgentActivityStateTests: XCTestCase {
         XCTAssertFalse(mark(needsYou: 0, unconfirmed: 3),
                        "a stale count with nothing waiting must not hollow the mark")
     }
+
+    func testQuietHeadlineDoesNotHideStoppedAgentsOrConnecting() {
+        var state = AgentActivityState(
+            headline: "index-rebuild", status: .working, needsYouCount: 0,
+            workingCount: 7, totalCount: 31, workingSince: nil)
+        XCTAssertEqual(state.presentationHeadline(isStale: false), "Nothing needs you")
+
+        state.status = .stopped
+        state.headline = "crashed-build"
+        XCTAssertEqual(state.presentationHeadline(isStale: false), "crashed-build")
+
+        state.status = .idle
+        state.totalCount = 0
+        state.headline = "Connecting…"
+        XCTAssertEqual(state.presentationHeadline(isStale: false), "Connecting…")
+    }
+
+    func testExpiredSnapshotQualifiesPreviouslyConfirmedDemand() {
+        let state = AgentActivityState(
+            headline: "prod-deploy", status: .needsYou, needsYouCount: 23,
+            workingCount: 7, totalCount: 31, workingSince: nil)
+        XCTAssertEqual(state.presentationHeadline(isStale: false), "prod-deploy")
+        XCTAssertEqual(state.presentationHeadline(isStale: true), "23 may need you")
+    }
 }

@@ -126,6 +126,19 @@ struct AgentActivityState: Codable, Hashable {
     var markIsUnconfirmed: Bool {
         needsYouCount > 0 && unconfirmedCount >= needsYouCount
     }
+
+    /// The same headline rule serves the lock screen and expanded island.
+    func presentationHeadline(isStale: Bool) -> String {
+        if isStale {
+            return needsYouCount > 0
+                ? AgentActivitySummary.line(self, isStale: true)
+                : "No recent update"
+        }
+        if needsYouCount == 0, totalCount > 0, status == .idle || status == .working {
+            return "Nothing needs you"
+        }
+        return headline
+    }
 }
 
 enum AgentActivityDeepLink {
@@ -183,11 +196,11 @@ enum AgentActivityStatus: String, Codable, Hashable {
 /// target would put these symbols in the app binary twice. So the wording is duplicated on
 /// purpose, and BOTH copies are now pinned by tests against the same table.
 enum AgentActivitySummary {
-    static func line(_ s: AgentActivityState) -> String {
+    static func line(_ s: AgentActivityState, isStale: Bool = false) -> String {
         if s.needsYouCount > 0 {
             // Every waiting agent rests on an unconfirmed state, so the whole claim is a
             // maybe: say so rather than appending a qualifier to an assertion.
-            if s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
+            if isStale || s.unconfirmedCount >= s.needsYouCount { return "\(s.needsYouCount) may need you" }
             // Some confirmed and some not. Lead with the fact, name the doubt.
             if s.unconfirmedCount > 0 {
                 return "\(s.needsYouCount) need you · \(s.unconfirmedCount) stale"

@@ -17,15 +17,13 @@ final class WidgetGalleryTests: XCTestCase {
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "widgets"
         app.launch()
 
-        // Queried as TEXT, not as the container's identifier: a SwiftUI ScrollView does
-        // not surface one to XCUITest, which is how the first version of this receipt
-        // failed while the gallery was on screen the whole time.
-        XCTAssertTrue(app.staticTexts["needsYou · many · bright"].waitForExistence(timeout: 20),
+        XCTAssertTrue(app.scrollViews.firstMatch.waitForExistence(timeout: 20),
                       "the gallery must render before anything is captured")
-        XCTAssertTrue(app.staticTexts["api-refactor"].firstMatch.waitForExistence(timeout: 10),
-                      "and it must contain the cards, not just their captions")
+        XCTAssertTrue(app.descendants(matching: .any)
+            .matching(identifier: "live-activity-open").firstMatch.waitForExistence(timeout: 10),
+                      "the card's action must render, not just the gallery container")
 
-        // The material and the timers settle a beat after the first paint.
+        // Let the timers settle before the first capture.
         Thread.sleep(forTimeInterval: 1.5)
         attach(named: "widget-gallery-top")
 
@@ -37,7 +35,7 @@ final class WidgetGalleryTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         attach(named: "widget-gallery-bottom")
 
-        for index in 0..<4 {
+        for index in 0..<8 {
             app.swipeUp()
             Thread.sleep(forTimeInterval: 0.8)
             attach(named: "widget-gallery-scroll-\(index)")
