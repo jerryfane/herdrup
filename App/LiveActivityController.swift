@@ -29,10 +29,14 @@ final class LiveActivityController: ObservableObject {
     /// exists goes through this.
     ///
     /// `.stale` COUNTS AS LIVE. A stale activity is still on screen and an update is
-    /// the documented cure for it — and this app's widget is built for that state, with
-    /// its own hedged headline and "last update" line off `context.isStale`. Treating
-    /// it as death would forget a visible banner and then mint a second one beside it.
-    /// Only `.dismissed` and `.ended` are dead.
+    /// the documented cure for it; treating it as death would forget a visible banner
+    /// and then mint a second one beside it. Only `.dismissed` and `.ended` are dead.
+    ///
+    /// The widget no longer RENDERS anything stale-specific. It used to, and none of it
+    /// could appear: `staleDate` is nil here by the decision recorded in `start`, and
+    /// the daemon's APNs payload carries no `stale-date` either, so `context.isStale`
+    /// was always false. This branch still admits `.stale` because ActivityKit may set
+    /// that state for reasons of its own, and a live banner must not be duplicated.
     private var liveActivity: Activity<AgentActivityAttributes>? {
         guard let activity else { return nil }
         switch activity.activityState {

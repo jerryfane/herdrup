@@ -170,23 +170,25 @@ final class AgentActivityStateTests: XCTestCase {
         var state = AgentActivityState(
             headline: "index-rebuild", status: .working, needsYouCount: 0,
             workingCount: 7, totalCount: 31, workingSince: nil)
-        XCTAssertEqual(state.presentationHeadline(isStale: false), "Nothing needs you")
+        XCTAssertEqual(state.presentationHeadline, "Nothing needs you")
 
         state.status = .stopped
         state.headline = "crashed-build"
-        XCTAssertEqual(state.presentationHeadline(isStale: false), "crashed-build")
+        XCTAssertEqual(state.presentationHeadline, "crashed-build")
 
         state.status = .idle
         state.totalCount = 0
         state.headline = "Connecting…"
-        XCTAssertEqual(state.presentationHeadline(isStale: false), "Connecting…")
+        XCTAssertEqual(state.presentationHeadline, "Connecting…")
     }
 
-    func testExpiredSnapshotQualifiesPreviouslyConfirmedDemand() {
+    /// The stale variant of this test is deliberately gone with the code it covered:
+    /// nothing supplies a stale date, so the hedged headline could not render on a
+    /// device. A test that pins unreachable behaviour reports coverage it does not have.
+    func testDemandKeepsTheAgentNameAsTheHeadline() {
         let state = AgentActivityState(
             headline: "prod-deploy", status: .needsYou, needsYouCount: 23,
             workingCount: 7, totalCount: 31, workingSince: nil)
-        XCTAssertEqual(state.presentationHeadline(isStale: false), "prod-deploy")
-        XCTAssertEqual(state.presentationHeadline(isStale: true), "23 may need you")
+        XCTAssertEqual(state.presentationHeadline, "prod-deploy")
     }
 }
