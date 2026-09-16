@@ -6,17 +6,19 @@ import XCTest
 /// What the terminal's font cascade must and must not claim.
 ///
 /// These run on a simulator (`-only-testing:HerdrFontTests` in ci.yml) because every
-/// assertion here is Core Text answering a real query against the registered faces —
-/// which is the only thing that can settle where a codepoint actually lands.
+/// assertion is Core Text answering a real query against the registered faces — the
+/// only thing that can settle where a codepoint actually lands. Two opposite bugs got
+/// here first, and both are pinned below.
 final class TerminalFontTests: XCTestCase {
 
-    /// Codepoints SymbolsNerdFontMono maps OUTSIDE the private-use area, read from its
-    /// cmap (format 4, platform 3/1). IBM Plex Mono covers none of them, so a cascade
-    /// that puts the symbol font first wins all of them away from the system — which is
-    /// what shipped until the ordering fix. U+26A1 is the expensive one: it has
-    /// Emoji_Presentation=Yes, so it must stay Apple Color Emoji rather than becoming a
-    /// monochrome Nerd glyph in agent output.
-    private static let nonPrivateUseCodepointsInSymbolFont: [(scalar: UInt32, label: String)] = [
+    private static let symbolFontName = "HerdrupSymbols"
+
+    /// Codepoints the UPSTREAM Nerd Fonts artifact maps outside the private-use area.
+    /// `Tools/subset-symbols-font.py` drops exactly these, so the shipped font cannot
+    /// claim them from the system however the cascade is ordered. With upstream coverage
+    /// and first position they were all hijacked, and U+26A1 — Emoji_Presentation=Yes —
+    /// turned `⚡` in agent output into a monochrome glyph.
+    private static let droppedNonPrivateUse: [(scalar: UInt32, label: String)] = [
         (0x23FB, "power symbol ⏻"),
         (0x23FC, "power on/off ⏼"),
         (0x23FD, "power on ⏽"),
@@ -24,8 +26,6 @@ final class TerminalFontTests: XCTestCase {
         (0x2630, "trigram ☰"),
         (0x2665, "heart ♥"),
         (0x26A1, "high voltage ⚡ (emoji presentation)"),
-        // All six of U+276C-U+2771, not just the ends: each is a separate glyph id
-        // (10-15) in the shipped cmap, verified by parsing it.
         (0x276C, "medium left angle bracket ❬"),
         (0x276D, "medium right angle bracket ❭"),
         (0x276E, "heavy left angle quote ❮"),
@@ -35,48 +35,78 @@ final class TerminalFontTests: XCTestCase {
         (0x2B58, "heavy circle ⭘"),
     ]
 
+    /// Private-use codepoints Apple Color Emoji ALSO maps, through the legacy SoftBank
+    /// block U+E001-U+E537 it has never dropped. These are the 170 glyphs that vanished
+    /// behind emoji while the symbol font sat after the system fallbacks: ordering it
+    /// first is what brings them back, and the subset is what makes first position safe.
+    private static let softBankCollisions: [(scalar: UInt32, label: String)] = [
+        (0xE001, "Seti/custom, start of U+E001-E00A"),
+        (0xE00A, "Seti/custom, end of U+E001-E00A"),
+        (0xE201, "Font Awesome Extension, start of U+E201-E253"),
+        (0xE253, "Font Awesome Extension, end of U+E201-E253"),
+        (0xE301, "Weather Icons, start of U+E301-E34D"),
+        (0xE34D, "Weather Icons, end of U+E301-E34D"),
+    ]
+
     func testPrimaryTextKeepsIBMPlexAndPrivateUseGlyphsReachTheSymbolFont() {
         let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
 
         XCTAssertEqual(postScriptName(resolvedFont(for: "A", from: font)), "IBMPlexMono")
 
-        // The reason the font is bundled at all: powerline separator and two Font
-        // Awesome glyphs, all private-use, none of which any system font claims.
+        // Why the font is bundled: the powerline separator and two Font Awesome glyphs.
         for scalar: UInt32 in [0xE0B0, 0xF07B, 0xF00C] {
             let face = resolvedFont(for: string(scalar), from: font)
             XCTAssertEqual(
-                postScriptName(face), "SymbolsNFM",
-                "U+\(String(scalar, radix: 16, uppercase: true)) must resolve to the symbol font")
+                postScriptName(face), Self.symbolFontName,
+                "U+\(hex(scalar)) must resolve to the symbol font")
             XCTAssertNotEqual(
                 glyph(for: scalar, in: face), 0,
-                "the symbol font must have a real glyph for U+\(String(scalar, radix: 16, uppercase: true))")
+                "the symbol font must have a real glyph for U+\(hex(scalar))")
         }
     }
 
-    /// The regression the ordering fix exists for. Each of these is a codepoint the
-    /// symbol font really does map, so this cannot pass vacuously — the version of this
-    /// test it replaces asserted U+263A, which SymbolsNerdFontMono does not map at all,
-    /// and so held no matter where the font sat in the cascade.
-    func testSymbolFontDoesNotHijackCodepointsTheSystemAlreadyRenders() {
+    /// The bug the FIRST fix introduced, and the reason the font is subset rather than
+    /// merely reordered. If these regress, the symbol font has been pushed behind Apple
+    /// Color Emoji again and 170 shipped glyphs are unreachable.
+    func testSoftBankPrivateUseGlyphsBeatAppleColorEmoji() {
         let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
-        guard let symbols = UIFont(name: "SymbolsNFM", size: 12.5) else {
-            return XCTFail("SymbolsNFM is not registered; the rest of this test is vacuous without it")
+        guard let symbols = UIFont(name: Self.symbolFontName, size: 12.5) else {
+            return XCTFail("\(Self.symbolFontName) is not registered; the rest is vacuous without it")
         }
 
-        for (scalar, label) in Self.nonPrivateUseCodepointsInSymbolFont {
-            // Precondition: the symbol font DOES map it, so losing it to the system is a
-            // real ordering outcome rather than an absent glyph.
+        for (scalar, label) in Self.softBankCollisions {
             XCTAssertNotEqual(
                 glyph(for: scalar, in: symbols as CTFont), 0,
-                "\(label) is expected in SymbolsNFM's cmap; if upstream dropped it, drop it here too")
+                "U+\(hex(scalar)) (\(label)) must exist in the subset, or this test proves nothing")
+            XCTAssertEqual(
+                postScriptName(resolvedFont(for: string(scalar), from: font)), Self.symbolFontName,
+                """
+                U+\(hex(scalar)) (\(label)) resolved elsewhere — Apple Color Emoji maps the \
+                legacy SoftBank block, so the symbol font must precede it in the cascade.
+                """)
+        }
+    }
 
+    /// The bug that SHIPPED. Asserted two ways so neither the subset nor the ordering can
+    /// regress silently: the font must not map these at all, and they must not resolve to
+    /// it. The version of this test that came before asserted U+263A, which neither font
+    /// maps, so it held wherever the symbol font sat.
+    func testDroppedCodepointsKeepTheirSystemFace() {
+        let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
+        guard let symbols = UIFont(name: Self.symbolFontName, size: 12.5) else {
+            return XCTFail("\(Self.symbolFontName) is not registered; the rest is vacuous without it")
+        }
+
+        for (scalar, label) in Self.droppedNonPrivateUse {
+            XCTAssertEqual(
+                glyph(for: scalar, in: symbols as CTFont), 0,
+                """
+                \(label) is still in the shipped font's cmap — rerun \
+                Tools/subset-symbols-font.py, because first position will hijack it.
+                """)
             let face = postScriptName(resolvedFont(for: string(scalar), from: font))
-            XCTAssertNotEqual(
-                face, "SymbolsNFM",
-                "\(label) must keep its system face, not the bundled symbol font")
-            XCTAssertNotEqual(
-                face, "LastResort",
-                "\(label) resolved to LastResort, so the cascade lost it entirely")
+            XCTAssertNotEqual(face, Self.symbolFontName, "\(label) must keep its system face")
+            XCTAssertNotEqual(face, "LastResort", "\(label) resolved to LastResort, so the cascade lost it")
         }
     }
 
@@ -84,17 +114,17 @@ final class TerminalFontTests: XCTestCase {
         let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
         for text in ["漢", "\u{263a}\u{fe0f}", "\u{1f600}"] {
             let name = postScriptName(resolvedFont(for: text, from: font))
-            XCTAssertNotEqual(name, "SymbolsNFM", "\(text) must not come from the symbol font")
+            XCTAssertNotEqual(name, Self.symbolFontName, "\(text) must not come from the symbol font")
             XCTAssertNotEqual(name, "LastResort", "\(text) must reach a real system face")
         }
     }
 
     /// SwiftTerm's hot-path gate is CTFont IDENTITY: `usesPrimaryFont` compares the run
-    /// font against `fontSet.normal` with `CFEqual`, and returns early for ordinary text.
-    /// The pane font is no longer a plain registered face but a descriptor carrying a
-    /// cascade list, and CTFont equality is descriptor-based — so if Core Text hands back
-    /// a normalised font for unsubstituted runs, that gate fails for ALL ordinary text and
-    /// every primary glyph takes two metric calls per repaint. Nothing tested that.
+    /// font against `fontSet.normal` with `CFEqual` and returns early for ordinary text.
+    /// The pane font is a descriptor carrying a cascade list, and CTFont equality is
+    /// descriptor-based — so if Core Text hands back a normalised font for unsubstituted
+    /// runs, that gate fails for ALL ordinary text and every primary glyph pays two metric
+    /// calls per repaint.
     func testCoreTextReturnsTheCascadeBearingFontForUnsubstitutedRuns() {
         let font = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
         let line = CTLineCreateWithAttributedString(
@@ -117,7 +147,47 @@ final class TerminalFontTests: XCTestCase {
             """)
     }
 
+    /// Size changes must still produce distinct metrics, since the cascade is now built
+    /// once at a reference size and resized per call.
+    func testResizingTheCachedDescriptorStillChangesMetrics() {
+        let small = LiveTerminalView.Coordinator.makePaneFont(size: 9)
+        let large = LiveTerminalView.Coordinator.makePaneFont(size: 24)
+        XCTAssertEqual(small.pointSize, 9)
+        XCTAssertEqual(large.pointSize, 24)
+        // A REAL glyph, measured. Passing a zero count returns 0 for both fonts, which
+        // is a tautology dressed as a metric check — that is what this line used to do.
+        XCTAssertGreaterThan(
+            advanceOfCapitalA(large), advanceOfCapitalA(small),
+            "a resized pane font must carry the larger advance, not the reference size's")
+        // The cascade must survive the resize, or private-use glyphs stop resolving.
+        XCTAssertEqual(
+            postScriptName(resolvedFont(for: string(0xE0B0), from: large)), Self.symbolFontName)
+    }
+
+    /// SwiftTerm derives bold and italic from the base font and `usesPrimaryFont` gates
+    /// on all four faces, so a cascade that survives only on `normal` would leave bold
+    /// terminal output with no symbol coverage — and the fit path would then treat those
+    /// runs as non-primary. Derived here the same way a trait-based derivation does.
+    func testTheCascadeSurvivesIntoDerivedBoldAndItalicFaces() {
+        let base = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
+        for (trait, label) in [(UIFontDescriptor.SymbolicTraits.traitBold, "bold"),
+                               (UIFontDescriptor.SymbolicTraits.traitItalic, "italic")] {
+            guard let descriptor = base.fontDescriptor.withSymbolicTraits(trait) else {
+                return XCTFail("could not derive the \(label) face from the pane font")
+            }
+            let derived = UIFont(descriptor: descriptor, size: 12.5)
+            XCTAssertEqual(
+                postScriptName(resolvedFont(for: string(0xE0B0), from: derived)),
+                Self.symbolFontName,
+                "the \(label) face lost the cascade, so private-use glyphs stop resolving in it")
+        }
+    }
+
     // MARK: - helpers
+
+    private func hex(_ scalar: UInt32) -> String {
+        String(scalar, radix: 16, uppercase: true)
+    }
 
     private func string(_ scalar: UInt32) -> String {
         String(UnicodeScalar(scalar)!)
@@ -125,6 +195,13 @@ final class TerminalFontTests: XCTestCase {
 
     private func postScriptName(_ font: CTFont) -> String {
         CTFontCopyPostScriptName(font) as String
+    }
+
+    private func advanceOfCapitalA(_ font: UIFont) -> CGFloat {
+        var g = glyph(for: 0x41, in: font as CTFont)
+        var advance = CGSize.zero
+        CTFontGetAdvancesForGlyphs(font as CTFont, .horizontal, &g, &advance, 1)
+        return advance.width
     }
 
     private func glyph(for scalar: UInt32, in font: CTFont) -> CGGlyph {

@@ -203,7 +203,7 @@ targets:
           - IBMPlexMono-Medium.ttf
           - IBMPlexMono-SemiBold.ttf
           - IBMPlexMono-Bold.ttf
-          - SymbolsNerdFontMono-Regular.ttf
+          - HerdrupSymbols-Regular.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -336,7 +336,7 @@ targets:
       - path: App/Fonts
         buildPhase: resources
         excludes:
-          - SymbolsNerdFontMono-Regular.ttf
+          - HerdrupSymbols-Regular.ttf
           # Its licence goes with it: nothing in the appex carries a Nerd Fonts glyph.
           - NerdFonts-LICENSE.txt
           - Geist-Bold.ttf

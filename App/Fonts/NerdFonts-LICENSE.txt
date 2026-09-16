@@ -1,8 +1,26 @@
 # Attribution for SymbolsNerdFontMono-Regular.ttf
 
-The bundled `SymbolsNerdFontMono-Regular.ttf` is the upstream
-`NerdFontsSymbolsOnly` artifact from Nerd Fonts v3.5.1, shipped byte-for-byte
-and unmodified.
+The bundled `HerdrupSymbols-Regular.ttf` is a MODIFIED version of the upstream
+`NerdFontsSymbolsOnly` artifact from Nerd Fonts v3.5.1
+(`SymbolsNerdFontMono-Regular.ttf`, sha256
+fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749, retained at
+`Tools/upstream/` so the modification can be re-derived and audited).
+
+WHAT WAS CHANGED, and nothing else: the character map was reduced to private-use
+codepoints only, dropping the 14 the upstream font maps outside that area
+(U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771, U+2B58), and the name
+table was retitled to "Herdrup Symbols" so the modified font does not present
+itself as the upstream release. NO GLYPH OUTLINE IS ALTERED.
+
+Why: the terminal needs the symbols ahead of Apple Color Emoji, which still maps
+the legacy SoftBank private-use block and would otherwise hide 170 of these
+glyphs; but ahead of the system it also won those 14 non-private-use codepoints,
+turning emoji-presentation characters such as U+26A1 into monochrome glyphs. No
+cascade order satisfies both, so the coverage changed instead. The reduction is
+reproducible and CI-enforced: see `Tools/subset-symbols-font.py`.
+
+The OFL permits modification and restricts only RESERVED FONT NAMES; the rename
+above keeps that condition met, and Pomicons' reserved name is not used.
 
 It is an AGGREGATE: the binary contains glyphs from fourteen icon sets, each
 under its own terms. The Nerd Fonts root licence below covers the project's own

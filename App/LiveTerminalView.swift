@@ -845,7 +845,7 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// IBM Plex Mono (the design's MACHINE voice) with Nerd Fonts' monospaced
         /// symbols in its cascade, so IBM Plex keeps its text metrics while Core Text
-        /// splits missing private-use glyphs into `SymbolsNFM` runs for SwiftTerm to draw.
+        /// splits missing private-use glyphs into `HerdrupSymbols` runs for SwiftTerm to draw.
         static let minFontSize: CGFloat = 9
         static let maxFontSize: CGFloat = 24
         static let defaultFontSize: CGFloat = 12.5
@@ -889,47 +889,39 @@ struct LiveTerminalView: UIViewRepresentable {
             let referenceSize = defaultFontSize
             let primary = UIFont(name: "IBMPlexMono", size: referenceSize)
                 ?? UIFont.monospacedSystemFont(ofSize: referenceSize, weight: .regular)
-            guard let symbols = UIFont(name: "SymbolsNFM", size: referenceSize) else {
+            guard let symbols = UIFont(name: "HerdrupSymbols", size: referenceSize) else {
                 return nil
             }
             let systemFallbacks =
                 CTFontCopyDefaultCascadeListForLanguages(primary as CTFont, nil)
                 as? [CTFontDescriptor] ?? []
 
-            // SYMBOLS GO LAST, NOT FIRST — but ahead of LastResort.
+            // SYMBOLS FIRST — which is only safe because the font can no longer answer
+            // for anything outside the private-use area. Both directions were tried and
+            // both were wrong while the font carried its upstream character map:
             //
-            // Prepending them looked right (the symbols are why this font is here) and
-            // was wrong: SymbolsNFM's cmap is not confined to the private-use area. It
-            // also maps U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771 and U+2B58,
-            // none of which IBM Plex Mono covers, so a first-position cascade entry won
-            // all six away from the system. U+26A1 has Emoji_Presentation=Yes: agent
-            // output containing ⚡ rendered as a monochrome Nerd glyph instead of the
-            // colour emoji, and ♥ and ⭘ changed face the same way.
+            //  * FIRST with upstream coverage: the artifact maps 14 non-private-use
+            //    codepoints (U+23FB-U+23FE, U+2630, U+2665, U+26A1, U+276C-U+2771,
+            //    U+2B58) that IBM Plex Mono does not, so it won all 14 from the system.
+            //    U+26A1 has Emoji_Presentation=Yes, so `⚡` in agent output came out as a
+            //    monochrome Nerd glyph instead of colour emoji. That shipped.
+            //  * AFTER the system fallbacks: fixes those 14 and breaks the inverse, which
+            //    is worse. Apple Color Emoji still maps the legacy SoftBank private-use
+            //    block U+E001-U+E537, overlapping 170 shipped Nerd codepoints — Seti
+            //    U+E001-E00A, Font Awesome Extension U+E201-E253, Weather Icons
+            //    U+E301-E34D — and it precedes any later entry, so those 170 vanish
+            //    behind emoji.
             //
-            // Ordering after the system fallbacks restores every one of those, and still
-            // reaches SymbolsNFM for the private-use glyphs this feature exists for,
-            // because no system font claims them. The one entry that would swallow them
-            // is LastResort, whose whole job is to answer for any codepoint, so the
-            // symbols are inserted just before it.
-            var cascade: [Any] = []
-            var placed = false
-            for descriptor in systemFallbacks {
-                if !placed, isLastResort(descriptor) {
-                    cascade.append(symbols.fontDescriptor)
-                    placed = true
-                }
-                cascade.append(descriptor)
-            }
-            if !placed { cascade.append(symbols.fontDescriptor) }
+            // No single ordering satisfies both, because the conflict is the font's
+            // COVERAGE, not the order. `Tools/subset-symbols-font.py` therefore ships a
+            // private-use-only subset: first position beats Apple Color Emoji for the
+            // 170, and the 14 reach the system because this font no longer claims them.
+            var cascade: [Any] = [symbols.fontDescriptor]
+            cascade.append(contentsOf: systemFallbacks)
 
             // The descriptor, not a font: `makePaneFont` applies the size, which is the
             // only thing the pinch gesture varies.
             return primary.fontDescriptor.addingAttributes([.cascadeList: cascade])
-        }
-
-        private static func isLastResort(_ descriptor: CTFontDescriptor) -> Bool {
-            let name = CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute) as? String
-            return name == "LastResort"
         }
 
         /// Apply a new terminal font size (clamped to [minFontSize, maxFontSize]).

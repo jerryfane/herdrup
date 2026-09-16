@@ -73,6 +73,20 @@ jobs:
       - name: Test vendored SwiftTerm core
         run: swift test --package-path Vendor/SwiftTerm
 
+      # The shipped symbol font is a PRIVATE-USE-ONLY SUBSET of the upstream Nerd Fonts
+      # artifact, because no cascade ordering can be right while the font also maps 14
+      # non-private-use codepoints — see Tools/subset-symbols-font.py for the two bugs
+      # that proved it. A committed binary nobody can re-derive is indistinguishable
+      # from a hand-edited one, so this re-runs the subset over the retained upstream
+      # input and fails if the bytes differ.
+      - name: Verify the symbol font is the upstream subset
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/fontenv
+          /tmp/fontenv/bin/pip install --quiet fonttools
+          /tmp/fontenv/bin/python Tools/subset-symbols-font.py \
+            Tools/upstream/SymbolsNerdFontMono-Regular.ttf --check
+
   build-and-uitest:
     runs-on: macos-latest
     timeout-minutes: 120
