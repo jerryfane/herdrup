@@ -268,6 +268,7 @@ private struct LockScreenView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Image("AppLogo")
                     .resizable()
+                    .interpolation(.high)
                     .frame(width: 26, height: 26)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .accessibilityHidden(true)
@@ -370,6 +371,7 @@ private struct ActivityAction: View {
                         .strokeBorder(WidgetPalette.textFaint, lineWidth: 1)
                 }
         }
+        .accessibilityIdentifier("live-activity-open")
     }
 }
 
@@ -464,15 +466,6 @@ private extension AgentActivityState {
 
     var markColor: Color { WidgetPalette.color(status) }
 
-    /// ActivityKit freshness and per-agent confirmation are separate signals.
-    func presentationHeadline(isStale: Bool) -> String {
-        if isStale {
-            return needsYouCount > 0 ? "\(needsYouCount) may need you" : "No recent update"
-        }
-        // Do not hide stopped/working agents or rewrite the empty connecting state.
-        if status == .idle, needsYouCount == 0, totalCount > 0 { return "Nothing needs you" }
-        return headline
-    }
 
     var deepLinkURL: URL { AgentActivityDeepLink.url(agentID: agentID) }
 }
@@ -540,6 +533,9 @@ struct WidgetGallery: View {
         ("idle", AgentActivityState(
             headline: "docs-sweep", status: .idle, needsYouCount: 0,
             workingCount: 0, totalCount: 31, workingSince: nil, agentID: "a6")),
+        ("working · many", AgentActivityState(
+            headline: "index-rebuild", status: .working, needsYouCount: 0,
+            workingCount: 7, totalCount: 31, workingSince: nil, agentID: "a8")),
         ("needsYou · unconfirmed", AgentActivityState(
             headline: "remote-build", status: .needsYou, needsYouCount: 3,
             unconfirmedCount: 3, workingCount: 0, totalCount: 3, workingSince: nil,
@@ -650,7 +646,11 @@ struct WidgetGallery: View {
                 .padding(.vertical, 8)
                 .background(Capsule().fill(Color.black))
 
-                StatusMark(status: item.1.status, diameter: 14)
+                StatusMark(
+                    status: item.1.status,
+                    diameter: 14,
+                    isUnconfirmed: item.1.markIsUnconfirmed
+                )
                     .frame(width: 36, height: 36)
                     .background(Circle().fill(Color.black))
             }

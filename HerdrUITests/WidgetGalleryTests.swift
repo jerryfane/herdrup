@@ -19,6 +19,9 @@ final class WidgetGalleryTests: XCTestCase {
 
         XCTAssertTrue(app.scrollViews.firstMatch.waitForExistence(timeout: 20),
                       "the gallery must render before anything is captured")
+        XCTAssertTrue(app.descendants(matching: .any)
+            .matching(identifier: "live-activity-open").firstMatch.waitForExistence(timeout: 10),
+                      "the card's action must render, not just the gallery container")
 
         // Let the timers settle before the first capture.
         Thread.sleep(forTimeInterval: 1.5)

@@ -69,6 +69,7 @@ let package = Package(
         .target(
             name: "AgentActivityState",
             path: "Shared",
+            exclude: ["AgentActivityAttributes.swift", "Assets.xcassets"],
             sources: ["AgentActivityState.swift"]),
         .testTarget(
             name: "AgentActivityStateTests",
