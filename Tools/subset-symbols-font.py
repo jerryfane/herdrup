@@ -55,6 +55,12 @@ OUTPUT = REPO / "App/Fonts/HerdrupSymbols-Regular.ttf"
 FAMILY = "Herdrup Symbols"
 POSTSCRIPT = "HerdrupSymbols"
 
+# The upstream artifact this subset is derived from: Nerd Fonts v3.5.1
+# NerdFontsSymbolsOnly. Pinned because `--check` otherwise only proves the output is
+# self-consistent with WHATEVER input it is handed — swap the input and a wrong font
+# passes. This is the same digest recorded in App/Fonts/NerdFonts-LICENSE.txt.
+UPSTREAM_SHA256 = "fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749"
+
 # Private-use: BMP, plus the two supplementary planes. Nothing else survives.
 PRIVATE_USE_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
 
@@ -88,6 +94,12 @@ def rename(font: TTFont) -> None:
 
 
 def build(source: Path) -> bytes:
+    actual = hashlib.sha256(source.read_bytes()).hexdigest()
+    if actual != UPSTREAM_SHA256:
+        sys.exit(f"{source} is not the pinned upstream artifact\n"
+                 f"  expected {UPSTREAM_SHA256}\n  actual   {actual}\n"
+                 "Re-pin UPSTREAM_SHA256 (and the licence record) only when deliberately "
+                 "moving to a new Nerd Fonts release.")
     font = TTFont(source)
     keep = {cp for cp in mapped_codepoints(font) if is_private_use(cp)}
     dropped = mapped_codepoints(font) - keep

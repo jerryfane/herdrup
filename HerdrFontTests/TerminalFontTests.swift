@@ -130,15 +130,26 @@ final class TerminalFontTests: XCTestCase {
         let line = CTLineCreateWithAttributedString(
             NSAttributedString(string: "plain ascii", attributes: [.font: font]))
 
-        // CFArray/CF type reads go through the C API rather than `as? [CTRun]` / `as?
-        // CTFont`: a conditional downcast to a CoreFoundation type always succeeds, and
-        // this target builds warnings as errors, so those spellings do not compile. The
-        // type ID check below is also the honest assertion — it verifies the attribute
-        // really is a font instead of assuming the cast proved it.
+        // CF reads go through the C API rather than `as? CTFont`. The reason recorded
+        // here first was WRONG: I wrote "this target builds warnings as errors", and
+        // nothing in the repo sets that — no SWIFT_TREAT_WARNINGS_AS_ERRORS, no
+        // OTHER_SWIFT_FLAGS, and HerdrFontTests carries only bundle id, Swift version,
+        // plist generation, device family and signing. What actually happened is simpler
+        // and is in the build log: xcodebuild failed with exit 65 on
+        // "conditional downcast to CoreFoundation type 'CTFont' will always succeed",
+        // reported as an error by the compiler itself, not promoted from a warning.
+        // The type ID check below is also the honest assertion — it verifies the
+        // attribute really is a font instead of letting an always-true cast imply it.
         let runs = CTLineGetGlyphRuns(line)
         XCTAssertEqual(CFArrayGetCount(runs), 1, "unsubstituted ASCII should not be split into runs")
         guard CFArrayGetCount(runs) == 1, let first = CFArrayGetValueAtIndex(runs, 0) else { return }
-        let run = unsafeBitCast(first, to: CTRun.self)
+        // Type-checked like the font read below it, rather than trusting the pointer:
+        // CTRunGetTypeID() exists, so leaving this side unchecked was asymmetric.
+        let runValue = Unmanaged<CFTypeRef>.fromOpaque(first).takeUnretainedValue()
+        guard CFGetTypeID(runValue) == CTRunGetTypeID() else {
+            return XCTFail("CTLineGetGlyphRuns returned something that is not a CTRun")
+        }
+        let run = unsafeBitCast(runValue, to: CTRun.self)
 
         let attributes = CTRunGetAttributes(run) as NSDictionary
         guard let value = attributes[kCTFontAttributeName as String] else {
@@ -176,22 +187,35 @@ final class TerminalFontTests: XCTestCase {
             postScriptName(resolvedFont(for: string(0xE0B0), from: large)), Self.symbolFontName)
     }
 
-    /// SwiftTerm derives bold and italic from the base font and `usesPrimaryFont` gates
-    /// on all four faces, so a cascade that survives only on `normal` would leave bold
-    /// terminal output with no symbol coverage — and the fit path would then treat those
-    /// runs as non-primary. Derived here the same way a trait-based derivation does.
-    func testTheCascadeSurvivesIntoDerivedBoldAndItalicFaces() {
+    /// `usesPrimaryFont` gates on all four `FontSet` faces, so a cascade that survives
+    /// only on `normal` would leave bold or italic terminal output with no symbol
+    /// coverage — and the fit path would then treat those runs as non-primary.
+    ///
+    /// Derived EXACTLY as `FontSet.init` does (iOSTerminalView.swift:74-99), including
+    /// its fallback: when a trait cannot be derived it keeps the base font. The first
+    /// version of this test failed that case on the simulator — `withSymbolicTraits`
+    /// returns nil for italic because IBM Plex Mono ships no italic cut, which is the
+    /// normal path through that initialiser and not a defect. Asserting the property on
+    /// whichever font SwiftTerm would actually use holds in both branches.
+    func testTheCascadeSurvivesIntoEveryFontSetFace() {
         let base = LiveTerminalView.Coordinator.makePaneFont(size: 12.5)
-        for (trait, label) in [(UIFontDescriptor.SymbolicTraits.traitBold, "bold"),
-                               (UIFontDescriptor.SymbolicTraits.traitItalic, "italic")] {
-            guard let descriptor = base.fontDescriptor.withSymbolicTraits(trait) else {
-                return XCTFail("could not derive the \(label) face from the pane font")
+        let faces: [(UIFontDescriptor.SymbolicTraits, String)] = [
+            ([.traitBold], "bold"),
+            ([.traitItalic], "italic"),
+            ([.traitBold, .traitItalic], "boldItalic"),
+        ]
+
+        for (traits, label) in faces {
+            let face: UIFont
+            if let descriptor = base.fontDescriptor.withSymbolicTraits(traits) {
+                face = UIFont(descriptor: descriptor, size: 0)
+            } else {
+                face = base   // SwiftTerm's own fallback
             }
-            let derived = UIFont(descriptor: descriptor, size: 12.5)
             XCTAssertEqual(
-                postScriptName(resolvedFont(for: string(0xE0B0), from: derived)),
+                postScriptName(resolvedFont(for: string(0xE0B0), from: face)),
                 Self.symbolFontName,
-                "the \(label) face lost the cascade, so private-use glyphs stop resolving in it")
+                "the \(label) face resolves U+E0B0 elsewhere, so private-use glyphs stop resolving in it")
         }
     }
 

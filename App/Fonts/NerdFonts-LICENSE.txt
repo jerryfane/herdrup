@@ -62,10 +62,16 @@ Apache 2.0 notice, as its section 4(d) requires for MaterialDesign:
 
 OFL 1.1 sets carry the full licence text below (it is the same OFL 1.1 the Nerd
 Fonts root licence reproduces). Pomicons is OFL with a RESERVED FONT NAME: the
-font must not be redistributed under the Pomicons name if modified. This app
-ships the artifact unmodified, so that condition is met — a SUBSET or any other
-edit would break it and require a rename, which is why the binary is shipped
-whole rather than trimmed.
+font must not be redistributed under the Pomicons name if modified.
+
+THE SHIPPED FONT IS MODIFIED — see the top of this file. This paragraph
+previously claimed the opposite ("ships the artifact unmodified ... shipped
+whole rather than trimmed"), which was written when that was true and left
+standing when it stopped being true. The OFL condition is met by the RENAME, not
+by being unmodified: the modified font is titled "Herdrup Symbols"
+(PostScript "HerdrupSymbols"), it is not distributed under the Pomicons name or
+any other reserved name, and the reduction is limited to the character map and
+name table with no outline altered.
 
 Font Logos is listed as "unlicensed" in upstream's table. That label is
 misleading and worth recording: its repository (https://github.com/lukas-w/font-logos)

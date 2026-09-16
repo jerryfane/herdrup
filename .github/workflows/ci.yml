@@ -95,7 +95,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv /tmp/fontenv
-          /tmp/fontenv/bin/pip install --quiet fonttools
+          # PINNED: this compares sha256 byte-exactly, so an unpinned fontTools would
+          # turn a future upstream release into a red X on unrelated PRs.
+          /tmp/fontenv/bin/pip install --quiet 'fonttools==4.65.0'
           /tmp/fontenv/bin/python Tools/subset-symbols-font.py \
             Tools/upstream/SymbolsNerdFontMono-Regular.ttf --check
 
