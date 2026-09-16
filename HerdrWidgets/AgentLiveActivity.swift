@@ -11,13 +11,8 @@ struct AgentLiveActivity: Widget {
                 isStale: context.isStale
             )
             .widgetURL(context.state.deepLinkURL)
-            // The card paints its own top-to-bottom gradient, so this tint is only the
-            // base the system falls back to — at the edges, and in any presentation
-            // that skips the view. It matches the gradient's foot so the seam is not
-            // visible. Passing nil instead gives real translucency but hands the ink
-            // to vibrancy and the herdrup palette with it; that was builds 145–146 and
-            // the owner chose the gradient.
-            .activityBackgroundTint(WidgetPalette.ground)
+            // Match the card's bottom stop at the system-owned edges.
+            .activityBackgroundTint(WidgetPalette.cardBottom)
             .activitySystemActionForegroundColor(WidgetPalette.text)
         } dynamicIsland: { context in
             DynamicIsland {
@@ -121,7 +116,7 @@ private struct ExpandedHero: View {
                 }
             }
             if state.needsYouCount > 0, !isStale {
-                Text("need you")
+                Text(state.markIsUnconfirmed ? "may need you" : "need you")
                     .font(WidgetFont.geist(12))
                     .foregroundStyle(WidgetPalette.textDim)
             }
@@ -157,7 +152,7 @@ private struct ExpandedBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             content
-            if state.needsYouCount > 0 {
+            if state.needsYouCount > 0 || state.status == .stopped || isStale {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
                     destination: state.deepLinkURL
@@ -186,18 +181,8 @@ private struct ExpandedBody: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// STALE reads as the summary's own doubt wording — "N may need you" — because the
-    /// agent's name stated plainly is a claim the card cannot back once the roster is
-    /// unconfirmed. That is the ONLY substitution made here.
-    ///
-    /// The design's zero card says "Nothing needs you", and that wording deliberately
-    /// does NOT get synthesised in this file: the comment on `AgentActivityState` below
-    /// records what happened last time a view rewrote the headline on
-    /// `needsYouCount == 0` — an all-clear printed over a red stopped mark, and over the
-    /// connect handshake. A quiet roster has to say so from `AgentList.activityContent`,
-    /// where a test can execute the rule.
     private var headline: String {
-        isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
+        state.presentationHeadline(isStale: isStale)
     }
 
     /// The faint line: the timer that matters in this state, then the fleet counts. The
@@ -235,19 +220,6 @@ private struct ExpandedBody: View {
     }
 }
 
-#if DEBUG
-/// The gallery's STAND-IN for the system's own Live Activity surface. The real one is
-/// composited by iOS behind the card and is the thing that shows the wallpaper; a
-/// material drawn inside the card cannot see it (measured on device, builds 144 and
-/// 145). Here, in-app, a material DOES sample what is behind it, which is why this is
-/// only a stand-in and lives under DEBUG beside the gallery that uses it.
-private struct SystemSurfaceStandIn: View {
-    var body: some View {
-        Rectangle().fill(.ultraThinMaterial)
-    }
-}
-#endif
-
 private struct LockScreenView: View {
     let hostLabel: String
     let state: AgentActivityAttributes.ContentState
@@ -255,11 +227,8 @@ private struct LockScreenView: View {
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
 
     var body: some View {
-        // THE SPEC'S THREE COLUMNS: hero (the number), centre (mark + what + which
-        // machine), trailing (the app icon, and nothing else). The mark belongs to the
-        // CENTRE beside the headline — it sat in the hero column until now, which is one
-        // of the ways this card did not match the design file.
-        VStack(alignment: .leading, spacing: 14) {
+        // Design: count, mark + headline + detail, app icon; one full-width action.
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 14) {
                 lockHero
                 VStack(alignment: .leading, spacing: 3) {
@@ -295,14 +264,16 @@ private struct LockScreenView: View {
                         lockDetail
                     }
                 }
-                Spacer(minLength: 0)
-                // TRAILING: the app icon, per the spec's row — "hostLabel moved into the
-                // fleet line, it was never worth a column". Drawn, not an asset: the
-                // mark is circles and two strokes, so the widget needs no catalogue.
-                AppMark(size: 30)
+                .padding(.top, 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image("AppLogo")
+                    .resizable()
+                    .frame(width: 26, height: 26)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .accessibilityHidden(true)
             }
 
-            if state.needsYouCount > 0 {
+            if state.needsYouCount > 0 || state.status == .stopped || isStale {
                 ActivityAction(
                     title: state.headline.isEmpty ? "Open herdrup" : "Open \(state.headline)",
                     destination: state.deepLinkURL
@@ -312,27 +283,11 @@ private struct LockScreenView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // OUR OWN GRADIENT, top to bottom, on the owner's call after seeing the
-        // alternatives on a device.
-        //
-        // The glass route is closed, and it is worth recording why rather than trying
-        // it a fourth time: a material painted INSIDE a Live Activity does not sample
-        // the wallpaper. iOS composites its own surface behind this view, so the blur
-        // blurs THAT and any wash only darkens the panel (builds 144 and 145). Leaving
-        // the background to the system does give real translucency, but then the ink
-        // has to be vibrancy-driven and the herdrup palette goes with it.
-        //
-        // Painting our own surface takes the translucency back off the table and
-        // returns everything else: the tuned tokens, the amber hero, and a mark that
-        // needs no disc behind it. Vertical, deep at the bottom.
+        // The owner chose an opaque vertical gradient after viewing the system surface.
         .background(WidgetPalette.cardGradient)
     }
 
-    // INK ON A SURFACE WE OWN AGAIN. The card paints `cardGradient`, #1B1F3A to
-    // #0B0E1A, so the tuned tokens hold at both ends: against the LIGHTEST stop, text
-    // 13.7:1, textDim 6.2:1, textFaint 3.19:1 — the last unchanged from the flat
-    // backdrop it replaces, and the reason the faint tier only ever carries the fleet
-    // line. No vibrancy, no unknown wallpaper, nothing this repo cannot measure.
+    // Fixed ink on the owned gradient, independent of wallpaper.
     private var primaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.text) }
     private var secondaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.textDim) }
     private var tertiaryInk: AnyShapeStyle { AnyShapeStyle(WidgetPalette.textFaint) }
@@ -342,11 +297,8 @@ private struct LockScreenView: View {
     /// amber hero comes back.
     private var heroInk: AnyShapeStyle { AnyShapeStyle(state.markColor) }
 
-    /// STALE takes the summary's own doubt wording, the same substitution the island
-    /// makes and the only one either surface makes. No other headline rewriting lives
-    /// here — see `ExpandedBody.headline` for what that cost last time.
     private var lockHeadline: String {
-        isStale && state.needsYouCount > 0 ? AgentActivitySummary.line(state) : state.headline
+        state.presentationHeadline(isStale: isStale)
     }
 
     /// HERO: the number and its caption, nothing else. The mark moved to the centre
@@ -361,7 +313,7 @@ private struct LockScreenView: View {
                     .font(WidgetFont.plexSemiBold(34))
                     .monospacedDigit()
                     .foregroundStyle(heroInk)
-                Text("need you")
+                Text(state.markIsUnconfirmed ? "may need you" : "need you")
                     .font(WidgetFont.geist(13))
                     .foregroundStyle(secondaryInk)
             }
@@ -421,54 +373,6 @@ private struct ActivityAction: View {
     }
 }
 
-/// The herdrup mark, for the lock card's trailing column.
-///
-/// DRAWN, not an asset: `design/herdrup-appicon.svg` is five circles/ellipses plus two
-/// strokes, so reproducing it here costs twenty lines and saves giving the widget
-/// extension an asset catalogue (and a second copy of the artwork to keep in step).
-/// Geometry and colours are taken from that file's 100x100 user space verbatim.
-private struct AppMark: View {
-    var size: CGFloat
-
-    private static let ink = Color(hex6: 0xB8C1F0)
-    private static let ground = Color(hex6: 0x1A1B26)
-
-    var body: some View {
-        Canvas { context, canvasSize in
-            let s = min(canvasSize.width, canvasSize.height) / 100
-            func scaled(_ rect: CGRect) -> CGRect {
-                CGRect(x: rect.minX * s, y: rect.minY * s, width: rect.width * s, height: rect.height * s)
-            }
-            // The head and ears, as in the source: body circle, two ear ellipses, three
-            // crown circles.
-            for rect in [
-                CGRect(x: 24, y: 36, width: 52, height: 52),
-                CGRect(x: 10, y: 53.5, width: 18, height: 13),
-                CGRect(x: 72, y: 53.5, width: 18, height: 13),
-                CGRect(x: 19, y: 25, width: 26, height: 26),
-                CGRect(x: 36, y: 16, width: 28, height: 28),
-                CGRect(x: 55, y: 25, width: 26, height: 26),
-            ] {
-                context.fill(Path(ellipseIn: scaled(rect)), with: .color(Self.ink))
-            }
-            // The prompt glyph cut into the face: a chevron and a bar, stroked in the
-            // ground colour so they read as negative space.
-            var glyph = Path()
-            glyph.move(to: CGPoint(x: 40 * s, y: 54 * s))
-            glyph.addLine(to: CGPoint(x: 46 * s, y: 61 * s))
-            glyph.addLine(to: CGPoint(x: 40 * s, y: 68 * s))
-            glyph.move(to: CGPoint(x: 56 * s, y: 64 * s))
-            glyph.addLine(to: CGPoint(x: 66 * s, y: 64 * s))
-            context.stroke(
-                glyph,
-                with: .color(Self.ground),
-                style: StrokeStyle(lineWidth: 8 * s, lineCap: .round, lineJoin: .round)
-            )
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-    }
-}
 
 private struct StatusMark: View {
     let status: AgentActivityAttributes.Status
@@ -527,34 +431,15 @@ private enum WidgetFont {
 
 private enum WidgetPalette {
     static let ground = Color(hex6: 0x13162A)
-    /// The lock-screen card's own surface: TOP TO BOTTOM, lifted at the head and deep
-    /// at the foot, so the hero and the agent's name sit on the lighter end and the
-    /// fleet line on the darker one.
-    ///
-    /// The top stop is #1B1F3A, the same lift the old flat backdrop used, and NOT a
-    /// point lighter: `textFaint` — the fleet line's tier — measures 3.19:1 there, and
-    /// a brighter head took it to 2.98:1, a contrast regression smuggled in under a
-    /// cosmetic change.
-    ///
-    /// The foot was #0B0E1A and read as near-black on device; it is #171B30 now, one
-    /// step under the head rather than five. The sweep is quieter but it is still a
-    /// sweep, and the ink tiers hold across both ends — against the FOOT: text 14.7:1,
-    /// textDim 6.7:1, textFaint 3.42:1, amber 8.2:1.
+    // Keep the original top and lighten the formerly near-black bottom.
+    static let cardBottom = Color(hex6: 0x171B30)
     static let cardGradient = LinearGradient(
-        colors: [Color(hex6: 0x1B1F3A), Color(hex6: 0x171B30)],
+        colors: [Color(hex6: 0x1B1F3A), cardBottom],
         startPoint: .top,
         endPoint: .bottom
     )
     static let text = Color(hex6: 0xEEF0F7)
-    /// Tertiary text ON THE ISLAND, whose background is true black and is ours to
-    /// measure against — unlike the lock screen, which now sits on the system's
-    /// surface and asks the system for ink. `textFaint` measures 4.16:1 on black,
-    /// under the small-text bar at the 11 pt this tier is always set in; this is
-    /// 5.23:1, and stays dimmer than `textDim` (8.11:1) so the tiers remain three.
-    ///
-    /// Deleted by accident in the glass-palette cleanup and restored: it broke both
-    /// targets, and the gallery run that looked green had been dispatched one commit
-    /// earlier.
+    /// Lift the small island text above the lock-screen token for contrast on black.
     static let islandTextFaint = Color(hex6: 0x767DA3)
     static let textDim = Color(hex6: 0x99A0BC)
     static let textFaint = Color(hex6: 0x666D91)
@@ -579,14 +464,15 @@ private extension AgentActivityState {
 
     var markColor: Color { WidgetPalette.color(status) }
 
-    // NO HEADLINE OVERRIDE LIVES HERE. A private rule in this target once rewrote the
-    // headline to "Nothing needs you" whenever needsYouCount == 0, which put that all-clear
-    // above a RED stopped mark (the agent had died), discarded the agent's name on a working
-    // roster, and answered the connect handshake — "Connecting…", nothing known yet — with a
-    // confident all-clear. No test target can see this file, so CI could not catch any of it.
-    // The headline is the lead agent's own name, decided in HerdrKit's
-    // `AgentList.activityContent` where a test executes it; a quiet roster is expressed by
-    // `AgentActivitySummary.line`, which is pinned in `Shared/`.
+    /// ActivityKit freshness and per-agent confirmation are separate signals.
+    func presentationHeadline(isStale: Bool) -> String {
+        if isStale {
+            return needsYouCount > 0 ? "\(needsYouCount) may need you" : "No recent update"
+        }
+        // Do not hide stopped/working agents or rewrite the empty connecting state.
+        if status == .idle, needsYouCount == 0, totalCount > 0 { return "Nothing needs you" }
+        return headline
+    }
 
     var deepLinkURL: URL { AgentActivityDeepLink.url(agentID: agentID) }
 }
@@ -626,7 +512,7 @@ private extension Color {
 ///
 /// Reached only through `ScreenshotMock.widgets`; the shipping app has no path to it.
 struct WidgetGallery: View {
-    /// Four states worth looking at, chosen from the design's own state matrix.
+    /// The design's state matrix, including unknown prompts and an all-clear roster.
     private static let cases: [(String, AgentActivityState)] = [
         ("needsYou · many", AgentActivityState(
             headline: "api-refactor", status: .needsYou, needsYouCount: 23,
@@ -651,15 +537,16 @@ struct WidgetGallery: View {
         ("stopped", AgentActivityState(
             headline: "flaky-e2e", status: .stopped, needsYouCount: 0,
             workingCount: 0, totalCount: 5, workingSince: nil, agentID: "a4")),
+        ("idle", AgentActivityState(
+            headline: "docs-sweep", status: .idle, needsYouCount: 0,
+            workingCount: 0, totalCount: 31, workingSince: nil, agentID: "a6")),
+        ("needsYou · unconfirmed", AgentActivityState(
+            headline: "remote-build", status: .needsYou, needsYouCount: 3,
+            unconfirmedCount: 3, workingCount: 0, totalCount: 3, workingSince: nil,
+            agentID: "a7")),
     ]
 
-    /// A bright wallpaper is the worst case for a translucent card, a dark one the
-    /// common case. NOTE the gallery's limit: the system applies VIBRANCY to `.primary`
-    /// and friends on the real lock screen, and nothing here reproduces it, so these
-    /// frames show layout faithfully and contrast only approximately.
-    /// The bright one is TRUE WHITE at its top stop, not 0.96 — an earlier version
-    /// measured at sRGB 245 and the figures were quoted as "over white", which flattered
-    /// the tertiary tier by a little under 5%.
+    /// Both wallpapers exercise the same opaque card. System clipping remains a stand-in.
     private static let backdrops: [(String, LinearGradient)] = [
         ("bright", LinearGradient(colors: [Color(white: 1.0), Color(white: 0.82)],
                                   startPoint: .top, endPoint: .bottom)),
@@ -692,9 +579,7 @@ struct WidgetGallery: View {
         .accessibilityIdentifier("widget-gallery")
     }
 
-    /// The lock-screen card over a wallpaper, with the system's translucent surface
-    /// STOOD IN FOR behind it — the card itself now draws no background of its own,
-    /// which is what makes it translucent on device.
+    /// Render the production card at the design's phone width.
     private func card(
         _ item: (String, AgentActivityState),
         backdrop: (String, LinearGradient),
@@ -708,7 +593,6 @@ struct WidgetGallery: View {
             LockScreenView(hostLabel: "tower", state: item.1, isStale: isStale)
                 .environment(\.isLuminanceReduced, dimmed)
                 .frame(width: 353)
-                .background { if !dimmed { SystemSurfaceStandIn() } }
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .background {
                     backdrop.1
