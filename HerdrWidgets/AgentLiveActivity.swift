@@ -266,7 +266,16 @@ private struct LockScreenView: View {
                 }
                 .padding(.top, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Image("AppLogo")
+                // SIZED FOR THIS SLOT, AND THAT IS THE WHOLE POINT. Build 148 shipped
+                // `AppLogo` here when that asset was the 1024x1024 app icon, and the
+                // device drew a flat grey square: a Live Activity refuses to render an
+                // asset whose resolution exceeds its presentation, silently, with no
+                // build error. The in-app gallery receipt CANNOT catch it — those views
+                // render in-process where no such limit applies, which is exactly why
+                // 148 passed CI and failed on the Lock Screen. So this slot gets its own
+                // 26pt asset at 1x/2x/3x (26/52/78 px) and `AppLogo` stays the app's
+                // 64pt header mark. Resize the view, resize the asset with it.
+                Image("AppLogoSmall")
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 26, height: 26)
