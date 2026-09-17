@@ -6986,6 +6986,11 @@ struct SettingsView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(
             usageMeterLabel(window, percent: clamped) + (live ? " · live" : "")))
+        // A read-only readout, declared as such. Without this trait the merged container
+        // carries a label but no type, so it is not exposed as a static text — and the
+        // receipt asserting the window label survived queries `staticTexts`, which the
+        // merge above had silently emptied of the child Texts that used to carry it.
+        .accessibilityAddTraits(.isStaticText)
     }
 
     /// The meter's MEANING: "NN% · <window>". Rigid in the layout, because a meter whose
