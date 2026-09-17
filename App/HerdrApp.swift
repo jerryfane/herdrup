@@ -7636,13 +7636,12 @@ struct SettingsView: View {
 
     /// The same row with its leading glyph supplied by the caller.
     ///
-    /// Every row here uses an SF Symbol except Discord, which has no SF Symbol and whose
-    /// mark is instead drawn from the bundled `HerdrupSymbols` font — the same subset the
-    /// terminal already uses for Nerd Font glyphs, so the brand mark is a licensed font
-    /// glyph rather than a hand-drawn imitation or a new image asset.
+    /// Every row here uses an SF Symbol except Discord, which has no SF Symbol and draws
+    /// Discord's own asset from an imageset instead. That row also opts out of the chip's
+    /// tint, because its mark has to stay in Discord's colour — see `discordRow`.
     ///
     /// The chip is `accessibilityHidden`: the row's own label is the accessible name, and
-    /// a private-use codepoint read aloud is noise.
+    /// a decorative mark adds nothing to it.
     private func richActionRow<Leading: View>(
         _ label: String, subtitle: String? = nil,
         trailingGlyph: String = "chevron.right",
