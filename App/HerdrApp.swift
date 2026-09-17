@@ -1511,10 +1511,21 @@ struct TerminalHomeView: View {
     /// BORN IN THE FINAL CONFIGURATION, not flipped after the first layout pass.
     ///
     /// This was `.all` unconditionally, with `.onChange(of: sidebarMinimized, initial: true)`
-    /// flipping it to `.detailOnly` after the split view had already laid out — so for an
-    /// owner whose stored preference is "minimised", the FIRST measurement of the detail
-    /// column happened in a configuration the split view was about to leave. That is the
-    /// "sometimes, for no reason" in the owner's report.
+    /// flipping it to `.detailOnly` after the split view had already laid out, so for an
+    /// owner whose stored preference is "minimised" the first measurement of the detail
+    /// column happened in a configuration the split view was about to leave.
+    ///
+    /// NOT A DIAGNOSIS OF ANY REPORTED BUG. An earlier version of this comment claimed
+    /// that pre-flip pass WAS the owner's "sometimes, for no reason" symptom. There is no
+    /// reproduction of that anywhere, no instrument in the repo that could produce one,
+    /// and no mechanism I can point to in the code: flipping `columnVisibility` re-lays
+    /// the split view out with fresh proposals, and nothing caches a page width across
+    /// it. The claim also contradicted this same file, which records the symptom as
+    /// undiagnosed. It was a fifth guess written as a fact, and it is withdrawn.
+    ///
+    /// The change stands on its own, smaller grounds: a view born in its final
+    /// configuration does not need a layout pass in a configuration it is leaving, and
+    /// one fewer state transition at launch is simpler to reason about.
     ///
     /// Read straight from `UserDefaults` because `@AppStorage` is not available during
     /// property initialisation ("cannot use instance member within property
@@ -1885,14 +1896,19 @@ struct TerminalHomeView: View {
             // and `groundMachine.ignoresSafeArea()` would then bleed under the leading
             // 64pt as a dark strip above and below it.
             //
-            // So this PR now changes NO layout. Three guesses at the owner's geometry
-            // have been refuted (a GramView anchor, a ZStack anchor, a detail frame) and
-            // this would have been the fourth. What it ships instead is the receipt that
-            // can tell them apart: `TerminalResizeTests` on CI's iPad destination, which
-            // measures the page against the window across a real sidebar-toggle tap. If
-            // that fails, the mechanism is reproducible and fixable in a loop rather than
-            // by inference; if it passes, the symptom is macOS-specific and the next
-            // instrument is a TestFlight build on the owner's Mac, not another commit.
+            // So this PR changes NO layout. Four guesses at the owner's geometry have been
+            // refuted: a GramView anchor, a ZStack anchor, a detail frame, and this inset.
+            //
+            // AND IT SHIPS NO TEST EITHER. An iPad guard lived here for six review rounds
+            // and was removed, because after each fix its defect only moved: the waiter
+            // asserted on the same axis as the assertion; the wall-clock floor that
+            // replaced it could return a pre-collapse rect and fail a CORRECT layout with
+            // a message byte-identical to the true finding, so a red run could not be told
+            // from a flake; and a detail column that came back blank measured as a zero
+            // rect and PASSED. The owner has since confirmed the symptom does not occur on
+            // iPad and can no longer reproduce it on the Mac, so the guard could not have
+            // seen its target either way. If it returns, the instrument is a TestFlight
+            // build and the owner's account of what preceded it, not another commit here.
             HStack(spacing: 0) {
                 // Keyed on `columnVisibility`, the LAYOUT TRUTH, not on the persisted
                 // preference: iPadOS collapses this column on its own (rotation, Stage
@@ -1915,17 +1931,20 @@ struct TerminalHomeView: View {
             // a child that is not small. Inert. The same premise was refuted once before,
             // at #268, when I put the modifier one level lower.
             //
-            // Worse than inert in the one case where it bit: when the page OVERFLOWS
-            // (GramView documents this — both priority rows claim ideal height and a
-            // VStack overflows rather than clipping, so the composer goes off-screen),
-            // the frame clamped the REPORTED size to the proposal and pinned the child
-            // top-leading, sending the whole excess off the BOTTOM instead of splitting
-            // it. That puts the composer — the only way to send — further out of reach,
-            // and hides the overflow from the split view entirely.
+            // I also claimed here that it was WORSE than inert in the overflow case, by
+            // clamping the reported size and sending the whole excess off the bottom. That
+            // was wrong, and the rule I asserted does not exist. Apple's contract for
+            // `frame(minWidth:...maxHeight:alignment:)` clamps to the proposal only when
+            // BOTH constraints are given in a dimension; with a MAXIMUM only, the frame
+            // reports the proposed size when the child is smaller, and otherwise reports
+            // THE SIZE OF THE CHILD. An overflowing page is larger than the proposal, so
+            // the frame reported the overflow unchanged and placed it exactly as before.
+            // Inert there too, not harmful.
             //
-            // So the vertical half of the owner's report is UNDIAGNOSED, not fixed. Three
-            // guesses have now been refuted on it (a GramView anchor, a ZStack anchor,
-            // this frame), which is why the receipt below measures rather than asserts it.
+            // So the vertical half of the owner's report is UNDIAGNOSED and unmeasured,
+            // deliberately: four diagnoses were refuted and the instrument built to tell
+            // them apart false-failed on correct layouts, so it was removed rather than
+            // recalibrated a fourth time.
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)

@@ -479,11 +479,13 @@ struct GramView: View {
                 // It does not, and never did — cited line 1885 was `.tint(Palette.brand)`.
                 // `TerminalHomeView.iPadLayout`'s detail closure adds NO frame, so an
                 // oversized page is reported oversized and the excess is split between
-                // top and bottom. A round of PR #269 did add a top-anchoring frame, which
-                // would have made exactly the failure this comment described — the whole
-                // excess off the bottom — and it was withdrawn for that reason. Cited by
-                // SYMBOL deliberately: the line number was stale on the day it was
-                // written and shifted again twice since.
+                // top and bottom. A round of PR #269 briefly added a top-anchoring
+                // `.frame(maxWidth:maxHeight:alignment:.topLeading)` there; I described it
+                // as causing exactly the failure above, and that was wrong too. A frame
+                // given only MAXIMUM constraints reports the child's own size when the
+                // child exceeds the proposal, so it neither clamped the overflow nor
+                // re-anchored it. Cited by SYMBOL deliberately: the line number was stale
+                // on the day it was written and shifted again twice since.
                 .layoutPriority(1)
         }
     }
