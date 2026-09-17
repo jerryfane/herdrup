@@ -190,6 +190,10 @@ class TerminalInteractionTestCase: XCTestCase {
                   file: StaticString = #filePath, line: UInt = #line) {
         for attempt in 0..<2 {
             guard let control = onscreen(menu) else { continue }
+            let ready = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+                object: control)
+            guard XCTWaiter.wait(for: [ready], timeout: 5) == .completed else { continue }
             control.tap()
             if let entry = onscreen(item, timeout: 5) {
                 entry.tap()
@@ -200,7 +204,8 @@ class TerminalInteractionTestCase: XCTestCase {
                 app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
             }
         }
-        XCTFail("menu \(menu) never offered a usable \(item)", file: file, line: line)
+        XCTFail("menu \(menu) never offered a usable \(item). \(elementDump())",
+                file: file, line: line)
     }
 
     func settled(cols: Int? = nil, rows: Int? = nil) {

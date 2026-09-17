@@ -280,6 +280,11 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5),
                       "a photo should be sendable without caption text")
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+            object: send)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
+                       "the staged photo's send action must accept a tap")
         send.tap()
         let sent = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"), object: chip)

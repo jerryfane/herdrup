@@ -391,13 +391,10 @@ final class TerminalSelectionTests: XCTestCase {
     /// the `fr=0` poll; under a mechanism that resigns by clearing the selection it fails at
     /// `sel=1`. Both are real regressions and each has its own failure message.
     func testTheCollapseChevronDismissesTheKeyboardWithAWordSelected() throws {
-        // iPHONE-ONLY BY CONSTRUCTION: the chevron's own visibility condition is
-        // `replyFocused || (terminalInputFocused && idiom == .phone)`, because on iPad the
-        // terminal's inputView is zero-frame so there is no keyboard to collapse. CI picks an
-        // iPhone destination (ci.yml greps `iPhone [0-9]+`), so this skips only on a local iPad run
-        // rather than silently passing there.
+        // This is the positive software-keyboard case. CI disconnects the phone's
+        // hardware keyboard; iPad retains one for direct-input coverage.
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
-                          "the collapse chevron is iPhone-only; there is no keyboard to collapse on iPad")
+                          "this regression requires the iPhone software-keyboard destination")
 
         let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
@@ -417,6 +414,10 @@ final class TerminalSelectionTests: XCTestCase {
         // slid under the finger. Settle first, then select.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.30)).tap()
         Thread.sleep(forTimeInterval: 2.5)
+        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                      "premise: the software keyboard must be visible")
+        XCTAssertTrue(probe.label.contains("hardware=0"),
+                      "premise: disconnect the simulator hardware keyboard; dismissal is intentionally hidden while it is attached. probe[\(probe.label)]")
         // dx 0.150 is col 7 — written on BOTH the primary and continuation row types with a
         // column of slack either side. See the long note in the other test for the enumeration.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.150, dy: 0.30)).doubleTap()

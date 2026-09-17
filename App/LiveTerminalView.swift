@@ -1605,6 +1605,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 "sel=\(active ? 1 : 0) len=\(selected.count) text=<\(selected)> "
                 + "rows=\(term.rows) cols=\(term.cols) ydisp=\(term.buffer.yDisp) "
                 + "fr=\(view.isFirstResponder ? 1 : 0) "
+                + "hardware=\(GCKeyboard.coalesced == nil ? 0 : 1) "
                 // MOTION AGE IN MILLISECONDS, published so a test can measure the guard's PREMISE
                 // rather than infer it. The previous version of the scroll guard was inert and the
                 // only symptom was a test that never reached it, which is indistinguishable from a
