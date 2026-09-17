@@ -6869,6 +6869,9 @@ struct SettingsView: View {
                 Text(AgentIdentity.glyph(for: account.kind))
                     .font(Typography.app(18, .bold)).foregroundStyle(.white)
             }
+            // PRIORITISED over the trailing cluster. Without this the meters win the
+            // width contest and the label truncates to a few characters — "C…" in the
+            // owner's screenshot — because a rigid readout beats a flexible one.
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.label)
                     .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
@@ -6879,6 +6882,7 @@ struct SettingsView: View {
                         .font(Typography.machine(11)).foregroundStyle(Palette.textFaint).lineLimit(1)
                 }
             }
+            .layoutPriority(1)
             Spacer(minLength: 8)
             accountTrailing(account)
         }
@@ -6957,8 +6961,15 @@ struct SettingsView: View {
                 Capsule().fill(Palette.hairline).frame(width: 34, height: 4)
                 Capsule().fill(usageColor(clamped)).frame(width: fill, height: 4)
             }
+            // NOT fixedSize. This readout is the dominant width hog in the row: at its
+            // widest ("100% · 5h · 3h left" from a live daemon) it is rigid enough to
+            // squeeze the account label below 70pt on a 393pt phone, which is the other
+            // half of what the owner's screenshot showed. It now truncates from the tail
+            // instead, so the reset hint is what degrades under pressure rather than the
+            // account's name — the percent and window label lead for that reason.
             Text(usageMeterLabel(window, percent: clamped))
-                .font(Typography.machine(11)).foregroundStyle(Palette.textDim).fixedSize()
+                .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
+                .lineLimit(1)
         }
     }
 

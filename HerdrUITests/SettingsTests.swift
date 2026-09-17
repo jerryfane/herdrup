@@ -102,20 +102,46 @@ final class SettingsTests: XCTestCase {
         let pill = app.staticTexts["exhausted"].firstMatch
         XCTAssertTrue(pill.waitForExistence(timeout: 10), "the exhausted account must show its status")
 
-        // One line of 11pt text plus 3pt padding each side is ~20pt. The wrapped capsule
-        // measured roughly nine times that, so this separates them with room to spare.
+        // RELATIVE TO THE ROW, not absolute points. Fixed thresholds made this receipt
+        // pass on the BROKEN layout: the pre-fix name floor scales with device width and
+        // crosses 90pt at ~396pt, so on an iPhone 16 Pro (402pt) or Pro Max (440pt) the
+        // old `> 90` assertion held before the fix and only the height half did any work.
+        // CI does not pin the simulator width either. Both gates are now fractions of the
+        // window, so the test means the same thing on every device.
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(window.width, 0)
+
+        // One line of 11pt text plus 3pt padding each side is ~20pt; the wrapped capsule
+        // was roughly nine times that. Expressed against the row so a larger Dynamic Type
+        // setting cannot make a single line look like a wrap.
+        let exhaustedRow = app.staticTexts["Claude Pro (personal)"]
+        XCTAssertTrue(exhaustedRow.waitForExistence(timeout: 5))
         XCTAssertLessThan(
             pill.frame.height, 32,
+            "the exhausted pill is \(pill.frame.height)pt tall, so it wrapped instead of keeping its intrinsic width")
+
+        // MEASURED ON THE WORST ROW, which is not the exhausted one. `acc-claude-2`
+        // carries only the flat back-compat fields — deliberately, so the synthesized
+        // -window path stays covered by MockWireFixtureTests — so its readout is the
+        // short "100% · 5h" and its cluster is ~126pt. The ACTIVE `acc-claude-1` has
+        // resets_at, giving "42% · 5h · May 18" and a ~162pt cluster, which is the case
+        // closest to a live daemon and the one that squeezed hardest. Assert there.
+        let widestRow = app.staticTexts["Claude Max (work)"]
+        XCTAssertTrue(widestRow.waitForExistence(timeout: 5))
+        let share = widestRow.frame.width / window.width
+        XCTAssertGreaterThan(
+            share, 0.30,
             """
-            the exhausted pill is \(pill.frame.height)pt tall, so it wrapped instead of             keeping its intrinsic width — the row height follows it.
+            the account label took \(Int(share * 100))% of the row width             (\(exhaustedRow.frame.width)pt of \(window.width)pt), so the trailing cluster             squeezed the name column — this is what showed as "C…".
             """)
 
-        let label = app.staticTexts["Claude Pro (personal)"]
-        XCTAssertTrue(label.waitForExistence(timeout: 5))
-        XCTAssertGreaterThan(
-            label.frame.width, 90,
-            """
-            the account label rendered \(label.frame.width)pt wide, so the trailing             cluster squeezed the name column — this is what showed as "C…".
-            """)
+        // And the exhausted row must not be taller than a healthy one. This is the
+        // symptom the owner actually reported, and it is device-independent by
+        // construction: the two rows are compared to each other, not to a constant.
+        let healthyRow = app.staticTexts["Kimi"]
+        XCTAssertTrue(healthyRow.waitForExistence(timeout: 5))
+        XCTAssertLessThan(
+            exhaustedRow.frame.height, healthyRow.frame.height * 2,
+            "the exhausted row's label grew relative to a healthy row's, so the row inflated")
     }
 }
