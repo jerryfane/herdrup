@@ -1511,9 +1511,15 @@ struct TerminalHomeView: View {
     /// BORN IN THE FINAL CONFIGURATION, not flipped after the first layout pass.
     ///
     /// This was `.all` unconditionally, with `.onChange(of: sidebarMinimized, initial: true)`
-    /// flipping it to `.detailOnly` after the split view had already laid out, so for an
-    /// owner whose stored preference is "minimised" the first measurement of the detail
-    /// column happened in a configuration the split view was about to leave.
+    /// flipping it to `.detailOnly` for an owner whose stored preference is "minimised".
+    ///
+    /// WHEN that flip landed relative to the split view's first layout pass is NOT
+    /// established. Apple documents `initial:` only as "whether the action should be run
+    /// when this view initially appears", with no ordering guarantee against the layout
+    /// phase and no definition of "initially appears" in those terms. So on one reading
+    /// this removes a real layout pass in a configuration about to be left, and on the
+    /// other it is a no-op. I cannot tell which from the documentation, and nothing here
+    /// measures it.
     ///
     /// NOT A DIAGNOSIS OF ANY REPORTED BUG. An earlier version of this comment claimed
     /// that pre-flip pass WAS the owner's "sometimes, for no reason" symptom. There is no
@@ -1523,9 +1529,12 @@ struct TerminalHomeView: View {
     /// it. The claim also contradicted this same file, which records the symptom as
     /// undiagnosed. It was a fifth guess written as a fact, and it is withdrawn.
     ///
-    /// The change stands on its own, smaller grounds: a view born in its final
-    /// configuration does not need a layout pass in a configuration it is leaving, and
-    /// one fewer state transition at launch is simpler to reason about.
+    /// What is left as justification is therefore only this, and it does not depend on
+    /// the ordering: the state is born in the configuration the preference already names,
+    /// so there is one fewer launch-time transition to reason about and no window in
+    /// which `columnVisibility` and `sidebarMinimized` disagree. If the flip in fact
+    /// landed before first layout, this change costs nothing and buys that; it is not
+    /// offered as a fix for anything.
     ///
     /// Read straight from `UserDefaults` because `@AppStorage` is not available during
     /// property initialisation ("cannot use instance member within property
@@ -1899,13 +1908,19 @@ struct TerminalHomeView: View {
             // So this PR changes NO layout. Four guesses at the owner's geometry have been
             // refuted: a GramView anchor, a ZStack anchor, a detail frame, and this inset.
             //
-            // AND IT SHIPS NO TEST EITHER. An iPad guard lived here for six review rounds
-            // and was removed, because after each fix its defect only moved: the waiter
+            // AND IT SHIPS NO TEST EITHER. An iPad guard was carried by five reviewed heads,
+            // with a sixth round reviewing its removal, because after each fix its defect only
+            // moved rather than disappearing: the waiter
             // asserted on the same axis as the assertion; the wall-clock floor that
             // replaced it could return a pre-collapse rect and fail a CORRECT layout with
             // a message byte-identical to the true finding, so a red run could not be told
-            // from a flake; and a detail column that came back blank measured as a zero
-            // rect and PASSED. The owner has since confirmed the symptom does not occur on
+            // from a flake; and nothing re-checked the row existed before measuring it.
+            // That last one I could only half establish, and the half I could not is the
+            // point: the predicates were verified to BOTH pass on a zero rect, so IF an
+            // unresolved query returns `CGRect.zero` a blank detail column greened the
+            // case — but XCUITest's documented behaviour there is unspecified, it may
+            // instead raise, and no run ever settled it. Untrustworthy either way, which
+            // is enough. The owner has since confirmed the symptom does not occur on
             // iPad and can no longer reproduce it on the Mac, so the guard could not have
             // seen its target either way. If it returns, the instrument is a TestFlight
             // build and the owner's account of what preceded it, not another commit here.
@@ -1934,12 +1949,14 @@ struct TerminalHomeView: View {
             // I also claimed here that it was WORSE than inert in the overflow case, by
             // clamping the reported size and sending the whole excess off the bottom. That
             // was wrong, and the rule I asserted does not exist. Apple's contract for
-            // `frame(minWidth:...maxHeight:alignment:)` clamps to the proposal only when
-            // BOTH constraints are given in a dimension; with a MAXIMUM only, the frame
-            // reports the proposed size when the child is smaller, and otherwise reports
-            // THE SIZE OF THE CHILD. An overflowing page is larger than the proposal, so
-            // the frame reported the overflow unchanged and placed it exactly as before.
-            // Inert there too, not harmful.
+            // `frame(minWidth:...maxHeight:alignment:)` adopts the proposal unconditionally
+            // only when BOTH constraints are given in a dimension. With a MAXIMUM only, it
+            // reports "the proposed size, clamped to that maximum" when the proposal
+            // exceeds the child, and "the size of this view" otherwise. The maximum here
+            // was `.infinity`, for which that clamp is the identity — so for THIS modifier
+            // an overflowing child was reported at its own oversized size and placed as
+            // before. Inert there too, not harmful. (State the clamp when quoting the rule
+            // generally: at a finite maximum it does bound the result.)
             //
             // So the vertical half of the owner's report is UNDIAGNOSED and unmeasured,
             // deliberately: four diagnoses were refuted and the instrument built to tell
