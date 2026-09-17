@@ -7686,6 +7686,10 @@ struct SettingsView: View {
     /// (`cdn.discordapp.com/assets/content/a736b959…zip`, `Discord_Symbol_Color/`) — their
     /// file, their blurple, not a redraw. The three scales are 33x25, 66x50 and 99x75,
     /// which are exact reductions of the 528x400 source, so no scale distorts the mark.
+    /// Provenance, what was done to the file, and the trademark position are recorded in
+    /// `NOTICE-Discord-Brand.txt` at the repository root — root deliberately, because
+    /// `Shared/` is a sources path and a stray text file there can end up copied into the
+    /// bundle as a resource.
     ///
     /// An earlier version drew `fa-discord` from the bundled Nerd Fonts subset instead.
     /// That was withdrawn on the trademark question, not the licence one: Font Awesome
