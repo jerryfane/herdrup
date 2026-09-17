@@ -7471,6 +7471,7 @@ struct SettingsView: View {
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("ABOUT")
+            discordRow
             linkRow("Privacy Policy", systemImage: "lock.shield",
                     url: URL(string: "https://herdrup.themartian.app/legal/privacy")!)
             linkRow("Terms of Service", systemImage: "doc.text",
@@ -7628,13 +7629,33 @@ struct SettingsView: View {
         _ label: String, systemImage: String, subtitle: String? = nil,
         trailingGlyph: String = "chevron.right", _ action: @escaping () -> Void
     ) -> some View {
+        richActionRow(label, subtitle: subtitle, trailingGlyph: trailingGlyph, action: action) {
+            Image(systemName: systemImage).font(.system(size: 15, weight: .semibold))
+        }
+    }
+
+    /// The same row with its leading glyph supplied by the caller.
+    ///
+    /// Every row here uses an SF Symbol except Discord, which has no SF Symbol and whose
+    /// mark is instead drawn from the bundled `HerdrupSymbols` font — the same subset the
+    /// terminal already uses for Nerd Font glyphs, so the brand mark is a licensed font
+    /// glyph rather than a hand-drawn imitation or a new image asset.
+    ///
+    /// The chip is `accessibilityHidden`: the row's own label is the accessible name, and
+    /// a private-use codepoint read aloud is noise.
+    private func richActionRow<Leading: View>(
+        _ label: String, subtitle: String? = nil,
+        trailingGlyph: String = "chevron.right",
+        action: @escaping () -> Void,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
+                leading()
                     .foregroundStyle(Palette.textDim)
                     .frame(width: 30, height: 30)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
                     if let subtitle {
@@ -7658,6 +7679,31 @@ struct SettingsView: View {
             openURL(url)
         }
     }
+
+    /// The community invite.
+    ///
+    /// `Self.discordGlyph` is `fa-discord` in the bundled `HerdrupSymbols` subset, which
+    /// is registered in the app's `UIAppFonts` (project.yml). SF Symbols has no Discord
+    /// mark, and a licensed font glyph already in the bundle beats both a hand-drawn
+    /// imitation and a new image asset.
+    ///
+    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` pins exactly what
+    /// this row needs — that the face resolves BY NAME, the way `Font.custom` does, and
+    /// that U+F1FF is still in the subset. It was added with this row; the font tests
+    /// that predate it all go through the terminal's cascade instead, and none of them
+    /// covered this codepoint. If either half regresses, `Text` draws a missing-glyph box
+    /// in the 30pt chip while the label and the link keep working.
+    private var discordRow: some View {
+        richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
+                      action: { openURL(Self.discordInvite) }) {
+            Text(verbatim: Self.discordGlyph)
+                .font(.custom("HerdrupSymbols", size: 17))
+        }
+    }
+
+    /// U+F1FF, `fa-discord` in the Nerd Fonts Font Awesome set.
+    private static let discordGlyph = "\u{F1FF}"
+    private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
 
     private func copyDiagnostics() {
         // Host + app version only — never anything sensitive (no key, ever).

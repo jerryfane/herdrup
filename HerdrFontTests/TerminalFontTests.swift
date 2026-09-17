@@ -223,6 +223,26 @@ final class TerminalFontTests: XCTestCase {
 
     // MARK: - helpers
 
+    /// SETTINGS DRAWS A BRAND MARK FROM THIS FONT, not from an image asset: the "Join the
+    /// Discord" row renders `fa-discord` (U+F1FF) with `Font.custom("HerdrupSymbols")`.
+    ///
+    /// That is a DIFFERENT path from every assertion above, which all go through the
+    /// terminal's cascade (`makePaneFont`) — this one queries the registered face by name,
+    /// the way SwiftUI's `Font.custom` resolves it. Both halves matter: the name has to
+    /// resolve at all (it is registered via `UIAppFonts`, and the widget deliberately
+    /// excludes this face), and the subset has to still carry the codepoint, since
+    /// `Tools/subset-symbols-font.py` is what decides coverage. If either regresses the
+    /// row silently draws a missing-glyph box.
+    func testSettingsDiscordGlyphResolvesByFontName() {
+        guard let face = UIFont(name: Self.symbolFontName, size: 17) else {
+            return XCTFail("\(Self.symbolFontName) is not registered; Font.custom cannot resolve it")
+        }
+        XCTAssertEqual(postScriptName(face), Self.symbolFontName)
+        XCTAssertNotEqual(
+            glyph(for: 0xF1FF, in: face), 0,
+            "U+F1FF (fa-discord) is not in the shipped subset, so the Settings Discord row draws a box")
+    }
+
     private func hex(_ scalar: UInt32) -> String {
         String(scalar, radix: 16, uppercase: true)
     }
