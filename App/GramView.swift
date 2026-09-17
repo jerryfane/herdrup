@@ -169,6 +169,9 @@ struct GramView: View {
     /// The in-flight file-open download (see `openFile`), cancelled when the page goes
     /// away so a late completion can't strand a temp file after cleanup already ran.
     @State private var openFileTask: Task<Void, Never>?
+    /// The in-flight export download, cancelled with the page for the same reason as
+    /// `openFileTask`.
+    @State private var saveFileTask: Task<Void, Never>?
     /// The message id whose file is currently downloading, to show a spinner on it.
     @State private var downloadingFileFor: String?
     /// Bytes of the reply received so far for the in-flight download, against the
@@ -394,24 +397,35 @@ struct GramView: View {
         // Delete the previewed temp file when QuickLook dismisses (it nils the
         // binding) or when it is replaced — so a previewed secret does not linger.
         .onChange(of: previewURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue {
+            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
                 try? FileManager.default.removeItem(at: oldValue)
             }
         }
         // Same for the web-doc viewer's raw file: remove the previous one whenever
         // webDoc changes (including → nil on dismiss), so a viewed HTML/SVG never lingers.
+        // Cached downloads are exempt for the same reason as in `onDisappear`.
         .onChange(of: webDoc?.fileURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue {
+            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
                 try? FileManager.default.removeItem(at: oldValue)
             }
         }
         // Backstop: on the way out, cancel an in-flight file open (so a late completion
-        // can't strand a temp file after cleanup) and remove any lingering temp files —
+        // can't strand a temp file after cleanup) and remove any lingering TEMP files —
         // both the QuickLook preview and the web-doc viewer's raw file.
+        //
+        // CACHED FILES ARE NOT TEMP FILES. A downloaded gram file now lives under
+        // `Downloads.root` so reopening it costs nothing; deleting it here would
+        // re-download on the next open and quietly undo the cache. Only paths outside
+        // that root are unlinked.
         .onDisappear {
             openFileTask?.cancel()
-            if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
-            if let url = webDoc?.fileURL { try? FileManager.default.removeItem(at: url) }
+            saveFileTask?.cancel()
+            if let previewURL, !Downloads.isCached(previewURL) {
+                try? FileManager.default.removeItem(at: previewURL)
+            }
+            if let url = webDoc?.fileURL, !Downloads.isCached(url) {
+                try? FileManager.default.removeItem(at: url)
+            }
             // Staged attachment bytes are deliberately NOT removed here. Gram is a
             // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
             // plain tab switch while this view's `@State` — including the chips in
@@ -734,6 +748,11 @@ struct GramView: View {
                             downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
                             onOpenFile: { openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
+                            // UNSAVE DOES NOT EVICT. Unsaving stops keeping the message
+                            // in the Saved tab; the message itself may still be in the
+                            // inbox, and discarding its bytes here would re-download the
+                            // next open — defeating the feature. Bytes go on DELETE
+                            // (the message is gone), on sign-out, or by the LRU ceiling.
                             onUnsave: { savedGrams.remove(s.id) }
                         )
                     }
@@ -1704,17 +1723,49 @@ struct GramView: View {
         return "application/octet-stream"
     }
 
-    /// Download a message's file to a temp URL and present it in QuickLook (which
-    /// offers the system share action to save it).
+    /// Open a message's file, downloading it only the FIRST time.
+    ///
+    /// A gram message is immutable, so its id names one set of bytes forever. Before
+    /// this, every open re-fetched them over SSH — the page's cleanup deleted the temp
+    /// file on dismissal, so reopening a large attachment made the reader wait through
+    /// the whole transfer again for a file the device had already received. A cache hit
+    /// now presents immediately and touches the network not at all.
+    ///
     /// `expectedBytes` comes from the ROW, not from a lookup: the Saved tab is local
     /// and outlives the server copy, so resolving a size through the inbox returned nil
     /// for exactly the rows the saved bar was added for. Each caller passes the size it
     /// already renders.
     private func openFile(id: String, expectedBytes: Int? = nil) {
         guard downloadingFileFor == nil else { return }
+
+        // CACHE HIT: no task, no spinner, no request. Presented synchronously so the
+        // reader sees the file on the same frame as the tap.
+        //
+        // The bytes are read ONLY when a viewer needs them. QuickLook takes the cached
+        // file by URL, so reading it here would pull a whole video into memory on the
+        // main actor and then discard it — the exact case this feature exists to make
+        // fast. Markdown and web documents do need the bytes, and the routing decision
+        // needs only the name and the stored mime.
+        if let hit = Downloads.cached(id: id) {
+            if Self.isMarkdown(name: hit.name, mime: hit.mime)
+                || Self.isWebDocument(name: hit.name, mime: hit.mime)
+            {
+                guard let data = try? Data(contentsOf: hit.url, options: .mappedIfSafe) else {
+                    sendError = "Couldn't open the file."
+                    return
+                }
+                present(data: data, name: hit.name, mime: hit.mime, cachedAt: hit.url)
+            } else {
+                // nil bytes: QuickLook opens the cached file itself.
+                present(data: nil, name: hit.name, mime: hit.mime, cachedAt: hit.url)
+            }
+            return
+        }
+
         downloadingFileFor = id
         downloadBytes = nil
         let expected = expectedBytes
+        let epoch = Downloads.currentEpoch
         openFileTask = Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
@@ -1722,53 +1773,84 @@ struct GramView: View {
                     Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 // The page went away mid-download (task cancelled in .onDisappear): stop
-                // before writing any temp file, so a late completion can't strand one.
+                // before writing any file, so a late completion can't strand one.
                 if Task.isCancelled { return }
-                // Remove any previously-previewed file so a viewed secret does not
-                // accumulate in tmp.
-                if let previous = previewURL {
-                    try? FileManager.default.removeItem(at: previous)
-                }
-                let tmp = FileManager.default.temporaryDirectory
-                let url: URL
-                if Self.isMarkdown(name: name, mime: mime),
-                    let text = String(data: data, encoding: .utf8)
-                {
-                    // Render markdown to styled HTML so it previews FORMATTED —
-                    // QuickLook shows a raw .md file as plain source otherwise.
-                    let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
-                    url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
-                    try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-                } else if Self.isWebDocument(name: name, mime: mime) {
-                    // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
-                    // (no remote loads, script off by default), NOT QuickLook — the old
-                    // srcdoc-sandbox path painted a blank white screen (#92). Decode
-                    // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
-                    // as text rather than being treated as a plain download. Keep the raw
-                    // bytes on disk so the viewer's Share button can save the original.
-                    let raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
-                    try data.write(to: raw, options: [.atomic, .completeFileProtection])
-                    // We present webDoc, not a QuickLook preview — clear any stale
-                    // previewURL (its file was removed above) so nothing tries to present
-                    // a now-deleted path, and the previewURL onChange doesn't fire on it.
-                    previewURL = nil
-                    webDoc = WebDoc(
-                        title: Self.webBaseName(name),
-                        html: String(decoding: data, as: UTF8.self),
-                        fileURL: raw)
-                    return
-                } else {
-                    // Never trust the server name to be a safe path component; reduce
-                    // it to a bare basename. Write encrypted-at-rest.
-                    url = tmp.appendingPathComponent(Self.safeTempFileName(name))
-                    try data.write(to: url, options: [.atomic, .completeFileProtection])
-                }
-                previewURL = url
+                // Keep the bytes for next time. A failure here is not an error: the open
+                // proceeds from a temp file and the next open simply downloads again.
+                let cached = Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
+                present(data: data, name: name, mime: mime, cachedAt: cached?.url)
             } catch let error as APIError {
                 sendError = "Couldn't open the file: \(error.message)"
             } catch {
                 sendError = "Couldn't open the file."
             }
+        }
+    }
+
+    /// Route already-held bytes to the right viewer. Shared by the cache-hit and
+    /// post-download paths so both render a markdown or web document identically —
+    /// when this logic lived only inside the download closure, a cached open could not
+    /// reach it at all.
+    ///
+    /// `cachedAt` is the cache entry for the ORIGINAL bytes when one exists. QuickLook
+    /// and the web viewer are handed that file directly, so nothing is re-written per
+    /// open; derived artifacts (markdown rendered to HTML) still go to a temp file,
+    /// because what the cache holds is the source, not the rendering.
+    @MainActor
+    private func present(data: Data?, name: String, mime: String = "", cachedAt: URL? = nil) {
+        // Remove any previously-previewed TEMP file so a viewed secret does not
+        // accumulate; cache entries are left alone.
+        if let previous = previewURL, !Downloads.isCached(previous) {
+            try? FileManager.default.removeItem(at: previous)
+        }
+        let tmp = FileManager.default.temporaryDirectory
+        do {
+            if Self.isMarkdown(name: name, mime: mime),
+                let data, let text = String(data: data, encoding: .utf8)
+            {
+                // Render markdown to styled HTML so it previews FORMATTED —
+                // QuickLook shows a raw .md file as plain source otherwise. This is a
+                // DERIVED artifact, so it goes to tmp even on a cache hit; the cache
+                // holds the markdown source.
+                let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
+                let url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
+                try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
+                previewURL = url
+            } else if Self.isWebDocument(name: name, mime: mime), let data {
+                // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
+                // (no remote loads, script off by default), NOT QuickLook — the old
+                // srcdoc-sandbox path painted a blank white screen (#92). Decode
+                // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
+                // as text rather than being treated as a plain download. Keep the raw
+                // bytes on disk so the viewer's Share button can save the original.
+                let raw: URL
+                if let cachedAt {
+                    raw = cachedAt   // already on disk; do not rewrite it per open
+                } else {
+                    raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                    try data.write(to: raw, options: [.atomic, .completeFileProtection])
+                }
+                // We present webDoc, not a QuickLook preview — clear any stale
+                // previewURL (its file was removed above) so nothing tries to present
+                // a now-deleted path, and the previewURL onChange doesn't fire on it.
+                previewURL = nil
+                webDoc = WebDoc(
+                    title: Self.webBaseName(name),
+                    html: String(decoding: data, as: UTF8.self),
+                    fileURL: raw)
+            } else if let cachedAt {
+                // The cache entry IS the file, under its real name: hand it straight to
+                // QuickLook rather than copying it into tmp on every open.
+                previewURL = cachedAt
+            } else {
+                // Never trust the server name to be a safe path component; reduce
+                // it to a bare basename. Write encrypted-at-rest.
+                let url = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
+                previewURL = url
+            }
+        } catch {
+            sendError = "Couldn't open the file."
         }
     }
 
@@ -1778,16 +1860,46 @@ struct GramView: View {
     /// app-sandbox container on Mac, so the saved file is where the owner expects it.
     private func saveFile(id: String, expectedBytes: Int? = nil) {
         guard downloadingFileFor == nil else { return }
+
+        // Already downloaded once: export from the cache rather than fetching the same
+        // bytes again. The picker needs its own copy under the file's real name, so the
+        // cached file is COPIED into a per-export dir — the export must not hand the
+        // picker a file that eviction can delete underneath it.
+        if let hit = Downloads.cached(id: id) {
+            do {
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let fileURL = dir.appendingPathComponent(hit.name)
+                try FileManager.default.copyItem(at: hit.url, to: fileURL)
+                exportFile = ExportFile(url: fileURL, dir: dir)
+                return
+            } catch {
+                // Fall through to a fresh download rather than failing the save.
+            }
+        }
+
         downloadingFileFor = id
         downloadBytes = nil
         let expected = expectedBytes
-        Task {
+        let epoch = Downloads.currentEpoch
+        // TRACKED, so the page's cleanup can cancel it. This task was untracked, which
+        // made its own `Task.isCancelled` check unreachable: nothing ever cancelled it.
+        saveFileTask = Task {
             defer { downloadingFileFor = nil; downloadBytes = nil }
             do {
-                let (name, _, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
+                let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
                     Task { @MainActor in report(received, of: expected, for: id) }
                 })
                 if Task.isCancelled { return }
+                // The SAME window the epoch exists for applies to the export copy: the
+                // continuation can run after disconnect() wiped the cache but before
+                // SwiftUI delivers onDisappear, so Task.isCancelled is still false here.
+                // Writing the export dir then would leave the whole payload on disk
+                // after sign-out — the cache guard alone does not cover it.
+                guard Downloads.currentEpoch == epoch else { return }
+                // Keep them for the next open or save.
+                Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
                 // A per-export temp dir so the file keeps its real name (the picker uses
                 // the file's own name) without colliding with the preview temp file.
                 let dir = FileManager.default.temporaryDirectory
@@ -1910,6 +2022,85 @@ struct GramView: View {
         }
     }
 
+    /// Downloaded gram files, kept so a second open does not re-fetch over SSH.
+    ///
+    /// In CACHES, not `temporaryDirectory`, and that distinction is the feature: the
+    /// page's cleanup unlinks temp files on dismissal, which is exactly why reopening a
+    /// file downloaded it again. Caches survives the page, is excluded from backup by
+    /// the system, and may be purged under storage pressure — a purge costs one
+    /// re-download, never correctness.
+    ///
+    /// The work is `HerdrKit.GramFileCache`'s, not this file's, for the same reason
+    /// staging is: this target cannot run on CI, and a cache that never hits is
+    /// invisible — the open still works, it is merely slow again.
+    enum Downloads {
+        static let root: URL = {
+            let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            return base.appendingPathComponent("gram-downloads", isDirectory: true)
+        }()
+
+        static func cached(id: String) -> CachedGramFile? {
+            GramFileCache.cached(id: id, in: root)
+        }
+
+        /// Session epoch. Sign-out bumps it BEFORE wiping, and a store carrying a stale
+        /// epoch is refused — see `invalidate()` for why that is needed.
+        private static let lock = NSLock()
+        private static var epoch = 0
+
+        static var currentEpoch: Int { lock.withLock { epoch } }
+
+        /// Store bytes downloaded during `epoch`. Refused when the session has ended
+        /// since, and re-checked AFTER the write, because `disconnect()` can wipe the
+        /// root while this is mid-flight and a late write would otherwise leave an
+        /// attachment on disk after sign-out.
+        @discardableResult
+        static func store(
+            _ data: Data, id: String, name: String, mime: String, epoch storeEpoch: Int
+        ) -> CachedGramFile? {
+            guard currentEpoch == storeEpoch else { return nil }
+            let stored = GramFileCache.store(data, id: id, name: name, mime: mime, in: root)
+            guard currentEpoch == storeEpoch else {
+                GramFileCache.remove(id: id, in: root)
+                return nil
+            }
+            return stored
+        }
+
+        static func remove(id: String) {
+            GramFileCache.remove(id: id, in: root)
+        }
+
+        /// Sign-out and account removal: downloaded bytes must not survive the account
+        /// that could read them.
+        ///
+        /// The epoch is bumped FIRST. `disconnect()` is synchronous and cancels nothing:
+        /// the only cancellation is the Gram page's `onDisappear`, which SwiftUI runs
+        /// during the teardown that `disconnect()` itself triggers — strictly after this
+        /// has already returned. So a download whose bytes have landed can reach `store`
+        /// after the wipe. Bumping first makes that store a no-op, and `store` re-checks
+        /// afterwards so a write that slipped through is removed again.
+        static func invalidate() {
+            lock.withLock { epoch += 1 }
+            GramFileCache.removeAll(in: root)
+        }
+
+        /// Whether `url` is a cache entry, so the page's temp-file cleanup leaves it
+        /// alone. Standardized first, so a `/private/var` vs `/var` difference cannot
+        /// make a cached file look temporary and get unlinked.
+        ///
+        /// Compared by PATH COMPONENTS, not by string prefix: `hasPrefix` on the raw
+        /// path also accepts a sibling directory like `gram-downloads-old`, which would
+        /// exempt files that are not ours from cleanup and leave them on disk.
+        static func isCached(_ url: URL) -> Bool {
+            let rootParts = root.standardizedFileURL.pathComponents
+            let urlParts = url.standardizedFileURL.pathComponents
+            guard urlParts.count > rootParts.count else { return false }
+            return Array(urlParts.prefix(rootParts.count)) == rootParts
+        }
+    }
+
     /// A file we should render as formatted HTML (a markdown source), by extension
     /// or advisory mime.
     private static func isMarkdown(name: String, mime: String) -> Bool {
@@ -1968,6 +2159,9 @@ struct GramView: View {
                 deletedIDs.insert(message.id)
                 inboxStore.inbox.remove(id: message.id)
                 pendingPosts.removeAll { $0.id == message.id }
+                // The downloaded copy must not outlive the message it came from: a
+                // deleted gram's attachment stays readable on disk otherwise.
+                Downloads.remove(id: message.id)
             } catch let error as APIError {
                 sendError = "Couldn't delete: \(error.message)"
             } catch {

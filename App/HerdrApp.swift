@@ -481,6 +481,9 @@ struct RootView: View {
         transport = nil
         credentials = nil
         LiveActivityController.shared.end()   // tear down the #90 Live Activity with the session
+        // Downloaded gram files are readable without a connection, so they must not
+        // survive the session that fetched them.
+        GramView.Downloads.invalidate()
     }
 
     /// Drops and re-establishes the connection with the RETAINED credentials —
