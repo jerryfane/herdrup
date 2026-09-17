@@ -1869,39 +1869,41 @@ struct TerminalHomeView: View {
                 max: Self.sidebarWidthRange.upperBound)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
-            // THE RAIL IS A SAFE-AREA INSET, NOT A SIBLING — and that is the fix for the
-            // owner's macOS report, measured rather than guessed.
+            // THE RAIL STAYS AN HSTACK SIBLING, and the inset I tried is withdrawn too.
             //
-            // It used to be `HStack(spacing: 0) { if .detailOnly { sidebarRail }; detailColumn }`.
-            // Inserting the rail as a layout SIBLING of the whole page changes the page's
-            // width structurally, in the same transaction in which UIKit is animating the
-            // detail column's width — so the feed and its content were laid out against
-            // two different widths.
+            // I replaced this with `detailColumn.safeAreaInset(edge: .leading)` on the
+            // theory that an inset CHANGE re-proposes the inset region while a sibling
+            // insertion does not. Review held the two against the documented contract:
+            // in steady state both inset the column by the rail's 64pt, so the content
+            // width is identical before and after, and the entire bet rested on an
+            // undocumented re-proposal property. If a stale proposal exists it comes
+            // from the split view's own animated column width, which NEITHER form
+            // influences. It also carried a real regression risk on this exact surface:
+            // `safeAreaInset` takes a vertical alignment, which only means anything if
+            // the content is not stretched to the container's height — so `sidebarRail`'s
+            // `Spacer()` greed could collapse into a short, vertically centred block,
+            // and `groundMachine.ignoresSafeArea()` would then bleed under the leading
+            // 64pt as a dark strip above and below it.
             //
-            // The owner measured the horizontal overflow: it is as wide as the sidebar's
-            // compression, roughly `sidebarWidth - 64` (~256pt at the default 320), NOT
-            // the rail's 64pt. That number identifies the mechanism exactly — the content
-            // keeps the EXPANDED proposal (window - sidebarWidth) while the frame is
-            // placed in rail mode (window - 64) — and it rules out the rail-insertion
-            // mismatch I would otherwise have blamed. It also explains why merely
-            // claiming the column is not enough: a definite frame cannot repair a STALE
-            // proposal.
-            //
-            // `safeAreaInset` exists for exactly this: the inset reduces the region its
-            // content is proposed, and a change to the inset re-proposes that region. So
-            // the page is measured against the width it is actually given, in both
-            // configurations, without remounting anything.
-            //
-            // The rail's own contract is unchanged — still keyed on `columnVisibility`,
-            // the layout truth rather than the persisted preference, because iPadOS
-            // collapses this column on its own (rotation, Stage Manager) and the rail must
-            // still appear or there is no way back. Still no transition, for the reason
-            // `toggleSidebar` documents: a sliding rail animates the column's width and
-            // every intermediate width reflows the live terminal.
-            detailColumn
-                .safeAreaInset(edge: .leading, spacing: 0) {
-                    if columnVisibility == .detailOnly { sidebarRail }
-                }
+            // So this PR now changes NO layout. Three guesses at the owner's geometry
+            // have been refuted (a GramView anchor, a ZStack anchor, a detail frame) and
+            // this would have been the fourth. What it ships instead is the receipt that
+            // can tell them apart: `TerminalResizeTests` on CI's iPad destination, which
+            // measures the page against the window across a real sidebar-toggle tap. If
+            // that fails, the mechanism is reproducible and fixable in a loop rather than
+            // by inference; if it passes, the symptom is macOS-specific and the next
+            // instrument is a TestFlight build on the owner's Mac, not another commit.
+            HStack(spacing: 0) {
+                // Keyed on `columnVisibility`, the LAYOUT TRUTH, not on the persisted
+                // preference: iPadOS collapses this column on its own (rotation, Stage
+                // Manager, any transition it cannot honour at `.balanced`), and when it
+                // does, the rail must still appear or there is no way back at all.
+                //
+                // No transition: a sliding rail animates the detail column's width, and
+                // every intermediate width reflows the live terminal (see `toggleSidebar`).
+                if columnVisibility == .detailOnly { sidebarRail }
+                detailColumn
+            }
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
             // It was `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`,
