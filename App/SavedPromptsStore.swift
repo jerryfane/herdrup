@@ -62,6 +62,43 @@ final class SavedPromptsStore: ObservableObject {
     }
 }
 
+struct SavedPromptsMenu: View {
+    let onSelect: (SavedPrompt) -> Void
+    @ObservedObject private var store = SavedPromptsStore.shared
+    @State private var showingEditor = false
+
+    var body: some View {
+        Menu {
+            ForEach(store.prompts) { prompt in
+                Button { onSelect(prompt) } label: {
+                    Label(prompt.label, systemImage: "text.quote")
+                }
+            }
+            if !store.prompts.isEmpty { Divider() }
+            Button { showingEditor = true } label: {
+                Label("Save new prompt…", systemImage: "plus")
+            }
+            if !store.prompts.isEmpty {
+                Menu {
+                    ForEach(store.prompts) { prompt in
+                        Button(role: .destructive) { store.delete(prompt.id) } label: {
+                            Text(prompt.label)
+                        }
+                    }
+                } label: {
+                    Label("Delete a prompt", systemImage: "trash")
+                }
+            }
+        } label: {
+            ComposerActionIcon(symbol: "bookmark")
+        }
+        .accessibilityLabel("Saved prompts")
+        .sheet(isPresented: $showingEditor) {
+            SavePromptSheet { nickname, text in store.add(nickname: nickname, text: text) }
+        }
+    }
+}
+
 /// A small form to save a new prompt: a nickname (the "surname") + the prompt text.
 /// Styled to match `HostEditor` — dark ground, surface fields, Geist app voice + Plex Mono
 /// for the prompt body. Owns its own state, so it opens blank each time.

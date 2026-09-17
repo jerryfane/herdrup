@@ -4031,12 +4031,15 @@ struct ComposerTextField: UIViewRepresentable {
     final class ReplyTextView: UITextView {
         var onPasteFile: ((NSItemProvider) -> Bool)?
         var onCommandReturn: (() -> Void)?
+        private lazy var sendKeyCommand: UIKeyCommand = {
+            let command = UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(commandReturn))
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }()
 
         override var keyCommands: [UIKeyCommand]? {
             guard onCommandReturn != nil else { return super.keyCommands }
-            let send = UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(commandReturn))
-            send.wantsPriorityOverSystemBehavior = true
-            return (super.keyCommands ?? []) + [send]
+            return (super.keyCommands ?? []) + [sendKeyCommand]
         }
 
         @objc private func commandReturn() { onCommandReturn?() }
@@ -4244,11 +4247,6 @@ struct TerminalPaneContent: View {
     @ObservedObject private var mute = MuteStore.shared
     /// A drag is hovering the reply bar, so the target says so before the drop lands.
     @State private var replyDropTargeted = false
-    /// Saved prompts, shown from the reply bar when the input is empty (the send arrow would be
-    /// dead then). Tapping one inserts it and sends it via the normal path.
-    @ObservedObject private var savedPrompts = SavedPromptsStore.shared
-    /// Presents the "save a new prompt" sheet.
-    @State private var showSavePrompt = false
     @State private var sending = false
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
@@ -5127,7 +5125,8 @@ struct TerminalPaneContent: View {
                     .fixedSize()
                     .disabled(sending || autoDelivering)
                 if !hasReplyContent {
-                    savedPromptsButton
+                    SavedPromptsMenu(onSelect: usePrompt)
+                        .disabled(sending || autoDelivering || replyDictating)
                 } else {
                     Button {
                         sendTapped()
@@ -5168,9 +5167,6 @@ struct TerminalPaneContent: View {
                     .padding(.bottom, 8)
                     .allowsHitTesting(false)
             }
-        }
-        .sheet(isPresented: $showSavePrompt) {
-            SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
     /// Stages every DROPPED file, one after another.
@@ -5374,27 +5370,6 @@ struct TerminalPaneContent: View {
     }
 
 
-    /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
-    /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
-    private var savedPromptsButton: some View {
-        Menu {
-            ForEach(savedPrompts.prompts) { p in
-                Button { usePrompt(p) } label: { Label(p.label, systemImage: "text.quote") }
-            }
-            if !savedPrompts.prompts.isEmpty { Divider() }
-            Button { showSavePrompt = true } label: { Label("Save new prompt…", systemImage: "plus") }
-            if !savedPrompts.prompts.isEmpty {
-                Menu {
-                    ForEach(savedPrompts.prompts) { p in
-                        Button(role: .destructive) { savedPrompts.delete(p.id) } label: { Text(p.label) }
-                    }
-                } label: { Label("Delete a prompt", systemImage: "trash") }
-            }
-        } label: {
-            ComposerActionIcon(symbol: "bookmark")
-        }
-        .disabled(sending || autoDelivering)
-    }
 
     /// Insert a saved prompt into the reply field and send it — the same path a typed reply
     /// takes (`sendTapped` → mode-aware `send(.submitText)` → confirmed `agent.prompt`).

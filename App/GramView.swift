@@ -1092,21 +1092,26 @@ struct GramView: View {
                     MicButton(text: $draft, recording: $draftDictating)
                         .fixedSize()
                         .disabled(sending || loadingPhoto)
-                    Button {
-                        Task { await send() }
-                    } label: {
-                        ComposerActionIcon(
-                            symbol: "arrow.up",
-                            primary: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                || !attachedFiles.isEmpty,
-                            busy: sending)
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachedFiles.isEmpty {
+                        SavedPromptsMenu { prompt in
+                            draft = prompt.text
+                            Task { await send() }
+                        }
+                        .disabled(sending || loadingPhoto || draftDictating)
+                        .accessibilityIdentifier("gram-saved-prompts")
+                    } else {
+                        Button {
+                            Task { await send() }
+                        } label: {
+                            ComposerActionIcon(symbol: "arrow.up", primary: true, busy: sending)
+                        }
+                        .fixedSize()
+                        .accessibilityLabel("Send gram")
+                        .accessibilityIdentifier("gram-send-button")
+                        .disabled(!canSend)
+                        .opacity(canSend ? 1 : 0.45)
+                        .keyboardShortcut(.return, modifiers: .command)
                     }
-                    .fixedSize()
-                    .accessibilityLabel("Send gram")
-                    .accessibilityIdentifier("gram-send-button")
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
-                    .keyboardShortcut(.return, modifiers: .command)
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 2)

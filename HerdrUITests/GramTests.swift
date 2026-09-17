@@ -136,10 +136,10 @@ final class GramTests: XCTestCase {
         let field = app.textViews["gram-composer-input"]
         let send = app.buttons["gram-send-button"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
-        XCTAssertTrue(send.waitForExistence(timeout: 5))
 
         field.tap()
         field.typeText("one")
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 0.3)
         let oneLine = field.frame
         let sendBottom = send.frame.maxY

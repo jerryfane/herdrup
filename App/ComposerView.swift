@@ -16,9 +16,9 @@ struct ComposerSurface<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) { content }
             .padding(11) // 10 points of content padding plus the HTML's one-point border.
-            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 28))
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 28, style: .circular))
             .overlay {
-                RoundedRectangle(cornerRadius: 28)
+                RoundedRectangle(cornerRadius: 28, style: .circular)
                     .strokeBorder(Palette.hairline, lineWidth: 1)
                     .allowsHitTesting(false)
             }
@@ -153,7 +153,7 @@ struct ComposerAttachmentChip: View {
         .padding(.trailing, 3)
         .padding(.vertical, 9)
         .frame(width: sizeClass == .compact ? 218 : 228)
-        .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 15))
+        .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 15, style: .circular))
     }
 }
 
