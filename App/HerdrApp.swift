@@ -6905,12 +6905,24 @@ struct SettingsView: View {
         // older flat fields — skipping any window without a percent. Handles 0
         // (tier-only / no usage), 1, or many windows gracefully.
         let windows = (account.usage?.effectiveWindows ?? []).filter { $0.usedPercent != nil }
-        HStack(spacing: 10) {
+        // STACKED, not side by side, and the pill never wraps.
+        //
+        // The status sat BESIDE the meters in an HStack, and an exhausted account that
+        // also reports usage — the common case, since hitting 100% is what exhausts it —
+        // demanded meter width plus pill width on one line. Two things broke, both
+        // visible in the owner's screenshot: `Text("exhausted")` has no line limit, so
+        // under that pressure it wrapped to one letter per line and grew a ~9-line tall
+        // red capsule that doubled the row height; and the width it took left the label
+        // column so narrow that "Claude Pro (personal)" truncated to "C…".
+        //
+        // Putting the status under the meters removes the competition, and
+        // `fixedSize` + `lineLimit(1)` mean the pill keeps its intrinsic width whatever
+        // the row does. An active account's dot is small enough that stacking it costs
+        // nothing.
+        VStack(alignment: .trailing, spacing: 6) {
             if !windows.isEmpty {
-                VStack(alignment: .trailing, spacing: 4) {
-                    ForEach(windows) { window in
-                        usageMeter(window, live: account.usage?.source == "live")
-                    }
+                ForEach(windows) { window in
+                    usageMeter(window, live: account.usage?.source == "live")
                 }
             }
             if account.active {
@@ -6919,6 +6931,8 @@ struct SettingsView: View {
             } else {
                 Text("exhausted")
                     .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                    .lineLimit(1)
+                    .fixedSize()
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.died.opacity(0.12)))
                     .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
@@ -6943,13 +6957,52 @@ struct SettingsView: View {
                 Capsule().fill(Palette.hairline).frame(width: 34, height: 4)
                 Capsule().fill(usageColor(clamped)).frame(width: fill, height: 4)
             }
-            Text(usageMeterLabel(window, percent: clamped))
-                .font(Typography.machine(11)).foregroundStyle(Palette.textDim).fixedSize()
+            // SPLIT, so the degradation is chosen rather than emergent.
+            //
+            // Two earlier shapes were both wrong. `fixedSize()` on the whole readout made
+            // the meter rigid and squeezed the account label to ~70pt on a 393pt phone.
+            // Making the whole readout flexible then let it absorb the entire deficit and
+            // truncate the WINDOW LABEL — "42% · 5…" and "68% · w…" — so two stacked
+            // meters could not be told apart, which is worse than a short name.
+            //
+            // The percent and window label are the meter's meaning and stay rigid; they
+            // are short and bounded ("100% · weekly" is the widest). The reset hint is
+            // the only genuinely optional token, so it is the one that truncates, and it
+            // does so before the account label because the label column no longer holds
+            // a blanket priority.
+            Text(usageEssential(window, percent: clamped))
+                .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
+                .fixedSize()
+            if let hint = resetHint(window.resetsAt) {
+                Text("· \(hint)")
+                    .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
+                    .lineLimit(1)
+            }
         }
+        // ONE element carrying the WHOLE reading. Splitting the readout for layout must
+        // not split it for VoiceOver, and the hint may be visually truncated — so the
+        // spoken label is the full string, plus liveness, which was previously a separate
+        // "live" element on the dot.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(
+            usageMeterLabel(window, percent: clamped) + (live ? " · live" : "")))
+        // A read-only readout, declared as such. Without this trait the merged container
+        // carries a label but no type, so it is not exposed as a static text — and the
+        // receipt asserting the window label survived queries `staticTexts`, which the
+        // merge above had silently emptied of the child Texts that used to carry it.
+        .accessibilityAddTraits(.isStaticText)
+    }
+
+    /// The meter's MEANING: "NN% · <window>". Rigid in the layout, because a meter whose
+    /// window label truncated to "w…" cannot be distinguished from the one stacked above
+    /// it. Widest real value is "100% · weekly".
+    private func usageEssential(_ window: UsageWindow, percent: Double) -> String {
+        "\(Int(percent.rounded()))% · \(window.label)"
     }
 
     /// "NN% · <label>" plus a compact reset token when present, e.g. "42% · 5h · 2h left"
-    /// or "68% · weekly · Aug 31".
+    /// or "68% · weekly · Aug 31". Still used for the accessibility value, which must
+    /// carry the whole reading even when the hint is visually truncated.
     private func usageMeterLabel(_ window: UsageWindow, percent: Double) -> String {
         var text = "\(Int(percent.rounded()))% · \(window.label)"
         if let hint = resetHint(window.resetsAt) { text += " · \(hint)" }
