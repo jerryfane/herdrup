@@ -122,19 +122,34 @@ final class SettingsTests: XCTestCase {
             the pill is \(pill.frame.height)pt against a \(exhaustedRow.frame.height)pt             single-line label, so it wrapped instead of keeping its intrinsic width.
             """)
 
-        // THE NAME MUST KEEP A REAL SHARE OF THE ROW — and 0.20 is the layout's floor, not
-        // a preference. The trailing cluster is rigid at ~142pt (4pt dot + 6 + 34pt track +
-        // 6 + an incompressible "68% · weekly" + the hint's floor), so the name's ceiling
-        // is W - 148 - 142: review measured 0.227 at 375pt, 0.257 at 390, 0.263 at 393 and
-        // 0.279 at 402, against 0.178 before the fix. A 0.24 gate — which this test carried
-        // — therefore FAILED on the correct layout on a 375pt iPhone SE, which CI can pick.
+        // THE NAME MUST KEEP A REAL SHARE OF THE ROW — and the floor has to be
+        // WIDTH-AWARE, because a single fraction cannot do this job. Executed shares of
+        // this label across the phone fleet at scale 1.0:
+        //
+        //   width  375   390   393   402   414   428   430   440
+        //   fixed  .227  .257  .263  .279  .300  .318  .317  .310   <- correct
+        //   mid    .102  .137  .144  .163  .187  .214  .217  .235   <- readout rigid
+        //   base   .054  .091  .098  .118  .143  .171  .175  .194   <- reported bug
+        //
+        // The bands OVERLAP: correct-at-375 is 0.227 while the intermediate broken layout
+        // reaches 0.235 at 440pt, so any constant that passes a 375pt phone also passes a
+        // 440pt phone carrying the bug the previous commit fixed — a 0.20 gate did exactly
+        // that. Bucketing by width separates all three, because the comparison is then
+        // against the same device's own numbers.
+        let floors: [(width: CGFloat, floor: CGFloat)] = [
+            (440, 0.27), (428, 0.26), (414, 0.24), (402, 0.22),
+            (393, 0.20), (390, 0.20), (375, 0.19), (0, 0.19),
+        ]
         let widestRow = app.staticTexts["Claude Max (work)"]
         XCTAssertTrue(widestRow.waitForExistence(timeout: 5))
         let share = widestRow.frame.width / window.width
+        let floor = floors.first { window.width >= $0.width }?.floor ?? 0.19
         XCTAssertGreaterThan(
-            share, 0.20,
+            share, floor,
             """
-            the account label took \(Int(share * 100))% of the \(window.width)pt window             (\(widestRow.frame.width)pt), so the trailing cluster squeezed the name column             — this is what showed as "C…".
+            the account label took \(Int(share * 100))% of the \(window.width)pt window \
+            (\(widestRow.frame.width)pt) against a floor of \(Int(floor * 100))%, so the \
+            trailing cluster squeezed the name column — this is what showed as "C…".
             """)
 
         // THE WINDOW LABEL MUST SURVIVE. An earlier fix let the readout absorb the whole
