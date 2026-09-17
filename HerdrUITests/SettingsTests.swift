@@ -106,9 +106,6 @@ final class SettingsTests: XCTestCase {
         let pill = app.staticTexts["exhausted"].firstMatch
         XCTAssertTrue(pill.waitForExistence(timeout: 10), "the exhausted account must show its status")
 
-        let window = app.windows.firstMatch.frame
-        XCTAssertGreaterThan(window.width, 0)
-
         let exhaustedRow = app.staticTexts["Claude Pro (personal)"]
         XCTAssertTrue(exhaustedRow.waitForExistence(timeout: 5))
 
@@ -122,34 +119,39 @@ final class SettingsTests: XCTestCase {
             the pill is \(pill.frame.height)pt against a \(exhaustedRow.frame.height)pt             single-line label, so it wrapped instead of keeping its intrinsic width.
             """)
 
-        // THE NAME MUST KEEP A REAL SHARE OF THE ROW — and the floor has to be
-        // WIDTH-AWARE, because a single fraction cannot do this job. Executed shares of
-        // this label across the phone fleet at scale 1.0:
+        // COMPARE THE TWO ROWS, not the window. Fourth calibration of this gate, and the
+        // first that is device-free — because a share-of-window gate CANNOT work: the
+        // name saturates at its 136.25pt intrinsic width, so the correct layout's share
+        // falls as 1/W and goes red above ~505pt. The review measured the correct layout
+        // at 0.183 on a 744pt iPad and 0.132 at 1032pt — the iPad Pro ci.yml:167-170
+        // deliberately selects — and at 320pt iPad Slide Over. My width-bucket table
+        // passed every phone and would have failed every iPad.
         //
-        //   width  375   390   393   402   414   428   430   440
-        //   fixed  .227  .257  .263  .279  .300  .318  .317  .310   <- correct
-        //   mid    .102  .137  .144  .163  .187  .214  .217  .235   <- readout rigid
-        //   base   .054  .091  .098  .118  .143  .171  .175  .194   <- reported bug
+        // The two labels this test already holds are enough. `acc-claude-2`'s row has no
+        // resets_at, so no hint, so its width is IDENTICAL in the correct and the broken
+        // layouts — it is a fixed yardstick. Executed ratios of
+        // widestRow.width / exhaustedRow.width:
         //
-        // The bands OVERLAP: correct-at-375 is 0.227 while the intermediate broken layout
-        // reaches 0.235 at 440pt, so any constant that passes a 375pt phone also passes a
-        // 440pt phone carrying the bug the previous commit fixed — a 0.20 gate did exactly
-        // that. Bucketing by width separates all three, because the comparison is then
-        // against the same device's own numbers.
-        let floors: [(width: CGFloat, floor: CGFloat)] = [
-            (440, 0.27), (428, 0.26), (414, 0.24), (402, 0.22),
-            (393, 0.20), (390, 0.20), (375, 0.19), (0, 0.19),
-        ]
+        //   correct  0.842 … 0.886 across 375-440pt, and 0.871 at 820 and 1032
+        //   mid      0.379 … 0.661   (readout rigid)
+        //   base     0.202 … 0.546   (the reported bug)
+        //
+        // 0.70 rather than the 0.75 the review suggested: its own caveat is that if
+        // SwiftUI's minimum for the truncating hint is the longest word instead of one
+        // ellipsis cell, the correct ratio at 375pt is 0.711 — which 0.75 would fail.
+        // 0.70 survives both models and still catches `mid`'s worst case (0.661).
+        //
+        // Above ~472pt all three layouts converge, which is honest: nothing truncates
+        // there, so there is no defect to detect.
         let widestRow = app.staticTexts["Claude Max (work)"]
         XCTAssertTrue(widestRow.waitForExistence(timeout: 5))
-        let share = widestRow.frame.width / window.width
-        let floor = floors.first { window.width >= $0.width }?.floor ?? 0.19
+        let ratio = widestRow.frame.width / exhaustedRow.frame.width
         XCTAssertGreaterThan(
-            share, floor,
+            ratio, 0.70,
             """
-            the account label took \(Int(share * 100))% of the \(window.width)pt window \
-            (\(widestRow.frame.width)pt) against a floor of \(Int(floor * 100))%, so the \
-            trailing cluster squeezed the name column — this is what showed as "C…".
+            the long account name rendered \(Int(ratio * 100))% of the short one's width \
+            (\(widestRow.frame.width)pt vs \(exhaustedRow.frame.width)pt), so the trailing \
+            cluster squeezed the name column — this is what showed as "C…".
             """)
 
         // THE WINDOW LABEL MUST SURVIVE. An earlier fix let the readout absorb the whole
