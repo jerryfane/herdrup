@@ -1508,7 +1508,19 @@ struct TerminalHomeView: View {
     /// On iPad (regular width) the app becomes a NavigationSplitView (sidebar + detail);
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
-    @State private var columnVisibility = NavigationSplitViewVisibility.all
+    /// BORN IN THE FINAL CONFIGURATION, not flipped after the first layout pass.
+    ///
+    /// This was `.all` unconditionally, with `.onChange(of: sidebarMinimized, initial: true)`
+    /// flipping it to `.detailOnly` after the split view had already laid out — so for an
+    /// owner whose stored preference is "minimised", the FIRST measurement of the detail
+    /// column happened in a configuration the split view was about to leave. That is the
+    /// "sometimes, for no reason" in the owner's report.
+    ///
+    /// Read straight from `UserDefaults` because `@AppStorage` is not available during
+    /// property initialisation; the key is the same one `sidebarMinimized` uses below, so
+    /// there is still one source of truth.
+    @State private var columnVisibility: NavigationSplitViewVisibility =
+        UserDefaults.standard.bool(forKey: "ui.sidebarMinimized") ? .detailOnly : .all
     /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
     ///
     /// There is deliberately no fully-hidden state. Hiding the column outright loses
@@ -1865,6 +1877,23 @@ struct TerminalHomeView: View {
                 if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
+            // THE DETAIL PAGE'S SIZE CONTRACT, which nothing on this path had.
+            //
+            // Every node from here down to Gram's message feed is size-to-children or
+            // proposal-following, so the page's size was 100% inherited — and an
+            // undersized detail child is placed CENTRED by the split view. That is the
+            // owner's macOS report: the page floated, so its first row (Gram's search
+            // icon) landed mid-column, and ⌘K fixed it because `toggleSidebar` is the one
+            // path that re-proposes the column's geometry to an already-mounted subtree.
+            //
+            // `maxWidth/maxHeight: .infinity` means the content can no longer REPORT a
+            // size smaller than the column; `.topLeading` makes the residual failure mode
+            // a page pinned to the top-left corner — invisible — instead of a floating
+            // header. The `.topLeading` on `detailColumn`'s own ZStack (:1899) shows this
+            // was always the intent; it was applied one level too deep to do the job,
+            // because it anchors GramView INSIDE the ZStack and nothing anchored the
+            // ZStack inside the column.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)
@@ -1879,7 +1908,11 @@ struct TerminalHomeView: View {
         // since only an explicit expand clears it, the app would then open on the rail
         // forever with no record that the owner ever asked for it. `sidebarMinimized` is
         // now written ONLY by `toggleSidebar` and `railSectionButton` - real gestures.
-        .onChange(of: sidebarMinimized, initial: true) { _, minimized in
+        // NO `initial: true` any more: the initial value is now applied by
+        // `columnVisibility`'s own initialiser, BEFORE the split view exists, rather than
+        // by a write that lands after its first layout pass. The handler stays for later
+        // preference changes, preserving the documented one-way preference -> layout edge.
+        .onChange(of: sidebarMinimized) { _, minimized in
             columnVisibility = minimized ? .detailOnly : .all
         }
         .tint(Palette.brand)
