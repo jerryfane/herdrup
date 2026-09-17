@@ -7699,6 +7699,7 @@ struct SettingsView: View {
             Text(verbatim: Self.discordGlyph)
                 .font(.custom("HerdrupSymbols", size: 17))
         }
+        .accessibilityIdentifier("settings-discord")
     }
 
     /// U+F1FF, `fa-discord` in the Nerd Fonts Font Awesome set.

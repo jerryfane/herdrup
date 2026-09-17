@@ -90,6 +90,50 @@ final class SettingsTests: XCTestCase {
     ///
     /// The mock's `acc-claude-2` is exactly this case (active false, both windows at
     /// 100%), which is why this is checkable at all.
+    /// THE DISCORD ROW RENDERS IN THE REAL SETTINGS SCREEN, which is the half a font
+    /// test cannot reach.
+    ///
+    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` proves the glyph is
+    /// in the bundle and resolvable by name; it says nothing about whether this row is
+    /// built, reachable, or tappable. This drives the shipping Settings view and asserts
+    /// the row exists, carries its label, and is hittable.
+    ///
+    /// It deliberately does NOT tap it: the tap hands off to Safari, and asserting on
+    /// another app's state from here would be a receipt about SafariViewController rather
+    /// than about this row. The URL itself is a constant in one place
+    /// (`SettingsView.discordInvite`), so there is nothing a tap would prove that reading
+    /// it does not.
+    ///
+    /// The glyph's own appearance is unverifiable here for the honest reason that XCUITest
+    /// cannot read a rendered outline: a missing-glyph box and the Discord mark are the
+    /// same element tree. A screenshot is attached so the result bundle carries the
+    /// evidence a human can check.
+    func testTheDiscordRowIsPresentAndTappable() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
+        app.launch()
+
+        let heading = app.staticTexts["ABOUT"]
+        var scrolls = 0
+        while !heading.exists, scrolls < 10 {
+            app.swipeUp()
+            scrolls += 1
+        }
+        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Settings should carry an ABOUT section")
+
+        let row = app.buttons["settings-discord"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the ABOUT section should offer the Discord invite")
+        XCTAssertTrue(row.isHittable, "the Discord row must be tappable where it sits")
+        XCTAssertTrue(
+            row.label.contains("Discord"),
+            "the row's accessible name must say Discord, not read out a private-use codepoint (got: \(row.label))")
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "settings-about-discord"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testAnExhaustedAccountRowKeepsItsShape() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
