@@ -7720,8 +7720,13 @@ struct SettingsView: View {
     /// Whether the bundled face can actually DRAW that codepoint, probed once.
     ///
     /// Without this the failure mode is a missing-glyph box, and a box is not an icon —
-    /// it fails the thing the row exists to do. So the row falls back to an SF Symbol
-    /// instead, and there is no state in which this row renders without a mark. The probe
+    /// it fails the thing the row exists to do. So the row falls back to a generic
+    /// speech-bubble SF Symbol, and there is no state in which it renders without one.
+    ///
+    /// THE FALLBACK IS NOT THE DISCORD MARK and is not offered as equivalent branding:
+    /// it is a legibility floor, so a font failure degrades to a plain "community" icon
+    /// rather than to a broken glyph. If it ever becomes the common path on real devices,
+    /// the answer is Discord's official asset, not this symbol. The probe
     /// is Core Text answering for the registered face, the same question
     /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` asks in CI; this one
     /// is the runtime belt to that test's braces, since a font can fail to register on a
