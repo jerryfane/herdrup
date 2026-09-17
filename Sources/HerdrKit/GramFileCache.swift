@@ -201,15 +201,35 @@ public enum GramFileCache {
             at: root, includingPropertiesForKeys: [.contentModificationDateKey])
         else { return [] }
         return dirs.compactMap { dir in
-            guard let files = try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.fileSizeKey])
-            else { return nil }
-            let size = files.reduce(0) {
-                $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-            }
             let touched = (try? dir.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate) ?? .distantPast
-            return Entry(dir: dir, size: size, touched: touched)
+            return Entry(dir: dir, size: payloadBytes(in: dir), touched: touched)
+        }
+    }
+
+    /// The payload's own byte count.
+    ///
+    /// READ FROM THE METADATA, not by summing the entry directory's children. When the
+    /// payload moved into `payload/` it became a grandchild, so a child-sum counted only
+    /// `meta.json` and the directory inode — 4161 bytes for a 40 MB attachment on Linux,
+    /// 65 on Darwin — and the 512 MB ceiling would have needed ~129k entries to trigger.
+    /// The LRU was dead and `totalBytes` under-reported by four orders of magnitude,
+    /// which also silently falsified the claim that unsaved entries are reclaimed by the
+    /// ceiling. The recorded size is authoritative and is already verified against the
+    /// file on every lookup.
+    private static func payloadBytes(in dir: URL) -> Int {
+        if let data = try? Data(contentsOf: dir.appendingPathComponent(metaName)),
+            let meta = try? JSONDecoder().decode(Meta.self, from: data)
+        {
+            return meta.size
+        }
+        // No usable metadata: the entry is a miss and exists only to be reclaimed, so
+        // measure it directly rather than reporting nothing and keeping it forever.
+        let payload = dir.appendingPathComponent(payloadDir)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: payload, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        return files.reduce(0) {
+            $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
     }
 

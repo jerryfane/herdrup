@@ -96,6 +96,19 @@ final class GramFileCacheTests: XCTestCase {
         XCTAssertTrue(hit.url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path))
     }
 
+    /// Sizing must count the PAYLOAD. When the payload moved into a subdirectory the
+    /// accounting silently began measuring `meta.json` and a directory inode instead —
+    /// 4161 bytes for a 40 MB file — so the ceiling could never be reached and eviction
+    /// never ran. `totalBytes <= ceiling` alone passes trivially in that state, so this
+    /// asserts the actual number first.
+    func testTotalBytesCountsThePayloadNotTheMetadata() {
+        let chunk = Data(repeating: 0x41, count: 4 * 1024)
+        GramFileCache.store(chunk, id: "one", name: "one.bin", in: root)
+        GramFileCache.store(chunk, id: "two", name: "two.bin", in: root)
+        XCTAssertEqual(GramFileCache.totalBytes(in: root), 8 * 1024,
+                       "accounting must see payload bytes, or the LRU ceiling is dead")
+    }
+
     func testEvictionKeepsTheCacheUnderItsCeiling() throws {
         // 4 KB each, ceiling 10 KB: storing three must drop at least one.
         let chunk = Data(repeating: 0x41, count: 4 * 1024)
@@ -103,6 +116,8 @@ final class GramFileCacheTests: XCTestCase {
             GramFileCache.store(chunk, id: id, name: "\(id).bin", in: root, maxBytes: 10 * 1024)
         }
         XCTAssertLessThanOrEqual(GramFileCache.totalBytes(in: root), 10 * 1024)
+        XCTAssertGreaterThan(GramFileCache.totalBytes(in: root), 0,
+                             "eviction must not have emptied the cache wholesale")
     }
 
     /// Eviction order is least-RECENTLY-USED, so the file the reader keeps opening
@@ -111,13 +126,17 @@ final class GramFileCacheTests: XCTestCase {
     func testTheMostRecentlyOpenedEntrySurvivesEviction() throws {
         let chunk = Data(repeating: 0x42, count: 4 * 1024)
         GramFileCache.store(chunk, id: "one", name: "one.bin", in: root, maxBytes: 10 * 1024)
-        // Distinguish the touch timestamps: filesystem mtime granularity is coarse.
-        Thread.sleep(forTimeInterval: 1.1)
         GramFileCache.store(chunk, id: "two", name: "two.bin", in: root, maxBytes: 10 * 1024)
 
-        // Re-open "one", making "two" the least recently used.
-        XCTAssertNotNil(GramFileCache.cached(id: "one", in: root))
-        Thread.sleep(forTimeInterval: 1.1)
+        // Timestamps set EXPLICITLY rather than slept for: the ordering this test
+        // asserts is the thing under test, so it must not depend on mtime granularity.
+        func touch(_ id: String, _ date: Date) throws {
+            try FileManager.default.setAttributes(
+                [.modificationDate: date],
+                ofItemAtPath: GramFileCache.directory(for: id, in: root).path)
+        }
+        try touch("two", Date(timeIntervalSince1970: 1_000))   // least recently used
+        try touch("one", Date(timeIntervalSince1970: 2_000))
 
         GramFileCache.store(chunk, id: "three", name: "three.bin", in: root, maxBytes: 10 * 1024)
         XCTAssertNotNil(
