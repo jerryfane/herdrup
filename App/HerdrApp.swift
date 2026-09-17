@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
+import CoreText // glyph-availability probe for the Discord row's bundled mark
 import UniformTypeIdentifiers
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
@@ -7691,19 +7692,47 @@ struct SettingsView: View {
     /// this row needs — that the face resolves BY NAME, the way `Font.custom` does, and
     /// that U+F1FF is still in the subset. It was added with this row; the font tests
     /// that predate it all go through the terminal's cascade instead, and none of them
-    /// covered this codepoint. If either half regresses, `Text` draws a missing-glyph box
-    /// in the 30pt chip while the label and the link keep working.
+    /// covered this codepoint. If either half regresses, `discordGlyphAvailable` is false
+    /// and the row draws an SF Symbol instead — never an empty box, which would fail the
+    /// one thing this row was asked for.
     private var discordRow: some View {
         richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
                       action: { openURL(Self.discordInvite) }) {
-            Text(verbatim: Self.discordGlyph)
-                .font(.custom("HerdrupSymbols", size: 17))
+            if Self.discordGlyphAvailable {
+                Text(verbatim: Self.discordGlyph)
+                    .font(.custom("HerdrupSymbols", size: 17))
+            } else {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 15, weight: .semibold))
+            }
         }
         .accessibilityIdentifier("settings-discord")
     }
 
     /// U+F1FF, `fa-discord` in the Nerd Fonts Font Awesome set.
+    ///
+    /// Read from the committed font's `cmap`, not from memory: U+F392 — the codepoint the
+    /// Font Awesome docs suggest — is NOT in this subset, and U+E7B9 is `dev-cypressio`,
+    /// a different company's logo. The two Discord marks present are U+F1FF (`fa-discord`)
+    /// and U+F066F (`md-discord`).
     private static let discordGlyph = "\u{F1FF}"
+
+    /// Whether the bundled face can actually DRAW that codepoint, probed once.
+    ///
+    /// Without this the failure mode is a missing-glyph box, and a box is not an icon —
+    /// it fails the thing the row exists to do. So the row falls back to an SF Symbol
+    /// instead, and there is no state in which this row renders without a mark. The probe
+    /// is Core Text answering for the registered face, the same question
+    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` asks in CI; this one
+    /// is the runtime belt to that test's braces, since a font can fail to register on a
+    /// device for reasons no test on another machine can see.
+    private static let discordGlyphAvailable: Bool = {
+        guard let face = UIFont(name: "HerdrupSymbols", size: 17) else { return false }
+        var utf16 = Array(discordGlyph.utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+        CTFontGetGlyphsForCharacters(face, &utf16, &glyphs, utf16.count)
+        return glyphs.allSatisfy { $0 != 0 }
+    }()
     private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
 
     private func copyDiagnostics() {
