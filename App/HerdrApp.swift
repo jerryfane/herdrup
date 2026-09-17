@@ -6869,9 +6869,6 @@ struct SettingsView: View {
                 Text(AgentIdentity.glyph(for: account.kind))
                     .font(Typography.app(18, .bold)).foregroundStyle(.white)
             }
-            // PRIORITISED over the trailing cluster. Without this the meters win the
-            // width contest and the label truncates to a few characters — "C…" in the
-            // owner's screenshot — because a rigid readout beats a flexible one.
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.label)
                     .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
@@ -6882,7 +6879,6 @@ struct SettingsView: View {
                         .font(Typography.machine(11)).foregroundStyle(Palette.textFaint).lineLimit(1)
                 }
             }
-            .layoutPriority(1)
             Spacer(minLength: 8)
             accountTrailing(account)
         }
@@ -6961,20 +6957,47 @@ struct SettingsView: View {
                 Capsule().fill(Palette.hairline).frame(width: 34, height: 4)
                 Capsule().fill(usageColor(clamped)).frame(width: fill, height: 4)
             }
-            // NOT fixedSize. This readout is the dominant width hog in the row: at its
-            // widest ("100% · 5h · 3h left" from a live daemon) it is rigid enough to
-            // squeeze the account label below 70pt on a 393pt phone, which is the other
-            // half of what the owner's screenshot showed. It now truncates from the tail
-            // instead, so the reset hint is what degrades under pressure rather than the
-            // account's name — the percent and window label lead for that reason.
-            Text(usageMeterLabel(window, percent: clamped))
+            // SPLIT, so the degradation is chosen rather than emergent.
+            //
+            // Two earlier shapes were both wrong. `fixedSize()` on the whole readout made
+            // the meter rigid and squeezed the account label to ~70pt on a 393pt phone.
+            // Making the whole readout flexible then let it absorb the entire deficit and
+            // truncate the WINDOW LABEL — "42% · 5…" and "68% · w…" — so two stacked
+            // meters could not be told apart, which is worse than a short name.
+            //
+            // The percent and window label are the meter's meaning and stay rigid; they
+            // are short and bounded ("100% · weekly" is the widest). The reset hint is
+            // the only genuinely optional token, so it is the one that truncates, and it
+            // does so before the account label because the label column no longer holds
+            // a blanket priority.
+            Text(usageEssential(window, percent: clamped))
                 .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
-                .lineLimit(1)
+                .fixedSize()
+            if let hint = resetHint(window.resetsAt) {
+                Text("· \(hint)")
+                    .font(Typography.machine(11)).foregroundStyle(Palette.textDim)
+                    .lineLimit(1)
+            }
         }
+        // ONE element carrying the WHOLE reading. Splitting the readout for layout must
+        // not split it for VoiceOver, and the hint may be visually truncated — so the
+        // spoken label is the full string, plus liveness, which was previously a separate
+        // "live" element on the dot.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(
+            usageMeterLabel(window, percent: clamped) + (live ? " · live" : "")))
+    }
+
+    /// The meter's MEANING: "NN% · <window>". Rigid in the layout, because a meter whose
+    /// window label truncated to "w…" cannot be distinguished from the one stacked above
+    /// it. Widest real value is "100% · weekly".
+    private func usageEssential(_ window: UsageWindow, percent: Double) -> String {
+        "\(Int(percent.rounded()))% · \(window.label)"
     }
 
     /// "NN% · <label>" plus a compact reset token when present, e.g. "42% · 5h · 2h left"
-    /// or "68% · weekly · Aug 31".
+    /// or "68% · weekly · Aug 31". Still used for the accessibility value, which must
+    /// carry the whole reading even when the hint is visually truncated.
     private func usageMeterLabel(_ window: UsageWindow, percent: Double) -> String {
         var text = "\(Int(percent.rounded()))% · \(window.label)"
         if let hint = resetHint(window.resetsAt) { text += " · \(hint)" }

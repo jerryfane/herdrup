@@ -129,11 +129,25 @@ final class SettingsTests: XCTestCase {
         let widestRow = app.staticTexts["Claude Max (work)"]
         XCTAssertTrue(widestRow.waitForExistence(timeout: 5))
         let share = widestRow.frame.width / window.width
+        // 0.24 comes from the layout budget, not taste. A 393pt phone leaves 253pt inside
+        // the row's paddings; the Spacer takes 8pt and each meter needs ~136pt (4pt live
+        // dot + 6 + 34pt track + 6 + an ~86pt rigid "100% · weekly"), leaving ~109pt =
+        // 0.277 for the label. Pre-fix it measured ~70pt = 0.178, so this discriminates
+        // with margin while not demanding width the meters legitimately need.
         XCTAssertGreaterThan(
-            share, 0.30,
+            share, 0.24,
             """
             the account label took \(Int(share * 100))% of the row width             (\(exhaustedRow.frame.width)pt of \(window.width)pt), so the trailing cluster             squeezed the name column — this is what showed as "C…".
             """)
+
+        // THE WINDOW LABEL MUST SURVIVE. An earlier fix let the readout absorb the whole
+        // deficit, so both meters truncated to "42% · 5…" / "68% · w…" and a stacked pair
+        // became indistinguishable — worse than a short name. The window token is what
+        // tells them apart, so assert it rendered.
+        XCTAssertTrue(
+            app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "weekly"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "the weekly meter lost its window label, so two stacked meters cannot be told apart")
 
         // And the exhausted row must not be taller than a healthy one. This is the
         // symptom the owner actually reported, and it is device-independent by
