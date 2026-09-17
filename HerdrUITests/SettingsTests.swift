@@ -79,10 +79,18 @@ final class SettingsTests: XCTestCase {
     /// THE DISCORD ROW RENDERS IN THE REAL SETTINGS SCREEN, which is the half a font test
     /// cannot reach.
     ///
-    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` proves the glyph is
-    /// in the bundle and resolvable by name; it says nothing about whether this row is
-    /// built or reachable. This drives the shipping `SettingsView` under the settings
-    /// mock and asserts the row exists, sits ON SCREEN, and announces itself as Discord.
+    /// The icon is Discord's official asset from an imageset, so there is no font glyph
+    /// left to assert on — an earlier font test pinning U+F1FF was deleted with the glyph
+    /// it covered, since a test that pins something the app no longer draws is worse than
+    /// no test. What remains worth proving is that this row is BUILT and REACHABLE, which
+    /// only the real screen can answer: this drives the shipping `SettingsView` under the
+    /// settings mock and asserts the row exists, sits ON SCREEN, and announces itself as
+    /// Discord.
+    ///
+    /// A missing asset is NOT detectable here: SwiftUI renders an absent `Image("…")` as
+    /// empty space inside the same element tree, and the chip is `accessibilityHidden`, so
+    /// no query can see it. The attached screenshot is the only evidence for the mark
+    /// itself, which is why it is attached unconditionally.
     ///
     /// GEOMETRY, NOT `isHittable`, and not `exists` as a scroll condition. In an eager
     /// `VStack` inside a `ScrollView`, `exists` is true for nodes below the fold, so a

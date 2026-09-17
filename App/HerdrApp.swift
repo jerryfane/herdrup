@@ -2,7 +2,6 @@ import SwiftUI
 import Foundation
 import Security
 import UIKit    // UIPasteboard (Copy diagnostics)
-import CoreText // glyph-availability probe for the Discord row's bundled mark
 import UniformTypeIdentifiers
 import Darwin   // inet_pton/inet_ntop for IPv6 canonicalization
 import StoreKit // Product / tip jar (Settings' Support section)
@@ -7681,88 +7680,49 @@ struct SettingsView: View {
         }
     }
 
-    /// The community invite.
+    /// The community invite, with Discord's official symbol.
     ///
-    /// `Self.discordGlyph` is `fa-discord` in the bundled `HerdrupSymbols` subset, which
-    /// is registered in the app's `UIAppFonts` (project.yml). SF Symbols has no Discord
-    /// mark, and a licensed font glyph already in the bundle beats both a hand-drawn
-    /// imitation and a new image asset.
+    /// The mark is `Shared/Assets.xcassets/DiscordMark.imageset`, downscaled from
+    /// `Discord-Symbol-Blurple.png` in Discord's own brand kit
+    /// (`cdn.discordapp.com/assets/content/a736b959…zip`, `Discord_Symbol_Color/`) — their
+    /// file, their blurple, not a redraw. The three scales are 33x25, 66x50 and 99x75,
+    /// which are exact reductions of the 528x400 source, so no scale distorts the mark.
     ///
-    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` pins exactly what
-    /// this row needs — that the face resolves BY NAME, the way `Font.custom` does, and
-    /// that U+F1FF is still in the subset. It was added with this row; the font tests
-    /// that predate it all go through the terminal's cascade instead, and none of them
-    /// covered this codepoint. If either half regresses, `discordGlyphAvailable` is false
-    /// and the row draws an SF Symbol instead — never an empty box, which would fail the
-    /// one thing this row was asked for.
+    /// An earlier version drew `fa-discord` from the bundled Nerd Fonts subset instead.
+    /// That was withdrawn on the trademark question, not the licence one: Font Awesome
+    /// Free ships under CC BY 4.0 with attribution already in the bundle, but CC BY
+    /// grants no trademark rights, and the row was tinting a third-party redraw grey.
     private var discordRow: some View {
         richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
                       action: { openURL(Self.discordInvite) }) {
-            if Self.discordGlyphAvailable {
-                // `fixedSize:`, not `size:`. `Font.custom(_:size:)` tracks `.body`, so at
-                // AX2 and above the mark painted outside this hard-coded 30x30 chip and
-                // into the label — and it was the only non-`fixedSize` custom font in the
-                // app, against DesignSystem's written contract. 15pt, not 17, so the ink
-                // matches the `.system(size: 15)` symbols in the rows either side: at 17pt
-                // this glyph measures ~17.6pt wide against their materially narrower
-                // marks. Deliberately NOT multiplied by `Typography.scale`: every icon
-                // chip in this list is fixed, and scaling only this one would make it
-                // disagree with its neighbours rather than with its label.
-                Text(verbatim: Self.discordGlyph)
-                    .font(.custom("HerdrupSymbols", fixedSize: 15))
-            } else {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 15, weight: .semibold))
-            }
+            // DISCORD'S OWN ASSET, IN DISCORD'S OWN COLOUR, and both halves are the point.
+            //
+            // This was a Font Awesome redraw taken from the bundled Nerd Fonts subset,
+            // tinted `Palette.textDim` grey to match the rows around it. The licence side
+            // of that was clean (CC BY 4.0, attribution shipped), but CC BY grants no
+            // TRADEMARK rights, and Discord's brand policy asks for the official mark in
+            // an approved colour. Owner's decision was the official asset.
+            //
+            // `.renderingMode(.original)` is load-bearing: without it the chip's
+            // `foregroundStyle(Palette.textDim)` from `richActionRow` would tint blurple
+            // to grey and put us back in the same place. This is the one icon in Settings
+            // that is deliberately NOT monochrome.
+            //
+            // Sized by WIDTH with `scaledToFit`: the mark is 1.32:1, so a square frame
+            // would either letterbox it or distort it, and the 30x30 chip is square.
+            Image("DiscordMark")
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18)
         }
         .accessibilityIdentifier("settings-discord")
     }
 
-    /// U+F1FF, `fa-discord` in the Nerd Fonts Font Awesome set.
-    ///
-    /// Read from the committed font's `cmap`, not from memory: U+F392 — the codepoint the
-    /// Font Awesome docs suggest — is NOT in this subset, and U+E7B9 is `dev-cypressio`,
-    /// a different company's logo. The other Discord mark in the subset is U+F066F
-    /// (`md-discord`) — non-BMP, so read `discordGlyphAvailable`'s note before swapping.
-    private static let discordGlyph = "\u{F1FF}"
-
-    /// Whether the bundled face can actually DRAW that codepoint, probed once.
-    ///
-    /// Without this the failure mode is a missing-glyph box, and a box is not an icon —
-    /// it fails the thing the row exists to do. So the row falls back to a generic
-    /// speech-bubble SF Symbol, and there is no state in which it renders without one.
-    ///
-    /// THE FALLBACK IS NOT THE DISCORD MARK and is not offered as equivalent branding:
-    /// it is a legibility floor, so a font failure degrades to a plain "community" icon
-    /// rather than to a broken glyph. If it ever becomes the common path on real devices,
-    /// the answer is Discord's official asset, not this symbol. The probe
-    /// is Core Text answering for the registered face, the same question
-    /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` asks in CI; this one
-    /// is the runtime belt to that test's braces.
-    ///
-    /// ITS HONEST RESIDUAL IS NARROW, and an earlier version of this comment overstated
-    /// it: the widget target's exclusion of this face cannot reach here, because
-    /// `SettingsView` never compiles into the appex; and a mistake in the APP's own
-    /// `UIAppFonts` or `App/Fonts` membership is already a hard CI gate via that test.
-    /// What is left is a registration failure visible only on a device or in a
-    /// Distribution archive, which a Debug simulator run cannot observe. That is the whole
-    /// case for eight lines.
-    ///
-    /// The fallback's own pixels are not novel: the chip, its tint and a 15pt SF Symbol
-    /// are the same construction as the Privacy Policy and Terms rows beside it. What it
-    /// does trade is detectability — a loud missing-glyph box becomes a plausible speech
-    /// bubble, so a regression that slips past CI also slips past screenshot review.
-    private static let discordGlyphAvailable: Bool = {
-        guard let face = UIFont(name: "HerdrupSymbols", size: 15) else { return false }
-        var utf16 = Array(discordGlyph.utf16)
-        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
-        // `glyphs[0]`, NOT `allSatisfy`: Core Text maps a surrogate pair to ONE glyph and
-        // leaves the second slot 0, so `allSatisfy` would report false for any non-BMP
-        // codepoint even when the glyph exists — and would silently pin this to the
-        // fallback forever if the mark were ever swapped to U+F066F.
-        CTFontGetGlyphsForCharacters(face as CTFont, &utf16, &glyphs, utf16.count)
-        return glyphs.first.map { $0 != 0 } ?? false
-    }()
+    /// The invite. A raw code rather than a vanity URL, which is safe to ship because
+    /// the OWNER CONFIRMED it is set to never expire with unlimited uses — recorded here
+    /// because nothing in the app or in CI can detect a dead invite, and correcting one
+    /// needs an App Store release. If it is ever rotated, prefer a vanity URL.
     private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
 
     private func copyDiagnostics() {
