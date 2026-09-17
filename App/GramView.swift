@@ -87,6 +87,20 @@ struct GramView: View {
     /// longer tell a healthy poll from a failing one.
     @State private var loadFailures = 0
     @State private var isLoading = false
+    /// A manual refresh that arrived while a load was already running.
+    ///
+    /// `load` takes one at a time, and the ambient 6s poll means a tap often lands mid
+    /// flight — so the tap was silently dropped and the button genuinely did nothing.
+    /// The request is remembered and run once the in-flight load finishes.
+    @State private var refreshQueued = false
+    /// Set while a MANUAL refresh is running, so the control can show it is working. The
+    /// poll deliberately does not set it: a spinner appearing every six seconds on its
+    /// own is noise, and the reader did not ask for it.
+    @State private var manualRefreshing = false
+    /// The manual-refresh acknowledgement, in its own slot so the 6s poll cannot clear it.
+    @State private var refreshAck: String?
+    /// Identity for the acknowledgement's expiry, so a stale timer cannot clear a newer note.
+    @State private var refreshAckToken = 0
     /// A page fetch (older messages) in flight, kept apart from `isLoading` so the head
     /// poll and a scroll-driven page never block each other.
     @State private var isLoadingPage = false
@@ -316,7 +330,9 @@ struct GramView: View {
         // false` so it refreshes in place instead of dropping back to the loading phase.
         .onChange(of: refreshToken) { old, new in
             guard new != old else { return }
-            Task { await load(initial: false) }
+            // Same path as the phone header's button, so the sidebar affordance cannot
+            // be silently swallowed by an in-flight poll either.
+            Task { await manualRefresh() }
         }
         // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
         .onChange(of: readAllToken) { old, new in
@@ -558,7 +574,7 @@ struct GramView: View {
     /// (empty inbox, pre-deploy daemon, or a loaded list alike).
     @ViewBuilder
     private var bannerView: some View {
-        if let text = sendError ?? markAllNote ?? refreshNote {
+        if let text = sendError ?? markAllNote ?? refreshAck ?? refreshNote {
             Text(text)
                 .font(Typography.app(12))
                 .foregroundStyle(Palette.died)
@@ -616,12 +632,20 @@ struct GramView: View {
             }
             if !showingSaved {
                 Button {
-                    Task { await load(initial: false) }
+                    Task { await manualRefresh() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
+                    // The spinner is the acknowledgement: without it a refresh over an
+                    // unchanged store changes nothing on screen.
+                    if manualRefreshing {
+                        ProgressView().controlSize(.small).tint(Palette.textDim)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Palette.textDim)
+                    }
                 }
+                .disabled(manualRefreshing)
+                .accessibilityLabel("Refresh")
             }
             if let onClose {
                 Button(action: onClose) {
@@ -898,7 +922,9 @@ struct GramView: View {
                 }
                 .padding(16)
             }
-            .refreshable { await load(initial: false) }
+            // Same path as the buttons: a pull that lands inside a poll must not be
+            // swallowed either.
+            .refreshable { await manualRefresh() }
         }
     }
 
@@ -1239,11 +1265,76 @@ struct GramView: View {
         }
     }
 
-    private func load(initial: Bool) async {
+    /// A refresh the READER asked for: acknowledged, never dropped, and it reports the
+    /// outcome truthfully.
+    ///
+    /// The plain `load(initial:)` was wired directly to the button, which made the
+    /// control look dead in two ways. It returns early when a load is already running —
+    /// and with a 6s ambient poll a tap often lands inside one — so the tap did nothing;
+    /// and on an unchanged store it returns without altering a pixel, so a successful
+    /// refresh was indistinguishable from a broken button.
+    private func manualRefresh() async {
+        if isLoading {
+            // Run it after the in-flight load rather than discarding it, and say so now,
+            // because the whole point is that a tap is never silently swallowed.
+            refreshQueued = true
+            acknowledge("Refreshing…", expiring: false)
+            return
+        }
+        manualRefreshing = true
+        defer { manualRefreshing = false }
+        switch await load(initial: false) {
+        case .unchanged: acknowledge("Up to date")
+        case .updated: acknowledge("Refreshed")
+        case .failed: acknowledge(nil)   // `load` already wrote the failure to refreshNote
+        }
+    }
+
+    /// Show a manual-refresh acknowledgement in ITS OWN slot.
+    ///
+    /// Not `refreshNote`: `load` clears that on every success, including every 6s poll,
+    /// so an acknowledgement put there survives only until the next poll — measured as a
+    /// median 3.2s but as little as 0.16s depending on where the tap lands in the cycle,
+    /// which is the same "dead button" impression this set out to remove. This file
+    /// already established the pattern twice, for `markAllNote` and `pageError`, both of
+    /// which were given their own slots for exactly this reason.
+    ///
+    /// Expiry is owned by a token so a later acknowledgement cannot be cleared by an
+    /// earlier one's timer.
+    private func acknowledge(_ text: String?, expiring: Bool = true) {
+        refreshAck = text
+        guard let text, expiring else { return }
+        refreshAckToken += 1
+        let token = refreshAckToken
+        Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if refreshAckToken == token, refreshAck == text { refreshAck = nil }
+        }
+    }
+
+    /// What a load actually did, so a manual refresh can say something TRUE.
+    ///
+    /// Derived from the digest answer, not from a list-length delta. A delta is wrong in
+    /// three real cases: at the refresh ceiling (a reader holding 500 gets the newest 500,
+    /// so N arrivals push N out and the count does not move), against a concurrent
+    /// server-side trim or delete (which offsets the delta to zero), and when the server
+    /// first reflects the reader's own optimistic post (which would report "1 new message"
+    /// about their own text).
+    private enum LoadOutcome { case unchanged, updated, failed }
+
+    @discardableResult
+    private func load(initial: Bool) async -> LoadOutcome {
         // One load at a time: overlapping loads would race each other.
-        guard !isLoading else { return }
+        guard !isLoading else { return .unchanged }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            // A tap that arrived mid-load is honoured now rather than lost.
+            if refreshQueued {
+                refreshQueued = false
+                Task { await manualRefresh() }
+            }
+        }
         // A warm cache means there is something to render RIGHT NOW, so leave
         // `.loading` before touching the network.
         //
@@ -1283,7 +1374,7 @@ struct GramView: View {
             loadFailures = 0
             // Nothing moved: the reconciliation below would compute the same result
             // from the same list, so skip it (the common case on a 6s poll).
-            guard changed || !answer.isUnchanged else { return }
+            guard changed || !answer.isUnchanged else { return .unchanged }
             // Keep the tab badge in step with what we just loaded.
             unread?.count = inboxStore.inbox.unreadCount
             // Drop optimistic posts the server now reflects; unconfirmed ones stay
@@ -1294,6 +1385,7 @@ struct GramView: View {
             // Retire delete-tombstones the server has confirmed gone; keep only those
             // it still returns (a poll that raced the delete), which stay suppressed.
             deletedIDs.formIntersection(serverIDs)
+            return .updated
         } catch let error as APIError where error.code == "gram_unavailable" {
             loadFailures += 1
             if messages.isEmpty {
@@ -1301,7 +1393,7 @@ struct GramView: View {
             } else {
                 refreshNote = "Gram is unavailable right now."
             }
-
+            return .failed
         } catch {
             // A daemon predating the gram build answers an unknown-method error, NOT
             // `gram_unavailable`, so a first-load failure gets one honest message
@@ -1313,6 +1405,7 @@ struct GramView: View {
             } else {
                 refreshNote = "Refresh failed. Showing the last loaded messages."
             }
+            return .failed
         }
     }
 
