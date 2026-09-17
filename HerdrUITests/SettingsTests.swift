@@ -76,6 +76,66 @@ final class SettingsTests: XCTestCase {
         app.launch()
         return app
     }
+    /// THE DISCORD ROW RENDERS IN THE REAL SETTINGS SCREEN, which is the half a font test
+    /// cannot reach.
+    ///
+    /// The icon is Discord's official asset from an imageset, so there is no font glyph
+    /// left to assert on — an earlier font test pinning U+F1FF was deleted with the glyph
+    /// it covered, since a test that pins something the app no longer draws is worse than
+    /// no test. What remains worth proving is that this row is BUILT and REACHABLE, which
+    /// only the real screen can answer: this drives the shipping `SettingsView` under the
+    /// settings mock and asserts the row exists, sits ON SCREEN, and announces itself as
+    /// Discord.
+    ///
+    /// A missing asset is NOT detectable here: SwiftUI renders an absent `Image("…")` as
+    /// empty space inside the same element tree, and the chip is `accessibilityHidden`, so
+    /// no query can see it. The attached screenshot is the only evidence for the mark
+    /// itself, which is why it is attached unconditionally.
+    ///
+    /// GEOMETRY, NOT `isHittable`, and not `exists` as a scroll condition. In an eager
+    /// `VStack` inside a `ScrollView`, `exists` is true for nodes below the fold, so a
+    /// loop keyed on it can swipe zero times and then interrogate a row parked outside the
+    /// viewport — where this repo has already documented `isHittable` raising "Activation
+    /// point invalid" rather than answering false (see `TerminalInteractionTestCase`).
+    /// So the loop scrolls until the row's frame lies inside the app frame, and that
+    /// containment IS the assertion.
+    ///
+    /// It deliberately does NOT tap: the tap hands off to Safari, and asserting on another
+    /// app's state would be a receipt about `SafariViewController`. The invite is a single
+    /// constant, so a tap proves nothing that reading it does not.
+    ///
+    /// The glyph's appearance stays unverifiable here for an honest reason: XCUITest
+    /// cannot read a rendered outline, so the mark and a missing-glyph box are the same
+    /// element tree. The screenshot is attached for a human to judge.
+    func testTheDiscordRowIsPresentAndOnScreen() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
+        app.launch()
+
+        let row = app.buttons["settings-discord"]
+        guard row.waitForExistence(timeout: 15) else {
+            return XCTFail("Settings should build the Discord row in its ABOUT section")
+        }
+        // Scroll on CONTAINMENT, not existence: the row can exist below the fold.
+        var scrolls = 0
+        while !app.frame.contains(row.frame), scrolls < 10 {
+            app.swipeUp()
+            scrolls += 1
+        }
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "settings-about-discord"
+        shot.lifetime = .keepAlways
+        add(shot)
+
+        XCTAssertTrue(
+            app.frame.contains(row.frame),
+            "the Discord row never came fully on screen after \(scrolls) swipes (row \(row.frame), app \(app.frame))")
+        XCTAssertTrue(
+            row.label.contains("Discord"),
+            "the row must announce itself as Discord, not read out a private-use codepoint (got: \(row.label))")
+    }
+
 
     /// GEOMETRY, because the defect was geometric and every text assertion passed
     /// through it. An exhausted account that also reports usage — the common case, since

@@ -7471,6 +7471,7 @@ struct SettingsView: View {
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("ABOUT")
+            discordRow
             linkRow("Privacy Policy", systemImage: "lock.shield",
                     url: URL(string: "https://herdrup.themartian.app/legal/privacy")!)
             linkRow("Terms of Service", systemImage: "doc.text",
@@ -7628,13 +7629,32 @@ struct SettingsView: View {
         _ label: String, systemImage: String, subtitle: String? = nil,
         trailingGlyph: String = "chevron.right", _ action: @escaping () -> Void
     ) -> some View {
+        richActionRow(label, subtitle: subtitle, trailingGlyph: trailingGlyph, action: action) {
+            Image(systemName: systemImage).font(.system(size: 15, weight: .semibold))
+        }
+    }
+
+    /// The same row with its leading glyph supplied by the caller.
+    ///
+    /// Every row here uses an SF Symbol except Discord, which has no SF Symbol and draws
+    /// Discord's own asset from an imageset instead. That row also opts out of the chip's
+    /// tint, because its mark has to stay in Discord's colour — see `discordRow`.
+    ///
+    /// The chip is `accessibilityHidden`: the row's own label is the accessible name, and
+    /// a decorative mark adds nothing to it.
+    private func richActionRow<Leading: View>(
+        _ label: String, subtitle: String? = nil,
+        trailingGlyph: String = "chevron.right",
+        action: @escaping () -> Void,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
+                leading()
                     .foregroundStyle(Palette.textDim)
                     .frame(width: 30, height: 30)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
                     if let subtitle {
@@ -7658,6 +7678,55 @@ struct SettingsView: View {
             openURL(url)
         }
     }
+
+    /// The community invite, with Discord's official symbol.
+    ///
+    /// The mark is `Shared/Assets.xcassets/DiscordMark.imageset`, downscaled from
+    /// `Discord-Symbol-Blurple.png` in Discord's own brand kit
+    /// (`cdn.discordapp.com/assets/content/a736b959…zip`, `Discord_Symbol_Color/`) — their
+    /// file, their blurple, not a redraw. The three scales are 33x25, 66x50 and 99x75,
+    /// which are exact reductions of the 528x400 source, so no scale distorts the mark.
+    /// Provenance, what was done to the file, and the trademark position are recorded in
+    /// `NOTICE-Discord-Brand.txt` at the repository root — root deliberately, because
+    /// `Shared/` is a sources path and a stray text file there can end up copied into the
+    /// bundle as a resource.
+    ///
+    /// An earlier version drew `fa-discord` from the bundled Nerd Fonts subset instead.
+    /// That was withdrawn on the trademark question, not the licence one: Font Awesome
+    /// Free ships under CC BY 4.0 with attribution already in the bundle, but CC BY
+    /// grants no trademark rights, and the row was tinting a third-party redraw grey.
+    private var discordRow: some View {
+        richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
+                      action: { openURL(Self.discordInvite) }) {
+            // DISCORD'S OWN ASSET, IN DISCORD'S OWN COLOUR, and both halves are the point.
+            //
+            // This was a Font Awesome redraw taken from the bundled Nerd Fonts subset,
+            // tinted `Palette.textDim` grey to match the rows around it. The licence side
+            // of that was clean (CC BY 4.0, attribution shipped), but CC BY grants no
+            // TRADEMARK rights, and Discord's brand policy asks for the official mark in
+            // an approved colour. Owner's decision was the official asset.
+            //
+            // `.renderingMode(.original)` is load-bearing: without it the chip's
+            // `foregroundStyle(Palette.textDim)` from `richActionRow` would tint blurple
+            // to grey and put us back in the same place. This is the one icon in Settings
+            // that is deliberately NOT monochrome.
+            //
+            // Sized by WIDTH with `scaledToFit`: the mark is 1.32:1, so a square frame
+            // would either letterbox it or distort it, and the 30x30 chip is square.
+            Image("DiscordMark")
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18)
+        }
+        .accessibilityIdentifier("settings-discord")
+    }
+
+    /// The invite. A raw code rather than a vanity URL, which is safe to ship because
+    /// the OWNER CONFIRMED it is set to never expire with unlimited uses — recorded here
+    /// because nothing in the app or in CI can detect a dead invite, and correcting one
+    /// needs an App Store release. If it is ever rotated, prefer a vanity URL.
+    private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
 
     private func copyDiagnostics() {
         // Host + app version only — never anything sensitive (no key, ever).
