@@ -7699,8 +7699,17 @@ struct SettingsView: View {
         richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
                       action: { openURL(Self.discordInvite) }) {
             if Self.discordGlyphAvailable {
+                // `fixedSize:`, not `size:`. `Font.custom(_:size:)` tracks `.body`, so at
+                // AX2 and above the mark painted outside this hard-coded 30x30 chip and
+                // into the label — and it was the only non-`fixedSize` custom font in the
+                // app, against DesignSystem's written contract. 15pt, not 17, so the ink
+                // matches the `.system(size: 15)` symbols in the rows either side: at 17pt
+                // this glyph measures ~17.6pt wide against their materially narrower
+                // marks. Deliberately NOT multiplied by `Typography.scale`: every icon
+                // chip in this list is fixed, and scaling only this one would make it
+                // disagree with its neighbours rather than with its label.
                 Text(verbatim: Self.discordGlyph)
-                    .font(.custom("HerdrupSymbols", size: 17))
+                    .font(.custom("HerdrupSymbols", fixedSize: 15))
             } else {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .font(.system(size: 15, weight: .semibold))
@@ -7713,8 +7722,8 @@ struct SettingsView: View {
     ///
     /// Read from the committed font's `cmap`, not from memory: U+F392 — the codepoint the
     /// Font Awesome docs suggest — is NOT in this subset, and U+E7B9 is `dev-cypressio`,
-    /// a different company's logo. The two Discord marks present are U+F1FF (`fa-discord`)
-    /// and U+F066F (`md-discord`).
+    /// a different company's logo. The other Discord mark in the subset is U+F066F
+    /// (`md-discord`) — non-BMP, so read `discordGlyphAvailable`'s note before swapping.
     private static let discordGlyph = "\u{F1FF}"
 
     /// Whether the bundled face can actually DRAW that codepoint, probed once.
@@ -7729,14 +7738,30 @@ struct SettingsView: View {
     /// the answer is Discord's official asset, not this symbol. The probe
     /// is Core Text answering for the registered face, the same question
     /// `TerminalFontTests.testSettingsDiscordGlyphResolvesByFontName` asks in CI; this one
-    /// is the runtime belt to that test's braces, since a font can fail to register on a
-    /// device for reasons no test on another machine can see.
+    /// is the runtime belt to that test's braces.
+    ///
+    /// ITS HONEST RESIDUAL IS NARROW, and an earlier version of this comment overstated
+    /// it: the widget target's exclusion of this face cannot reach here, because
+    /// `SettingsView` never compiles into the appex; and a mistake in the APP's own
+    /// `UIAppFonts` or `App/Fonts` membership is already a hard CI gate via that test.
+    /// What is left is a registration failure visible only on a device or in a
+    /// Distribution archive, which a Debug simulator run cannot observe. That is the whole
+    /// case for eight lines.
+    ///
+    /// The fallback's own pixels are not novel: the chip, its tint and a 15pt SF Symbol
+    /// are the same construction as the Privacy Policy and Terms rows beside it. What it
+    /// does trade is detectability — a loud missing-glyph box becomes a plausible speech
+    /// bubble, so a regression that slips past CI also slips past screenshot review.
     private static let discordGlyphAvailable: Bool = {
-        guard let face = UIFont(name: "HerdrupSymbols", size: 17) else { return false }
+        guard let face = UIFont(name: "HerdrupSymbols", size: 15) else { return false }
         var utf16 = Array(discordGlyph.utf16)
         var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
-        CTFontGetGlyphsForCharacters(face, &utf16, &glyphs, utf16.count)
-        return glyphs.allSatisfy { $0 != 0 }
+        // `glyphs[0]`, NOT `allSatisfy`: Core Text maps a surrogate pair to ONE glyph and
+        // leaves the second slot 0, so `allSatisfy` would report false for any non-BMP
+        // codepoint even when the glyph exists — and would silently pin this to the
+        // fallback forever if the mark were ever swapped to U+F066F.
+        CTFontGetGlyphsForCharacters(face as CTFont, &utf16, &glyphs, utf16.count)
+        return glyphs.first.map { $0 != 0 } ?? false
     }()
     private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
 
