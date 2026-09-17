@@ -87,6 +87,16 @@ struct GramView: View {
     /// longer tell a healthy poll from a failing one.
     @State private var loadFailures = 0
     @State private var isLoading = false
+    /// A manual refresh that arrived while a load was already running.
+    ///
+    /// `load` takes one at a time, and the ambient 6s poll means a tap often lands mid
+    /// flight — so the tap was silently dropped and the button genuinely did nothing.
+    /// The request is remembered and run once the in-flight load finishes.
+    @State private var refreshQueued = false
+    /// Set while a MANUAL refresh is running, so the control can show it is working. The
+    /// poll deliberately does not set it: a spinner appearing every six seconds on its
+    /// own is noise, and the reader did not ask for it.
+    @State private var manualRefreshing = false
     /// A page fetch (older messages) in flight, kept apart from `isLoading` so the head
     /// poll and a scroll-driven page never block each other.
     @State private var isLoadingPage = false
@@ -304,6 +314,21 @@ struct GramView: View {
                 phoneBody
             }
         }
+        // CLAIM THE HEIGHT AND PIN TO THE TOP. This page's full-height look was
+        // incidental: nothing here or at either call site asked for the offered height,
+        // and both hosts centre by default — the split view's detail `HStack(spacing: 0)`
+        // (HerdrApp.swift:1857) and the compact `ZStack {}` (:2312). The page only filled
+        // because `content`'s ScrollViews and `centered` happen to be greedy, and a
+        // greedy child collapses to its ideal height the moment the enclosing layout
+        // measures with an INDEFINITE height proposal — which is what a Designed-for-iPad
+        // Mac split view does while its columns re-measure on a window resize, a ⌘K rail
+        // toggle, a divider drag or a section remount. The undersized page was then
+        // centred, putting its first child — the search row — in the middle of the
+        // window, which is exactly what the owner reported on macOS.
+        //
+        // `gramSidebar` already carries this same modifier for the same reason
+        // (HerdrApp.swift:2047), against the same kind of centring parent.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Palette.ground.ignoresSafeArea())
         .background { gramKeyboardShortcuts }
         // Poll while the page is open so new agent messages appear without a manual
@@ -316,7 +341,9 @@ struct GramView: View {
         // false` so it refreshes in place instead of dropping back to the loading phase.
         .onChange(of: refreshToken) { old, new in
             guard new != old else { return }
-            Task { await load(initial: false) }
+            // Same path as the phone header's button, so the sidebar affordance cannot
+            // be silently swallowed by an in-flight poll either.
+            Task { await manualRefresh() }
         }
         // The sidebar's Read-all button bumps `readAllToken` for the same reason refresh does.
         .onChange(of: readAllToken) { old, new in
@@ -616,12 +643,20 @@ struct GramView: View {
             }
             if !showingSaved {
                 Button {
-                    Task { await load(initial: false) }
+                    Task { await manualRefresh() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
+                    // The spinner is the acknowledgement: without it a refresh over an
+                    // unchanged store changes nothing on screen.
+                    if manualRefreshing {
+                        ProgressView().controlSize(.small).tint(Palette.textDim)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Palette.textDim)
+                    }
                 }
+                .disabled(manualRefreshing)
+                .accessibilityLabel("Refresh")
             }
             if let onClose {
                 Button(action: onClose) {
@@ -1239,11 +1274,46 @@ struct GramView: View {
         }
     }
 
+    /// A refresh the READER asked for: acknowledged, never dropped, and it reports the
+    /// outcome.
+    ///
+    /// The plain `load(initial:)` was wired directly to the button, which made the
+    /// control look dead in two different ways. It returns early when a load is already
+    /// running — and with a 6s ambient poll a tap often lands inside one — so the tap did
+    /// nothing at all; and on the common case of an unchanged store it returns without
+    /// altering a single pixel, so even a successful refresh was indistinguishable from a
+    /// broken button.
+    private func manualRefresh() async {
+        if isLoading {
+            // Run it after the in-flight load rather than discarding it.
+            refreshQueued = true
+            return
+        }
+        manualRefreshing = true
+        defer { manualRefreshing = false }
+        let before = inboxStore.inbox.messages.count
+        await load(initial: false)
+        // Say something either way. Nothing new is a RESULT, and the reader asked.
+        if refreshNote == nil {
+            let arrived = inboxStore.inbox.messages.count - before
+            refreshNote = arrived > 0
+                ? "\(arrived) new message\(arrived == 1 ? "" : "s")"
+                : "Up to date"
+        }
+    }
+
     private func load(initial: Bool) async {
         // One load at a time: overlapping loads would race each other.
         guard !isLoading else { return }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            // A tap that arrived mid-load is honoured now rather than lost.
+            if refreshQueued {
+                refreshQueued = false
+                Task { await manualRefresh() }
+            }
+        }
         // A warm cache means there is something to render RIGHT NOW, so leave
         // `.loading` before touching the network.
         //

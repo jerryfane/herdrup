@@ -159,4 +159,41 @@ final class GramTests: XCTestCase {
         XCTAssertTrue((field.value as? String)?.contains("four") == true)
         XCTAssertTrue(send.isHittable)
     }
+
+    /// WHERE the search row sits, not merely that it exists.
+    ///
+    /// The owner reported that on macOS the search row "goes in the middle of the gram
+    /// page". Cause: the page never claimed the offered height and both hosts centre by
+    /// default, so its full-height look came only from `content`'s greedy ScrollViews —
+    /// and a greedy child collapses to its ideal height whenever the enclosing layout
+    /// measures with an indefinite height proposal, which a Mac split view does while
+    /// re-measuring columns. The undersized page was then centred and its first child
+    /// landed mid-window.
+    ///
+    /// Every existing Gram receipt asserts the toggle's EXISTENCE and hittability, which
+    /// is true in the broken layout too. Position is what separates them, so this pins
+    /// the search control to the top band of the window — as a FRACTION, so it means the
+    /// same thing on any device or window size.
+    func testTheSearchRowStaysAtTheTopOfThePage() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Gram"].waitForExistence(timeout: 8))
+        let search = app.buttons["gram-search"].firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 8), "the Gram search control should render")
+
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(window.height, 0)
+
+        // The control belongs in the header band. Centred, it would sit near 0.5; the
+        // threshold leaves generous room for a tall header or a large Dynamic Type size
+        // while still failing a vertically-centred page.
+        let position = (search.frame.midY - window.minY) / window.height
+        XCTAssertLessThan(
+            position, 0.25,
+            """
+            the search control sits \(Int(position * 100))% down the window             (\(search.frame.midY)pt of \(window.height)pt), so the page is not anchored             to the top — this is the macOS "header in the middle" report.
+            """)
+    }
 }
