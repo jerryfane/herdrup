@@ -318,43 +318,48 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         return last
     }
 
-    /// A GUARD ON THE SPLIT-VIEW GRAM PAGE'S WIDTH — not a reproduction.
+    /// A GUARD ON THE SPLIT-VIEW GRAM PAGE'S GEOMETRY — not a reproduction.
     ///
     /// Written while chasing an owner report on macOS: with the sidebar compressed to the
     /// rail, "the gram section doesn't take the full width, and instead it allows me to
-    /// scroll horizontally", with the leftover as wide as the sidebar's own compression.
+    /// scroll horizontally". THE OWNER HAS SINCE ESTABLISHED THAT IT DOES NOT HAPPEN ON
+    /// IPAD, and that it is no longer reproducible on the Mac either. So this case cannot
+    /// see that symptom and must not be read as evidence about it; four diagnoses were
+    /// refuted during the hunt and all four fixes were withdrawn.
     ///
-    /// THE OWNER HAS SINCE ESTABLISHED THAT IT DOES NOT HAPPEN ON IPAD, and that it is no
-    /// longer reproducible on the Mac either. So this case is expected to pass both before
-    /// and after every layout change in that investigation, and it must NOT be read as
-    /// evidence about the reported symptom: it cannot see it. Four diagnoses were refuted
-    /// during that hunt and all four fixes were withdrawn; a transient stale measurement
-    /// fits the remaining evidence (⌘K cured it, and so does not seeing it again) better
-    /// than any permanent defect in this code.
+    /// WHY THE SURFACE WAS UNCOVERED, correctly this time: not the destination — this very
+    /// class has run on CI's iPad since `edcff2d` (ci.yml's `iPadResize` lane) — but
+    /// because no case had ever navigated to GRAM inside the split view. Every existing
+    /// case stays on the terminal.
     ///
-    /// It is kept for what it does cover, which nothing else did: the Gram page must fill
-    /// its detail column and must not scroll sideways at regular width. That surface had
-    /// NO coverage at all, because `iPadLayout` only exists when
-    /// `hSizeClass == .regular` and the whole UI suite ran on the iPhone destination
-    /// (ci.yml:313), where the branch is never instantiated — which is also why an earlier
-    /// receipt of mine passed on code that could not compile the app. This suite already
-    /// runs on CI's iPad Pro 13-inch and already taps the real sidebar toggle.
+    /// WHAT IT ASSERTS, and why each line can actually fail:
     ///
-    /// The sequence is the owner's: Gram must be selected from the EXPANDED sidebar,
-    /// because the rail's own Gram button writes `columnVisibility = .all`
-    /// (`railSectionButton`) and so cannot arrive in the state under test; then the
-    /// sidebar is collapsed, which is what ⌘K does.
+    ///  * the search toggle is TRAILING-pinned 16pt inside the detail column, and the
+    ///    column's trailing edge is the window's in both configurations — so its `maxX`
+    ///    is invariant on a correct layout with ~16pt of margin, and a page sized to the
+    ///    expanded width but placed at the rail width pushes it PAST the window edge.
+    ///    Accessibility frames are not clipped, so that overshoot is visible.
+    ///  * a message row is LEADING-pinned, so collapsing the sidebar must move it LEFT as
+    ///    the column's leading edge goes from the sidebar's width to the rail's 64pt. A
+    ///    page that ignored the collapse leaves it where it was.
     ///
-    /// The discriminator needs no calibration, unlike three earlier receipts of mine: a
-    /// page measured at the expanded width and placed in the rail width extends PAST the
-    /// window's right edge. `maxX <= window.maxX` is a fact about a window, not a
-    /// threshold about a font.
+    /// Deliberately absent, after three receipts of mine that were calibrated rather than
+    /// measured: any threshold in points. Both assertions are facts about a window and a
+    /// direction of travel.
     ///
-    /// DELIBERATELY NOT ASSERTED: the vertical half of that report (the header drifting to
-    /// the centre). It is measured and attached as a screenshot instead. Three diagnoses
-    /// of it were refuted, and it is now unreproducible, so an assertion would only encode
-    /// a guess about a symptom nobody can currently see.
-    func testGramFillsTheDetailColumnWhenTheSidebarIsCollapsed() throws {
+    /// ALSO DELIBERATELY ABSENT: a horizontal-drag assertion. I had one, and it was a
+    /// tautology twice over — first it measured `iPadSearchRow`, a SIBLING of the feed's
+    /// ScrollView rather than a descendant, and then, once aimed at a row inside the feed,
+    /// its failure mode turned out to be unreachable on iOS anyway: the feed is a
+    /// vertical-only `ScrollView` (GramView's `content`), so content wider than the column
+    /// is CLIPPED, not pannable. The owner's "scroll horizontally" is a Mac behaviour this
+    /// destination cannot produce, and the `maxX` bound above is what detects the
+    /// overflow that would cause it.
+    ///
+    /// The vertical half of the report (the header drifting to the centre) is attached as
+    /// a screenshot and not asserted: three diagnoses of it were refuted and it is now
+    /// unreproducible, so an assertion would only encode a guess.
+    func testGramTracksTheDetailColumnWhenTheSidebarCollapses() throws {
         launch("resize")
         guard probe()["iPad"] as? Bool == true else {
             throw XCTSkip("iPadLayout only exists at regular width; the iPhone destination has no split view")
@@ -365,69 +370,48 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             return XCTFail("The expanded sidebar must offer Gram; the rail's button would expand the sidebar")
         }
         gram.tap()
-        let search = app.buttons["gram-search"]
-        XCTAssertTrue(search.waitForExistence(timeout: 10), "Gram's search row is the page's first row")
-        let expanded = search.frame
+        let toggle = app.buttons["gram-search"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Gram's search toggle is the page's trailing anchor")
+        let message = app.staticTexts["Digest ready: 7 trends, 2 need your call."]
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "the mock gram.list must render")
+        let expandedToggle = toggle.frame
+        let expandedRow = message.frame
         attach("gram-sidebar-expanded")
 
-        guard let toggle = onscreen("terminal-sidebar-toggle", timeout: 5) else {
+        guard let sidebar = onscreen("terminal-sidebar-toggle", timeout: 5) else {
             return XCTFail("The receipt must exercise the actual sidebar toggle")
         }
-        toggle.tap()
-        let railed = frameSettles(of: search, changedFrom: expanded)
+        sidebar.tap()
+        // Settle on the message row, NOT the search toggle: the toggle is trailing-pinned
+        // and its frame is invariant across the collapse, so waiting for it to move would
+        // XCTFail on a correct layout and abort the case before a single real assertion.
+        let railedRow = frameSettles(of: message, changedFrom: expandedRow)
+        let railedToggle = toggle.frame
         attach("gram-sidebar-rail")
 
         XCTAssertLessThanOrEqual(
-            railed.maxX, window.maxX + 1,
+            railedToggle.maxX, window.maxX + 1,
             """
-            with the sidebar collapsed, Gram's first row reaches \(railed.maxX)pt in a \
-            \(window.maxX)pt window — \(railed.maxX - window.maxX)pt past the right edge, \
-            so the page was laid out against the EXPANDED width and placed in the rail \
-            width. That overhang is what the owner drags through horizontally. \
-            (expanded row: \(expanded), railed row: \(railed))
+            with the sidebar collapsed, the Gram page's trailing anchor sits at \
+            \(railedToggle.maxX)pt in a \(window.maxX)pt window — \
+            \(railedToggle.maxX - window.maxX)pt beyond the right edge, so the page is \
+            wider than the column it was placed in (expanded \(expandedToggle), railed \
+            \(railedToggle))
             """)
-        // Two-sided: the page must start clear of the 64pt rail, not merely end inside the
-        // window. A page shifted left rather than oversized fails here instead.
-        XCTAssertGreaterThanOrEqual(
-            railed.minX, window.minX - 1,
-            "Gram's first row starts at \(railed.minX)pt, left of the window at \(window.minX)pt")
-
-        // THE HORIZONTAL-SCROLL HALF, measured on an element INSIDE the feed.
-        //
-        // My first version dragged the feed and then asserted on `search`, which is
-        // `iPadSearchRow` — a SIBLING of the ScrollView inside `content`, not a
-        // descendant. Scrolling a container cannot move a sibling, so that assertion held
-        // on correct code and on a sideways-scrolling page alike: a tautology.
-        //
-        // The drag is also aimed at a message row's own coordinates rather than at
-        // `app.scrollViews.firstMatch`, which can bind SwiftTerm's `TerminalView` — it is
-        // a `UIScrollView`, and the resize fixture keeps two panes mounted at
-        // `.opacity(0)`, which leaves them in the accessibility tree.
-        let message = app.staticTexts["Digest ready: 7 trends, 2 need your call."]
-        XCTAssertTrue(message.waitForExistence(timeout: 10),
-                      "the mock gram.list must render, or there is no feed to drag")
-        let rowBefore = message.frame
-        XCTAssertLessThanOrEqual(
-            rowBefore.maxX, window.maxX + 1,
-            "a message row reaches \(rowBefore.maxX)pt past the \(window.maxX)pt window edge")
-        message.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
-            .press(forDuration: 0.05,
-                   thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
-        attach("gram-after-horizontal-drag")
-        XCTAssertEqual(
-            message.frame.minX, rowBefore.minX, accuracy: 1,
+        XCTAssertLessThan(
+            railedRow.minX, expandedRow.minX,
             """
-            a leftward drag moved a message row from \(rowBefore.minX)pt to \
-            \(message.frame.minX)pt, so the feed's content is wider than its column — \
-            this is the owner's "it allows me to scroll horizontally"
+            the page's leading content stayed at \(railedRow.minX)pt after the sidebar \
+            collapsed from \(expandedRow.minX)pt, so the page did not follow the detail \
+            column's leading edge in to the rail
             """)
 
-        // LEAVE THE PREFERENCE AS IT WAS FOUND. `toggleSidebar` writes
-        // `ui.sidebarMinimized`, nothing in the suite resets defaults, and there is no
-        // test plan — so execution is alphabetical and the eight cases after this one
-        // would otherwise launch onto the rail, a state no case produced before.
+        // LEAVE THE PREFERENCE AS IT WAS FOUND. `toggleSidebar` persists
+        // `ui.sidebarMinimized`, nothing in the suite resets defaults and there is no test
+        // plan, so execution is alphabetical and the later cases would otherwise launch
+        // onto the rail — a state no case produced before.
         onscreen("terminal-sidebar-toggle", timeout: 5)?.tap()
-        _ = frameSettles(of: search, changedFrom: railed)
+        _ = frameSettles(of: message, changedFrom: railedRow)
     }
 
     func testReturningToEarlierTargetStillUsesLatestQuietWindow() {
