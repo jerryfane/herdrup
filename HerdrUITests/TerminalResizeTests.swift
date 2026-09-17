@@ -278,24 +278,44 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertEqual(probe()["opens"] as? Int, opens)
     }
 
-    /// Waits for an element's frame to stop moving. The terminal probe (`settled()`) is
-    /// unusable once Gram is fronted — it reports the terminal as `covered`, which is the
-    /// intended state — so a layout receipt has to settle on the layout itself.
-    func stillFrame(of element: XCUIElement, timeout: TimeInterval = 8) {
+    /// Waits until an element's frame has CHANGED from `from` and then gone quiet, and
+    /// FAILS if it never does.
+    ///
+    /// `settled()` is unusable here: it waits on the terminal probe reporting
+    /// `covered == false`, and fronting Gram is exactly what covers the terminal.
+    ///
+    /// Requiring a change is the point. A bare stability poll can return before the
+    /// transition even starts — collapsing the sidebar widens the detail column by
+    /// ~256pt and forces a SwiftTerm reflow plus a `set_pty_size` round trip on the main
+    /// actor (HerdrApp's `toggleSidebar`), so the split view's own animation can begin
+    /// after the first few samples. Every sample would then be PRE-animation and the
+    /// caller would measure the old frame while believing it had settled. A poll with no
+    /// failure path makes that silent.
+    @discardableResult
+    func frameSettles(of element: XCUIElement, changedFrom from: CGRect,
+                      timeout: TimeInterval = 10,
+                      file: StaticString = #filePath, line: UInt = #line) -> CGRect {
         var last = element.frame
         var quietSince: Date?
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: 0.2)
             let now = element.frame
+            guard now != from else { quietSince = nil; last = now; continue }
             if now == last {
                 if quietSince == nil { quietSince = Date() }
-                if Date().timeIntervalSince(quietSince!) >= 0.4 { return }
+                if Date().timeIntervalSince(quietSince!) >= 0.4 { return now }
             } else {
                 quietSince = nil
                 last = now
             }
         }
+        XCTFail("""
+            frame never moved off \(from) and settled within \(timeout)s (last \(last)) — \
+            the sidebar transition did not happen, so any measurement here would be of \
+            the previous configuration
+            """, file: file, line: line)
+        return last
     }
 
     /// THE OWNER'S GRAM WIDTH BUG, ON THE DESTINATION THAT CAN SEE IT.
@@ -348,12 +368,8 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             return XCTFail("The receipt must exercise the actual sidebar toggle")
         }
         toggle.tap()
-        // NOT `settled()`: that waits on the terminal probe reporting `covered == false`,
-        // and selecting Gram is precisely what covers the terminal. Wait on the thing
-        // under test instead — the row's own frame going quiet.
-        stillFrame(of: search)
+        let railed = frameSettles(of: search, changedFrom: expanded)
         attach("gram-sidebar-rail")
-        let railed = search.frame
 
         XCTAssertLessThanOrEqual(
             railed.maxX, window.maxX + 1,
@@ -364,20 +380,48 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             width. That overhang is what the owner drags through horizontally. \
             (expanded row: \(expanded), railed row: \(railed))
             """)
+        // Two-sided: the page must start clear of the 64pt rail, not merely end inside the
+        // window. A page shifted left rather than oversized fails here instead.
+        XCTAssertGreaterThanOrEqual(
+            railed.minX, window.minX - 1,
+            "Gram's first row starts at \(railed.minX)pt, left of the window at \(window.minX)pt")
 
-        // A page that fits cannot scroll sideways. Dragging the feed must not move it.
-        let before = search.frame.minX
-        let feed = app.scrollViews.firstMatch
-        if feed.exists {
-            feed.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
-                .press(forDuration: 0.05,
-                       thenDragTo: feed.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
-            stillFrame(of: search)
-            attach("gram-after-horizontal-drag")
-        }
+        // THE HORIZONTAL-SCROLL HALF, measured on an element INSIDE the feed.
+        //
+        // My first version dragged the feed and then asserted on `search`, which is
+        // `iPadSearchRow` — a SIBLING of the ScrollView inside `content`, not a
+        // descendant. Scrolling a container cannot move a sibling, so that assertion held
+        // on correct code and on a sideways-scrolling page alike: a tautology.
+        //
+        // The drag is also aimed at a message row's own coordinates rather than at
+        // `app.scrollViews.firstMatch`, which can bind SwiftTerm's `TerminalView` — it is
+        // a `UIScrollView`, and the resize fixture keeps two panes mounted at
+        // `.opacity(0)`, which leaves them in the accessibility tree.
+        let message = app.staticTexts["Digest ready: 7 trends, 2 need your call."]
+        XCTAssertTrue(message.waitForExistence(timeout: 10),
+                      "the mock gram.list must render, or there is no feed to drag")
+        let rowBefore = message.frame
+        XCTAssertLessThanOrEqual(
+            rowBefore.maxX, window.maxX + 1,
+            "a message row reaches \(rowBefore.maxX)pt past the \(window.maxX)pt window edge")
+        message.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+            .press(forDuration: 0.05,
+                   thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
+        attach("gram-after-horizontal-drag")
         XCTAssertEqual(
-            search.frame.minX, before, accuracy: 1,
-            "a horizontal drag moved Gram's content, so the page is wider than its column")
+            message.frame.minX, rowBefore.minX, accuracy: 1,
+            """
+            a leftward drag moved a message row from \(rowBefore.minX)pt to \
+            \(message.frame.minX)pt, so the feed's content is wider than its column — \
+            this is the owner's "it allows me to scroll horizontally"
+            """)
+
+        // LEAVE THE PREFERENCE AS IT WAS FOUND. `toggleSidebar` writes
+        // `ui.sidebarMinimized`, nothing in the suite resets defaults, and there is no
+        // test plan — so execution is alphabetical and the eight cases after this one
+        // would otherwise launch onto the rail, a state no case produced before.
+        onscreen("terminal-sidebar-toggle", timeout: 5)?.tap()
+        _ = frameSettles(of: search, changedFrom: railed)
     }
 
     func testReturningToEarlierTargetStillUsesLatestQuietWindow() {
