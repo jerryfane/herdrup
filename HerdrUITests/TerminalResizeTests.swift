@@ -278,44 +278,45 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertEqual(probe()["opens"] as? Int, opens)
     }
 
-    /// Waits until an element's frame has CHANGED from `from` and then gone quiet, and
-    /// FAILS if it never does.
+    /// Polls until an element's frame has been unchanged for `quiet`, and NEVER fails.
     ///
-    /// `settled()` is unusable here: it waits on the terminal probe reporting
-    /// `covered == false`, and fronting Gram is exactly what covers the terminal.
+    /// WAITING IS NOT ASSERTING, which is the whole point of the split. The previous
+    /// version required the frame to CHANGE and XCTFailed if it did not — but the frame it
+    /// watched (the page's leading placement) is the same fact the test's own assertion
+    /// checks, so on exactly the geometry the test exists to catch it aborted inside the
+    /// waiter, with `continueAfterFailure = false` skipping every real assertion, and
+    /// reported "the transition did not happen" when the transition had happened and the
+    /// page simply had not followed. A waiter that can fail steals the diagnosis from the
+    /// assertion that should make it.
     ///
-    /// Requiring a change is the point. A bare stability poll can return before the
-    /// transition even starts — collapsing the sidebar widens the detail column by
-    /// ~256pt and forces a SwiftTerm reflow plus a `set_pty_size` round trip on the main
-    /// actor (HerdrApp's `toggleSidebar`), so the split view's own animation can begin
-    /// after the first few samples. Every sample would then be PRE-animation and the
-    /// caller would measure the old frame while believing it had settled. A poll with no
-    /// failure path makes that silent.
-    @discardableResult
-    func frameSettles(of element: XCUIElement, changedFrom from: CGRect,
-                      timeout: TimeInterval = 10,
-                      file: StaticString = #filePath, line: UInt = #line) -> CGRect {
+    /// `minimumWait` is what a bare stability poll lacks. Collapsing the sidebar widens
+    /// the detail column and forces a SwiftTerm reflow plus a `set_pty_size` round trip on
+    /// the main actor (`toggleSidebar`), so the split view's animation can start after the
+    /// first samples; without a floor, three early samples of an unchanged frame look
+    /// settled and the caller measures the configuration it is not testing.
+    ///
+    /// `settled()` is unusable here for a different reason: it waits on the terminal probe
+    /// reporting `covered == false`, and fronting Gram is exactly what covers the terminal.
+    func quietFrame(of element: XCUIElement, minimumWait: TimeInterval = 1.2,
+                    quiet: TimeInterval = 0.4, timeout: TimeInterval = 8) -> CGRect {
+        let start = Date()
         var last = element.frame
         var quietSince: Date?
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        while Date().timeIntervalSince(start) < timeout {
             Thread.sleep(forTimeInterval: 0.2)
             let now = element.frame
-            guard now != from else { quietSince = nil; last = now; continue }
             if now == last {
                 if quietSince == nil { quietSince = Date() }
-                if Date().timeIntervalSince(quietSince!) >= 0.4 { return now }
+                if Date().timeIntervalSince(start) >= minimumWait,
+                   Date().timeIntervalSince(quietSince!) >= quiet {
+                    return now
+                }
             } else {
                 quietSince = nil
                 last = now
             }
         }
-        XCTFail("""
-            frame never moved off \(from) and settled within \(timeout)s (last \(last)) — \
-            the sidebar transition did not happen, so any measurement here would be of \
-            the previous configuration
-            """, file: file, line: line)
-        return last
+        return element.frame
     }
 
     /// A GUARD ON THE SPLIT-VIEW GRAM PAGE'S GEOMETRY — not a reproduction.
@@ -374,18 +375,23 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Gram's search toggle is the page's trailing anchor")
         let message = app.staticTexts["Digest ready: 7 trends, 2 need your call."]
         XCTAssertTrue(message.waitForExistence(timeout: 10), "the mock gram.list must render")
+        // Captured from a QUIET layout, not the instant the row appears: a re-render
+        // between appearing and the tap (an unread dot clearing, the banner arriving)
+        // would otherwise make the "before" rect a transient one, and every comparison
+        // against it meaningless.
+        let expandedRow = quietFrame(of: message)
         let expandedToggle = toggle.frame
-        let expandedRow = message.frame
         attach("gram-sidebar-expanded")
 
         guard let sidebar = onscreen("terminal-sidebar-toggle", timeout: 5) else {
             return XCTFail("The receipt must exercise the actual sidebar toggle")
         }
         sidebar.tap()
-        // Settle on the message row, NOT the search toggle: the toggle is trailing-pinned
-        // and its frame is invariant across the collapse, so waiting for it to move would
-        // XCTFail on a correct layout and abort the case before a single real assertion.
-        let railedRow = frameSettles(of: message, changedFrom: expandedRow)
+        // The row, not the toggle: the toggle is trailing-pinned and invariant across the
+        // collapse, so it can never be a settle signal. And the wait cannot fail — a page
+        // that does not follow the column is the finding, reported by the assertions
+        // below, not a timeout inside a helper.
+        let railedRow = quietFrame(of: message)
         let railedToggle = toggle.frame
         attach("gram-sidebar-rail")
 
@@ -411,7 +417,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         // plan, so execution is alphabetical and the later cases would otherwise launch
         // onto the rail — a state no case produced before.
         onscreen("terminal-sidebar-toggle", timeout: 5)?.tap()
-        _ = frameSettles(of: message, changedFrom: railedRow)
+        _ = quietFrame(of: message)
     }
 
     func testReturningToEarlierTargetStillUsesLatestQuietWindow() {
