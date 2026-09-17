@@ -1866,17 +1866,39 @@ struct TerminalHomeView: View {
                 max: Self.sidebarWidthRange.upperBound)
             .toolbar(.hidden, for: .navigationBar)
         } detail: {
-            HStack(spacing: 0) {
-                // Keyed on `columnVisibility`, the LAYOUT TRUTH, not on the persisted
-                // preference: iPadOS collapses this column on its own (rotation, Stage
-                // Manager, any transition it cannot honour at `.balanced`), and when it
-                // does, the rail must still appear or there is no way back at all.
-                //
-                // No transition: a sliding rail animates the detail column's width, and
-                // every intermediate width reflows the live terminal (see `toggleSidebar`).
-                if columnVisibility == .detailOnly { sidebarRail }
-                detailColumn
-            }
+            // THE RAIL IS A SAFE-AREA INSET, NOT A SIBLING — and that is the fix for the
+            // owner's macOS report, measured rather than guessed.
+            //
+            // It used to be `HStack(spacing: 0) { if .detailOnly { sidebarRail }; detailColumn }`.
+            // Inserting the rail as a layout SIBLING of the whole page changes the page's
+            // width structurally, in the same transaction in which UIKit is animating the
+            // detail column's width — so the feed and its content were laid out against
+            // two different widths.
+            //
+            // The owner measured the horizontal overflow: it is as wide as the sidebar's
+            // compression, roughly `sidebarWidth - 64` (~256pt at the default 320), NOT
+            // the rail's 64pt. That number identifies the mechanism exactly — the content
+            // keeps the EXPANDED proposal (window - sidebarWidth) while the frame is
+            // placed in rail mode (window - 64) — and it rules out the rail-insertion
+            // mismatch I would otherwise have blamed. It also explains why merely
+            // claiming the column is not enough: a definite frame cannot repair a STALE
+            // proposal.
+            //
+            // `safeAreaInset` exists for exactly this: the inset reduces the region its
+            // content is proposed, and a change to the inset re-proposes that region. So
+            // the page is measured against the width it is actually given, in both
+            // configurations, without remounting anything.
+            //
+            // The rail's own contract is unchanged — still keyed on `columnVisibility`,
+            // the layout truth rather than the persisted preference, because iPadOS
+            // collapses this column on its own (rotation, Stage Manager) and the rail must
+            // still appear or there is no way back. Still no transition, for the reason
+            // `toggleSidebar` documents: a sliding rail animates the column's width and
+            // every intermediate width reflows the live terminal.
+            detailColumn
+                .safeAreaInset(edge: .leading, spacing: 0) {
+                    if columnVisibility == .detailOnly { sidebarRail }
+                }
             // THE DETAIL PAGE'S SIZE CONTRACT, which nothing on this path had.
             //
             // Every node from here down to Gram's message feed is size-to-children or
