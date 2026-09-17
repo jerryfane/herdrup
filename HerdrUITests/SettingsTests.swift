@@ -127,31 +127,63 @@ final class SettingsTests: XCTestCase {
         // deliberately selects — and at 320pt iPad Slide Over. My width-bucket table
         // passed every phone and would have failed every iPad.
         //
-        // The two labels this test already holds are enough. `acc-claude-2`'s row has no
-        // resets_at, so no hint, so its width is IDENTICAL in the correct and the broken
-        // layouts — it is a fixed yardstick. Executed ratios of
-        // widestRow.width / exhaustedRow.width:
+        // The two labels this test already holds are enough — with ONE premise, which is
+        // now asserted rather than assumed.
+        //
+        // `acc-claude-2` carries no resets_at, so its meter has no reset hint and its row
+        // is identical in the correct layout and in the `mid` one (125.80pt cluster in
+        // both). That is what makes it usable as a yardstick. Two honest caveats the
+        // review established:
+        //
+        //  * it is NOT invariant in the `base` layout (158.71pt there, because the status
+        //    sat beside the meters and the pill compressed this row too). The gate still
+        //    catches `base` on phones, but because BOTH rows compress and the name
+        //    compresses harder — 20.40pt against 68.29pt at 375pt — not because the
+        //    denominator held still.
+        //  * if that fixture ever gains a resets_at — the production-NORMAL case for an
+        //    exhausted account — the yardstick compresses too and the ratio rises to
+        //    ~1.08, which would BLIND this gate silently. So the premise is pinned below:
+        //    the yardstick's readout must be exactly "100% · weekly", with no hint.
+        //
+        // Executed ratios of name / yardstick:
         //
         //   correct  0.842 … 0.886 across 375-440pt, and 0.871 at 820 and 1032
         //   mid      0.379 … 0.661   (readout rigid)
         //   base     0.202 … 0.546   (the reported bug)
         //
-        // 0.70 rather than the 0.75 the review suggested: its own caveat is that if
-        // SwiftUI's minimum for the truncating hint is the longest word instead of one
-        // ellipsis cell, the correct ratio at 375pt is 0.711 — which 0.75 would fail.
-        // 0.70 survives both models and still catches `mid`'s worst case (0.661).
+        // 0.70 rather than the 0.75 the review suggested: if SwiftUI's minimum for the
+        // truncating hint is the longest word rather than one ellipsis cell, the correct
+        // ratio at 375pt is 0.711, which 0.75 would fail. 0.70 survives both models.
+        //
+        // The margin against `mid` at 440pt is only 0.92 of one IBM Plex Mono cell, so it
+        // depends on the mock's reset hint staying two tokens long. That is exactly why
+        // the premise assertion below exists: a fixture change breaks the test loudly
+        // instead of quietly disarming it.
         //
         // Above ~472pt all three layouts converge, which is honest: nothing truncates
         // there, so there is no defect to detect.
-        let widestRow = app.staticTexts["Claude Max (work)"]
-        XCTAssertTrue(widestRow.waitForExistence(timeout: 5))
-        let ratio = widestRow.frame.width / exhaustedRow.frame.width
+        XCTAssertTrue(
+            app.staticTexts["100% · weekly"].waitForExistence(timeout: 5),
+            """
+            the yardstick row's readout is not exactly "100% · weekly" any more, so \
+            `acc-claude-2` has gained a reset hint and the ratio gate below is no longer \
+            discriminating — re-derive it before trusting a green result.
+            """)
+
+        // NAMES, not "widest"/"short": at 15pt Geist-SemiBold "Claude Max (work)" is
+        // 136.25pt and "Claude Pro (personal)" is 156.38pt, so the row this gate measures
+        // is the NARROWER of the two and a fully healthy render tops out at 0.871.
+        let measuredName = app.staticTexts["Claude Max (work)"]
+        XCTAssertTrue(measuredName.waitForExistence(timeout: 5))
+        let yardstick = exhaustedRow
+        let ratio = measuredName.frame.width / yardstick.frame.width
         XCTAssertGreaterThan(
             ratio, 0.70,
             """
-            the long account name rendered \(Int(ratio * 100))% of the short one's width \
-            (\(widestRow.frame.width)pt vs \(exhaustedRow.frame.width)pt), so the trailing \
-            cluster squeezed the name column — this is what showed as "C…".
+            "Claude Max (work)" rendered at \(Int(ratio * 100))% of the unsqueezed \
+            "Claude Pro (personal)" row (\(measuredName.frame.width)pt vs \
+            \(yardstick.frame.width)pt, healthy ceiling 87%), so the trailing cluster \
+            squeezed the name column — this is what showed as "C…".
             """)
 
         // THE WINDOW LABEL MUST SURVIVE. An earlier fix let the readout absorb the whole
