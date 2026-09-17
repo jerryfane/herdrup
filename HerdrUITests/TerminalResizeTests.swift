@@ -278,6 +278,108 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertEqual(probe()["opens"] as? Int, opens)
     }
 
+    /// Waits for an element's frame to stop moving. The terminal probe (`settled()`) is
+    /// unusable once Gram is fronted — it reports the terminal as `covered`, which is the
+    /// intended state — so a layout receipt has to settle on the layout itself.
+    func stillFrame(of element: XCUIElement, timeout: TimeInterval = 8) {
+        var last = element.frame
+        var quietSince: Date?
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.2)
+            let now = element.frame
+            if now == last {
+                if quietSince == nil { quietSince = Date() }
+                if Date().timeIntervalSince(quietSince!) >= 0.4 { return }
+            } else {
+                quietSince = nil
+                last = now
+            }
+        }
+    }
+
+    /// THE OWNER'S GRAM WIDTH BUG, ON THE DESTINATION THAT CAN SEE IT.
+    ///
+    /// Reported on macOS: with the sidebar compressed to the rail, "the gram section
+    /// doesn't take the full width, and instead it allows me to scroll horizontally",
+    /// and the leftover is as wide as the sidebar's own compression (~`sidebarWidth - 64`)
+    /// rather than the rail's 64pt.
+    ///
+    /// I claimed for two rounds that no test could discriminate this. That was wrong, and
+    /// structurally so: the defect lives in `TerminalHomeView.iPadLayout`, which is only
+    /// instantiated when `hSizeClass == .regular`, and the whole UI suite ran on the
+    /// iPhone destination (ci.yml:313) where that branch never exists. The Gram-page
+    /// harness was the wrong harness for the same reason — it mounts `GramView` as a
+    /// window root, with no split view above it. macOS is not required: the iPad Pro
+    /// 13-inch destination this suite already runs on provides the regular size class.
+    ///
+    /// THE SEQUENCE IS THE OWNER'S, not a synthetic state. Gram must be selected from the
+    /// EXPANDED sidebar, because the rail's own Gram button writes
+    /// `columnVisibility = .all` (`railSectionButton`) and so cannot be used to arrive in
+    /// the state under test; then the sidebar is collapsed, which is what ⌘K does.
+    ///
+    /// THE DISCRIMINATOR NEEDS NO CALIBRATION, unlike three earlier receipts of mine: a
+    /// page laid out against the expanded width and placed in the rail width extends PAST
+    /// the window's right edge, by ~`sidebarWidth - 64` (~240pt at the default 320). The
+    /// assertion is `maxX <= window.maxX`, which is a fact about a window, not a
+    /// threshold about a font.
+    ///
+    /// DELIBERATELY NOT ASSERTED: the vertical half of the same report (the header
+    /// drifting to the centre). Three of my diagnoses for it have been refuted, so it is
+    /// measured and attached here as evidence rather than pinned by an assertion that
+    /// would only encode the next guess.
+    func testGramFillsTheDetailColumnWhenTheSidebarIsCollapsed() throws {
+        launch("resize")
+        guard probe()["iPad"] as? Bool == true else {
+            throw XCTSkip("iPadLayout only exists at regular width; the iPhone destination has no split view")
+        }
+        let window = app.frame
+
+        guard let gram = onscreen("Gram", timeout: 10) else {
+            return XCTFail("The expanded sidebar must offer Gram; the rail's button would expand the sidebar")
+        }
+        gram.tap()
+        let search = app.buttons["gram-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10), "Gram's search row is the page's first row")
+        let expanded = search.frame
+        attach("gram-sidebar-expanded")
+
+        guard let toggle = onscreen("terminal-sidebar-toggle", timeout: 5) else {
+            return XCTFail("The receipt must exercise the actual sidebar toggle")
+        }
+        toggle.tap()
+        // NOT `settled()`: that waits on the terminal probe reporting `covered == false`,
+        // and selecting Gram is precisely what covers the terminal. Wait on the thing
+        // under test instead — the row's own frame going quiet.
+        stillFrame(of: search)
+        attach("gram-sidebar-rail")
+        let railed = search.frame
+
+        XCTAssertLessThanOrEqual(
+            railed.maxX, window.maxX + 1,
+            """
+            with the sidebar collapsed, Gram's first row reaches \(railed.maxX)pt in a \
+            \(window.maxX)pt window — \(railed.maxX - window.maxX)pt past the right edge, \
+            so the page was laid out against the EXPANDED width and placed in the rail \
+            width. That overhang is what the owner drags through horizontally. \
+            (expanded row: \(expanded), railed row: \(railed))
+            """)
+
+        // A page that fits cannot scroll sideways. Dragging the feed must not move it.
+        let before = search.frame.minX
+        let feed = app.scrollViews.firstMatch
+        if feed.exists {
+            feed.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+                .press(forDuration: 0.05,
+                       thenDragTo: feed.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
+            stillFrame(of: search)
+            attach("gram-after-horizontal-drag")
+        }
+        XCTAssertEqual(
+            search.frame.minX, before, accuracy: 1,
+            "a horizontal drag moved Gram's content, so the page is wider than its column")
+    }
+
     func testReturningToEarlierTargetStillUsesLatestQuietWindow() {
         launch("resize")
         command("history"); anchor()

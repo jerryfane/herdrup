@@ -472,9 +472,18 @@ struct GramView: View {
                 // priority it is just another default-priority row, so when attachments add
                 // the chips strip and the progress block the stack's minimum can exceed the
                 // window - and a VStack overflows rather than clipping, putting the send
-                // button below the bottom edge. On Mac the split-view host anchors that
-                // overflow at the top (HerdrApp.swift:1885), so all of the excess is lost
-                // off-screen and, with no keyboard send, the composer becomes unreachable.
+                // button below the bottom edge, and with no keyboard send the composer
+                // becomes unreachable.
+                //
+                // This used to claim the split-view host anchors that overflow at the top.
+                // It does not, and never did — cited line 1885 was `.tint(Palette.brand)`.
+                // `TerminalHomeView.iPadLayout`'s detail closure adds NO frame, so an
+                // oversized page is reported oversized and the excess is split between
+                // top and bottom. A round of PR #269 did add a top-anchoring frame, which
+                // would have made exactly the failure this comment described — the whole
+                // excess off the bottom — and it was withdrawn for that reason. Cited by
+                // SYMBOL deliberately: the line number was stale on the day it was
+                // written and shifted again twice since.
                 .layoutPriority(1)
         }
     }

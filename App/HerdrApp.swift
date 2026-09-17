@@ -1517,10 +1517,13 @@ struct TerminalHomeView: View {
     /// "sometimes, for no reason" in the owner's report.
     ///
     /// Read straight from `UserDefaults` because `@AppStorage` is not available during
-    /// property initialisation; the key is the same one `sidebarMinimized` uses below, so
-    /// there is still one source of truth.
+    /// property initialisation ("cannot use instance member within property
+    /// initializer"). Both readers name `Self.sidebarMinimizedKey` so a rename cannot
+    /// desync them — and the desync would be SILENT, since the layout would simply be
+    /// born expanded while the preference said otherwise.
+    private static let sidebarMinimizedKey = "ui.sidebarMinimized"
     @State private var columnVisibility: NavigationSplitViewVisibility =
-        UserDefaults.standard.bool(forKey: "ui.sidebarMinimized") ? .detailOnly : .all
+        UserDefaults.standard.bool(forKey: Self.sidebarMinimizedKey) ? .detailOnly : .all
     /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
     ///
     /// There is deliberately no fully-hidden state. Hiding the column outright loses
@@ -1531,7 +1534,7 @@ struct TerminalHomeView: View {
     /// Persisted because `columnVisibility` is `@State`: on its own the choice lasts
     /// only until relaunch, which is wrong for a preference set deliberately to give
     /// the terminal full width.
-    @AppStorage("ui.sidebarMinimized") private var sidebarMinimized = false
+    @AppStorage(Self.sidebarMinimizedKey) private var sidebarMinimized = false
     /// The sidebar's width, remembered across launches.
     ///
     /// `navigationSplitViewColumnWidth` takes an `ideal` but reports nothing back, and
@@ -1899,23 +1902,28 @@ struct TerminalHomeView: View {
                 .safeAreaInset(edge: .leading, spacing: 0) {
                     if columnVisibility == .detailOnly { sidebarRail }
                 }
-            // THE DETAIL PAGE'S SIZE CONTRACT, which nothing on this path had.
+            // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
-            // Every node from here down to Gram's message feed is size-to-children or
-            // proposal-following, so the page's size was 100% inherited — and an
-            // undersized detail child is placed CENTRED by the split view. That is the
-            // owner's macOS report: the page floated, so its first row (Gram's search
-            // icon) landed mid-column, and ⌘K fixed it because `toggleSidebar` is the one
-            // path that re-proposes the column's geometry to an already-mounted subtree.
+            // It was `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`,
+            // on the theory that an undersized page was being centre-placed by the split
+            // view. Review refuted the premise with the code: `detailColumn`'s ZStack has
+            // `Palette.groundMachine.ignoresSafeArea()` as its first child, and that is a
+            // `Color` (DesignSystem.swift:21) — no intrinsic size, accepts any finite
+            // proposal — so the ZStack already fills, and a flexible frame cannot enlarge
+            // a child that is not small. Inert. The same premise was refuted once before,
+            // at #268, when I put the modifier one level lower.
             //
-            // `maxWidth/maxHeight: .infinity` means the content can no longer REPORT a
-            // size smaller than the column; `.topLeading` makes the residual failure mode
-            // a page pinned to the top-left corner — invisible — instead of a floating
-            // header. The `.topLeading` on `detailColumn`'s own ZStack (:1899) shows this
-            // was always the intent; it was applied one level too deep to do the job,
-            // because it anchors GramView INSIDE the ZStack and nothing anchored the
-            // ZStack inside the column.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // Worse than inert in the one case where it bit: when the page OVERFLOWS
+            // (GramView documents this — both priority rows claim ideal height and a
+            // VStack overflows rather than clipping, so the composer goes off-screen),
+            // the frame clamped the REPORTED size to the proposal and pinned the child
+            // top-leading, sending the whole excess off the BOTTOM instead of splitting
+            // it. That puts the composer — the only way to send — further out of reach,
+            // and hides the overflow from the split view entirely.
+            //
+            // So the vertical half of the owner's report is UNDIAGNOSED, not fixed. Three
+            // guesses have now been refuted on it (a GramView anchor, a ZStack anchor,
+            // this frame), which is why the receipt below measures rather than asserts it.
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)
@@ -1930,11 +1938,22 @@ struct TerminalHomeView: View {
         // since only an explicit expand clears it, the app would then open on the rail
         // forever with no record that the owner ever asked for it. `sidebarMinimized` is
         // now written ONLY by `toggleSidebar` and `railSectionButton` - real gestures.
-        // NO `initial: true` any more: the initial value is now applied by
-        // `columnVisibility`'s own initialiser, BEFORE the split view exists, rather than
-        // by a write that lands after its first layout pass. The handler stays for later
-        // preference changes, preserving the documented one-way preference -> layout edge.
-        .onChange(of: sidebarMinimized) { _, minimized in
+        // `initial: true` IS LOAD-BEARING and was wrongly removed for one round.
+        //
+        // The initialiser above runs once per view LIFETIME; this handler re-fires on
+        // every REMOUNT. `iPadLayout` unmounts and remounts across compact<->regular
+        // transitions (Stage Manager, a window resize), while `columnVisibility` is
+        // `@State` on `TerminalHomeView`, whose identity survives them. Because the
+        // layout -> preference edge is deliberately absent, an iPadOS-initiated collapse
+        // leaves `columnVisibility == .detailOnly` with `sidebarMinimized == false`; this
+        // handler is what re-applied the real preference on reappearance and self-healed
+        // it. Without it, a system collapse STICKS until an explicit ⌘K or rail tap.
+        //
+        // It is not redundant with the initialiser and it is not merely "for later
+        // preference changes": both in-scene writers (`toggleSidebar`, `railSectionButton`)
+        // set `columnVisibility` themselves in the same transaction, so a same-value
+        // re-apply is all this can ever do for a gesture. Its real job is the remount.
+        .onChange(of: sidebarMinimized, initial: true) { _, minimized in
             columnVisibility = minimized ? .detailOnly : .all
         }
         .tint(Palette.brand)
