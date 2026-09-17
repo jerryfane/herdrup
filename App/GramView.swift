@@ -1312,6 +1312,16 @@ struct GramView: View {
         }
     }
 
+    /// What a load actually did, so a manual refresh can say something TRUE.
+    ///
+    /// Derived from the digest answer, not from a list-length delta. A delta is wrong in
+    /// three real cases: at the refresh ceiling (a reader holding 500 gets the newest 500,
+    /// so N arrivals push N out and the count does not move), against a concurrent
+    /// server-side trim or delete (which offsets the delta to zero), and when the server
+    /// first reflects the reader's own optimistic post (which would report "1 new message"
+    /// about their own text).
+    private enum LoadOutcome { case unchanged, updated, failed }
+
     @discardableResult
     private func load(initial: Bool) async -> LoadOutcome {
         // One load at a time: overlapping loads would race each other.
