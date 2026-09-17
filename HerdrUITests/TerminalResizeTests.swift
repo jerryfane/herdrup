@@ -318,36 +318,42 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         return last
     }
 
-    /// THE OWNER'S GRAM WIDTH BUG, ON THE DESTINATION THAT CAN SEE IT.
+    /// A GUARD ON THE SPLIT-VIEW GRAM PAGE'S WIDTH — not a reproduction.
     ///
-    /// Reported on macOS: with the sidebar compressed to the rail, "the gram section
-    /// doesn't take the full width, and instead it allows me to scroll horizontally",
-    /// and the leftover is as wide as the sidebar's own compression (~`sidebarWidth - 64`)
-    /// rather than the rail's 64pt.
+    /// Written while chasing an owner report on macOS: with the sidebar compressed to the
+    /// rail, "the gram section doesn't take the full width, and instead it allows me to
+    /// scroll horizontally", with the leftover as wide as the sidebar's own compression.
     ///
-    /// I claimed for two rounds that no test could discriminate this. That was wrong, and
-    /// structurally so: the defect lives in `TerminalHomeView.iPadLayout`, which is only
-    /// instantiated when `hSizeClass == .regular`, and the whole UI suite ran on the
-    /// iPhone destination (ci.yml:313) where that branch never exists. The Gram-page
-    /// harness was the wrong harness for the same reason — it mounts `GramView` as a
-    /// window root, with no split view above it. macOS is not required: the iPad Pro
-    /// 13-inch destination this suite already runs on provides the regular size class.
+    /// THE OWNER HAS SINCE ESTABLISHED THAT IT DOES NOT HAPPEN ON IPAD, and that it is no
+    /// longer reproducible on the Mac either. So this case is expected to pass both before
+    /// and after every layout change in that investigation, and it must NOT be read as
+    /// evidence about the reported symptom: it cannot see it. Four diagnoses were refuted
+    /// during that hunt and all four fixes were withdrawn; a transient stale measurement
+    /// fits the remaining evidence (⌘K cured it, and so does not seeing it again) better
+    /// than any permanent defect in this code.
     ///
-    /// THE SEQUENCE IS THE OWNER'S, not a synthetic state. Gram must be selected from the
-    /// EXPANDED sidebar, because the rail's own Gram button writes
-    /// `columnVisibility = .all` (`railSectionButton`) and so cannot be used to arrive in
-    /// the state under test; then the sidebar is collapsed, which is what ⌘K does.
+    /// It is kept for what it does cover, which nothing else did: the Gram page must fill
+    /// its detail column and must not scroll sideways at regular width. That surface had
+    /// NO coverage at all, because `iPadLayout` only exists when
+    /// `hSizeClass == .regular` and the whole UI suite ran on the iPhone destination
+    /// (ci.yml:313), where the branch is never instantiated — which is also why an earlier
+    /// receipt of mine passed on code that could not compile the app. This suite already
+    /// runs on CI's iPad Pro 13-inch and already taps the real sidebar toggle.
     ///
-    /// THE DISCRIMINATOR NEEDS NO CALIBRATION, unlike three earlier receipts of mine: a
-    /// page laid out against the expanded width and placed in the rail width extends PAST
-    /// the window's right edge, by ~`sidebarWidth - 64` (~240pt at the default 320). The
-    /// assertion is `maxX <= window.maxX`, which is a fact about a window, not a
+    /// The sequence is the owner's: Gram must be selected from the EXPANDED sidebar,
+    /// because the rail's own Gram button writes `columnVisibility = .all`
+    /// (`railSectionButton`) and so cannot arrive in the state under test; then the
+    /// sidebar is collapsed, which is what ⌘K does.
+    ///
+    /// The discriminator needs no calibration, unlike three earlier receipts of mine: a
+    /// page measured at the expanded width and placed in the rail width extends PAST the
+    /// window's right edge. `maxX <= window.maxX` is a fact about a window, not a
     /// threshold about a font.
     ///
-    /// DELIBERATELY NOT ASSERTED: the vertical half of the same report (the header
-    /// drifting to the centre). Three of my diagnoses for it have been refuted, so it is
-    /// measured and attached here as evidence rather than pinned by an assertion that
-    /// would only encode the next guess.
+    /// DELIBERATELY NOT ASSERTED: the vertical half of that report (the header drifting to
+    /// the centre). It is measured and attached as a screenshot instead. Three diagnoses
+    /// of it were refuted, and it is now unreproducible, so an assertion would only encode
+    /// a guess about a symptom nobody can currently see.
     func testGramFillsTheDetailColumnWhenTheSidebarIsCollapsed() throws {
         launch("resize")
         guard probe()["iPad"] as? Bool == true else {
