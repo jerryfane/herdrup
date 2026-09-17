@@ -346,6 +346,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "the file should stage its own chip — note=\(note.exists ? note.label : "none")")
         XCTAssertTrue(photoChip.exists,
                       "a second paste must ADD an attachment, not replace the first")
+        attach("terminal-composer-files")
 
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
@@ -433,6 +434,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue(send.isHittable)
+        attach("terminal-composer-three-lines")
 
         field.typeText(String(repeating: " overflow", count: 20) + " tail-token")
         Thread.sleep(forTimeInterval: 0.3)

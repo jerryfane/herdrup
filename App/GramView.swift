@@ -69,10 +69,9 @@ struct GramView: View {
     @State private var phase: LoadPhase = .loading
     @State private var recipient: Recipient = .queue
     @State private var draft: String = ""
-    /// Focus of the composer field. Bound so a successful send can resign it —
-    /// the composer is a multiline (`axis: .vertical`) field with no Return-to-send,
-    /// so without this the keyboard has no way to drop and it hides the tab bar.
-    @FocusState private var composerFocused: Bool
+    /// UIKit owns the multiline field; focus is mirrored through its delegate.
+    @State private var composerFocused = false
+    @StateObject private var composerKeyboard = ComposerKeyboard()
     /// True while dictating into the composer, so the field is disabled (typing can't be
     /// overwritten by the next partial) while the live transcript still appends.
     @State private var draftDictating = false
@@ -152,14 +151,11 @@ struct GramView: View {
     /// Gates Send and the paperclip so a text-only send can't race the load and a
     /// second pick can't start concurrently.
     @State private var loadingPhoto = false
-    /// True while a picked file is uploading (many small chunks over SSH).
-    @State private var uploading = false
-    /// Byte progress of the file currently uploading: (bytesSent, totalBytes). Drives
-    /// the composer's determinate progress bar; nil when no upload is in flight.
+    /// Byte progress for the active file's icon ring.
     @State private var uploadBytes: (sent: Int, total: Int)?
-    /// Progress across a multi-file send: (already-sent, total). nil when idle or when
-    /// only a single message is in flight.
+    /// Already-sent file count and batch size, while the snapshot remains displayed.
     @State private var sendProgress: (sent: Int, total: Int)?
+    @State private var failedAttachmentID: UUID?
     /// Dismissed the "set up gram for your agents" card. It also auto-hides once any
     /// agent has messaged (proof they've set the skill up), so this is the manual out.
     @AppStorage("gram.setupCardDismissed") private var setupCardDismissed = false
@@ -1043,107 +1039,77 @@ struct GramView: View {
                 }
                 .disabled(sending)
                 Spacer(minLength: 0)
-            }
-            if !attachedFiles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(attachedFiles) { file in attachmentChip(file) }
-                    }
-                }
-                // A ScrollView is greedy in BOTH axes by default, so the horizontal strip
-                // would also claim vertical slack and add to the height the composer
-                // demands. Pin it to the chips' own height.
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            if let up = uploadBytes {
-                let frac = up.total > 0 ? min(1, Double(up.sent) / Double(up.total)) : 0
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 6) {
-                        Text(uploadStatusLabel(fraction: frac))
-                            .font(Typography.machine(11))
-                            .foregroundStyle(Palette.textFaint)
-                        Spacer(minLength: 8)
-                        if up.total >= 1024 * 1024 {
-                            Text("\(byteString(up.sent)) / \(byteString(up.total))")
-                                .font(Typography.machine(11))
-                                .foregroundStyle(Palette.textFaint)
-                                .monospacedDigit()
-                        }
-                    }
-                    ProgressView(value: frac)
-                        .tint(Palette.text)
-                }
-                .frame(maxWidth: .infinity)
-            } else if let progress = sendProgress, progress.total > 1 {
-                // Between files (this one's upload done, its message posting): keep the count.
-                Text("Sending \(progress.sent + 1) of \(progress.total)…")
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            HStack(alignment: .bottom, spacing: 8) {
                 Button {
                     showAttachSheet = true
                 } label: {
-                    Group {
-                        if loadingPhoto {
-                            // An iCloud-backed pick can take a beat to materialize;
-                            // show it's working rather than a dead paperclip.
-                            ProgressView().tint(Palette.textDim)
-                        } else {
-                            Image(systemName: "paperclip")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(Palette.textDim)
-                        }
-                    }
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(Palette.surface))
+                    ComposerActionIcon(symbol: "paperclip", busy: loadingPhoto)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Attach file")
                 .disabled(sending || loadingPhoto)
-                TextField("Message an agent…", text: $draft, axis: .vertical)
-                    .font(Typography.app(15))
-                    .foregroundStyle(Palette.text)
-                    .tint(Palette.text)
-                    .focused($composerFocused)
-                    .lineLimit(1...3)
-                    .frame(minWidth: 0, maxWidth: .infinity)
-                    .accessibilityIdentifier("gram-composer-input")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
-                    .disabled(draftDictating)   // dictation owns the field while live
-                // Dictate into the draft (on-device); appends, never clobbers typed text.
-                // Disabled during a send so dictation can't race the field-clear.
-                MicButton(text: $draft, recording: $draftDictating)
-                    .fixedSize()
-                    .disabled(sending || loadingPhoto)
-                Button {
-                    Task { await send() }
-                } label: {
-                    Group {
-                        if uploading {
-                            // Over the dark `surface` fill (canSend is false while
-                            // sending), tint the spinner light so it is visible —
-                            // it is the only feedback during a many-chunk upload.
-                            ProgressView().tint(Palette.text)
-                        } else {
-                            Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
-                        }
+            }
+            ComposerSurface {
+                ComposerTextField(
+                    text: $draft,
+                    isEnabled: !draftDictating,
+                    isFocused: composerFocused,
+                    onFocusChange: { composerFocused = $0 },
+                    placeholder: "Message an agent…",
+                    accessibilityIdentifier: "gram-composer-input",
+                    capitalization: .sentences,
+                    autocorrection: .default,
+                    onCommandReturn: {
+                        guard canSend else { return }
+                        Task { await send() }
                     }
-                    .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(canSend ? Palette.text : Palette.surface))
+                )
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .padding(.horizontal, 2)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+
+                if !attachedFiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(attachedFiles) { file in attachmentChip(file) }
+                        }
+                        .padding(.horizontal, 2)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 10)
                 }
-                .fixedSize()
-                .accessibilityLabel("Send gram")
-                .accessibilityIdentifier("gram-send-button")
-                .disabled(!canSend)
-                // Keyboard send. The field is `axis: .vertical` so Return inserts a newline
-                // (a gram is often multi-line, and `onSubmit` does not fire for a vertical
-                // field anyway) - Command+Return sends, matching Mail and Messages.
-                // This is not a convenience: without it an unreachable send button is a total
-                // lockout, which is exactly what was reported on Mac.
-                .keyboardShortcut(.return, modifiers: .command)
+
+                HStack(spacing: 4) {
+                    if composerKeyboard.isVisible && composerFocused {
+                        Button {
+                            composerFocused = false
+                        } label: {
+                            ComposerActionIcon(symbol: "keyboard.chevron.compact.down")
+                        }
+                        .accessibilityLabel("Collapse keyboard")
+                    }
+                    Spacer(minLength: 0)
+                    MicButton(text: $draft, recording: $draftDictating)
+                        .fixedSize()
+                        .disabled(sending || loadingPhoto)
+                    Button {
+                        Task { await send() }
+                    } label: {
+                        ComposerActionIcon(
+                            symbol: "arrow.up",
+                            primary: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || !attachedFiles.isEmpty,
+                            busy: sending)
+                    }
+                    .fixedSize()
+                    .accessibilityLabel("Send gram")
+                    .accessibilityIdentifier("gram-send-button")
+                    .disabled(!canSend)
+                    .opacity(canSend ? 1 : 0.45)
+                    .keyboardShortcut(.return, modifiers: .command)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
         }
         .padding(.horizontal, 16)
@@ -1162,44 +1128,29 @@ struct GramView: View {
             || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// A staged attachment shown in the composer's horizontal strip, with a remove
-    /// button. Sizes to content (long names truncate) rather than filling the width,
-    /// since several chips now sit side by side.
     private func attachmentChip(_ file: PickedAttachment) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: FileGlyph.name(for: file.mime, fileName: file.name))
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.textDim)
-            Text(file.name)
-                .font(Typography.app(13, .medium))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 140)
-            Text(GramFile.displaySize(of: UInt64(file.size)))
-                .font(Typography.machine(11))
-                .foregroundStyle(Palette.textFaint)
-            Button {
-                // Remove the staged bytes with the chip: a dropped attachment must
-                // not leave a secret-bearing temp file behind.
-                try? FileManager.default.removeItem(at: file.dir)
-                attachedFiles.removeAll { $0.id == file.id }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Palette.textFaint)
-            }
-            // Locked during a send: send() snapshots the files up front, so a
-            // "removed" chip would post anyway — a visible remove that silently
-            // still sends is the wrong outcome for a secret-bearing channel. The
-            // strip is read-only until the batch finishes (matching the paperclip/
-            // Send/recipient controls, which are already disabled while sending).
-            .disabled(sending)
+        ComposerAttachmentChip(
+            name: file.name, size: file.size, isImage: file.mime.hasPrefix("image/"),
+            state: attachmentState(file), canRemove: !sending
+        ) {
+            try? FileManager.default.removeItem(at: file.dir)
+            attachedFiles.removeAll { $0.id == file.id }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-        .opacity(sending ? 0.6 : 1)
+        .accessibilityIdentifier("gram-attachment")
+    }
+
+    private func attachmentState(_ file: PickedAttachment) -> ComposerAttachmentState {
+        if file.id == failedAttachmentID { return .failed }
+        guard sending else { return .ready }
+        guard let progress = sendProgress,
+              let index = attachedFiles.firstIndex(where: { $0.id == file.id })
+        else { return .waiting }
+        if index < progress.sent { return .sent }
+        guard index == progress.sent else { return .waiting }
+        if let upload = uploadBytes {
+            return .uploading(sent: upload.sent, total: upload.total)
+        }
+        return .sending
     }
 
     /// A Telegram-style attach sheet: two large iconned choices instead of the old
@@ -1525,21 +1476,6 @@ struct GramView: View {
         }
     }
 
-    /// Label above the upload bar: "Sending k of N · NN%" for a batch, else "Uploading NN%".
-    private func uploadStatusLabel(fraction: Double) -> String {
-        let pct = Int((fraction * 100).rounded())
-        if let p = sendProgress, p.total > 1 {
-            return "Sending \(p.sent + 1) of \(p.total) · \(pct)%"
-        }
-        return "Uploading \(pct)%"
-    }
-
-    /// Compact byte size for the upload bar (e.g. "42.1 MB", "512 KB").
-    private func byteString(_ bytes: Int) -> String {
-        let mb = Double(bytes) / (1024 * 1024)
-        if mb >= 1 { return String(format: "%.1f MB", mb) }
-        return String(format: "%.0f KB", Double(bytes) / 1024)
-    }
 
     private func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1557,11 +1493,11 @@ struct GramView: View {
         composerFocused = false
         defer {
             sending = false
-            uploading = false
             sendProgress = nil
             uploadBytes = nil
         }
         sendError = nil
+        failedAttachmentID = nil
 
         // Text-only: the unchanged single-message path.
         guard !files.isEmpty else {
@@ -1589,12 +1525,10 @@ struct GramView: View {
             sendProgress = (sent: sentCount, total: files.count)
             let caption = index == 0 ? text : ""
             do {
-                uploading = true
                 uploadBytes = (sent: 0, total: file.size)
                 let uploadID = try await client.gramUploadFile(fileURL: file.url) { sent, total in
                     uploadBytes = (sent: sent, total: total)
                 }
-                uploading = false
                 uploadBytes = nil
                 let attachment = HerdrClient.GramFileAttachment(
                     uploadID: uploadID, name: file.name, mime: file.mime)
@@ -1607,6 +1541,7 @@ struct GramView: View {
                 sentCount += 1
                 if index == 0 { draft = "" }
             } catch let error as APIError {
+                failedAttachmentID = file.id
                 // A post still refused after the retries above means the daemon has
                 // not reaped the upload connection at all. The bytes are staged and
                 // complete, so this is a retry rather than a failure — but the raw
@@ -1618,6 +1553,7 @@ struct GramView: View {
                 remaining.append(contentsOf: files[index...])
                 break
             } catch {
+                failedAttachmentID = file.id
                 failure = "Couldn't send. Try again."
                 remaining.append(contentsOf: files[index...])
                 break

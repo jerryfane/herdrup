@@ -295,10 +295,9 @@ struct MicButton: View {
     @Binding var text: String
     /// Idle tint (matches the sibling composer/reply glyphs at each site).
     var tint: Color = Palette.textDim
-    /// Circular footprint + glyph size, matched to the sibling buttons at each site
-    /// (Gram composer is 38/16; the terminal reply bar is 40/15).
-    var diameter: CGFloat = 38
-    var iconSize: CGFloat = 16
+    /// The 40-point visible circle sits inside the composer's 44-point action target.
+    var diameter: CGFloat = 40
+    var iconSize: CGFloat = 18
     /// False when the enclosing surface is backgrounded (e.g. a keep-mounted terminal
     /// pane that is no longer front): recording auto-stops so the mic never runs hidden.
     var isActive: Bool = true
@@ -324,12 +323,15 @@ struct MicButton: View {
                 dictator.start()
             }
         } label: {
-            Image(systemName: dictator.isRecording ? "stop.circle.fill" : "mic.fill")
-                .font(.system(size: iconSize, weight: .semibold))
+            Image(systemName: dictator.isRecording ? "stop.circle.fill" : "mic")
+                .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(dictator.isRecording ? Palette.died : tint)
                 .frame(width: diameter, height: diameter)
-                .background(Circle().fill(Palette.surface))
+                .background(Circle().fill(Palette.surfaceRaised))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel(dictator.isRecording ? "Stop dictation" : "Dictate")
         // Live-append the transcript to the bound field as partial results arrive.
         .onChange(of: dictator.transcript) { _, t in
