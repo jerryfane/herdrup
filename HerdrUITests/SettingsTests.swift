@@ -76,4 +76,46 @@ final class SettingsTests: XCTestCase {
         app.launch()
         return app
     }
+
+    /// GEOMETRY, because the defect was geometric and every text assertion passed
+    /// through it. An exhausted account that also reports usage — the common case, since
+    /// reaching 100% is what exhausts it — put the meters and the status pill on one
+    /// line. `Text("exhausted")` had no line limit, so it wrapped to one letter per
+    /// line into a ~9-line red capsule that doubled the row height, and the width it
+    /// claimed squeezed "Claude Pro (personal)" down to "C…".
+    ///
+    /// Accessibility labels are unaffected by truncation, so a `staticTexts["..."]`
+    /// existence check reports success on the broken layout. What separates the two is
+    /// the rendered FRAME: the pill's height, and the label's width.
+    ///
+    /// The mock's `acc-claude-2` is exactly this case (active false, both windows at
+    /// 100%), which is why this is checkable at all.
+    func testAnExhaustedAccountRowKeepsItsShape() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
+        app.launch()
+
+        let accountsRow = app.staticTexts["Accounts"]
+        XCTAssertTrue(accountsRow.waitForExistence(timeout: 15), "Settings should list Accounts")
+        accountsRow.tap()
+
+        let pill = app.staticTexts["exhausted"].firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: 10), "the exhausted account must show its status")
+
+        // One line of 11pt text plus 3pt padding each side is ~20pt. The wrapped capsule
+        // measured roughly nine times that, so this separates them with room to spare.
+        XCTAssertLessThan(
+            pill.frame.height, 32,
+            """
+            the exhausted pill is \(pill.frame.height)pt tall, so it wrapped instead of             keeping its intrinsic width — the row height follows it.
+            """)
+
+        let label = app.staticTexts["Claude Pro (personal)"]
+        XCTAssertTrue(label.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(
+            label.frame.width, 90,
+            """
+            the account label rendered \(label.frame.width)pt wide, so the trailing             cluster squeezed the name column — this is what showed as "C…".
+            """)
+    }
 }

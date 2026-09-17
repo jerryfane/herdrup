@@ -6905,12 +6905,24 @@ struct SettingsView: View {
         // older flat fields — skipping any window without a percent. Handles 0
         // (tier-only / no usage), 1, or many windows gracefully.
         let windows = (account.usage?.effectiveWindows ?? []).filter { $0.usedPercent != nil }
-        HStack(spacing: 10) {
+        // STACKED, not side by side, and the pill never wraps.
+        //
+        // The status sat BESIDE the meters in an HStack, and an exhausted account that
+        // also reports usage — the common case, since hitting 100% is what exhausts it —
+        // demanded meter width plus pill width on one line. Two things broke, both
+        // visible in the owner's screenshot: `Text("exhausted")` has no line limit, so
+        // under that pressure it wrapped to one letter per line and grew a ~9-line tall
+        // red capsule that doubled the row height; and the width it took left the label
+        // column so narrow that "Claude Pro (personal)" truncated to "C…".
+        //
+        // Putting the status under the meters removes the competition, and
+        // `fixedSize` + `lineLimit(1)` mean the pill keeps its intrinsic width whatever
+        // the row does. An active account's dot is small enough that stacking it costs
+        // nothing.
+        VStack(alignment: .trailing, spacing: 6) {
             if !windows.isEmpty {
-                VStack(alignment: .trailing, spacing: 4) {
-                    ForEach(windows) { window in
-                        usageMeter(window, live: account.usage?.source == "live")
-                    }
+                ForEach(windows) { window in
+                    usageMeter(window, live: account.usage?.source == "live")
                 }
             }
             if account.active {
@@ -6919,6 +6931,8 @@ struct SettingsView: View {
             } else {
                 Text("exhausted")
                     .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                    .lineLimit(1)
+                    .fixedSize()
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.died.opacity(0.12)))
                     .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
