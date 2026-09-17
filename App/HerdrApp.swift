@@ -4934,28 +4934,24 @@ struct TerminalPaneContent: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 keyCap(label: "esc", key: "Escape")
-                keyCap(symbol: "chevron.left", key: "Left")
-                keyCap(symbol: "chevron.up", key: "Up")
-                keyCap(symbol: "chevron.down", key: "Down")
-                keyCap(symbol: "chevron.right", key: "Right")
+                keyCap(image: "ComposerKeyLeft", key: "Left")
+                keyCap(image: "ComposerKeyUp", key: "Up")
+                keyCap(image: "ComposerKeyDown", key: "Down")
+                keyCap(image: "ComposerKeyRight", key: "Right")
                 // End (end-of-line cursor) + the two scroll jumps for a mouse-mode agent
                 // like Claude Code: Ctrl+Home = jump to TOP, Ctrl+End = jump to BOTTOM
                 // (and re-enable auto-follow). ESC[1;5H / ESC[1;5F are the xterm Ctrl+Home
                 // / Ctrl+End sequences Claude Code's readline keymap honors (End alone is a
                 // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
                 keyCap(label: "end", key: "End")
-                rawCap(symbol: "arrow.up.to.line", sequence: "\u{1b}[1;5H")
+                rawCap(label: "Jump to top", image: "ComposerKeyTop", sequence: "\u{1b}[1;5H")
                 // Jump to the newest output. Routed through the pane rather than a raw
                 // byte sequence, so a plain shell scrolls its own scrollback while a
                 // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
                 // `sending || pendingPrefill` like the keycaps: this is local view
                 // navigation, not input to the agent.
                 Button { jumpToTailToken += 1 } label: {
-                    Image(systemName: "arrow.down.to.line").font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                        .padding(.horizontal, 10)
-                        .frame(minWidth: 44, minHeight: 34)
-                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+                    ComposerQuickKeyLabel(text: "Jump to latest output", imageName: "ComposerKeyLatest")
                 }
                 .accessibilityLabel(Text("Jump to latest output"))
                 keyCap(label: "tab", key: "Tab")
@@ -4972,22 +4968,15 @@ struct TerminalPaneContent: View {
                 // The submit affordance rawKeys needs — typing never submits, so
                 // Return is the deliberate second action. Highlighted, as the mockup
                 // shows it.
-                keyCap(symbol: "return", key: "Enter", primary: true)
+                keyCap(image: "ComposerKeyEnter", key: "Enter", primary: true)
             }
             .padding(.horizontal, 24).padding(.vertical, 8)
         }
     }
 
-    private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
+    private func keyCap(label: String? = nil, image: String? = nil, key: String, primary: Bool = false) -> some View {
         Button { ctrlArmed = false; send(.key(key)) } label: {
-            Group {
-                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
-                else { Text(label ?? key).font(Typography.machine(12)) }
-            }
-            .foregroundStyle(primary ? Palette.ground : Palette.textDim)
-            .padding(.horizontal, 10)
-            .frame(minWidth: 44, minHeight: 34)
-            .background(primary ? Palette.text : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: label ?? key, imageName: image, primary: primary)
         }
         // Disabled while a pre-fill is pending too: a stray Return during automatic
         // delivery could race the in-flight agent.prompt (and Return into a booting
@@ -5000,19 +4989,12 @@ struct TerminalPaneContent: View {
     /// straight to the PTY via `pane.send_text` — for keys herdr's named allow-list
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
-    private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
+    private func rawCap(label: String, image: String? = nil, sequence: String) -> some View {
         Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
-            Group {
-                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
-                else { Text(label ?? "").font(Typography.machine(12)) }
-            }
-            .foregroundStyle(Palette.textDim)
-            .padding(.horizontal, 10)
-            .frame(minWidth: 44, minHeight: 34)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: label, imageName: image)
         }
         .disabled(sending || pendingPrefill)
-        .accessibilityLabel(Text(label ?? symbol ?? "key"))
+        .accessibilityLabel(Text(label))
     }
 
     /// One-shot Ctrl for direct terminal input and the reply field. Native terminal
@@ -5020,12 +5002,7 @@ struct TerminalPaneContent: View {
     /// Tapping twice cancels without sending input.
     private var ctrlCap: some View {
         Button { ctrlArmed.toggle() } label: {
-            Text("ctrl").font(Typography.machine(12))
-                .foregroundStyle(ctrlArmed ? Palette.ground : Palette.textDim)
-                .padding(.horizontal, 10)
-                .frame(minWidth: 44, minHeight: 34)
-                .background(ctrlArmed ? Palette.working : Palette.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: "ctrl", armed: ctrlArmed)
         }
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
@@ -5053,6 +5030,7 @@ struct TerminalPaneContent: View {
                 .padding(.horizontal, 2)
             }
             .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 1)
             .padding(.bottom, 10)
         }
     }
@@ -5079,7 +5057,7 @@ struct TerminalPaneContent: View {
 
 
     private var replyBar: some View {
-        ComposerSurface {
+        ComposerSurface(isFocused: replyFocused) {
             ComposerTextField(
                 text: $reply,
                 // Dictation owns the field; an upload must not resign its first responder.
@@ -5114,7 +5092,7 @@ struct TerminalPaneContent: View {
                         replyFocused = false
                         terminalInputFocused = false
                     } label: {
-                        ComposerActionIcon(symbol: "keyboard.chevron.compact.down")
+                        ComposerActionIcon(image: Image("ComposerKeyboard"))
                     }
                     .accessibilityLabel("Collapse keyboard")
                 }
@@ -5136,10 +5114,9 @@ struct TerminalPaneContent: View {
                             replyFocused = false
                         }
                     } label: {
-                        ComposerActionIcon(symbol: "arrow.up", primary: true, busy: sending)
+                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
                     }
                     .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
                     .fixedSize()
                     .accessibilityLabel("Send reply")
                     .accessibilityIdentifier("terminal-send-button")

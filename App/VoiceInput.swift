@@ -295,9 +295,6 @@ struct MicButton: View {
     @Binding var text: String
     /// Idle tint (matches the sibling composer/reply glyphs at each site).
     var tint: Color = Palette.textDim
-    /// The 40-point visible circle sits inside the composer's 44-point action target.
-    var diameter: CGFloat = 40
-    var iconSize: CGFloat = 18
     /// False when the enclosing surface is backgrounded (e.g. a keep-mounted terminal
     /// pane that is no longer front): recording auto-stops so the mic never runs hidden.
     var isActive: Bool = true
@@ -323,13 +320,10 @@ struct MicButton: View {
                 dictator.start()
             }
         } label: {
-            Image(systemName: dictator.isRecording ? "stop.circle.fill" : "mic")
-                .font(.system(size: iconSize, weight: .regular))
-                .foregroundStyle(dictator.isRecording ? Palette.died : tint)
-                .frame(width: diameter, height: diameter)
-                .background(Circle().fill(Palette.surfaceRaised))
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
+            ComposerActionIcon(
+                image: dictator.isRecording ? Image(systemName: "stop.circle.fill") : Image("ComposerMic"),
+                tint: dictator.isRecording ? Palette.died : tint
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(dictator.isRecording ? "Stop dictation" : "Dictate")

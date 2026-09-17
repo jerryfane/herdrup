@@ -22,6 +22,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   Ctrl key arms one native terminal chord in direct input, or a control character in the reply field.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
+- **Composer**: Terminal and Gram share an editor that grows to three lines, then scrolls.
+  Attachments show per-file progress inside the card, with dictation and saved prompts below.
+  Terminal quick keys stay above the card.
 
 ## Requirements
 

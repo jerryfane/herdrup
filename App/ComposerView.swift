@@ -8,9 +8,12 @@ import UIKit
 enum ComposerStyle {
     static let fontSize: CGFloat = 16
     static var lineHeight: CGFloat { 24 * Typography.scale }
+    static let actionHover = Color(red: 38 * 1.15 / 255, green: 42 * 1.15 / 255, blue: 69 * 1.15 / 255)
+    static let primaryKeyHover = Color(red: 238 * 0.9 / 255, green: 240 * 0.9 / 255, blue: 247 * 0.9 / 255)
 }
 
 struct ComposerSurface<Content: View>: View {
+    let isFocused: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -19,31 +22,83 @@ struct ComposerSurface<Content: View>: View {
             .background(Palette.surface, in: RoundedRectangle(cornerRadius: 28, style: .circular))
             .overlay {
                 RoundedRectangle(cornerRadius: 28, style: .circular)
-                    .strokeBorder(Palette.hairline, lineWidth: 1)
+                    .strokeBorder(isFocused ? Palette.textFaint : Palette.hairline, lineWidth: 1)
                     .allowsHitTesting(false)
             }
     }
 }
 
 struct ComposerActionIcon: View {
-    let symbol: String
+    let image: Image
+    var tint: Color?
     var primary = false
     var busy = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     var body: some View {
         ZStack {
-            Circle().fill(primary ? Palette.text : Palette.surfaceRaised)
+            Circle().fill(hovering && isEnabled
+                          ? (primary ? .white : ComposerStyle.actionHover)
+                          : (primary ? Palette.text : Palette.surfaceRaised))
                 .frame(width: 40, height: 40)
             if busy {
-                ProgressView().tint(primary ? Palette.ground : Palette.textDim)
+                ComposerSendingIcon()
             } else {
-                Image(systemName: symbol)
-                    .font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(primary ? Palette.ground : Palette.textDim)
+                image.resizable().renderingMode(.template).scaledToFit()
+                    .frame(width: 18, height: 18)
             }
         }
+        .foregroundStyle(tint ?? (primary ? Palette.ground : Palette.textDim))
         .frame(width: 44, height: 44)
         .contentShape(Circle())
+        .opacity(isEnabled ? 1 : 0.45)
+        .onHover { hovering = $0 }
+    }
+}
+
+struct ComposerQuickKeyLabel: View {
+    let text: String
+    var imageName: String?
+    var primary = false
+    var armed = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    private var fill: Color {
+        if armed { return Palette.working }
+        if primary { return hovering && isEnabled ? ComposerStyle.primaryKeyHover : Palette.text }
+        return hovering && isEnabled ? Palette.surfaceRaised : Palette.surface
+    }
+
+    var body: some View {
+        Group {
+            if let imageName {
+                Image(imageName).resizable().renderingMode(.template).frame(width: 14, height: 14)
+            } else {
+                Text(text).font(.system(size: 12 * Typography.scale, design: .monospaced))
+            }
+        }
+        .foregroundStyle(primary || armed ? Palette.ground : Palette.textDim)
+        .padding(.horizontal, 10)
+        .frame(minWidth: 44, minHeight: 34)
+        .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .circular))
+        .opacity(isEnabled ? 1 : 0.4)
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct ComposerSendingIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spinning = false
+
+    var body: some View {
+        Image("ComposerSending").resizable().renderingMode(.template)
+            .frame(width: 18, height: 18)
+            .rotationEffect(.degrees(spinning ? 360 : 0))
+            .animation(reduceMotion ? nil : .linear(duration: 1.2).repeatForever(autoreverses: false),
+                       value: spinning)
+            .onAppear { spinning = true }
     }
 }
 
@@ -101,6 +156,7 @@ struct ComposerAttachmentChip: View {
     let canRemove: Bool
     let onRemove: () -> Void
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hoveringRemove = false
 
     var body: some View {
@@ -111,11 +167,12 @@ struct ComposerAttachmentChip: View {
                     Circle().trim(from: 0, to: progress)
                         .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                         .rotationEffect(.degrees(-90))
+                        .animation(reduceMotion ? nil : .linear(duration: 0.2), value: progress)
                 } else if state.isIndeterminate {
                     ComposerProgressRing()
                 }
-                Image(systemName: state.isSent ? "checkmark" : state.isFailed ? "exclamationmark.circle" : isImage ? "photo" : "doc")
-                    .font(.system(size: 19, weight: .regular))
+                Image(state.isSent ? "ComposerCheck" : state.isFailed ? "ComposerAlert" : isImage ? "ComposerPhoto" : "ComposerFile")
+                    .resizable().renderingMode(.template).frame(width: 19, height: 19)
                     .foregroundStyle(state.isFailed ? Palette.died : state.isSent ? Palette.text : Palette.textDim)
             }
             .padding(2)
@@ -125,7 +182,7 @@ struct ComposerAttachmentChip: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(name).font(Typography.app(12))
                     .foregroundStyle(Palette.text)
-                    .lineLimit(1).truncationMode(.middle)
+                    .lineLimit(1).truncationMode(.tail)
                     .frame(height: 18 * Typography.scale, alignment: .leading)
                 Text(state.label(size: size)).font(Typography.app(10))
                     .foregroundStyle(state.isFailed ? Palette.died : Palette.textDim)
@@ -135,8 +192,8 @@ struct ComposerAttachmentChip: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(action: onRemove) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .regular))
+                Image("ComposerClose").resizable().renderingMode(.template)
+                    .frame(width: 15, height: 15)
                     .foregroundStyle(hoveringRemove && canRemove ? Palette.text : Palette.textDim)
                     .frame(width: 24, height: 24)
                     .background(hoveringRemove && canRemove ? Palette.surface : .clear, in: Circle())

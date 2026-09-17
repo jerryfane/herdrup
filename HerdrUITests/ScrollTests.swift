@@ -18,6 +18,8 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
         app.launch()
+        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
 
         // Let the app launch and the mock stream feed all 200 lines into the real
         // SwiftTerm view (async), so there is scrollback to move.
@@ -26,9 +28,9 @@ final class ScrollTests: XCTestCase {
         // (1) STATIC CHECK: with the cursor hidden by the seed, an untouched terminal
         // must render essentially identically frame to frame. If it doesn't, some
         // animation is running and the scroll assertion below would be unreliable.
-        let before = app.screenshot()
+        let before = viewport.screenshot()
         Thread.sleep(forTimeInterval: 1.0)
-        let beforeAgain = app.screenshot()
+        let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
         attach(before, name: "01-before")
         XCTAssertLessThan(idleDiff, 0.02,
@@ -36,15 +38,15 @@ final class ScrollTests: XCTestCase {
 
         // (2) SWIPE: drag DOWN on the terminal body (below the header, above the reply
         // bar) to reveal older scrollback. Three firm drags to move a clear distance.
-        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        let high = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let low  = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
         for _ in 0..<3 {
             high.press(forDuration: 0.05, thenDragTo: low)
             Thread.sleep(forTimeInterval: 0.2)
         }
         Thread.sleep(forTimeInterval: 1.0)   // let scroll settle + repaint
 
-        let after = app.screenshot()
+        let after = viewport.screenshot()
         attach(after, name: "02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
 
@@ -64,12 +66,14 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "ccscroll"
         app.launch()
+        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + enter alt-screen/mouse + render
 
         // Static baseline (cursor hidden by the seed): untouched frames ~identical.
-        let before = app.screenshot()
+        let before = viewport.screenshot()
         Thread.sleep(forTimeInterval: 1.0)
-        let beforeAgain = app.screenshot()
+        let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
         attach(before, name: "cc-01-before")
         XCTAssertLessThan(idleDiff, 0.02,
@@ -77,15 +81,15 @@ final class ScrollTests: XCTestCase {
 
         // Swipe DOWN → the fix emits wheel-up (SGR 64) → the stand-in agent redraws an
         // earlier window → content moves.
-        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        let high = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let low  = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
         for _ in 0..<3 {
             high.press(forDuration: 0.05, thenDragTo: low)
             Thread.sleep(forTimeInterval: 0.2)
         }
         Thread.sleep(forTimeInterval: 1.0)
 
-        let after = app.screenshot()
+        let after = viewport.screenshot()
         attach(after, name: "cc-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
         XCTAssertGreaterThan(movedDiff, 0.10,
@@ -103,12 +107,14 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "backfill"
         app.launch()
+        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + backfill read + reset seed feed
 
         // Static baseline (cursor hidden by the fixture): untouched frames ~identical.
-        let before = app.screenshot()
+        let before = viewport.screenshot()
         Thread.sleep(forTimeInterval: 1.0)
-        let beforeAgain = app.screenshot()
+        let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
         attach(before, name: "bf-01-before")
         XCTAssertLessThan(idleDiff, 0.02,
@@ -118,21 +124,18 @@ final class ScrollTests: XCTestCase {
         // screen (same gesture the omp scroll receipt uses).
         // Longer, more numerous drags than the other two scroll tests so more backfilled
         // history is revealed, giving the assert headroom on the CI sim (see #124).
-        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
-        let low  = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.90))
+        let high = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        let low  = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
         for _ in 0..<5 {
             high.press(forDuration: 0.05, thenDragTo: low)
             Thread.sleep(forTimeInterval: 0.2)
         }
         Thread.sleep(forTimeInterval: 1.0)
 
-        let after = app.screenshot()
+        let after = viewport.screenshot()
         attach(after, name: "bf-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
-        // Threshold 0.06 is ~3x the <0.02 idle-noise ceiling asserted above, so it cleanly
-        // separates a working scroll (~0.09 on the CI sim) from a broken backfill (~idle). The
-        // old 0.10 chronically false-failed a working scroll (#122 0.0945, #123 0.0921); see #124.
-        XCTAssertGreaterThan(movedDiff, 0.06,
+        XCTAssertGreaterThan(movedDiff, 0.10,
             "No backfilled history to scroll into: content unchanged after swiping (diff=\(movedDiff)). The connect-time scrollback backfill did not populate SwiftTerm's scrollback.")
     }
 
@@ -151,7 +154,10 @@ final class ScrollTests: XCTestCase {
     private func pixelDiffFraction(_ a: XCUIScreenshot, _ b: XCUIScreenshot) -> Double {
         let w = 90, h = 180
         guard let bufA = rgbaBuffer(a.image, w: w, h: h),
-              let bufB = rgbaBuffer(b.image, w: w, h: h) else { return 1.0 }
+              let bufB = rgbaBuffer(b.image, w: w, h: h) else {
+            XCTFail("Could not decode terminal viewport screenshots")
+            return 0
+        }
         var differing = 0
         var i = 0
         while i < bufA.count {

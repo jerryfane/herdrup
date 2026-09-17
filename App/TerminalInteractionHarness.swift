@@ -1,5 +1,6 @@
 #if DEBUG && canImport(UIKit)
 import Foundation
+import GameController
 import SwiftUI
 import SwiftTerm
 import UIKit
@@ -405,6 +406,7 @@ final class TerminalInteractionHarness: ObservableObject {
         }
         value["mounted"] = surfaces.count
         value["iPad"] = UIDevice.current.userInterfaceIdiom == .pad
+        value["physicalKeyboard"] = GCKeyboard.coalesced != nil
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }

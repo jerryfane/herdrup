@@ -90,7 +90,7 @@ struct SavedPromptsMenu: View {
                 }
             }
         } label: {
-            ComposerActionIcon(symbol: "bookmark")
+            ComposerActionIcon(image: Image("ComposerBookmark"))
         }
         .accessibilityLabel("Saved prompts")
         .sheet(isPresented: $showingEditor) {

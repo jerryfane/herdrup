@@ -1042,13 +1042,13 @@ struct GramView: View {
                 Button {
                     showAttachSheet = true
                 } label: {
-                    ComposerActionIcon(symbol: "paperclip", busy: loadingPhoto)
+                    ComposerActionIcon(image: Image(systemName: "paperclip"), busy: loadingPhoto)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Attach file")
                 .disabled(sending || loadingPhoto)
             }
-            ComposerSurface {
+            ComposerSurface(isFocused: composerFocused) {
                 ComposerTextField(
                     text: $draft,
                     isEnabled: !draftDictating,
@@ -1076,6 +1076,7 @@ struct GramView: View {
                         .padding(.horizontal, 2)
                     }
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 1)
                     .padding(.bottom, 10)
                 }
 
@@ -1084,7 +1085,7 @@ struct GramView: View {
                         Button {
                             composerFocused = false
                         } label: {
-                            ComposerActionIcon(symbol: "keyboard.chevron.compact.down")
+                            ComposerActionIcon(image: Image("ComposerKeyboard"))
                         }
                         .accessibilityLabel("Collapse keyboard")
                     }
@@ -1103,13 +1104,12 @@ struct GramView: View {
                         Button {
                             Task { await send() }
                         } label: {
-                            ComposerActionIcon(symbol: "arrow.up", primary: true, busy: sending)
+                            ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
                         }
                         .fixedSize()
                         .accessibilityLabel("Send gram")
                         .accessibilityIdentifier("gram-send-button")
                         .disabled(!canSend)
-                        .opacity(canSend ? 1 : 0.45)
                         .keyboardShortcut(.return, modifiers: .command)
                     }
                 }
