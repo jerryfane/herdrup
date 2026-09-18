@@ -309,6 +309,17 @@ final class TerminalInteractionHarness: ObservableObject {
                          MockTransport.pagingAgent(kind: "RESIZE-BRAVO", pane: "ix:b")]
     static let driver = TerminalInteractionDriver(control: ScreenshotMock.mode == .control)
     @Published private(set) var revision = 0
+    /// A stand-in for the software keyboard's share of the pane. Animated like the
+    /// real thing so the terminal band really sweeps through intermediate heights.
+    @Published private(set) var keyboardSpacer: CGFloat = 0
+    /// Grid proposals this pane actually COMMITTED — i.e. that reached the resize
+    /// pipeline rather than being coalesced away. A keyboard sweep proposes one per
+    /// animation frame, so this is what tells "the sweep was taken as one event" from
+    /// "every frame was taken as its own resize".
+    private var commits = 0
+    /// The grid of the newest committed proposal, so a receipt can assert that the one
+    /// commit a sweep makes is the fit the sweep ENDED on.
+    private var commitGrid: (cols: Int, rows: Int)?
     private struct Surface {
         weak var view: TerminalView?
         let requestFit: (Int, Int) -> Void
@@ -340,6 +351,46 @@ final class TerminalInteractionHarness: ObservableObject {
         guard enabled else { return (cols, rows) }
         if shared.naturalPanes.contains(paneID) { return (cols, rows) }
         return shared.fits[paneID] ?? (ScreenshotMock.mode == .resize ? (80, 24) : (cols, rows))
+    }
+    /// Recorded when a proposal is committed as a new target, AFTER coalescing.
+    static func noteCommittedFit(paneID: String, cols: Int, rows: Int) {
+        guard enabled else { return }
+        shared.commits += 1
+        shared.commitGrid = (cols: cols, rows: rows)
+    }
+
+    /// Drives a keyboard transition the way UIKit does: the notification (carrying the
+    /// animation's duration, which is what the pane keys its sweep off) first, then an
+    /// animated height change that really sweeps the terminal band through ~20
+    /// intermediate fits.
+    ///
+    /// A FIXTURE, because CI's simulator exposes a hardware keyboard and will not raise
+    /// the software one: the code under test is the pane's own observer, sweep and
+    /// commit path, not this trigger. Real software-keyboard timing stays a device
+    /// check.
+    func sweepKeyboard(hiding: Bool) {
+        // A real iPhone keyboard is ~300pt. This is deliberately smaller so the smallest
+        // simulator CI may pick still leaves the terminal a usable grid — the receipt is
+        // about how many grids one animated sweep commits, not about the exact height.
+        let height: CGFloat = 220
+        let screen = surfaces[activeID]?.view?.window?.bounds
+            ?? CGRect(x: 0, y: 0, width: 400, height: 900)
+        let end = hiding
+            ? CGRect(x: 0, y: screen.height, width: screen.width, height: height)
+            : CGRect(x: 0, y: screen.height - height, width: screen.width, height: height)
+        NotificationCenter.default.post(
+            name: UIResponder.keyboardWillChangeFrameNotification, object: nil,
+            userInfo: [UIResponder.keyboardAnimationDurationUserInfoKey: 0.25,
+                       UIResponder.keyboardFrameEndUserInfoKey: end])
+        if hiding {
+            NotificationCenter.default.post(
+                name: UIResponder.keyboardWillHideNotification, object: nil,
+                userInfo: [UIResponder.keyboardAnimationDurationUserInfoKey: 0.25,
+                           UIResponder.keyboardFrameEndUserInfoKey: end])
+        }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            keyboardSpacer = hiding ? 0 : height
+        }
     }
     static func painted(paneID: String, view: TerminalView, cellSize: CGSize, complete: Bool) {
         guard enabled, var surface = shared.surfaces[paneID], cellSize.height > 0 else { return }
@@ -415,6 +466,10 @@ final class TerminalInteractionHarness: ObservableObject {
         value["mounted"] = surfaces.count
         value["iPad"] = UIDevice.current.userInterfaceIdiom == .pad
         value["physicalKeyboard"] = GCKeyboard.coalesced != nil
+        value["commits"] = commits
+        value["commitCols"] = commitGrid?.cols ?? 0
+        value["commitRows"] = commitGrid?.rows ?? 0
+        value["keyboardSpacer"] = Int(keyboardSpacer.rounded())
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }
@@ -451,6 +506,8 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x24": grid(80, 24)
         case "120x24": grid(120, 24)
         case "80x32": grid(80, 32)
+        case "keyboard-show": sweepKeyboard(hiding: false)
+        case "keyboard-hide": sweepKeyboard(hiding: true)
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -539,6 +596,7 @@ final class TerminalInteractionHarness: ObservableObject {
 
 struct TerminalInteractionRoot: View {
     let control: Bool
+    @ObservedObject private var harness = TerminalInteractionHarness.shared
     private let client = HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
     var body: some View {
         VStack(spacing: 0) {
@@ -553,6 +611,10 @@ struct TerminalInteractionRoot: View {
                                  livePaneIDs: ["ix:a", "ix:b"])
             }
         }
+        // The keyboard's share of the pane, animated by `sweepKeyboard`. SwiftUI's own
+        // keyboard avoidance does the same thing to the same view, so the terminal band
+        // really sweeps through intermediate heights here.
+        .padding(.bottom, harness.keyboardSpacer)
         // ABOVE THE PANE, NOT AS A BOTTOM INSET.
         //
         // As a bottom safe-area inset the fixture bar ended up drawn OVER the pane's
@@ -579,7 +641,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

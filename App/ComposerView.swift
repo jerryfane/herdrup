@@ -8,6 +8,12 @@ import UIKit
 enum ComposerStyle {
     static let fontSize: CGFloat = 16
     static var lineHeight: CGFloat { 24 * Typography.scale }
+    /// How far the typed text and its placeholder start in from the composer's own
+    /// content padding. The round surface reads tighter than a rectangular one at the
+    /// same padding, so the text needs a little more room on the left than the HTML's
+    /// box gives it. Applied as the text container's left inset (and the placeholder's
+    /// leading constraint) so the caret, the text and the placeholder all share it.
+    static let textLeadingInset: CGFloat = 5
     static let actionHover = Color(red: 38 * 1.15 / 255, green: 42 * 1.15 / 255, blue: 69 * 1.15 / 255)
     static let primaryKeyHover = Color(red: 238 * 0.9 / 255, green: 240 * 0.9 / 255, blue: 247 * 0.9 / 255)
 }

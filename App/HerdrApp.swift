@@ -3932,7 +3932,10 @@ struct ComposerTextField: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textColor = UIColor(Palette.text)
         view.tintColor = UIColor(Palette.text)
-        view.textContainerInset = .zero
+        // Text starts `textLeadingInset` in from the surface's padding; the placeholder
+        // below is constrained to the same value so the two never disagree.
+        view.textContainerInset = UIEdgeInsets(top: 0, left: ComposerStyle.textLeadingInset,
+                                              bottom: 0, right: 0)
         view.textContainer.lineFragmentPadding = 0
         view.configureTypography()
         view.autocapitalizationType = capitalization
@@ -4054,7 +4057,8 @@ struct ComposerTextField: UIViewRepresentable {
             placeholder.translatesAutoresizingMaskIntoConstraints = false
             addSubview(placeholder)
             NSLayoutConstraint.activate([
-                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor),
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                                     constant: ComposerStyle.textLeadingInset),
                 placeholder.topAnchor.constraint(equalTo: topAnchor),
             ])
         }
@@ -5369,6 +5373,30 @@ struct TerminalPaneContent: View {
         }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
+        // CLEARED NOW, NOT WHEN THE ROUND TRIP RETURNS.
+        //
+        // The composer is content-sized and the terminal takes whatever height is left,
+        // so clearing the text RESIZES THE PTY. Doing it on the reply meant a second
+        // resize hundreds of milliseconds to seconds after the keyboard had already
+        // caused one: two reflows, two agent repaints and two retained frames for a
+        // single send, the later one landing while the reader was still watching the
+        // first settle. Clearing here folds that height change into the keyboard's own
+        // sweep.
+        //
+        // It is still only ever THIS text: restored below if the send was refused or
+        // failed, and never over something typed since (the composer stays editable for
+        // the whole round trip — see the `isEnabled` comment in replyBar).
+        let clearedReply: String?
+        if case .submitText(let text) = action, reply == text, !text.isEmpty {
+            clearedReply = text
+            reply = ""
+        } else {
+            clearedReply = nil
+        }
+        func restoreClearedReply() {
+            guard let clearedReply, reply.isEmpty else { return }
+            reply = clearedReply
+        }
         Task {
             sending = true
             defer { sending = false }
@@ -5384,20 +5412,17 @@ struct TerminalPaneContent: View {
                 case .keys(let pane, let keys):
                     try await client.sendKeys(pane: pane, keys: keys); actionNote = nil
                 case .refused(let reason):
-                    actionNote = "not sent: \(reason)"; return
+                    actionNote = "not sent: \(reason)"; restoreClearedReply(); return
                 }
-                // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
-                // whole round trip now (see the `isEnabled` comment in replyBar),
-                // so an unconditional clear here would wipe a reply typed while the prompt
-                // was in flight — the very flow that fix exists to allow.
-                if case .submitText(let sent) = action, reply == sent { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
                 actionNote = Self.promptFailureNote(for: apiError)
+                restoreClearedReply()
             } catch {
                 actionNote = "send failed: \(error)"
+                restoreClearedReply()
             }
         }
     }

@@ -462,4 +462,96 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "typing after a multiline paste should keep the caret at the end")
         XCTAssertTrue(send.isHittable)
     }
+
+    /// Polls for a retained frame rather than waiting on a predicate.
+    ///
+    /// TIGHT POLLING, NOT `XCTNSPredicateExpectation`: that re-evaluates about once a
+    /// second and these frames are deliberately short-lived, so a predicate wait can
+    /// miss one entirely and report a cover that never appeared.
+    private func sawCover(within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if (probe()["covered"] as? Bool) == true { return true }
+        }
+        return false
+    }
+
+    /// A KEYBOARD IS ONE RESIZE, NOT TWENTY.
+    ///
+    /// The terminal is the only flexible view in the pane, so the keyboard's animation
+    /// sweeps its height through every intermediate value and each one used to be
+    /// committed as its own grid. Every commit restarted the settle window and re-armed
+    /// the reveal ceiling, so the retained frame outlived the keyboard by about a
+    /// second — the 1-2s of movement after sending that this exists to remove.
+    ///
+    /// `commits` counts proposals that survived coalescing, so this tells "the sweep was
+    /// taken as one event" from "every animation frame was taken as its own resize".
+    func testKeyboardSweepCommitsOneGrid() {
+        launch("control")
+        XCTAssertTrue(app.textViews["terminal-reply-input"].waitForExistence(timeout: 10))
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2 }
+        let openRows = probe()["rows"] as? Int ?? 0
+        var commits = probe()["commits"] as? Int ?? 0
+
+        command("keyboard-show")
+        XCTAssertTrue(sawCover(within: 2),
+                      "no frame was retained while the keyboard took the pane: \(probe())")
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) < openRows }
+        let shown = (probe()["commits"] as? Int ?? 0) - commits
+        XCTAssertEqual(shown, 1, "the keyboard's arrival committed \(shown) grids: \(probe())")
+        attach("keyboard-show-one-commit")
+
+        commits = probe()["commits"] as? Int ?? 0
+        command("keyboard-hide")
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) == openRows }
+        let hidden = (probe()["commits"] as? Int ?? 0) - commits
+        XCTAssertEqual(hidden, 1, "the keyboard's dismissal committed \(hidden) grids: \(probe())")
+        XCTAssertEqual(probe()["commitRows"] as? Int, openRows,
+                       "the one commit must be the fit the sweep ENDED on")
+        attach("keyboard-hide-one-commit")
+    }
+
+    /// SENDING IS ONE RESIZE TOO, and its own input must not strip its cover.
+    ///
+    /// Two defects met here. The reply was cleared when the round trip RETURNED, which
+    /// resized the pane a second time long after the keyboard had already resized it —
+    /// two reflows and two repaints for one send. And the send's `userInputToken` bump
+    /// (which must drop a stale frame, review d750df7) also latched the burst closed, so
+    /// the dismissal it causes ran uncovered while a drain was in flight.
+    func testSendClearsComposerAtOnceAndKeepsItsFrame() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("keyboard-show")
+        wait { ($0["covered"] as? Bool) == false }
+        field.tap()
+        field.typeText("send-clear" + String(repeating: " wrapped", count: 40))
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.3)
+        let grown = field.frame.height
+        // A drain IS IN FLIGHT across the send: that is the state in which the closed
+        // burst refused to cover, so the receipt has to be taken in it. `natural` hands
+        // fitting back to the real layout afterwards, or the sweep's own fit would be
+        // rewritten to the pinned grid and never commit at all.
+        command("delayed")
+        command("80x32")
+        command("natural")
+        let commits = probe()["commits"] as? Int ?? 0
+        send.tap()
+        command("keyboard-hide")
+        XCTAssertTrue(sawCover(within: 2),
+                      "the send's own keyboard dismissal was left uncovered: \(probe())")
+        // Emptied on the tap, not on the reply: one height change, inside the sweep.
+        let cleared = Date().addingTimeInterval(0.4)
+        var shrank = false
+        while Date() < cleared {
+            if field.frame.height < grown - 1 { shrank = true; break }
+        }
+        XCTAssertTrue(shrank, "the composer still held the sent text after the tap")
+        wait { ($0["covered"] as? Bool) == false }
+        let spent = (probe()["commits"] as? Int ?? 0) - commits
+        XCTAssertEqual(spent, 1, "one send cost \(spent) grid commits: \(probe())")
+        attach("send-dismissal-one-commit")
+    }
 }
