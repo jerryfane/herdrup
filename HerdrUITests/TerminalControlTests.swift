@@ -564,3 +564,5 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         wait { ($0["covered"] as? Bool) == false && ($0["keyboardSpacer"] as? Int) == 0 }
         XCTAssertLessThan(field.frame.height, grown - 1,
                           "the composer never gave the sent text's height back")
+    }
+}
