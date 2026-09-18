@@ -33,6 +33,8 @@ jobs:
           print(f'Xcode={xcode}; device={phone}; keyboard preference=false')
           PY
           xcodebuild -version
+      - name: Boot configured simulator
+        run: |
           xcrun simctl boot "$PHONE"
           xcrun simctl bootstatus "$PHONE" -b
       - name: Compile standalone public-API keyboard probe
