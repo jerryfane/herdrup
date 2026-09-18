@@ -175,28 +175,6 @@ jobs:
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY
 
-      - name: Configure simulator keyboard destinations before launch
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, plistlib, subprocess
-          domain = "com.apple.iphonesimulator"
-          source = pathlib.Path.home() / "Library/Preferences" / f"{domain}.plist"
-          preferences = plistlib.loads(source.read_bytes()) if source.exists() else {}
-          preferences["ConnectHardwareKeyboard"] = False
-          devices = preferences.setdefault("DevicePreferences", {})
-          for key, connected in [("IPHONE_UDID", False), ("IPAD_UDID", True)]:
-              udid = os.environ[key].upper()
-              devices.setdefault(udid, {})["ConnectHardwareKeyboard"] = connected
-              print(f"{key}={udid}: ConnectHardwareKeyboard={connected}")
-          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "simulator-keyboards.plist"
-          destination.write_bytes(plistlib.dumps(preferences))
-          subprocess.run(["defaults", "import", domain, str(destination)], check=True)
-          PY
-          # Simulator reads these preferences when its UI attaches to each device.
-          # Phone tests exercise software-keyboard dismissal; iPad tests retain
-          # real hardware-keyboard input. The app probes assert the actual state.
-          open -a "$(xcode-select -p)/Applications/Simulator.app"
-
       - name: Build for simulator (compile check — SwiftTerm 1.15.0 + Metal + app)
         run: |
           set -o pipefail

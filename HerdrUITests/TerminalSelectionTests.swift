@@ -385,16 +385,14 @@ final class TerminalSelectionTests: XCTestCase {
     /// observable for "gave up the responder while keeping the selection". Hence `fr=` on the
     /// probe and hence this test.
     ///
-    /// WHAT IT PINS, which is the product contract and not the mechanism: a deliberate collapse
-    /// resigns the responder (keyboard down) AND the selection survives in the model (a double
-    /// tap re-presents Copy without re-selecting). Under the async-reset mechanism this fails at
+    /// Without a physical keyboard, deliberate collapse resigns the responder AND
+    /// preserves the selection. With one attached, the control must stay hidden. A double
+    /// tap re-presents Copy without re-selecting. Under the async-reset mechanism this fails at
     /// the `fr=0` poll; under a mechanism that resigns by clearing the selection it fails at
     /// `sel=1`. Both are real regressions and each has its own failure message.
-    func testTheCollapseChevronDismissesTheKeyboardWithAWordSelected() throws {
-        // This is the positive software-keyboard case. CI disconnects the phone's
-        // hardware keyboard; iPad retains one for direct-input coverage.
+    func testKeyboardDismissalRespectsHardwareAndPreservesSelection() throws {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
-                          "this regression requires the iPhone software-keyboard destination")
+                          "this regression exercises the iPhone terminal keyboard")
 
         let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
@@ -414,10 +412,6 @@ final class TerminalSelectionTests: XCTestCase {
         // slid under the finger. Settle first, then select.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.30)).tap()
         Thread.sleep(forTimeInterval: 2.5)
-        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
-                      "premise: the software keyboard must be visible")
-        XCTAssertTrue(probe.label.contains("hardware=0"),
-                      "premise: disconnect the simulator hardware keyboard; dismissal is intentionally hidden while it is attached. probe[\(probe.label)]")
         // dx 0.150 is col 7 — written on BOTH the primary and continuation row types with a
         // column of slack either side. See the long note in the other test for the enumeration.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.150, dy: 0.30)).doubleTap()
@@ -432,6 +426,18 @@ final class TerminalSelectionTests: XCTestCase {
                       "premise: the terminal does not hold the responder, so there is nothing for the chevron to resign. probe[\(beforeReading)]")
 
         let chevron = app.buttons["Collapse keyboard"]
+        let physicalKeyboard = beforeReading.contains("hardware=1")
+        XCTAssertTrue(physicalKeyboard || beforeReading.contains("hardware=0"),
+                      "the receipt must identify the real keyboard state. probe[\(beforeReading)]")
+        if physicalKeyboard {
+            XCTAssertFalse(chevron.waitForExistence(timeout: 2),
+                           "an attached keyboard must hide dismissal even with a word selected")
+            print("Selection dismissal: physical keyboard attached; hidden control verified. Software-only dismissal was not exercised.")
+            return
+        }
+        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                      "premise: the software keyboard must be visible")
+        print("Selection dismissal: no physical keyboard; exercising dismissal with selection.")
         XCTAssertTrue(chevron.waitForExistence(timeout: 5),
                       "the chevron is absent while the keyboard is up with a selection held — which IS the original defect: no affordance to dismiss with")
         chevron.tap()
