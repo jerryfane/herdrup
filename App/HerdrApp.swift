@@ -8102,10 +8102,22 @@ struct MockTransport: HerdrTransport {
     /// which makes the UI test's "did the content move?" an exact before/after image
     /// compare with no blinking-cursor false positive. Same reset shape as
     /// `paneStreamReset`; base64 built at runtime (DEBUG/UI-test-only, not a fixture).
+    ///
+    /// EVERY ROW LOOKS DIFFERENT, not just its three-digit number. The rows used to
+    /// share one sentence, so a real scroll of a whole screen changed only the digits:
+    /// measured at head 45ba03b the pixel difference after three firm drags was 0.0289
+    /// against ScrollTests' 0.10 floor, and the receipt failed while the screenshots it
+    /// attached showed the top line moving from 170 to 085 — a working scroll reported
+    /// as the dead-scroll symptom. A per-row letter and a per-row bar length make a
+    /// one-screen shift change most of the pixels, so the floor now separates a real
+    /// scroll from a dead one instead of separating nothing.
     static func scrollbackResetFrame() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         for i in 1...200 {
-            body += String(format: "SCROLLTEST line %03d  the quick brown fox jumps over the lazy dog\r\n", i)
+            let letter = letters[i % letters.count]
+            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
+            body += String(format: "SCROLLTEST line %03d %@ %@\r\n", i, String(letter), bar)
         }
         body += "SCROLLTEST end, swipe down to reveal earlier lines"
         let b64 = Data(body.utf8).base64EncodedString()
@@ -8117,10 +8129,17 @@ struct MockTransport: HerdrTransport {
     /// scrollback. `\r\n` endings (no staircase), cursor hidden (ESC[?25l) so static frames stay
     /// byte-identical for the before/after image compare. Built at runtime (DEBUG/UI-test only);
     /// JSONSerialization escapes the ESC + control bytes in the `text` field.
+    ///
+    /// Rows differ by more than their number, for the reason `scrollbackResetFrame`
+    /// records: one shared sentence made a real one-screen scroll a ~3% pixel change,
+    /// which is not a signal the receipt's 10% floor can read.
     static func backfillRead() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         for i in 1...1000 {
-            body += String(format: "BACKFILL line %04d  the quick brown fox jumps over the lazy dog\r\n", i)
+            let letter = letters[i % letters.count]
+            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
+            body += String(format: "BACKFILL line %04d %@ %@\r\n", i, String(letter), bar)
         }
         body += "BACKFILL end, swipe down to reveal earlier lines"
         let payload: [String: Any] = ["id": "mock", "result": ["read": [
