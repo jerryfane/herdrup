@@ -19,6 +19,8 @@ on:
   #
   # `main` is not branch-protected, so no required status check depends on the old push
   # trigger. `workflow_dispatch` stays for deliberate one-off runs.
+  push:
+    branches: [verify/soft-square-lifecycle]
   pull_request:
     paths-ignore:
       - "**/*.md"
@@ -255,7 +257,32 @@ jobs:
               recorder=
             fi
           }
-          trap stop_recording EXIT
+          # Diagnostic branch only: sample the unchanged app while repeating the
+          # exact failing transition. Any failed iteration keeps the run red.
+          xcrun simctl spawn "$IPHONE_UDID" log stream --style compact --level debug \
+            --predicate 'process == "Herdr"' > TestReceipts/lifecycle-system.log 2>&1 &
+          streamer=$!
+          (
+            while sleep 5; do
+              for pid in $(pgrep -x Herdr || true); do
+                if command=$(ps -p "$pid" -o command=); then
+                  case "$command" in
+                    */Herdr.app/Herdr*)
+                      sample "$pid" 1 10 \
+                        -file "TestReceipts/lifecycle-stack-$pid-$(date +%Y%m%dT%H%M%S).txt" || true
+                      ;;
+                  esac
+                fi
+              done
+            done
+          ) > TestReceipts/lifecycle-sampler.log 2>&1 &
+          sampler=$!
+          cleanup() {
+            stop_recording
+            kill "$sampler" "$streamer" 2>/dev/null || true
+            wait "$sampler" "$streamer" || true
+          }
+          trap cleanup EXIT
           run_suite() {
             local label="$1" udid="$2" budget="$3"
             shift 3
@@ -284,29 +311,19 @@ jobs:
                 echo "::error::$label exceeded its ${budget} budget; see TestReceipts/$label-first.log"
                 return 1
               fi
-              echo "::error::$label first run failed; preserving it and collecting raw diagnostics"
-              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
-                -project Herdr.xcodeproj -scheme Herdr \
-                -destination "platform=iOS Simulator,id=$udid" \
-                -parallel-testing-enabled NO \
-                -test-timeouts-enabled YES \
-                -default-test-execution-time-allowance 300 \
-                -maximum-test-execution-time-allowance 600 \
-                -derivedDataPath .build-dd \
-                -clonedSourcePackagesDirPath SourcePackages \
-                -resultBundlePath "TestReceipts/$label-diagnostic.xcresult" \
-                "$@" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "TestReceipts/$label-diagnostic.log" || true
               return 1
             fi
           }
-          FOCUS="${{ github.event.inputs.only_suite }}"
+          FOCUS=TerminalControlTests
           if [ -n "$FOCUS" ]; then
             case "${{ github.event.inputs.only_device }}" in
               ipad) label=iPad; udid="$IPAD_UDID"; xcrun simctl bootstatus "$IPAD_UDID" -b ;;
               *)    label=iPhone; udid="$IPHONE_UDID" ;;
             esac
             echo "::notice::focused dispatch: HerdrUITests/$FOCUS on $label only"
-            run_suite "$label-$FOCUS" "$udid" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
+            run_suite "$label-lifecycle" "$udid" 25m \
+              "-only-testing:HerdrUITests/$FOCUS/testAppDeactivationDisarmsBeforeNextDirectKey" \
+              -test-iterations 12 || failed=1
             exit "$failed"
           fi
           # Whole iPhone UI suite: Scroll, Selection, Paging, and terminal interactions.
@@ -330,7 +347,7 @@ jobs:
 
       - name: Run UIKit SwiftTerm API regressions on both devices
         # Still collect API evidence when an interaction assertion failed.
-        if: ${{ !cancelled() && steps.simulators.outcome == 'success' && github.event.inputs.only_suite == '' }}
+        if: ${{ false }}
         working-directory: Vendor/SwiftTerm
         run: |
           set -o pipefail
@@ -381,6 +398,8 @@ jobs:
             [ -d "$bundle" ] || continue
             xcrun xcresulttool export attachments --path "$bundle" \
               --output-path "${bundle%.xcresult}-attachments"
+            xcrun xcresulttool export diagnostics --path "$bundle" \
+              --output-path "${bundle%.xcresult}-diagnostics"
           done
 
       - name: Upload terminal receipts and first-failure diagnostics
@@ -392,3 +411,4 @@ jobs:
             TestReceipts/
             SimulatorDevices.json
           if-no-files-found: ignore
+          include-hidden-files: true
