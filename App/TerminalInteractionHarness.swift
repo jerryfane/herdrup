@@ -382,10 +382,10 @@ final class TerminalInteractionHarness: ObservableObject {
     /// the software one: the code under test is the pane's own observer, sweep and
     /// commit path, not this trigger. Real software-keyboard timing stays a device
     /// check.
-    /// `duration` is what UIKit would report. A dragged (interactive) dismissal really
-    /// does take about a second, and the slow case is the one a receipt needs when it
-    /// has to get a separate tap in while the keyboard is still moving.
-    func sweepKeyboard(hiding: Bool, duration: Double = 0.25) {
+    /// The reported duration is UIKit's nominal 0.25s, which is what the pane keys its
+    /// sweep window off.
+    func sweepKeyboard(hiding: Bool) {
+        let duration = 0.25
         // A real iPhone keyboard is ~300pt. This is deliberately smaller so the smallest
         // simulator CI may pick still leaves the terminal a usable grid — the receipt is
         // about how many grids one animated sweep commits, not about the exact height.
@@ -524,9 +524,6 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
-        // A DRAGGED dismissal: long enough that a receipt can tap Send while the
-        // keyboard is still on its way out, which is when the phone's own Send does it.
-        case "keyboard-hide-slow": sweepKeyboard(hiding: true, duration: 1.2)
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -662,7 +659,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "keyboard-hide-slow"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

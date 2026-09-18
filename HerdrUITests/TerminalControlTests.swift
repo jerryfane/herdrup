@@ -521,21 +521,24 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("keyboard-hide-one-commit")
     }
 
-    /// SENDING IS ONE RESIZE TOO, and its own input must not strip its cover.
+    /// A SEND CLOSES THE BURST, AND THE DISMISSAL IT CAUSES MUST STILL BE COVERED.
     ///
-    /// Two defects met here. The reply was cleared when the round trip RETURNED, which
-    /// resized the pane a second time long after the keyboard had already resized it —
-    /// two reflows and two repaints for one send. And the send's `userInputToken` bump
-    /// (which must drop a stale frame, review d750df7) also latched the burst closed, so
-    /// the dismissal it causes ran uncovered while a drain was in flight.
+    /// `send()` bumps `userInputToken`, which drops the retained frame on purpose — an
+    /// input whose effect is hidden reads as ignored (review d750df7). It also latched
+    /// the burst CLOSED, so the keyboard dismissal the same tap performs re-covered only
+    /// if no drain was in flight; while one was, the reader watched the raw reflow. That
+    /// is the state staged here: input first, drain in flight, then the dismissal.
     ///
-    /// THE SEND HAPPENS INSIDE THE DISMISSAL, because that is what the phone does: Send
-    /// resigns the composer and the keyboard leaves underneath it. Tapping Send and then
-    /// asking for a dismissal is two separate XCUITest taps ~100-400ms apart, so the
-    /// composer's clear would spend a commit of its own before any sweep existed, for
-    /// reasons that say nothing about this change. Review caught exactly that (f1),
-    /// hence the dragged-length dismissal.
-    func testSendClearsComposerAtOnceAndKeepsItsFrame() {
+    /// NOT ONE OVERLAPPING GESTURE. XCUITest blocks on app quiescence, so a tap issued
+    /// during a 1.2s dismissal animation does not land until the animation is over: in
+    /// run 35340997265 the whole sweep had finished (`keyboardSpacer` 0) before the
+    /// first probe read returned, and the cover had come and gone inside the blocked
+    /// window. Sequencing the two is the only thing this harness can actually observe,
+    /// and it stages the same invariant.
+    ///
+    /// The composer's clear is asserted as a CONTRACT (the height comes back), not as a
+    /// stopwatch: its timing is not observable through a query that waits for quiescence.
+    func testSendKeepsAFrameAcrossItsOwnDismissal() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
@@ -547,31 +550,22 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 0.3)
         let grown = field.frame.height
-        // A drain IS IN FLIGHT across the send: that is the state in which the closed
-        // burst refused to cover, so the receipt has to be taken in it. `natural` hands
-        // fitting back to the real layout afterwards, or the sweep's own fit would be
-        // rewritten to the pinned grid and never commit at all.
+
         command("delayed")
-        command("80x32")
-        command("natural")
-        let commits = probe()["commits"] as? Int ?? 0
-        command("keyboard-hide-slow")
         send.tap()
-        XCTAssertTrue(sawCover(within: 2),
+        wait { ($0["covered"] as? Bool) == false }
+        // A drain IS IN FLIGHT across the dismissal: that is the state in which the
+        // closed burst refused to cover. `delayed` holds the response ~0.9s, so the
+        // cover is still up when a query can finally be answered.
+        command("80x32")
+        command("keyboard-hide")
+        XCTAssertTrue(sawCover(within: 4),
                       "the send's own keyboard dismissal was left uncovered: \(probe())")
-        // The clear's height change has to land INSIDE the sweep, and the commit count
-        // is what proves it: a clear that waited for the round trip resizes the band on
-        // its own clock and commits its own grid.
-        //
-        // NOT A STOPWATCH ON `field.frame`. XCUITest blocks a frame query until the app
-        // is quiescent, so during a dragged dismissal the first query returns after the
-        // animation — a 0.6s window measured the harness, not the app. Run 35329283397
-        // failed on exactly that.
+        attach("send-dismissal-retains-frame")
+
+        command("natural")
         wait { ($0["covered"] as? Bool) == false && ($0["keyboardSpacer"] as? Int) == 0 }
-        let spent = (probe()["commits"] as? Int ?? 0) - commits
-        XCTAssertLessThanOrEqual(spent, 2, "one send cost \(spent) grid commits: \(probe())")
         XCTAssertLessThan(field.frame.height, grown - 1,
                           "the composer never gave the sent text's height back")
-        attach("send-dismissal-one-commit")
     }
 }

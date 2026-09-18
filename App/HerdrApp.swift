@@ -3932,10 +3932,7 @@ struct ComposerTextField: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textColor = UIColor(Palette.text)
         view.tintColor = UIColor(Palette.text)
-        // Text starts `textLeadingInset` in from the surface's padding; the placeholder
-        // below is constrained to the same value so the two never disagree.
-        view.textContainerInset = UIEdgeInsets(top: 0, left: ComposerStyle.textLeadingInset,
-                                              bottom: 0, right: 0)
+        view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
         view.configureTypography()
         view.autocapitalizationType = capitalization
@@ -4057,8 +4054,7 @@ struct ComposerTextField: UIViewRepresentable {
             placeholder.translatesAutoresizingMaskIntoConstraints = false
             addSubview(placeholder)
             NSLayoutConstraint.activate([
-                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                                     constant: ComposerStyle.textLeadingInset),
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor),
                 placeholder.topAnchor.constraint(equalTo: topAnchor),
             ])
         }
@@ -5083,6 +5079,7 @@ struct TerminalPaneContent: View {
             )
             .frame(minWidth: 0, maxWidth: .infinity)
             .padding(.horizontal, 2)
+            .padding(.leading, ComposerStyle.textLeadingInset)
             .padding(.top, 2)
             .padding(.bottom, 10)
 
@@ -5423,7 +5420,12 @@ struct TerminalPaneContent: View {
                 await refresh()
             } catch let apiError as APIError {
                 actionNote = Self.promptFailureNote(for: apiError)
-                restoreClearedReply()
+                // NOT ON A TIMEOUT. `agent.prompt` writes the text and schedules the
+                // Enter, so a timeout means "sent, awaiting confirmation" (see
+                // promptFailureNote): putting the text back there would invite a second
+                // send of something the agent already has. Every other code says it did
+                // not land, and the reader should get their text back.
+                if apiError.code != "timeout" { restoreClearedReply() }
             } catch {
                 actionNote = "send failed: \(error)"
                 restoreClearedReply()
