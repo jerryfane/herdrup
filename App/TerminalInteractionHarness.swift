@@ -299,6 +299,13 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     }
 }
 
+/// The fixture keyboard's height, observed by the fixture root alone so the probe's
+/// ten-per-second refresh cannot re-render the pane under test.
+@MainActor
+final class KeyboardSpacerBox: ObservableObject {
+    @Published var height: CGFloat = 0
+}
+
 /// DEBUG-only bridge. The probe reads rendered cells and UIKit scroll coordinates;
 /// it never reads the emulator's private resize anchor or the requested logical row.
 @MainActor
@@ -309,9 +316,16 @@ final class TerminalInteractionHarness: ObservableObject {
                          MockTransport.pagingAgent(kind: "RESIZE-BRAVO", pane: "ix:b")]
     static let driver = TerminalInteractionDriver(control: ScreenshotMock.mode == .control)
     @Published private(set) var revision = 0
-    /// A stand-in for the software keyboard's share of the pane. Animated like the
-    /// real thing so the terminal band really sweeps through intermediate heights.
-    @Published private(set) var keyboardSpacer: CGFloat = 0
+    /// A stand-in for the software keyboard's share of the pane, animated like the real
+    /// thing so the terminal band really sweeps through intermediate heights.
+    ///
+    /// ITS OWN OBSERVABLE, not a property of the harness. The fixture bar ticks
+    /// `revision` ten times a second to refresh the probe label, so a root that observed
+    /// the harness re-rendered the whole pane at that rate: XCUITest then could not
+    /// resolve a hit point for the header's find button ("Activation point invalid") and
+    /// the iPhone suite ran long enough to hit the job's 120-minute ceiling. Measured in
+    /// run 35329283397.
+    let spacer = KeyboardSpacerBox()
     /// Grid proposals this pane actually COMMITTED — i.e. that reached the resize
     /// pipeline rather than being coalesced away. A keyboard sweep proposes one per
     /// animation frame, so this is what tells "the sweep was taken as one event" from
@@ -368,7 +382,10 @@ final class TerminalInteractionHarness: ObservableObject {
     /// the software one: the code under test is the pane's own observer, sweep and
     /// commit path, not this trigger. Real software-keyboard timing stays a device
     /// check.
-    func sweepKeyboard(hiding: Bool) {
+    /// `duration` is what UIKit would report. A dragged (interactive) dismissal really
+    /// does take about a second, and the slow case is the one a receipt needs when it
+    /// has to get a separate tap in while the keyboard is still moving.
+    func sweepKeyboard(hiding: Bool, duration: Double = 0.25) {
         // A real iPhone keyboard is ~300pt. This is deliberately smaller so the smallest
         // simulator CI may pick still leaves the terminal a usable grid — the receipt is
         // about how many grids one animated sweep commits, not about the exact height.
@@ -378,18 +395,17 @@ final class TerminalInteractionHarness: ObservableObject {
         let end = hiding
             ? CGRect(x: 0, y: screen.height, width: screen.width, height: height)
             : CGRect(x: 0, y: screen.height - height, width: screen.width, height: height)
+        let info: [AnyHashable: Any] = [
+            UIResponder.keyboardAnimationDurationUserInfoKey: duration,
+            UIResponder.keyboardFrameEndUserInfoKey: end]
         NotificationCenter.default.post(
-            name: UIResponder.keyboardWillChangeFrameNotification, object: nil,
-            userInfo: [UIResponder.keyboardAnimationDurationUserInfoKey: 0.25,
-                       UIResponder.keyboardFrameEndUserInfoKey: end])
+            name: UIResponder.keyboardWillChangeFrameNotification, object: nil, userInfo: info)
         if hiding {
             NotificationCenter.default.post(
-                name: UIResponder.keyboardWillHideNotification, object: nil,
-                userInfo: [UIResponder.keyboardAnimationDurationUserInfoKey: 0.25,
-                           UIResponder.keyboardFrameEndUserInfoKey: end])
+                name: UIResponder.keyboardWillHideNotification, object: nil, userInfo: info)
         }
-        withAnimation(.easeInOut(duration: 0.25)) {
-            keyboardSpacer = hiding ? 0 : height
+        withAnimation(.easeInOut(duration: duration)) {
+            spacer.height = hiding ? 0 : height
         }
     }
     static func painted(paneID: String, view: TerminalView, cellSize: CGSize, complete: Bool) {
@@ -469,7 +485,7 @@ final class TerminalInteractionHarness: ObservableObject {
         value["commits"] = commits
         value["commitCols"] = commitGrid?.cols ?? 0
         value["commitRows"] = commitGrid?.rows ?? 0
-        value["keyboardSpacer"] = Int(keyboardSpacer.rounded())
+        value["keyboardSpacer"] = Int(spacer.height.rounded())
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }
@@ -508,6 +524,9 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
+        // A DRAGGED dismissal: long enough that a receipt can tap Send while the
+        // keyboard is still on its way out, which is when the phone's own Send does it.
+        case "keyboard-hide-slow": sweepKeyboard(hiding: true, duration: 1.2)
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -596,7 +615,9 @@ final class TerminalInteractionHarness: ObservableObject {
 
 struct TerminalInteractionRoot: View {
     let control: Bool
-    @ObservedObject private var harness = TerminalInteractionHarness.shared
+    /// ONLY the spacer, never the harness itself: the probe's ten-per-second tick would
+    /// otherwise re-render the pane under test (see `KeyboardSpacerBox`).
+    @ObservedObject private var spacer = TerminalInteractionHarness.shared.spacer
     private let client = HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
     var body: some View {
         VStack(spacing: 0) {
@@ -614,7 +635,7 @@ struct TerminalInteractionRoot: View {
         // The keyboard's share of the pane, animated by `sweepKeyboard`. SwiftUI's own
         // keyboard avoidance does the same thing to the same view, so the terminal band
         // really sweeps through intermediate heights here.
-        .padding(.bottom, harness.keyboardSpacer)
+        .padding(.bottom, spacer.height)
         // ABOVE THE PANE, NOT AS A BOTTOM INSET.
         //
         // As a bottom safe-area inset the fixture bar ended up drawn OVER the pane's
@@ -641,7 +662,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "keyboard-hide-slow"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

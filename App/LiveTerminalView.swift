@@ -652,21 +652,25 @@ struct LiveTerminalView: UIViewRepresentable {
         /// a burst may still be retained after the reader acted (`.keyboard`).
         private enum PresentationReason { case local, server, keyboard }
 
-        /// How long a keyboard sweep's grid proposals must stand still before the final
-        /// one is committed. One proposal lands per animation frame (~16ms), so this is
-        /// long enough to mean "the animation stopped" and short enough that the round
-        /// trip starts while the keyboard is still on its way out.
-        static let keyboardSweepQuietDuration: Duration = .milliseconds(60)
-        /// Backstop if the last animation frame never arrives (an interactive dismissal
-        /// that ends early, a cancelled animation): the sweep is closed this long after
-        /// UIKit's own reported duration.
+        /// The floor on a sweep's window. UIKit reports 0 for an interactive (dragged)
+        /// dismissal, and a window that short would close while the reader is still
+        /// moving the keyboard, which is the per-frame behaviour this replaces.
+        static let keyboardSweepMinimumDuration: Duration = .milliseconds(250)
+        /// Added to the sweep's reported duration, so the LAST animation frame is inside
+        /// the window.
         static let keyboardSweepGrace: Duration = .milliseconds(80)
 
         /// A software-keyboard transition is animating this pane's height. UIKit reports
         /// the duration up front, so the whole sweep is ONE event with a known end.
+        ///
+        /// The end is that reported duration and nothing else. An earlier version also
+        /// closed the sweep after 60ms of proposal quiet, which is wrong for any slow
+        /// transition: a dragged dismissal proposes a new row count every ~85ms, so the
+        /// quiet window closed the sweep mid-animation and the remaining frames
+        /// committed one by one — the defect, back again, for exactly the gesture a
+        /// reader controls. Review caught it (f3).
         private var keyboardSweepActive = false
         private var keyboardSweepDeadlineTask: Task<Void, Never>?
-        private var keyboardSweepQuietTask: Task<Void, Never>?
         /// The newest fit proposed during the sweep. Only this one is ever sent.
         private var deferredKeyboardTarget: (cols: Int, rows: Int)?
 
@@ -1704,8 +1708,6 @@ struct LiveTerminalView: UIViewRepresentable {
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
             keyboardSweepActive = false
-            keyboardSweepQuietTask?.cancel()
-            keyboardSweepQuietTask = nil
             keyboardSweepDeadlineTask?.cancel()
             keyboardSweepDeadlineTask = nil
             deferredKeyboardTarget = nil
@@ -2288,35 +2290,36 @@ struct LiveTerminalView: UIViewRepresentable {
             // must not freeze it. `onGeometryWillChange` retains the frame on the first
             // layout pass that really changes, with this sweep's `.keyboard` reason.
             keyboardSweepDeadlineTask?.cancel()
-            let backstop = Duration.seconds(max(0, duration)) + Self.keyboardSweepGrace
+            let window = max(Duration.seconds(max(0, duration)), Self.keyboardSweepMinimumDuration)
+            let backstop = window + Self.keyboardSweepGrace
             keyboardSweepDeadlineTask = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: backstop) } catch { return }
                 self?.endKeyboardSweep()
             }
         }
 
-        /// A fit proposed while the keyboard is moving. Kept, not sent; the sweep ends
-        /// once the proposals stop changing.
+        /// A fit proposed while the keyboard is moving. Kept, not sent: the sweep's end
+        /// commits it.
         private func noteKeyboardSweepProposal(cols: Int, rows: Int) {
             deferredKeyboardTarget = (cols: cols, rows: rows)
-            keyboardSweepQuietTask?.cancel()
-            keyboardSweepQuietTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: Self.keyboardSweepQuietDuration) } catch { return }
-                self?.endKeyboardSweep()
-            }
         }
 
         /// Closes the sweep and commits its final fit — exactly one proposal for the
-        /// whole animation. Idempotent: the quiet window and the backstop race, and
-        /// whichever lands first owns the commit.
+        /// whole animation. Idempotent: a second notification's task, `stop()` and this
+        /// may all race, and only the first caller commits.
         private func endKeyboardSweep() {
-            keyboardSweepQuietTask?.cancel()
-            keyboardSweepQuietTask = nil
             keyboardSweepDeadlineTask?.cancel()
             keyboardSweepDeadlineTask = nil
             guard keyboardSweepActive else { return }
             keyboardSweepActive = false
-            guard let target = deferredKeyboardTarget else { return }
+            guard let target = deferredKeyboardTarget else {
+                // Nothing to commit (a keyboard that did not resize this pane, or a fit
+                // identical to the one already driving). A reveal held off during the
+                // sweep must still be reconsidered now, or the retained frame would sit
+                // until its ceiling.
+                evaluatePresentationReveal()
+                return
+            }
             deferredKeyboardTarget = nil
             requestGeometry(cols: target.cols, rows: target.rows)
         }
@@ -2518,6 +2521,13 @@ struct LiveTerminalView: UIViewRepresentable {
 
         private func evaluatePresentationReveal() {
             guard presentationActive, !stopped, let view else { return }
+            // NOT WHILE THE KEYBOARD IS STILL MOVING. The sweep deliberately leaves
+            // `desiredTarget` alone, so "settled" is still being judged against the
+            // PRE-sweep target: a late response for that target satisfies it mid-
+            // animation and the frame this burst exists for would come off while the
+            // band is still sweeping. Review caught it (f4); `endKeyboardSweep`
+            // re-evaluates.
+            guard !keyboardSweepActive else { return }
             guard presentationGeometrySettled || presentationDeadlineReached else { return }
             let terminal = view.getTerminal()
             guard !terminal.synchronizedOutputActive else { return }

@@ -5393,6 +5393,10 @@ struct TerminalPaneContent: View {
         } else {
             clearedReply = nil
         }
+        // The ATTACHMENT path keeps its own late clear (`sendPromptWithAttachments`): its
+        // caption has to survive a batch that failed halfway so the retry chips can send
+        // it again. That send therefore still costs the second resize; deliberate, and a
+        // separate change if it ever matters (review f2).
         func restoreClearedReply() {
             guard let clearedReply, reply.isEmpty else { return }
             reply = clearedReply
