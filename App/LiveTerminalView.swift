@@ -2548,11 +2548,19 @@ struct LiveTerminalView: UIViewRepresentable {
             let ready = presentationDeadlineReached || presentationSyncEnded
                 || ContinuousClock.now - quietStart >= Self.presentationQuietDuration
             guard ready else { scheduleQuietReveal(); return }
-            if let draw = lastCompleteDraw, draw == currentDrawToken() {
+            if presentationDeadlineReached {
+                // HARD CEILING. A repaint request is not a ceiling: when the emulator's
+                // logical grid already matches, `applyTerminalSize` may produce no draw
+                // callback, so nothing finishes the presentation and the retained frame
+                // becomes a permanently frozen terminal. CI35369227802 reproduced that
+                // in both iPhone passes. At the deadline the safer failure mode is one
+                // exposed reflow, never an unbounded freeze.
+                finishPresentation()
+            } else if let draw = lastCompleteDraw, draw == currentDrawToken() {
                 finishPresentation()
             } else if !pendingSafeRepaint {
-                // Reconcile and schedule through the library's synchronization gate,
-                // including the no-output/deadline case. Never force DEC 2026 to end.
+                // Reconcile and schedule through the library's synchronization gate.
+                // Never force DEC 2026 to end.
                 pendingSafeRepaint = true
                 view.applyTerminalSize(cols: terminal.cols, rows: terminal.rows)
             }
