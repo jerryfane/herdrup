@@ -338,6 +338,7 @@ final class TerminalInteractionHarness: ObservableObject {
         weak var view: TerminalView?
         let requestFit: (Int, Int) -> Void
         let isCovered: () -> Bool
+        let coverInstalls: () -> Int
         let isForeground: () -> Bool
         var cellSize = CGSize.zero
         var painted: [String: Any] = [:]
@@ -352,10 +353,12 @@ final class TerminalInteractionHarness: ObservableObject {
 
     static func register(paneID: String, view: TerminalView,
                          requestFit: @escaping (Int, Int) -> Void, isCovered: @escaping () -> Bool,
+                         coverInstalls: @escaping () -> Int,
                          isForeground: @escaping () -> Bool) {
         guard enabled else { return }
         shared.surfaces[paneID] = Surface(view: view, requestFit: requestFit,
-                                         isCovered: isCovered, isForeground: isForeground)
+                                         isCovered: isCovered, coverInstalls: coverInstalls,
+                                         isForeground: isForeground)
     }
     static func unregister(paneID: String, view: TerminalView) {
         guard shared.surfaces[paneID]?.view === view else { return }
@@ -470,6 +473,7 @@ final class TerminalInteractionHarness: ObservableObject {
         if let surface = surfaces[id] {
             value.merge(surface.isCovered() ? (surface.retained ?? surface.painted) : surface.painted) { _, rhs in rhs }
             value["covered"] = surface.isCovered()
+            value["coverInstalls"] = surface.coverInstalls()
             value["focused"] = surface.view?.isFirstResponder ?? false
             value["keyDriveEnabled"] = (surface.view as? LiveTerminalView.ReadOnlyTerminalView)?.keyDriveEnabled ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search

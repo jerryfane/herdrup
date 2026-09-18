@@ -302,6 +302,9 @@ struct LiveTerminalView: UIViewRepresentable {
         private var coverContentSize: CGSize = .zero
 
         var isCovered: Bool { cover != nil }
+        /// Monotonic receipt for DEBUG/UI tests. Sampling `isCovered` is racy by design:
+        /// a valid cover may live for only a few frames.
+        private(set) var coverInstallCount = 0
 
         init(terminal: ReadOnlyTerminalView) {
             self.terminal = terminal
@@ -343,6 +346,7 @@ struct LiveTerminalView: UIViewRepresentable {
             cover = container
             coverContent = content
             coverContentSize = content.bounds.size
+            coverInstallCount += 1
             layoutCover()
         }
 
@@ -994,6 +998,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 TerminalInteractionHarness.register(paneID: paneID, view: view,
                     requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
                     isCovered: { [weak surface] in surface?.isCovered ?? false },
+                    coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
                     isForeground: { [weak self] in self?.foreground ?? false })
             }
             #endif

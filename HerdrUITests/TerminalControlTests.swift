@@ -467,18 +467,6 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.isHittable)
     }
 
-    /// Polls for a retained frame rather than waiting on a predicate.
-    ///
-    /// TIGHT POLLING, NOT `XCTNSPredicateExpectation`: that re-evaluates about once a
-    /// second and these frames are deliberately short-lived, so a predicate wait can
-    /// miss one entirely and report a cover that never appeared.
-    private func sawCover(within seconds: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if (probe()["covered"] as? Bool) == true { return true }
-        }
-        return false
-    }
 
     /// A KEYBOARD IS ONE RESIZE, NOT TWENTY.
     ///
@@ -504,10 +492,10 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2 }
         let openRows = probe()["rows"] as? Int ?? 0
         var commits = probe()["commits"] as? Int ?? 0
+        var coverInstalls = probe()["coverInstalls"] as? Int ?? 0
 
         command("keyboard-show")
-        XCTAssertTrue(sawCover(within: 2),
-                      "no frame was retained while the keyboard took the pane: \(probe())")
+        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) < openRows }
         let shown = (probe()["commits"] as? Int ?? 0) - commits
         XCTAssertLessThanOrEqual(shown, 2,
@@ -515,7 +503,9 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("keyboard-show-one-commit")
 
         commits = probe()["commits"] as? Int ?? 0
+        coverInstalls = probe()["coverInstalls"] as? Int ?? 0
         command("keyboard-hide")
+        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) == openRows }
         let hidden = (probe()["commits"] as? Int ?? 0) - commits
         XCTAssertLessThanOrEqual(hidden, 2,
@@ -558,18 +548,19 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         command("delayed")
         send.tap()
         wait { ($0["covered"] as? Bool) == false }
+        let coverInstalls = probe()["coverInstalls"] as? Int ?? 0
         // A drain IS IN FLIGHT across the dismissal: that is the state in which the
-        // closed burst refused to cover. `delayed` holds the response ~0.9s, so the
-        // cover is still up when a query can finally be answered.
+        // closed burst refused to cover. `delayed` holds the response ~0.9s.
         command("80x32")
         command("keyboard-hide")
-        XCTAssertTrue(sawCover(within: 4),
-                      "the send's own keyboard dismissal was left uncovered: \(probe())")
+        // Count the installation instead of sampling a transient frame. XCUITest waits
+        // for animation quiescence before returning from the command tap, so a valid
+        // short-lived cover can come and go before `isCovered` is observable; both
+        // 35381308071 passes demonstrated exactly that.
+        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
         attach("send-dismissal-retains-frame")
 
         command("natural")
         wait { ($0["covered"] as? Bool) == false && ($0["keyboardSpacer"] as? Int) == 0 }
         XCTAssertLessThan(field.frame.height, grown - 1,
                           "the composer never gave the sent text's height back")
-    }
-}
