@@ -552,7 +552,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         // A drain IS IN FLIGHT across the dismissal: that is the state in which the
         // closed burst refused to cover. `delayed` holds the response ~0.9s.
         command("80x32")
-        command("keyboard-hide")
+        command("input-then-keyboard-hide")
         // Count the installation instead of sampling a transient frame. XCUITest waits
         // for animation quiescence before returning from the command tap, so a valid
         // short-lived cover can come and go before `isCovered` is observable; both

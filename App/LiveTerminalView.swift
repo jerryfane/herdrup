@@ -999,6 +999,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
                     isCovered: { [weak surface] in surface?.isCovered ?? false },
                     coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
+                    closePresentation: { [weak self] in self?.userTookControl() },
                     isForeground: { [weak self] in self?.foreground ?? false })
             }
             #endif
