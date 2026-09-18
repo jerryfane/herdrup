@@ -425,6 +425,8 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertTrue(beforeReading.contains("fr=1"),
                       "premise: the terminal does not hold the responder, so there is nothing for the chevron to resign. probe[\(beforeReading)]")
 
+        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
+                      "premise: the software keyboard must be visible")
         let chevron = app.buttons["Collapse keyboard"]
         let physicalKeyboard = beforeReading.contains("hardware=1")
         XCTAssertTrue(physicalKeyboard || beforeReading.contains("hardware=0"),
@@ -435,8 +437,6 @@ final class TerminalSelectionTests: XCTestCase {
             print("Selection dismissal: physical keyboard attached; hidden control verified. Software-only dismissal was not exercised.")
             return
         }
-        XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
-                      "premise: the software keyboard must be visible")
         print("Selection dismissal: no physical keyboard; exercising dismissal with selection.")
         XCTAssertTrue(chevron.waitForExistence(timeout: 5),
                       "the chevron is absent while the keyboard is up with a selection held — which IS the original defect: no affordance to dismiss with")
