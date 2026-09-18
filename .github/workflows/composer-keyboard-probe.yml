@@ -1,0 +1,120 @@
+name: Composer keyboard environment probe
+on:
+  push:
+    branches: [verify/soft-square-keyboard]
+    paths: [.github/workflows/composer-keyboard-probe.yml]
+permissions:
+  contents: read
+jobs:
+  keyboard:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - name: Select simulator and configure disconnected keyboard
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, plistlib, re, subprocess
+          xcode = max(pathlib.Path('/Applications').glob('Xcode*.app'), key=lambda p: tuple(map(int, re.findall(r'\d+', p.name))))
+          subprocess.run(['sudo', 'xcode-select', '-s', str(xcode)], check=True)
+          devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json']))['devices']
+          runtime = max((r for r in devices if '.iOS-' in r), key=lambda r: tuple(map(int, r.rsplit('iOS-', 1)[1].split('-'))))
+          phone = next(d for d in devices[runtime] if d['name'].startswith('iPhone'))
+          udid = phone['udid'].upper()
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'PHONE={udid}\n')
+          domain = 'com.apple.iphonesimulator'
+          source = pathlib.Path.home() / 'Library/Preferences' / f'{domain}.plist'
+          prefs = plistlib.loads(source.read_bytes()) if source.exists() else {}
+          prefs['ConnectHardwareKeyboard'] = False
+          prefs.setdefault('DevicePreferences', {}).setdefault(udid, {})['ConnectHardwareKeyboard'] = False
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'keyboard-preferences.plist'
+          destination.write_bytes(plistlib.dumps(prefs))
+          subprocess.run(['defaults', 'import', domain, str(destination)], check=True)
+          print(f'Xcode={xcode}; device={phone}; keyboard preference=false')
+          PY
+          xcodebuild -version
+          xcrun simctl boot "$PHONE"
+          xcrun simctl bootstatus "$PHONE" -b
+      - name: Compile standalone public-API keyboard probe
+        run: |
+          mkdir -p "$RUNNER_TEMP/KeyboardProbe.app" "$RUNNER_TEMP/KeyboardProof"
+          cat > "$RUNNER_TEMP/KeyboardProbe.swift" <<'SWIFT'
+          import UIKit
+          import GameController
+          import Darwin
+          @main
+          final class AppDelegate: NSObject, UIApplicationDelegate {
+              var window: UIWindow?
+              var keyboardFrame = CGRect.zero
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  setbuf(stdout, nil)
+                  let controller = UIViewController()
+                  controller.view.backgroundColor = .systemBackground
+                  let input = UITextField(frame: CGRect(x: 20, y: 140, width: 300, height: 44))
+                  input.borderStyle = .roundedRect
+                  input.placeholder = "Public GCKeyboard probe"
+                  controller.view.addSubview(input)
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = controller
+                  window?.makeKeyAndVisible()
+                  NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] event in
+                      self?.keyboardFrame = (event.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
+                  }
+                  Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                      let keyboard = GCKeyboard.coalesced
+                      print("RECEIPT time=\(Date().timeIntervalSince1970) hardware=\(keyboard != nil) vendor=\(keyboard?.vendorName ?? "nil") category=\(keyboard?.productCategory ?? "nil") frame=\(self?.keyboardFrame ?? .zero) focused=\(input.isFirstResponder)")
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1) { input.becomeFirstResponder() }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 180) { exit(0) }
+                  return true
+              }
+          }
+          SWIFT
+          python3 - <<'PY'
+          import os, pathlib, plistlib
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'KeyboardProbe.app'
+          (app / 'Info.plist').write_bytes(plistlib.dumps({
+              'CFBundleIdentifier': 'org.herdr.composer.keyboardprobe',
+              'CFBundleExecutable': 'KeyboardProbe', 'CFBundleName': 'KeyboardProbe',
+              'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
+              'CFBundleShortVersionString': '1.0', 'LSRequiresIPhoneOS': True,
+              'UIDeviceFamily': [1], 'UILaunchScreen': {},
+              'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait'],
+          }))
+          PY
+          xcrun --sdk iphonesimulator swiftc -parse-as-library -swift-version 5 \
+            -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+            -target "$(uname -m)-apple-ios17.0-simulator" \
+            -framework UIKit -framework GameController \
+            "$RUNNER_TEMP/KeyboardProbe.swift" -o "$RUNNER_TEMP/KeyboardProbe.app/KeyboardProbe"
+          codesign --force --sign - "$RUNNER_TEMP/KeyboardProbe.app"
+          xcrun simctl install "$PHONE" "$RUNNER_TEMP/KeyboardProbe.app"
+      - name: Compare headless and visible Simulator without XCTest
+        run: |
+          set -e
+          proof="$RUNNER_TEMP/KeyboardProof"
+          xcrun simctl launch --console "$PHONE" org.herdr.composer.keyboardprobe > "$proof/probe.log" 2>&1 &
+          console=$!
+          trap 'kill "$console" 2>/dev/null || true' EXIT
+          echo "HEADLESS $(date -u)" | tee -a "$proof/phases.txt"
+          sleep 15
+          xcrun simctl io "$PHONE" screenshot "$proof/headless.png"
+          echo "SIMULATOR UI OPEN $(date -u)" | tee -a "$proof/phases.txt"
+          open -a "$(xcode-select -p)/Applications/Simulator.app" --args -CurrentDeviceUDID "$PHONE"
+          sleep 15
+          xcrun simctl io "$PHONE" screenshot "$proof/visible.png"
+          defaults export com.apple.iphonesimulator - > "$proof/host-preferences.plist"
+          echo "SIMULATOR MENU STATE $(date -u)" | tee -a "$proof/phases.txt"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get value of attribute "AXMenuItemMarkChar" of menu item "Connect Hardware Keyboard" of menu 1 of menu item "Keyboard" of menu 1 of menu bar item "I/O" of menu bar 1' > "$proof/menu-state.txt" 2>&1 || true
+          echo "SIMULATOR UI CLOSED $(date -u)" | tee -a "$proof/phases.txt"
+          if pgrep -x Simulator; then pkill -x Simulator; fi
+          sleep 15
+          xcrun simctl io "$PHONE" screenshot "$proof/closed.png"
+          cat "$proof/probe.log" "$proof/menu-state.txt"
+      - name: Preserve environment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyboard-environment-proof
+          path: ${{ runner.temp }}/KeyboardProof
+          if-no-files-found: warn
