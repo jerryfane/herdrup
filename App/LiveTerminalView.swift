@@ -2322,6 +2322,11 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             deferredKeyboardTarget = nil
             requestGeometry(cols: target.cols, rows: target.rows)
+            // ALWAYS re-evaluate, even though `requestGeometry` usually does: it returns
+            // early when the fit matches the target already driving, and that early
+            // return is exactly the case where a reveal deferred during the sweep has
+            // nothing left to wake it.
+            evaluatePresentationReveal()
         }
 
         /// The single serialized drain. At most one `set_pty_size` in flight, and a
@@ -2527,7 +2532,12 @@ struct LiveTerminalView: UIViewRepresentable {
             // animation and the frame this burst exists for would come off while the
             // band is still sweeping. Review caught it (f4); `endKeyboardSweep`
             // re-evaluates.
-            guard !keyboardSweepActive else { return }
+            // The ceiling is exempt. Holding the reveal is a courtesy to the animation;
+            // the deadline is the promise that a retained frame always comes off. In run
+            // 35351892191 the two met: the ceiling fired mid-sweep, this guard swallowed
+            // its only evaluation, and the cover sat there — a frozen terminal, which is
+            // worse than the reflow it was hiding.
+            guard !keyboardSweepActive || presentationDeadlineReached else { return }
             guard presentationGeometrySettled || presentationDeadlineReached else { return }
             let terminal = view.getTerminal()
             guard !terminal.synchronizedOutputActive else { return }
