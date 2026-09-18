@@ -46,16 +46,13 @@ class TerminalInteractionTestCase: XCTestCase {
         return probe()
     }
 
-    /// A usable element, chosen and checked by GEOMETRY.
-    ///
-    /// `isHittable` is not usable here: on an element parked outside its scroll
-    /// viewport it raises "Activation point invalid" instead of returning false, which
-    /// failed eight cases outright. Two mounted panes also publish the same pane
-    /// identifiers, so a bare query can match a hidden twin ("Multiple matching
-    /// elements found"). Both are answered by taking the first match whose frame lies
-    /// inside the APPLICATION frame — the screen. A window query can return a window
-    /// that is not the main one, which would reject every element on the screen.
-    func onscreen(_ identifier: String, timeout: TimeInterval = 10) -> XCUIElement? {
+    /// Check geometry before hit testing: clipped quick keys can raise
+    /// "Activation point invalid" instead of returning false from `isHittable`.
+    /// Menus additionally require an enabled, hittable match. Retained panes can
+    /// publish identical frames, so waiting on the first geometric match alone
+    /// can wait forever on the hidden copy while ignoring the visible control.
+    func onscreen(_ identifier: String, timeout: TimeInterval = 10,
+                  requiringHittable: Bool = false) -> XCUIElement? {
         // Identifier OR label: production keycaps carry only an accessibility label.
         let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
                                                        identifier, identifier))
@@ -65,7 +62,9 @@ class TerminalInteractionTestCase: XCTestCase {
             for index in 0..<matches.count {
                 let candidate = matches.element(boundBy: index)
                 let frame = candidate.frame
-                if frame.width > 0, frame.height > 0, visible.contains(frame) { return candidate }
+                guard frame.width > 0, frame.height > 0, visible.contains(frame) else { continue }
+                if requiringHittable && (!candidate.isEnabled || !candidate.isHittable) { continue }
+                return candidate
             }
         } while Date() < deadline
         return nil
@@ -189,11 +188,7 @@ class TerminalInteractionTestCase: XCTestCase {
     func menuItem(_ menu: String, _ item: String,
                   file: StaticString = #filePath, line: UInt = #line) {
         for attempt in 0..<2 {
-            guard let control = onscreen(menu) else { continue }
-            let ready = XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
-                object: control)
-            guard XCTWaiter.wait(for: [ready], timeout: 5) == .completed else { continue }
+            guard let control = onscreen(menu, requiringHittable: true) else { continue }
             control.tap()
             if let entry = onscreen(item, timeout: 5) {
                 entry.tap()
@@ -276,10 +271,15 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             onscreen("terminal-sidebar-toggle")?.tap()
             settled(); anchor()
         }
+        let originalColumns = try XCTUnwrap(probe()["cols"] as? Int)
         menuItem("terminal-actions", "terminal-font-increase")
+        wait { state in
+            guard let columns = state["cols"] as? Int else { return false }
+            return columns < originalColumns
+        }
         settled(); anchor(); attach("larger-font-history")
         menuItem("terminal-actions", "terminal-font-decrease")
-        settled(); anchor()
+        settled(cols: originalColumns); anchor()
         XCTAssertEqual(probe()["opens"] as? Int, opens)
     }
 
