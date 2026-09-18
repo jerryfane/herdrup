@@ -3908,40 +3908,41 @@ private enum PastedFile {
     }
 }
 
-private struct TerminalReplyField: UIViewRepresentable {
+struct ComposerTextField: UIViewRepresentable {
     @Binding var text: String
     let isEnabled: Bool
     let isFocused: Bool
     let onFocusChange: (Bool) -> Void
-    let onChange: (String, String) -> Void
-    let onReturn: (String) -> Void
-    /// Returns false when the composer declines the file, so `paste(_:)` can fall through
-    /// to UIKit instead of turning the paste into a no-op.
-    let onPasteFile: (NSItemProvider) -> Bool
+    var placeholder = "Type a reply…"
+    var accessibilityIdentifier = "terminal-reply-input"
+    var capitalization: UITextAutocapitalizationType = .none
+    var autocorrection: UITextAutocorrectionType = .no
+    var onChange: (String, String) -> Void = { _, _ in }
+    var onReturn: ((String) -> Void)?
+    var onCommandReturn: (() -> Void)?
+    var onPasteFile: ((NSItemProvider) -> Bool)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> ReplyTextView {
         let view = ReplyTextView()
         view.onPasteFile = onPasteFile
+        view.onCommandReturn = onCommandReturn
         view.delegate = context.coordinator
-        view.backgroundColor = UIColor(Palette.surface)
-        view.layer.cornerRadius = 20
+        view.backgroundColor = .clear
         view.textColor = UIColor(Palette.text)
-        view.tintColor = UIColor(Palette.brand)
-        view.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
-        view.textContainerInset = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
-        let lineHeight = view.font?.lineHeight ?? 18
-        view.minimumHeight = lineHeight + 22
-        view.maximumHeight = lineHeight * 3 + 22
-        view.autocapitalizationType = .none
-        view.autocorrectionType = .no
-        view.returnKeyType = .send
+        view.tintColor = UIColor(Palette.text)
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.configureTypography()
+        view.autocapitalizationType = capitalization
+        view.autocorrectionType = autocorrection
+        view.returnKeyType = onReturn == nil ? .default : .send
         // Scrolling is ON at every height (see `refreshScrollMode`); only bouncing tracks
         // whether the content overflows.
         view.isScrollEnabled = true
         view.alwaysBounceVertical = false
-        view.accessibilityIdentifier = "terminal-reply-input"
+        view.accessibilityIdentifier = accessibilityIdentifier
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.updatePlaceholder()
         return view
@@ -3950,8 +3951,12 @@ private struct TerminalReplyField: UIViewRepresentable {
     func updateUIView(_ view: ReplyTextView, context: Context) {
         context.coordinator.parent = self
         view.onPasteFile = onPasteFile
+        view.onCommandReturn = onCommandReturn
+        view.configureTypography()
+        view.setPlaceholder(placeholder)
         if view.text != text {
-            view.text = text
+            view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
+            view.typingAttributes = view.composerAttributes
             view.updatePlaceholder()
             view.invalidateIntrinsicContentSize()
             view.refreshScrollMode()
@@ -3977,12 +3982,12 @@ private struct TerminalReplyField: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: TerminalReplyField
+        var parent: ComposerTextField
         /// A native tap reaches UIKit before SwiftUI commits the FocusState update.
         /// Keep that responder alive through text-binding renders until the true state arrives.
         var nativeFocusPendingStateSync = false
 
-        init(_ parent: TerminalReplyField) {
+        init(_ parent: ComposerTextField) {
             self.parent = parent
         }
 
@@ -4017,41 +4022,81 @@ private struct TerminalReplyField: UIViewRepresentable {
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText replacement: String) -> Bool {
-            guard replacement == "\n" else { return true }
-            parent.onReturn(textView.text ?? "")
+            guard replacement == "\n", let onReturn = parent.onReturn else { return true }
+            onReturn(textView.text ?? "")
             return false
         }
     }
 
     final class ReplyTextView: UITextView {
         var onPasteFile: ((NSItemProvider) -> Bool)?
+        var onCommandReturn: (() -> Void)?
+        private lazy var sendKeyCommand: UIKeyCommand = {
+            let command = UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(commandReturn))
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }()
+
+        override var keyCommands: [UIKeyCommand]? {
+            guard onCommandReturn != nil else { return super.keyCommands }
+            return (super.keyCommands ?? []) + [sendKeyCommand]
+        }
+
+        @objc private func commandReturn() { onCommandReturn?() }
         private let placeholder = UILabel()
-        var minimumHeight: CGFloat = 40
-        var maximumHeight: CGFloat = 76
+        var minimumHeight: CGFloat = 24
+        var maximumHeight: CGFloat = 72
+        private(set) var composerAttributes: [NSAttributedString.Key: Any] = [:]
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
             super.init(frame: frame, textContainer: textContainer)
-            placeholder.text = "type a reply…"
-            placeholder.font = UIFont(name: "Geist-Regular", size: 15) ?? .systemFont(ofSize: 15)
-            placeholder.textColor = UIColor(Palette.textFaint)
+            placeholder.textColor = UIColor(Palette.textDim)
             placeholder.translatesAutoresizingMaskIntoConstraints = false
             addSubview(placeholder)
             NSLayoutConstraint.activate([
-                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-                placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+                placeholder.leadingAnchor.constraint(equalTo: leadingAnchor),
+                placeholder.topAnchor.constraint(equalTo: topAnchor),
             ])
+        }
+
+        func configureTypography() {
+            let size = ComposerStyle.fontSize * Typography.scale
+            let lineHeight = ComposerStyle.lineHeight
+            guard font?.pointSize != size || minimumHeight != lineHeight || composerAttributes.isEmpty else { return }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.minimumLineHeight = lineHeight
+            paragraph.maximumLineHeight = lineHeight
+            let face = UIFont(name: "Geist-Regular", size: size) ?? .systemFont(ofSize: size)
+            composerAttributes = [.font: face, .foregroundColor: UIColor(Palette.text), .paragraphStyle: paragraph]
+            let selection = selectedRange
+            attributedText = NSAttributedString(string: text ?? "", attributes: composerAttributes)
+            typingAttributes = composerAttributes
+            selectedRange = selection
+            minimumHeight = lineHeight
+            maximumHeight = lineHeight * 3
+            placeholder.font = face
+        }
+
+        func setPlaceholder(_ text: String) {
+            placeholder.attributedText = NSAttributedString(
+                string: text,
+                attributes: composerAttributes.merging([.foregroundColor: UIColor(Palette.textDim)]) { _, new in new })
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { nil }
         override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-            if action == #selector(paste(_:)), PastedFile.pasteboardType() != nil {
+            if onPasteFile != nil, action == #selector(paste(_:)), PastedFile.pasteboardType() != nil {
                 return true
             }
             return super.canPerformAction(action, withSender: sender)
         }
 
         override func paste(_ sender: Any?) {
+            guard onPasteFile != nil else {
+                super.paste(sender)
+                return
+            }
             // Text wins when the pasteboard carries both. Copying an image out of Safari
             // registers a URL alongside the image, and a composer that swallowed the item
             // as a file dropped the text the user was actually after.
@@ -4105,9 +4150,9 @@ private struct TerminalReplyField: UIViewRepresentable {
             let box = (measured as NSString).boundingRect(
                 with: CGSize(width: usable, height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font ?? .systemFont(ofSize: 15)],
+                attributes: composerAttributes,
                 context: nil)
-            return ceil(box.height) + textContainerInset.top + textContainerInset.bottom
+            return ceil(box.height / minimumHeight) * minimumHeight
         }
 
         /// Scrolling stays ON at every height. It used to be toggled with the content, which
@@ -4172,24 +4217,23 @@ struct TerminalPaneContent: View {
         let name: String
         let mime: String
         let isImage: Bool
+        let size: Int
         let staged: StagedAttachment?
         let uploadID: String?
         let gramMessageID: String?
     }
 
     @State private var reply: String
+    @StateObject private var composerKeyboard = ComposerKeyboard()
     /// Every staged attachment, in paste order. Each sends as its own gram message and
     /// they are all named by ONE prompt, so the agent gets a single turn that points at
     /// the whole set. Capped at `GramView.Staging.maxAttachments`.
     @State private var replyAttachments: [PromptAttachment] = []
     @State private var loadingReplyAttachment = false
-    /// Bytes sent / total for the attachment currently uploading, nil when none is.
-    /// A 20 MB photo on a slow link takes long enough that a spinner alone reads as a
-    /// hang, so the strip shows a determinate bar driven by the upload channel itself.
+    /// Progress belongs to an attachment identity, including while its gram is posting.
     @State private var replyUploadBytes: (sent: Int, total: Int)?
-    /// Which file of how many is in flight, so the gap between one upload finishing and
-    /// its gram post landing still says something. Nil for a single attachment.
-    @State private var replySendProgress: (sent: Int, total: Int)?
+    @State private var replySendingAttachmentID: UUID?
+    @State private var replyFailedAttachmentID: UUID?
     /// The agent this pane hosts (drives identity, status badge, and input mode).
     /// Seeded from the caller's list context, then RE-RESOLVED from agent.list on
     /// every refresh so status + input mode track the LIVE pane instead of freezing
@@ -4203,11 +4247,6 @@ struct TerminalPaneContent: View {
     @ObservedObject private var mute = MuteStore.shared
     /// A drag is hovering the reply bar, so the target says so before the drop lands.
     @State private var replyDropTargeted = false
-    /// Saved prompts, shown from the reply bar when the input is empty (the send arrow would be
-    /// dead then). Tapping one inserts it and sends it via the normal path.
-    @ObservedObject private var savedPrompts = SavedPromptsStore.shared
-    /// Presents the "save a new prompt" sheet.
-    @State private var showSavePrompt = false
     @State private var sending = false
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
@@ -4895,28 +4934,24 @@ struct TerminalPaneContent: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 keyCap(label: "esc", key: "Escape")
-                keyCap(symbol: "chevron.left", key: "Left")
-                keyCap(symbol: "chevron.up", key: "Up")
-                keyCap(symbol: "chevron.down", key: "Down")
-                keyCap(symbol: "chevron.right", key: "Right")
+                keyCap(image: "ComposerKeyLeft", key: "Left")
+                keyCap(image: "ComposerKeyUp", key: "Up")
+                keyCap(image: "ComposerKeyDown", key: "Down")
+                keyCap(image: "ComposerKeyRight", key: "Right")
                 // End (end-of-line cursor) + the two scroll jumps for a mouse-mode agent
                 // like Claude Code: Ctrl+Home = jump to TOP, Ctrl+End = jump to BOTTOM
                 // (and re-enable auto-follow). ESC[1;5H / ESC[1;5F are the xterm Ctrl+Home
                 // / Ctrl+End sequences Claude Code's readline keymap honors (End alone is a
                 // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
                 keyCap(label: "end", key: "End")
-                rawCap(symbol: "arrow.up.to.line", sequence: "\u{1b}[1;5H")
+                rawCap(label: "Jump to top", image: "ComposerKeyTop", sequence: "\u{1b}[1;5H")
                 // Jump to the newest output. Routed through the pane rather than a raw
                 // byte sequence, so a plain shell scrolls its own scrollback while a
                 // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
                 // `sending || pendingPrefill` like the keycaps: this is local view
                 // navigation, not input to the agent.
                 Button { jumpToTailToken += 1 } label: {
-                    Image(systemName: "arrow.down.to.line").font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                        .padding(.horizontal, 10)
-                        .frame(minWidth: 44, minHeight: 34)
-                        .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+                    ComposerQuickKeyLabel(text: "Jump to latest output", imageName: "ComposerKeyLatest")
                 }
                 .accessibilityLabel(Text("Jump to latest output"))
                 keyCap(label: "tab", key: "Tab")
@@ -4933,22 +4968,15 @@ struct TerminalPaneContent: View {
                 // The submit affordance rawKeys needs — typing never submits, so
                 // Return is the deliberate second action. Highlighted, as the mockup
                 // shows it.
-                keyCap(symbol: "return", key: "Enter", primary: true)
+                keyCap(image: "ComposerKeyEnter", key: "Enter", primary: true)
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            .padding(.horizontal, 24).padding(.vertical, 8)
         }
     }
 
-    private func keyCap(label: String? = nil, symbol: String? = nil, key: String, primary: Bool = false) -> some View {
+    private func keyCap(label: String? = nil, image: String? = nil, key: String, primary: Bool = false) -> some View {
         Button { ctrlArmed = false; send(.key(key)) } label: {
-            Group {
-                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
-                else { Text(label ?? key).font(Typography.machine(12)) }
-            }
-            .foregroundStyle(primary ? Palette.ground : Palette.textDim)
-            .padding(.horizontal, 10)
-            .frame(minWidth: 44, minHeight: 34)
-            .background(primary ? Palette.text : Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: label ?? key, imageName: image, primary: primary)
         }
         // Disabled while a pre-fill is pending too: a stray Return during automatic
         // delivery could race the in-flight agent.prompt (and Return into a booting
@@ -4961,19 +4989,12 @@ struct TerminalPaneContent: View {
     /// straight to the PTY via `pane.send_text` — for keys herdr's named allow-list
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
-    private func rawCap(label: String? = nil, symbol: String? = nil, sequence: String) -> some View {
+    private func rawCap(label: String, image: String? = nil, sequence: String) -> some View {
         Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
-            Group {
-                if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
-                else { Text(label ?? "").font(Typography.machine(12)) }
-            }
-            .foregroundStyle(Palette.textDim)
-            .padding(.horizontal, 10)
-            .frame(minWidth: 44, minHeight: 34)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: label, imageName: image)
         }
         .disabled(sending || pendingPrefill)
-        .accessibilityLabel(Text(label ?? symbol ?? "key"))
+        .accessibilityLabel(Text(label))
     }
 
     /// One-shot Ctrl for direct terminal input and the reply field. Native terminal
@@ -4981,12 +5002,7 @@ struct TerminalPaneContent: View {
     /// Tapping twice cancels without sending input.
     private var ctrlCap: some View {
         Button { ctrlArmed.toggle() } label: {
-            Text("ctrl").font(Typography.machine(12))
-                .foregroundStyle(ctrlArmed ? Palette.ground : Palette.textDim)
-                .padding(.horizontal, 10)
-                .frame(minWidth: 44, minHeight: 34)
-                .background(ctrlArmed ? Palette.working : Palette.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            ComposerQuickKeyLabel(text: "ctrl", armed: ctrlArmed)
         }
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
@@ -4994,209 +5010,120 @@ struct TerminalPaneContent: View {
     }
     @ViewBuilder
     private var replyAttachmentStrip: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if !replyAttachments.isEmpty {
-                // Horizontal, and pinned to the chips' own height: a ScrollView is
-                // greedy in both axes, and a greedy strip would steal the vertical slack
-                // the composer needs (the same trap GramView's strip documents).
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(replyAttachments) { attachment in
-                            replyAttachmentChip(attachment)
+        if !replyAttachments.isEmpty || loadingReplyAttachment {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(replyAttachments) { attachment in
+                        replyAttachmentChip(attachment)
+                    }
+                    if loadingReplyAttachment {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Adding attachment…").font(Typography.app(12))
                         }
+                        .foregroundStyle(Palette.textDim)
+                        .padding(12)
+                        .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 15))
+                        .accessibilityIdentifier("terminal-attachment-loading")
                     }
                 }
-                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 2)
             }
-            if loadingReplyAttachment {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Adding attachment…")
-                        .font(Typography.app(12, .medium))
-                        .foregroundStyle(Palette.textDim)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-                .accessibilityIdentifier("terminal-attachment-loading")
-            }
-            // ONE progress block for the whole batch, not one per chip: the loop is
-            // serial, so exactly one file is ever in flight. The byte bar is shown while
-            // bytes move; between an upload finishing and its gram post landing only the
-            // file counter is true, and saying nothing there reads as a stall.
-            if let upload = replyUploadBytes {
-                Text(Self.uploadLabel(sent: upload.sent, total: upload.total,
-                                      file: replySendProgress))
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .monospacedDigit()
-                    .accessibilityIdentifier("terminal-attachment-progress")
-                ProgressView(value: upload.total > 0
-                    ? min(1, Double(upload.sent) / Double(upload.total))
-                    : 0)
-                    .tint(Palette.text)
-            } else if let progress = replySendProgress, progress.total > 1 {
-                Text("Sending \(progress.sent + 1) of \(progress.total)…")
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .accessibilityIdentifier("terminal-attachment-progress")
-            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 1)
+            .padding(.bottom, 10)
         }
     }
 
     private func replyAttachmentChip(_ attachment: PromptAttachment) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: attachment.isImage ? "photo" : "doc")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.textDim)
-            Text(attachment.name)
-                .font(Typography.app(12, .medium))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Button {
-                removeReplyAttachment(attachment)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Palette.textFaint)
-            }
-            // No unlinking mid-send: the bytes of a file still queued in the batch are
-            // what a retry needs.
-            .disabled(sending)
-            // Named, because the strip now holds up to ten of these: ten identical
-            // "Remove attachment" buttons tell a VoiceOver reader nothing about which.
-            .accessibilityLabel("Remove \(attachment.name)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(maxWidth: 220, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
-        .opacity(sending ? 0.6 : 1)
+        ComposerAttachmentChip(
+            name: attachment.name, size: attachment.size, isImage: attachment.isImage,
+            state: replyAttachmentState(attachment), canRemove: !sending,
+            onRemove: { removeReplyAttachment(attachment) }
+        )
         .accessibilityIdentifier("terminal-attachment")
     }
 
-    /// "Uploading 42% · 8.4 MB / 20.0 MB", prefixed with "File 2 of 3 · " for a batch and
-    /// trimmed to just the percentage for small files where the byte pair is noise.
-    /// Sizes render through HerdrKit's one formatter.
-    static func uploadLabel(sent: Int, total: Int, file: (sent: Int, total: Int)?) -> String {
-        let percent = total > 0 ? Int((Double(sent) / Double(total) * 100).rounded()) : 0
-        let prefix = (file?.total ?? 1) > 1 ? "File \(file!.sent + 1) of \(file!.total) · " : ""
-        guard total >= 1024 * 1024 else { return prefix + "Uploading \(percent)%" }
-        return prefix + "Uploading \(percent)% · \(GramFile.displaySize(of: UInt64(sent)))"
-            + " / \(GramFile.displaySize(of: UInt64(total)))"
+    private func replyAttachmentState(_ attachment: PromptAttachment) -> ComposerAttachmentState {
+        if attachment.id == replyFailedAttachmentID { return .failed }
+        if attachment.gramMessageID != nil { return .sent }
+        guard sending else { return .ready }
+        guard attachment.id == replySendingAttachmentID else { return .waiting }
+        if let upload = replyUploadBytes {
+            return .uploading(sent: upload.sent, total: upload.total)
+        }
+        return .sending
     }
 
 
     private var replyBar: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            // Collapse-keyboard button — shown while EITHER input owner holds the
-            // keyboard. It lives INSIDE the bar's HStack (laid out beside the field/send),
-            // NOT in a `.keyboard` accessory toolbar: that toolbar floated on top of the
-            // send button. Matched to the send button's circular footprint.
-            //
-            // `terminalInputFocused` is in the condition because a TERMINAL tap raises the
-            // software keyboard too, and gating on `replyFocused` alone left that keyboard
-            // with no dismiss affordance at all: a reader who tapped once to select and
-            // copy a line could only put it down by first focusing the reply field to make
-            // this button appear, and then pressing it.
-            //
-            // ...AND THAT DISJUNCT IS iPHONE-ONLY, because on iPad it produced a DEAD BUTTON.
-            // `terminalInputFocused` goes true on any terminal tap, but the iPad terminal's
-            // inputView is a zero-frame view, so no keyboard ever appeared for it to collapse;
-            // pressing it cleared both flags and then `wantsTerminalKeyFocus` re-asserted
-            // through its own `|| idiom == .pad` disjunct and the terminal immediately retook
-            // the responder. A control that visibly does nothing is worse than an absent one.
-            if replyFocused || (terminalInputFocused && UIDevice.current.userInterfaceIdiom == .phone) {
-                Button {
-                    // Mark the collapse as DELIBERATE before dropping the flags, so the resign in
-                    // updateUIView is allowed to run even while a word is selected. No reset: the
-                    // pane consumes the token exactly once, so there is nothing to leak into
-                    // unrelated passes and no async hop that can race the pass it was meant for.
-                    terminalCollapseToken += 1
+        ComposerSurface(isFocused: replyFocused) {
+            ComposerTextField(
+                text: $reply,
+                // Dictation owns the field; an upload must not resign its first responder.
+                isEnabled: !replyDictating,
+                isFocused: replyFocused,
+                onFocusChange: { replyFocused = $0 },
+                onChange: { oldValue, newValue in
+                    handleReplyChange(old: oldValue, new: newValue)
+                },
+                onReturn: { currentText in
+                    guard !sending, !replyDictating,
+                          !replyAttachments.isEmpty
+                            || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    else { return }
                     ctrlArmed = false
-                    replyFocused = false
-                    terminalInputFocused = false
-                } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                        .frame(width: 40, height: 40)
-                        .background(Palette.surface).clipShape(Circle())
-                }
-                .accessibilityLabel("Collapse keyboard")
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                replyAttachmentStrip
-                TerminalReplyField(
-                    text: $reply,
-                    // ONLY dictation disables the field. Gating it on `sending` (and on the
-                    // attachment upload, which holds for upload + post + prompt) set
-                    // `isEditable = false` on a first-responder text view, which ends editing:
-                    // the keyboard visibly dropped on EVERY reply and nothing re-acquired it,
-                    // so consecutive replies needed a re-tap each time. Double sends are
-                    // already prevented where they happen — `canSend` disables the button and
-                    // `onReturn` bails while `sending`.
-                    isEnabled: !replyDictating,
-                    isFocused: replyFocused,
-                    onFocusChange: { replyFocused = $0 },
-                    onChange: { oldValue, newValue in
-                        handleReplyChange(old: oldValue, new: newValue)
-                    },
-                    onReturn: { currentText in
-                        guard !sending, !replyDictating,
-                              !replyAttachments.isEmpty
-                                || !currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        else { return }
-                        ctrlArmed = false
-                        sendTapped(currentText)
-                    },
-                    onPasteFile: pasteReplyAttachment
-                )
-            }
+                    sendTapped(currentText)
+                },
+                onPasteFile: pasteReplyAttachment
+            )
             .frame(minWidth: 0, maxWidth: .infinity)
-            // Dictate into the reply (on-device). isActive: isForeground stops the mic
-            // if this pane stops being the front one (no hot mic behind a hidden pane);
-            // onStart disarms any pending ctrl chord and `replyDictating` suppresses the
-            // chord interception, so a dictation partial is never read as a control byte.
-            MicButton(text: $reply, diameter: 40, iconSize: 15,
-                      isActive: isForeground && !autoDelivering, recording: $replyDictating,
-                      onStart: { ctrlArmed = false })
-                .fixedSize()
-                // Mutually gated with Send AND the programmatic pre-fill auto-deliver:
-                // isActive drops on autoDelivering so an in-flight dictation stops before
-                // the auto-deliver clears the reply, and it can't be started during either.
-                .disabled(sending || autoDelivering)
-            // When the input is EMPTY the send arrow is dead, so offer saved prompts in its
-            // place; otherwise the normal send arrow (same 40x40 circle, mutually exclusive
-            // by the same empty predicate `canSend` uses).
-            if !hasReplyContent {
-                savedPromptsButton
-            } else {
-                // Tapping the arrow deliberately dismisses the iPhone keyboard. The
-                // keyboard's Return key activates this same button and delivery path.
-                // Dismissal bumps the collapse token so SwiftTerm will resign
-                // even while a selection is active. Keep that request phone-only: iPad has
-                // no software keyboard here, and its terminal-focus branch would leave an
-                // unconsumed token that could fire during a later unrelated collapse.
-                Button {
-                    sendTapped()
-                    terminalInputFocused = false
-                    if UIDevice.current.userInterfaceIdiom == .phone {
+            .padding(.horizontal, 2)
+            .padding(.top, 2)
+            .padding(.bottom, 10)
+
+            replyAttachmentStrip
+
+            HStack(spacing: 4) {
+                if composerKeyboard.isVisible && !findFocused && (replyFocused || terminalInputFocused) {
+                    Button {
                         terminalCollapseToken += 1
+                        ctrlArmed = false
                         replyFocused = false
+                        terminalInputFocused = false
+                    } label: {
+                        ComposerActionIcon(image: Image("ComposerKeyboard"))
                     }
-                } label: {
-                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(canSend ? Palette.ground : Palette.textFaint)
-                        .frame(width: 40, height: 40)
-                        .background(canSend ? Palette.text : Palette.surface).clipShape(Circle())
+                    .accessibilityLabel("Collapse keyboard")
                 }
-                .disabled(!canSend)
-                .fixedSize()
-                .accessibilityLabel("Send reply")
-                .accessibilityIdentifier("terminal-send-button")
+                Spacer(minLength: 0)
+                MicButton(text: $reply,
+                          isActive: isForeground && !autoDelivering, recording: $replyDictating,
+                          onStart: { ctrlArmed = false })
+                    .fixedSize()
+                    .disabled(sending || autoDelivering)
+                if !hasReplyContent {
+                    SavedPromptsMenu(onSelect: usePrompt)
+                        .disabled(sending || autoDelivering || replyDictating)
+                } else {
+                    Button {
+                        sendTapped()
+                        terminalInputFocused = false
+                        if UIDevice.current.userInterfaceIdiom == .phone {
+                            terminalCollapseToken += 1
+                            replyFocused = false
+                        }
+                    } label: {
+                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                    }
+                    .disabled(!canSend)
+                    .fixedSize()
+                    .accessibilityLabel("Send reply")
+                    .accessibilityIdentifier("terminal-send-button")
+                }
             }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
         // DRAG AND DROP, the other half of "get a file in from a Mac or an iPad". The
@@ -5210,14 +5137,13 @@ struct TerminalPaneContent: View {
         }
         .overlay {
             if replyDropTargeted {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: 28)
                     .strokeBorder(Palette.brand, lineWidth: 2)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
                     .allowsHitTesting(false)
             }
-        }
-        .sheet(isPresented: $showSavePrompt) {
-            SavePromptSheet { nick, txt in savedPrompts.add(nickname: nick, text: txt) }
         }
     }
     /// Stages every DROPPED file, one after another.
@@ -5331,7 +5257,7 @@ struct TerminalPaneContent: View {
                         id: UUID(), name: name,
                         mime: fileType?.preferredMIMEType ?? "application/octet-stream",
                         isImage: fileType?.conforms(to: .image) ?? false,
-                        staged: staged, uploadID: nil, gramMessageID: nil)
+                        size: staged.size, staged: staged, uploadID: nil, gramMessageID: nil)
                 }
                 Task { @MainActor in
                     finishReplyAttachmentPaste(attachment)
@@ -5361,7 +5287,7 @@ struct TerminalPaneContent: View {
             let fileAttachment: PromptAttachment? = source.flatMap { url in
                 guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
                 return PromptAttachment(
-                    id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
+                    id: UUID(), name: name, mime: mime, isImage: isImage, size: staged.size, staged: staged,
                     uploadID: nil, gramMessageID: nil)
             }
             if let fileAttachment {
@@ -5377,7 +5303,7 @@ struct TerminalPaneContent: View {
                         maxBytes: GramView.Staging.maxFileBytes)
                     else { return nil }
                     return PromptAttachment(
-                        id: UUID(), name: name, mime: mime, isImage: isImage, staged: staged,
+                        id: UUID(), name: name, mime: mime, isImage: isImage, size: staged.size, staged: staged,
                         uploadID: nil, gramMessageID: nil)
                 }
                 Task { @MainActor in finishReplyAttachmentPaste(dataAttachment) }
@@ -5421,30 +5347,6 @@ struct TerminalPaneContent: View {
     }
 
 
-    /// Replaces the (dead) send arrow when the input is empty: a menu of saved prompts. Tap one
-    /// to insert + send it; "Save new prompt…" opens the editor; the submenu deletes.
-    private var savedPromptsButton: some View {
-        Menu {
-            ForEach(savedPrompts.prompts) { p in
-                Button { usePrompt(p) } label: { Label(p.label, systemImage: "text.quote") }
-            }
-            if !savedPrompts.prompts.isEmpty { Divider() }
-            Button { showSavePrompt = true } label: { Label("Save new prompt…", systemImage: "plus") }
-            if !savedPrompts.prompts.isEmpty {
-                Menu {
-                    ForEach(savedPrompts.prompts) { p in
-                        Button(role: .destructive) { savedPrompts.delete(p.id) } label: { Text(p.label) }
-                    }
-                } label: { Label("Delete a prompt", systemImage: "trash") }
-            }
-        } label: {
-            Image(systemName: "bookmark").font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Palette.textDim)
-                .frame(width: 40, height: 40)
-                .background(Palette.surface).clipShape(Circle())
-        }
-        .disabled(sending || autoDelivering)
-    }
 
     /// Insert a saved prompt into the reply field and send it — the same path a typed reply
     /// takes (`sendTapped` → mode-aware `send(.submitText)` → confirmed `agent.prompt`).
@@ -5485,7 +5387,7 @@ struct TerminalPaneContent: View {
                     actionNote = "not sent: \(reason)"; return
                 }
                 // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
-                // whole round trip now (see the `isEnabled` comment on TerminalReplyField),
+                // whole round trip now (see the `isEnabled` comment in replyBar),
                 // so an unconditional clear here would wipe a reply typed while the prompt
                 // was in flight — the very flow that fix exists to allow.
                 if case .submitText(let sent) = action, reply == sent { reply = "" }
@@ -5524,11 +5426,12 @@ struct TerminalPaneContent: View {
 
         Task {
             sending = true
-            defer { sending = false; replyUploadBytes = nil; replySendProgress = nil }
+            replyFailedAttachmentID = nil
+            defer { sending = false; replyUploadBytes = nil; replySendingAttachmentID = nil }
             var delivered: [(attachment: PromptAttachment, messageID: String)] = []
             do {
-                for (index, attachment) in attachments.enumerated() {
-                    replySendProgress = (sent: index, total: attachments.count)
+                for attachment in attachments {
+                    replySendingAttachmentID = attachment.id
                     var current = attachment
                     var messageID = current.gramMessageID
                     if messageID == nil {
@@ -5537,6 +5440,7 @@ struct TerminalPaneContent: View {
                             uploadID = existing
                         } else {
                             guard let staged = current.staged else {
+                                replyFailedAttachmentID = current.id
                                 actionNote = Self.attachmentFailureNote(
                                     "Couldn't read \(current.name).",
                                     delivered: delivered.count, total: attachments.count)
@@ -5549,7 +5453,7 @@ struct TerminalPaneContent: View {
                             replyUploadBytes = nil
                             current = PromptAttachment(
                                 id: current.id, name: current.name, mime: current.mime,
-                                isImage: current.isImage, staged: staged, uploadID: uploadID,
+                                isImage: current.isImage, size: current.size, staged: staged, uploadID: uploadID,
                                 gramMessageID: nil)
                             rememberReplyAttachment(current)
                         }
@@ -5564,12 +5468,13 @@ struct TerminalPaneContent: View {
                         }
                         current = PromptAttachment(
                             id: current.id, name: current.name, mime: current.mime,
-                            isImage: current.isImage, staged: nil, uploadID: nil,
+                            isImage: current.isImage, size: current.size, staged: nil, uploadID: nil,
                             gramMessageID: posted.id)
                         rememberReplyAttachment(current)
                     }
 
                     guard let messageID else {
+                        replyFailedAttachmentID = current.id
                         actionNote = Self.attachmentFailureNote(
                             "Couldn't deliver \(current.name).",
                             delivered: delivered.count, total: attachments.count)
@@ -5578,7 +5483,7 @@ struct TerminalPaneContent: View {
                     delivered.append((attachment: current, messageID: messageID))
                 }
                 replyUploadBytes = nil
-                replySendProgress = nil
+                replySendingAttachmentID = nil
 
                 let prompt = Self.attachmentPrompt(text: text, delivered: delivered)
                 try await submitPrompt(pane: paneID, text: prompt)
@@ -5591,10 +5496,12 @@ struct TerminalPaneContent: View {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
+                replyFailedAttachmentID = replySendingAttachmentID
                 actionNote = Self.attachmentFailureNote(
                     Self.promptFailureNote(for: apiError),
                     delivered: delivered.count, total: attachments.count)
             } catch {
+                replyFailedAttachmentID = replySendingAttachmentID
                 actionNote = Self.attachmentFailureNote(
                     "send failed: \(error)",
                     delivered: delivered.count, total: attachments.count)

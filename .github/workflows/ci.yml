@@ -374,6 +374,15 @@ jobs:
           done
           exit "$failed"
 
+      - name: Export simulator screenshots
+        if: always()
+        run: |
+          for bundle in TestReceipts/*.xcresult; do
+            [ -d "$bundle" ] || continue
+            xcrun xcresulttool export attachments --path "$bundle" \
+              --output-path "${bundle%.xcresult}-attachments"
+          done
+
       - name: Upload terminal receipts and first-failure diagnostics
         if: always()
         uses: actions/upload-artifact@v4

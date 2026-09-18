@@ -125,24 +125,18 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         typeDirect("p"); input("p", previous: 0)
         chord("c"); input("")
         cap("terminal-ctrl").tap()
-        // THE CHEVRON IS PHONE-ONLY BY DESIGN: its gate is
-        // `replyFocused || (terminalInputFocused && idiom == .phone)`, because the iPad
-        // terminal's input view is zero-frame, so there is no keyboard to collapse and
-        // the control would be dead. Asserting it on iPad tested a decision the product
-        // deliberately made the other way.
-        if probe()["iPad"] as? Bool != true {
+        let physicalKeyboard = try XCTUnwrap(probe()["physicalKeyboard"] as? Bool)
+        let softwareKeyboard = app.keyboards.firstMatch.exists
+        print("Keyboard dismissal: software=\(softwareKeyboard), physical=\(physicalKeyboard)")
+        if softwareKeyboard && !physicalKeyboard {
             XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
-                            "the keyboard chevron must be present while direct input holds the keyboard")
+                            "the visible software keyboard must be dismissible without a physical keyboard")
             onscreen("Collapse keyboard")?.tap()
             wait { ($0["focused"] as? Bool) == false }
         } else {
             XCTAssertNil(onscreen("Collapse keyboard", timeout: 2),
-                         "iPad must not offer a dismissal for a keyboard it never shows")
-            // NOTHING HAS CANCELLED THE ARM ON THIS PATH, and the previous version of
-            // this branch expected the next key to be ordinary anyway: the fixture duly
-            // received 70 03 10 — the final p arrived as ^P, exactly as a live one-shot
-            // should encode it. iPad has no keyboard to dismiss, so cancel the way iPad
-            // actually can, with a second tap, and keep the no-leak assertion honest.
+                         "a hidden or physical keyboard must not offer software-keyboard dismissal")
+            // No dismissal occurred, so explicitly cancel the armed chord.
             cap("terminal-ctrl").tap()
             XCTAssertFalse(armed, "a second tap must cancel the one-shot")
         }
@@ -286,6 +280,11 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5),
                       "a photo should be sendable without caption text")
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+            object: send)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
+                       "the staged photo's send action must accept a tap")
         send.tap()
         let sent = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"), object: chip)
@@ -346,6 +345,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "the file should stage its own chip — note=\(note.exists ? note.label : "none")")
         XCTAssertTrue(photoChip.exists,
                       "a second paste must ADD an attachment, not replace the first")
+        attach("terminal-composer-files")
 
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
@@ -433,6 +433,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue(send.isHittable)
+        attach("terminal-composer-three-lines")
 
         field.typeText(String(repeating: " overflow", count: 20) + " tail-token")
         Thread.sleep(forTimeInterval: 0.3)

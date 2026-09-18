@@ -133,13 +133,13 @@ final class GramTests: XCTestCase {
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
         app.launch()
 
-        let field = app.textFields["gram-composer-input"]
+        let field = app.textViews["gram-composer-input"]
         let send = app.buttons["gram-send-button"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
-        XCTAssertTrue(send.waitForExistence(timeout: 5))
 
         field.tap()
         field.typeText("one")
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 0.3)
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
@@ -151,6 +151,10 @@ final class GramTests: XCTestCase {
         XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue(send.isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "gram-composer-three-lines"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
 
         field.typeText("\nfour")
         Thread.sleep(forTimeInterval: 0.3)

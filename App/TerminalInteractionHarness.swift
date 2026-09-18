@@ -1,5 +1,6 @@
 #if DEBUG && canImport(UIKit)
 import Foundation
+import GameController
 import SwiftUI
 import SwiftTerm
 import UIKit
@@ -160,6 +161,19 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                 seed()
             }
             let ticker = Task { [weak self] in
+                // Termination runs synchronously under the consumer task's status
+                // lock. It must not take mutex while a producer holds mutex in yield.
+                // Let the producer own cleanup after cancellation has unwound.
+                defer {
+                    if let self {
+                        self.locked {
+                            if self.lifetime == token {
+                                self.continuation = nil
+                                self.lifetime = nil
+                            }
+                        }
+                    }
+                }
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     guard !Task.isCancelled, let self else { break }
@@ -170,12 +184,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                     }
                 }
             }
-            c.onTermination = { [weak self] _ in
-                ticker.cancel()
-                self?.locked {
-                    if self?.lifetime == token { self?.continuation = nil; self?.lifetime = nil }
-                }
-            }
+            c.onTermination = { _ in ticker.cancel() }
         }
     }
 
@@ -405,6 +414,7 @@ final class TerminalInteractionHarness: ObservableObject {
         }
         value["mounted"] = surfaces.count
         value["iPad"] = UIDevice.current.userInterfaceIdiom == .pad
+        value["physicalKeyboard"] = GCKeyboard.coalesced != nil
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }
