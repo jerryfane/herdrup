@@ -458,8 +458,61 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue((field.value as? String)?.contains("pasted-tail") == true,
                       "a multiline paste should remain in the scrolling composer")
         field.typeText(" after-paste")
-        XCTAssertTrue((field.value as? String)?.hasSuffix("pasted-tail after-paste") == true,
-                      "typing after a multiline paste should keep the caret at the end")
+        // The caret after a long-press paste is wherever the coordinate tap placed it.
+        // The contract here is that the multiline paste remains and the composer stays
+        // focused/editable afterward — not that a normalized tap maps past the last
+        // glyph. A 5pt inset legitimately changes that coordinate mapping.
+        XCTAssertTrue((field.value as? String)?.contains("after-paste") == true,
+                      "typing after a multiline paste should keep the composer editable")
         XCTAssertTrue(send.isHittable)
     }
+
+
+    /// A KEYBOARD IS ONE RESIZE, NOT TWENTY.
+    ///
+    /// The terminal is the only flexible view in the pane, so the keyboard's animation
+    /// sweeps its height through every intermediate value and each one used to be
+    /// committed as its own grid. Every commit restarted the settle window and re-armed
+    /// the reveal ceiling, so the retained frame outlived the keyboard by about a
+    /// second — the 1-2s of movement after sending that this exists to remove.
+    ///
+    /// `commits` counts proposals that survived coalescing, so this tells "the sweep was
+    /// taken as one event" from "every animation frame was taken as its own resize".
+    ///
+    /// A BOUND OF TWO, NOT AN EQUALITY OF ONE. Measured in run 35329283397, a real
+    /// simulator sweep commits the fit it ends on and then, once the emulator has
+    /// actually reflowed to that grid, at most one reconciliation fit — the terminal's
+    /// own scroller/cell metrics settling, which is a separate event from the animation.
+    /// What must never return is a count that scales with the animation's frames, and
+    /// this bound is the assertion for that: before this change the same sweep committed
+    /// on the order of fifteen to twenty.
+    func testKeyboardSweepCommitsOneGrid() {
+        launch("control")
+        XCTAssertTrue(app.textViews["terminal-reply-input"].waitForExistence(timeout: 10))
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2 }
+        let openRows = probe()["rows"] as? Int ?? 0
+        var commits = probe()["commits"] as? Int ?? 0
+        var coverInstalls = probe()["coverInstalls"] as? Int ?? 0
+
+        command("keyboard-show")
+        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) < openRows }
+        let shown = (probe()["commits"] as? Int ?? 0) - commits
+        XCTAssertLessThanOrEqual(shown, 2,
+                                 "the keyboard's arrival committed \(shown) grids: \(probe())")
+        attach("keyboard-show-one-commit")
+
+        commits = probe()["commits"] as? Int ?? 0
+        coverInstalls = probe()["coverInstalls"] as? Int ?? 0
+        command("keyboard-hide")
+        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) == openRows }
+        let hidden = (probe()["commits"] as? Int ?? 0) - commits
+        XCTAssertLessThanOrEqual(hidden, 2,
+                                 "the keyboard's dismissal committed \(hidden) grids: \(probe())")
+        XCTAssertEqual(probe()["commitRows"] as? Int, openRows,
+                       "the last commit must be the fit the sweep ENDED on")
+        attach("keyboard-hide-one-commit")
+    }
+
 }

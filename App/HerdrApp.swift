@@ -5079,6 +5079,7 @@ struct TerminalPaneContent: View {
             )
             .frame(minWidth: 0, maxWidth: .infinity)
             .padding(.horizontal, 2)
+            .padding(.leading, ComposerStyle.textLeadingInset)
             .padding(.top, 2)
             .padding(.bottom, 10)
 
@@ -5369,6 +5370,34 @@ struct TerminalPaneContent: View {
         }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
+        // CLEARED NOW, NOT WHEN THE ROUND TRIP RETURNS.
+        //
+        // The composer is content-sized and the terminal takes whatever height is left,
+        // so clearing the text RESIZES THE PTY. Doing it on the reply meant a second
+        // resize hundreds of milliseconds to seconds after the keyboard had already
+        // caused one: two reflows, two agent repaints and two retained frames for a
+        // single send, the later one landing while the reader was still watching the
+        // first settle. Clearing here folds that height change into the keyboard's own
+        // sweep.
+        //
+        // It is still only ever THIS text: restored below if the send was refused or
+        // failed, and never over something typed since (the composer stays editable for
+        // the whole round trip — see the `isEnabled` comment in replyBar).
+        let clearedReply: String?
+        if case .submitText(let text) = action, reply == text, !text.isEmpty {
+            clearedReply = text
+            reply = ""
+        } else {
+            clearedReply = nil
+        }
+        // The ATTACHMENT path keeps its own late clear (`sendPromptWithAttachments`): its
+        // caption has to survive a batch that failed halfway so the retry chips can send
+        // it again. That send therefore still costs the second resize; deliberate, and a
+        // separate change if it ever matters (review f2).
+        func restoreClearedReply() {
+            guard let clearedReply, reply.isEmpty else { return }
+            reply = clearedReply
+        }
         Task {
             sending = true
             defer { sending = false }
@@ -5384,20 +5413,22 @@ struct TerminalPaneContent: View {
                 case .keys(let pane, let keys):
                     try await client.sendKeys(pane: pane, keys: keys); actionNote = nil
                 case .refused(let reason):
-                    actionNote = "not sent: \(reason)"; return
+                    actionNote = "not sent: \(reason)"; restoreClearedReply(); return
                 }
-                // CLEAR ONLY WHAT WAS SENT. The composer stays editable and focused for the
-                // whole round trip now (see the `isEnabled` comment in replyBar),
-                // so an unconditional clear here would wipe a reply typed while the prompt
-                // was in flight — the very flow that fix exists to allow.
-                if case .submitText(let sent) = action, reply == sent { reply = "" }
                 // Give the pane a beat to reflect the input, then re-read.
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
                 actionNote = Self.promptFailureNote(for: apiError)
+                // NOT ON A TIMEOUT. `agent.prompt` writes the text and schedules the
+                // Enter, so a timeout means "sent, awaiting confirmation" (see
+                // promptFailureNote): putting the text back there would invite a second
+                // send of something the agent already has. Every other code says it did
+                // not land, and the reader should get their text back.
+                if apiError.code != "timeout" { restoreClearedReply() }
             } catch {
                 actionNote = "send failed: \(error)"
+                restoreClearedReply()
             }
         }
     }
@@ -8077,10 +8108,22 @@ struct MockTransport: HerdrTransport {
     /// which makes the UI test's "did the content move?" an exact before/after image
     /// compare with no blinking-cursor false positive. Same reset shape as
     /// `paneStreamReset`; base64 built at runtime (DEBUG/UI-test-only, not a fixture).
+    ///
+    /// EVERY ROW LOOKS DIFFERENT, not just its three-digit number. The rows used to
+    /// share one sentence, so a real scroll of a whole screen changed only the digits:
+    /// measured at head 45ba03b the pixel difference after three firm drags was 0.0289
+    /// against ScrollTests' 0.10 floor, and the receipt failed while the screenshots it
+    /// attached showed the top line moving from 170 to 085 — a working scroll reported
+    /// as the dead-scroll symptom. A per-row letter and a per-row bar length make a
+    /// one-screen shift change most of the pixels, so the floor now separates a real
+    /// scroll from a dead one instead of separating nothing.
     static func scrollbackResetFrame() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         for i in 1...200 {
-            body += String(format: "SCROLLTEST line %03d  the quick brown fox jumps over the lazy dog\r\n", i)
+            let letter = letters[i % letters.count]
+            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
+            body += String(format: "SCROLLTEST line %03d %@ %@\r\n", i, String(letter), bar)
         }
         body += "SCROLLTEST end, swipe down to reveal earlier lines"
         let b64 = Data(body.utf8).base64EncodedString()
@@ -8092,10 +8135,17 @@ struct MockTransport: HerdrTransport {
     /// scrollback. `\r\n` endings (no staircase), cursor hidden (ESC[?25l) so static frames stay
     /// byte-identical for the before/after image compare. Built at runtime (DEBUG/UI-test only);
     /// JSONSerialization escapes the ESC + control bytes in the `text` field.
+    ///
+    /// Rows differ by more than their number, for the reason `scrollbackResetFrame`
+    /// records: one shared sentence made a real one-screen scroll a ~3% pixel change,
+    /// which is not a signal the receipt's 10% floor can read.
     static func backfillRead() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         for i in 1...1000 {
-            body += String(format: "BACKFILL line %04d  the quick brown fox jumps over the lazy dog\r\n", i)
+            let letter = letters[i % letters.count]
+            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
+            body += String(format: "BACKFILL line %04d %@ %@\r\n", i, String(letter), bar)
         }
         body += "BACKFILL end, swipe down to reveal earlier lines"
         let payload: [String: Any] = ["id": "mock", "result": ["read": [

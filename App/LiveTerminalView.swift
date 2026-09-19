@@ -293,20 +293,18 @@ struct LiveTerminalView: UIViewRepresentable {
     /// assigned - because after that assignment the old rendering is already gone.
     final class TerminalSurfaceView: UIView {
         let terminal: ReadOnlyTerminalView
-        /// Where the retained frame is pinned while the geometry changes. A tail
-        /// follower reads the newest line at the bottom; a history reader reads from
-        /// the top. Nothing is ever scaled: text does not stretch.
-        enum CoverAnchor { case topLeft, bottomLeft }
-
         /// Called immediately before the terminal's frame changes, so the owner can
         /// retain the current frame. Returns nothing: covering is the owner's choice.
         var onGeometryWillChange: (() -> Void)?
 
         private var cover: UIView?
         private var coverContent: UIView?
-        private var coverAnchor: CoverAnchor = .bottomLeft
+        private var coverContentSize: CGSize = .zero
 
         var isCovered: Bool { cover != nil }
+        /// Monotonic receipt for DEBUG/UI tests. Sampling `isCovered` is racy by design:
+        /// a valid cover may live for only a few frames.
+        private(set) var coverInstallCount = 0
 
         init(terminal: ReadOnlyTerminalView) {
             self.terminal = terminal
@@ -334,7 +332,7 @@ struct LiveTerminalView: UIViewRepresentable {
             return terminal.snapshotView(afterScreenUpdates: false)
         }
 
-        func installCover(_ content: UIView, anchor: CoverAnchor) {
+        func installCover(_ content: UIView) {
             removeCover()
             let container = UIView(frame: bounds)
             container.clipsToBounds = true
@@ -347,7 +345,8 @@ struct LiveTerminalView: UIViewRepresentable {
             addSubview(container)
             cover = container
             coverContent = content
-            coverAnchor = anchor
+            coverContentSize = content.bounds.size
+            coverInstallCount += 1
             layoutCover()
         }
 
@@ -359,15 +358,22 @@ struct LiveTerminalView: UIViewRepresentable {
 
         private func layoutCover() {
             guard let cover, let content = coverContent else { return }
+            // The CONTAINER tracks the new bounds; the retained content does NOT MOVE.
+            //
+            // It used to be pinned to an edge of those bounds — bottom for a tail
+            // follower, top for a history reader — which is motion nobody asked for as
+            // soon as the bounds themselves are animating. A keyboard dismissal grows
+            // this view by the keyboard's height over ~0.25s, so a bottom-pinned picture
+            // SLID DOWN the full ~300pt while it was supposed to be HIDING a reflow, and
+            // a blank band opened above it. Holding the capture where it was captured is
+            // the whole point: a still terminal until the new grid is ready, then one
+            // change.
+            //
+            // The capture comes from `terminal`, whose frame IS these bounds at that
+            // moment, so its captured origin is already the correct one. Growth shows
+            // background at the edge the layout actually moved; a shrink clips.
             cover.frame = bounds
-            let size = content.bounds.size
-            switch coverAnchor {
-            case .topLeft:
-                content.frame = CGRect(x: 0, y: 0, width: size.width, height: size.height)
-            case .bottomLeft:
-                content.frame = CGRect(x: 0, y: bounds.height - size.height,
-                                       width: size.width, height: size.height)
-            }
+            content.frame = CGRect(origin: .zero, size: coverContentSize)
         }
     }
 
@@ -646,8 +652,37 @@ struct LiveTerminalView: UIViewRepresentable {
         // showing text reflowing through sizes nobody asked for, so the last complete
         // frame is retained over the terminal until the new one is genuinely ready.
 
-        /// Why the geometry is changing, which decides what "settled" means.
-        private enum PresentationReason { case local, server }
+        /// Why the geometry is changing, which decides what "settled" means and whether
+        /// a burst may still be retained after the reader acted (`.keyboard`).
+        private enum PresentationReason { case local, server, keyboard }
+
+        /// The floor on a sweep's window. UIKit reports 0 for an interactive (dragged)
+        /// dismissal, and a window that short would close while the reader is still
+        /// moving the keyboard, which is the per-frame behaviour this replaces.
+        static let keyboardSweepMinimumDuration: Duration = .milliseconds(250)
+        /// Added to the sweep's reported duration, so the LAST animation frame is inside
+        /// the window.
+        static let keyboardSweepGrace: Duration = .milliseconds(80)
+
+        /// A software-keyboard transition is animating this pane's height. UIKit reports
+        /// the duration up front, so the whole sweep is ONE event with a known end.
+        ///
+        /// The end is that reported duration and nothing else. An earlier version also
+        /// closed the sweep after 60ms of proposal quiet, which is wrong for any slow
+        /// transition: a dragged dismissal proposes a new row count every ~85ms, so the
+        /// quiet window closed the sweep mid-animation and the remaining frames
+        /// committed one by one — the defect, back again, for exactly the gesture a
+        /// reader controls. Review caught it (f3).
+        private var keyboardSweepActive = false
+        private var keyboardSweepDeadlineTask: Task<Void, Never>?
+        /// The newest fit proposed during the sweep. Only this one is ever sent.
+        private var deferredKeyboardTarget: (cols: Int, rows: Int)?
+        /// The frame on screen at the exact composer Send event. `userTookControl`
+        /// removes any old cover immediately, but the same event dismisses the keyboard
+        /// before SwiftTerm can draw again. Hold this candidate briefly and consume it
+        /// ONLY if that keyboard transition follows.
+        private var pendingHostInputFrame: UIView?
+        private var pendingHostInputFrameTask: Task<Void, Never>?
 
         /// A completed paint, tagged with everything that must still hold for it to
         /// count as the finished frame for the current burst.
@@ -802,6 +837,19 @@ struct LiveTerminalView: UIViewRepresentable {
             guard token != lastUserInputToken else { return }
             lastUserInputToken = token
             guard !stopped, foreground else { return }
+            prepareHostInputFrameAndTakeControl()
+        }
+
+        /// Shared by the real host-input token and the DEBUG receipt that must perform
+        /// host input + keyboard notification in one main-actor event.
+        private func prepareHostInputFrameAndTakeControl() {
+            pendingHostInputFrameTask?.cancel()
+            pendingHostInputFrame = surface?.captureTerminalFrame()
+            pendingHostInputFrameTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                self?.pendingHostInputFrame = nil
+                self?.pendingHostInputFrameTask = nil
+            }
             userTookControl()
         }
 
@@ -969,6 +1017,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 TerminalInteractionHarness.register(paneID: paneID, view: view,
                     requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
                     isCovered: { [weak surface] in surface?.isCovered ?? false },
+                    coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
                     isForeground: { [weak self] in self?.foreground ?? false })
             }
             #endif
@@ -995,7 +1044,12 @@ struct LiveTerminalView: UIViewRepresentable {
             // The container tells us a frame change is imminent, while the current
             // rendering is still on screen and can be retained.
             surface.onGeometryWillChange = { [weak self] in
-                self?.beginResizePresentation(reason: .local)
+                // The reason is the sweep's: a keyboard-driven relayout may retain a
+                // frame even though the send that dismissed the keyboard just dropped
+                // one. This fires only when the frame REALLY changes, so a keyboard
+                // event that does not resize this pane still costs nothing.
+                self?.beginResizePresentation(
+                    reason: self?.keyboardSweepActive == true ? .keyboard : .local)
             }
             view.onWillInsertText = { [weak self] text, composing in
                 self?.prepareForInsertedText(text, composing: composing)
@@ -1053,6 +1107,24 @@ struct LiveTerminalView: UIViewRepresentable {
                     self?.cancelArmedControl()
                     self?.finishPresentation()
                 })
+            // THE SOFTWARE KEYBOARD IS A GEOMETRY EVENT, and UIKit says so up front: the
+            // notification carries the animation's duration, so the sweep it is about to
+            // run has a known end. Without this the only evidence of a keyboard was ~20
+            // layout passes that each looked like an independent resize.
+            //
+            // willChangeFrame covers show, hide, height changes and the floating/split
+            // iPad keyboard in one notification; willHide is kept because an interactive
+            // dismissal ends there. Both funnel into the same idempotent sweep.
+            for name in [UIResponder.keyboardWillChangeFrameNotification,
+                         UIResponder.keyboardWillHideNotification] {
+                keyboardObservers.append(
+                    NotificationCenter.default.addObserver(forName: name, object: nil,
+                                                           queue: .main) { [weak self] note in
+                        let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
+                                        as? Double) ?? 0.25
+                        self?.beginKeyboardSweep(duration: duration)
+                    })
+            }
             // Claim geometry ownership for this pane (see geometryGeneration): the newest
             // attach wins, and an older coordinator's delayed release checks this before
             // unlocking.
@@ -1659,6 +1731,13 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
+            keyboardSweepActive = false
+            keyboardSweepDeadlineTask?.cancel()
+            keyboardSweepDeadlineTask = nil
+            deferredKeyboardTarget = nil
+            pendingHostInputFrameTask?.cancel()
+            pendingHostInputFrameTask = nil
+            pendingHostInputFrame = nil
             streamTask?.cancel()
             streamTask = nil
             watchdogTask?.cancel()          // stop the stream-stuck watchdog
@@ -2175,6 +2254,21 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             #endif
             guard cols >= 4, rows >= 2 else { return }
+            // ONE PROPOSAL PER KEYBOARD SWEEP.
+            //
+            // The keyboard animates this pane's height over ~0.25s and the terminal is
+            // the only flexible view in it, so EVERY animation frame proposed its own
+            // row count: ~20 targets, each one restarting the settle window and
+            // re-arming the reveal ceiling, which is why the retained frame was released
+            // a second AFTER the keyboard had already finished. Only the fit the sweep
+            // ENDS on was ever asked for; the rest are frames of an animation.
+            //
+            // The sweep's own end (`noteKeyboardSweepProposal`) commits that last fit
+            // through this same path.
+            if keyboardSweepActive {
+                noteKeyboardSweepProposal(cols: cols, rows: rows)
+                return
+            }
             let cell = cellPixels()
             let priorChange = desiredTargetChangedAt
             let target = TerminalGeometryTarget(cols: cols, rows: rows,
@@ -2187,6 +2281,11 @@ struct LiveTerminalView: UIViewRepresentable {
             desiredTarget = target
             desiredTargetChangedAt = ContinuousClock.now
             targetGeneration += 1
+            #if DEBUG
+            MainActor.assumeIsolated {
+                TerminalInteractionHarness.noteCommittedFit(paneID: paneID, cols: cols, rows: rows)
+            }
+            #endif
             resizeRetries = 0        // a new target gets a fresh retry budget
             presentationGeometrySettled = false
             geometryEligibleAt = nil
@@ -2207,6 +2306,62 @@ struct LiveTerminalView: UIViewRepresentable {
             // window could race the `lock:false` and strand the visible pane unlocked.
             guard foreground, !relockPending else { return }
             startGeometryDrain()
+        }
+
+        /// A keyboard transition began. Retains the current frame for the whole sweep
+        /// and holds its grid proposals until the animation stops moving.
+        private func beginKeyboardSweep(duration: Double) {
+            guard !stopped, foreground else { return }
+            keyboardSweepActive = true
+            // On iPhone the software keyboard is full-width and this notification always
+            // changes the pane's safe-area height. Capture NOW, while `.keyboard` is
+            // unambiguous and immediately after Send closed the old presentation.
+            // SwiftUI may defer `layoutSubviews` until after this sweep's deadline, which
+            // made a layout-only classification miss the exemption in CI35408586711.
+            //
+            // iPad stays layout-driven: floating/split keyboards can post the same
+            // notification without resizing the pane, and must not freeze it.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                beginResizePresentation(reason: .keyboard)
+            }
+            keyboardSweepDeadlineTask?.cancel()
+            let window = max(Duration.seconds(max(0, duration)), Self.keyboardSweepMinimumDuration)
+            let backstop = window + Self.keyboardSweepGrace
+            keyboardSweepDeadlineTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: backstop) } catch { return }
+                self?.endKeyboardSweep()
+            }
+        }
+
+        /// A fit proposed while the keyboard is moving. Kept, not sent: the sweep's end
+        /// commits it.
+        private func noteKeyboardSweepProposal(cols: Int, rows: Int) {
+            deferredKeyboardTarget = (cols: cols, rows: rows)
+        }
+
+        /// Closes the sweep and commits its final fit — exactly one proposal for the
+        /// whole animation. Idempotent: a second notification's task, `stop()` and this
+        /// may all race, and only the first caller commits.
+        private func endKeyboardSweep() {
+            keyboardSweepDeadlineTask?.cancel()
+            keyboardSweepDeadlineTask = nil
+            guard keyboardSweepActive else { return }
+            keyboardSweepActive = false
+            guard let target = deferredKeyboardTarget else {
+                // Nothing to commit (a keyboard that did not resize this pane, or a fit
+                // identical to the one already driving). A reveal held off during the
+                // sweep must still be reconsidered now, or the retained frame would sit
+                // until its ceiling.
+                evaluatePresentationReveal()
+                return
+            }
+            deferredKeyboardTarget = nil
+            requestGeometry(cols: target.cols, rows: target.rows)
+            // ALWAYS re-evaluate, even though `requestGeometry` usually does: it returns
+            // early when the fit matches the target already driving, and that early
+            // return is exactly the case where a reveal deferred during the sweep has
+            // nothing left to wake it.
+            evaluatePresentationReveal()
         }
 
         /// The single serialized drain. At most one `set_pty_size` in flight, and a
@@ -2294,20 +2449,39 @@ struct LiveTerminalView: UIViewRepresentable {
         private func beginResizePresentation(reason: PresentationReason) {
             guard !stopped, foreground else { return }
             if presentationActive {
-                if reason == .local { presentationReason = .local }
+                // A keyboard sweep is still OUR relayout, so it keeps the burst local
+                // for the settled test; only the server's own commit means .server.
+                if reason != .server { presentationReason = .local }
                 return
             }
             // A gesture closes the entire in-flight burst, including its late markers.
             // Only a later, stationary-to-moving transition can retain another frame.
-            if presentationClosed {
+            //
+            // A KEYBOARD SWEEP IS EXEMPT, and that exemption is the point of the
+            // `.keyboard` reason. Sending on iPhone drops the retained frame on purpose
+            // (`userInputToken` → `userTookControl`): the reader's keystroke must not be
+            // hidden behind a stale picture. But the SAME send dismisses the keyboard,
+            // and the relayout that follows is ours, not stale output — leaving it
+            // uncovered is what put the raw reflow on screen for a second. The capture
+            // below is taken now, i.e. AFTER the input, so nothing stale is retained.
+            if presentationClosed, reason != .keyboard {
                 guard resizeTask == nil, inflightTarget == nil,
                       desiredTargetChangedAt.map({ ContinuousClock.now - $0 >= Self.resizeSettleDuration }) ?? true
                 else { return }
             }
+            let hostInputFrame: UIView?
+            if reason == .keyboard {
+                hostInputFrame = pendingHostInputFrame
+                pendingHostInputFrame = nil
+                pendingHostInputFrameTask?.cancel()
+                pendingHostInputFrameTask = nil
+            } else {
+                hostInputFrame = nil
+            }
             presentationGeneration += 1
             presentationActive = true
             presentationClosed = false
-            presentationReason = reason
+            presentationReason = reason == .server ? .server : .local
             presentationStartedOnNormalBuffer = !(view?.getTerminal().isCurrentBufferAlternate ?? false)
             presentationGeometrySettled = false
             geometryEligibleAt = nil
@@ -2317,8 +2491,10 @@ struct LiveTerminalView: UIViewRepresentable {
             lastCompleteDraw = nil
             pendingSafeRepaint = false
             tailPublishHeld = true
-            if backingDrawComplete, let surface, let image = surface.captureTerminalFrame() {
-                surface.installCover(image, anchor: lastReportedAtTail ? .bottomLeft : .topLeft)
+            if let surface, let image = hostInputFrame
+                ?? ((backingDrawComplete || reason == .keyboard)
+                    ? surface.captureTerminalFrame() : nil) {
+                surface.installCover(image)
             }
             armPresentationDeadline(after: Self.presentationDeadlineDuration)
         }
@@ -2396,6 +2572,18 @@ struct LiveTerminalView: UIViewRepresentable {
 
         private func evaluatePresentationReveal() {
             guard presentationActive, !stopped, let view else { return }
+            // NOT WHILE THE KEYBOARD IS STILL MOVING. The sweep deliberately leaves
+            // `desiredTarget` alone, so "settled" is still being judged against the
+            // PRE-sweep target: a late response for that target satisfies it mid-
+            // animation and the frame this burst exists for would come off while the
+            // band is still sweeping. Review caught it (f4); `endKeyboardSweep`
+            // re-evaluates.
+            // The ceiling is exempt. Holding the reveal is a courtesy to the animation;
+            // the deadline is the promise that a retained frame always comes off. In run
+            // 35351892191 the two met: the ceiling fired mid-sweep, this guard swallowed
+            // its only evaluation, and the cover sat there — a frozen terminal, which is
+            // worse than the reflow it was hiding.
+            guard !keyboardSweepActive || presentationDeadlineReached else { return }
             guard presentationGeometrySettled || presentationDeadlineReached else { return }
             let terminal = view.getTerminal()
             guard !terminal.synchronizedOutputActive else { return }
@@ -2406,11 +2594,19 @@ struct LiveTerminalView: UIViewRepresentable {
             let ready = presentationDeadlineReached || presentationSyncEnded
                 || ContinuousClock.now - quietStart >= Self.presentationQuietDuration
             guard ready else { scheduleQuietReveal(); return }
-            if let draw = lastCompleteDraw, draw == currentDrawToken() {
+            if presentationDeadlineReached {
+                // HARD CEILING. A repaint request is not a ceiling: when the emulator's
+                // logical grid already matches, `applyTerminalSize` may produce no draw
+                // callback, so nothing finishes the presentation and the retained frame
+                // becomes a permanently frozen terminal. CI35369227802 reproduced that
+                // in both iPhone passes. At the deadline the safer failure mode is one
+                // exposed reflow, never an unbounded freeze.
+                finishPresentation()
+            } else if let draw = lastCompleteDraw, draw == currentDrawToken() {
                 finishPresentation()
             } else if !pendingSafeRepaint {
-                // Reconcile and schedule through the library's synchronization gate,
-                // including the no-output/deadline case. Never force DEC 2026 to end.
+                // Reconcile and schedule through the library's synchronization gate.
+                // Never force DEC 2026 to end.
                 pendingSafeRepaint = true
                 view.applyTerminalSize(cols: terminal.cols, rows: terminal.rows)
             }

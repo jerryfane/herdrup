@@ -1065,6 +1065,7 @@ struct GramView: View {
                 )
                 .frame(minWidth: 0, maxWidth: .infinity)
                 .padding(.horizontal, 2)
+                .padding(.leading, ComposerStyle.textLeadingInset)
                 .padding(.top, 2)
                 .padding(.bottom, 10)
 
