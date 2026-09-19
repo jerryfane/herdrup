@@ -22,6 +22,7 @@ BUILD_NUMBER = "156"
 LOCALE = "en-US"
 WHATS_NEW = "Smoother keyboard transitions and improved reply-field spacing."
 SUBMITTED_VERSION_STATES = {
+    "ACCEPTED",
     "WAITING_FOR_REVIEW",
     "IN_REVIEW",
     "PENDING_DEVELOPER_RELEASE",
@@ -93,7 +94,11 @@ def app_and_build() -> tuple[dict, dict]:
         "/v1/builds",
         **{"filter[app]": app["id"], "filter[version]": BUILD_NUMBER, "limit": "10"},
     ).get("data", [])
-    valid = [build for build in builds if attrs(build).get("processingState") == "VALID"]
+    valid = [
+        build for build in builds
+        if attrs(build).get("processingState") == "VALID"
+        and attrs(build).get("expired") is not True
+    ]
     if len(valid) != 1:
         raise RuntimeError(f"Expected one VALID build {BUILD_NUMBER}; found {len(valid)}")
     build = valid[0]
@@ -277,43 +282,101 @@ def verify_screenshots(localization: dict) -> None:
         sets = request(
             "GET", f"/v1/appStoreVersionLocalizations/{localization['id']}/appScreenshotSets?limit=200"
         ).get("data", [])
-        present = {attrs(item).get("screenshotDisplayType") for item in sets}
-        print(f"screenshot-sets attempt={attempt + 1}: {sorted(present)}")
-        if expected <= present:
+        complete: set[str] = set()
+        evidence: dict[str, dict] = {}
+        for screenshot_set in sets:
+            display_type = attrs(screenshot_set).get("screenshotDisplayType")
+            if display_type not in expected:
+                continue
+            screenshots = request(
+                "GET", f"/v1/appScreenshotSets/{screenshot_set['id']}/appScreenshots?limit=200"
+            ).get("data", [])
+            states = [
+                (attrs(screenshot).get("assetDeliveryState") or {}).get("state")
+                for screenshot in screenshots
+            ]
+            evidence[display_type] = {"count": len(screenshots), "states": states}
+            if screenshots and all(state == "COMPLETE" for state in states):
+                complete.add(display_type)
+        print(f"screenshot-assets attempt={attempt + 1}: {json.dumps(evidence, sort_keys=True)}")
+        if expected <= complete:
             return
         time.sleep(10)
-    raise RuntimeError(f"New version did not inherit required screenshots: expected {sorted(expected)}")
+    raise RuntimeError(f"New version lacks complete screenshots for {sorted(expected)}")
 
 
-def create_and_submit_review(app: dict, version: dict) -> dict:
-    submission = request(
-        "POST",
-        "/v1/reviewSubmissions",
-        {
-            "data": {
-                "type": "reviewSubmissions",
-                "attributes": {"platform": "IOS"},
-                "relationships": {"app": relationship("apps", app["id"])},
-            }
-        },
-    ).get("data")
+def review_submission_items(submission_id: str) -> list[dict]:
+    return request("GET", f"/v1/reviewSubmissions/{submission_id}/items?limit=200").get("data", [])
+
+
+def review_item_version_id(item_id: str) -> str:
+    version = request("GET", f"/v1/reviewSubmissionItems/{item_id}/appStoreVersion").get("data")
+    if not version:
+        raise RuntimeError(f"Review submission item {item_id} has no App Store version")
+    return version["id"]
+
+
+def resumable_submission(active: list[dict], version: dict) -> dict | None:
+    if not active:
+        return None
+    if len(active) != 1:
+        details = [(item["id"], attrs(item).get("state")) for item in active]
+        raise RuntimeError(f"Refusing multiple active review submissions: {details}")
+    submission = active[0]
+    state = attrs(submission).get("state")
+    if state != "READY_FOR_REVIEW":
+        raise RuntimeError(f"Active review submission {submission['id']} is not resumable: {state}")
+    items = review_submission_items(submission["id"])
+    version_ids = {review_item_version_id(item["id"]) for item in items}
+    if version_ids and version_ids != {version["id"]}:
+        raise RuntimeError(
+            f"Active review submission {submission['id']} belongs to other versions: {sorted(version_ids)}"
+        )
+    print(
+        f"resuming-review: id={submission['id']} state={state} "
+        f"target-items={len(items)}"
+    )
+    return submission
+
+
+def create_and_submit_review(app: dict, version: dict, submission: dict | None) -> dict:
     if not submission:
-        raise RuntimeError("Creating review submission returned no resource")
-    item = request(
-        "POST",
-        "/v1/reviewSubmissionItems",
-        {
-            "data": {
-                "type": "reviewSubmissionItems",
-                "relationships": {
-                    "reviewSubmission": relationship("reviewSubmissions", submission["id"]),
-                    "appStoreVersion": relationship("appStoreVersions", version["id"]),
-                },
-            }
-        },
-    ).get("data")
-    if not item:
-        raise RuntimeError("Creating review submission item returned no resource")
+        submission = request(
+            "POST",
+            "/v1/reviewSubmissions",
+            {
+                "data": {
+                    "type": "reviewSubmissions",
+                    "attributes": {"platform": "IOS"},
+                    "relationships": {"app": relationship("apps", app["id"])},
+                }
+            },
+        ).get("data")
+        if not submission:
+            raise RuntimeError("Creating review submission returned no resource")
+    items = review_submission_items(submission["id"])
+    if not items:
+        item = request(
+            "POST",
+            "/v1/reviewSubmissionItems",
+            {
+                "data": {
+                    "type": "reviewSubmissionItems",
+                    "relationships": {
+                        "reviewSubmission": relationship("reviewSubmissions", submission["id"]),
+                        "appStoreVersion": relationship("appStoreVersions", version["id"]),
+                    },
+                }
+            },
+        ).get("data")
+        if not item:
+            raise RuntimeError("Creating review submission item returned no resource")
+    else:
+        version_ids = {review_item_version_id(item["id"]) for item in items}
+        if version_ids != {version["id"]}:
+            raise RuntimeError(
+                f"Review submission {submission['id']} contains other versions: {sorted(version_ids)}"
+            )
     submitted = request(
         "PATCH",
         f"/v1/reviewSubmissions/{submission['id']}",
@@ -370,19 +433,20 @@ def main() -> None:
         return
 
     active = active_submissions(app["id"])
-    if active:
-        details = [(item["id"], attrs(item).get("state")) for item in active]
-        raise RuntimeError(f"Refusing to overlap an active review submission: {details}")
     if target and attrs(target).get("appStoreState") != "PREPARE_FOR_SUBMISSION":
         raise RuntimeError(f"Target version is not mutable: {attrs(target).get('appStoreState')}")
     if not target:
+        if active:
+            details = [(item["id"], attrs(item).get("state")) for item in active]
+            raise RuntimeError(f"Refusing active review submission without target version: {details}")
         target = create_version(app, source_version)
+    reusable = resumable_submission(active, target)
 
     select_build(target, build)
     localization = ensure_localization(target, source_localization)
     ensure_review_detail(target, source_review, notes)
     verify_screenshots(localization)
-    submission = create_and_submit_review(app, target)
+    submission = create_and_submit_review(app, target, reusable)
     verify_submission(target["id"], submission["id"])
 
 
