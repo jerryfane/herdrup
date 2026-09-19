@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Inspect or submit Herdr 1.0.6 build 156 through App Store Connect."""
+"""Submit the exact authorized Herdr build to App Store review, idempotently."""
 
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -16,14 +17,23 @@ import jwt
 API = "https://api.appstoreconnect.apple.com"
 BUNDLE_ID = "com.jerryfane.herdr"
 VERSION = "1.0.6"
+SOURCE_VERSION = "1.0.5"
 BUILD_NUMBER = "156"
 LOCALE = "en-US"
 WHATS_NEW = "Smoother keyboard transitions and improved reply-field spacing."
-MODE = os.environ.get("MODE", "inspect")
-for required in ("ASC_ISSUER_ID", "ASC_KEY_ID", "ASC_P8_BASE64"):
+SUBMITTED_VERSION_STATES = {
+    "WAITING_FOR_REVIEW",
+    "IN_REVIEW",
+    "PENDING_DEVELOPER_RELEASE",
+    "PENDING_APPLE_RELEASE",
+    "PROCESSING_FOR_DISTRIBUTION",
+    "READY_FOR_SALE",
+}
+SUBMITTED_REVIEW_STATES = {"WAITING_FOR_REVIEW", "IN_REVIEW", "COMPLETE"}
+
+for required in ("ASC_ISSUER_ID", "ASC_KEY_ID", "ASC_P8_BASE64", "HERDR_REVIEW_DEMO_PASSWORD"):
     if not os.environ.get(required):
         raise RuntimeError(f"Missing required release credential: {required}")
-
 
 
 def token() -> str:
@@ -97,61 +107,283 @@ def app_and_build() -> tuple[dict, dict]:
 
 
 def versions_for_app(app_id: str) -> list[dict]:
-    versions = query(
+    return query(
         f"/v1/apps/{app_id}/appStoreVersions",
         **{"filter[platform]": "IOS", "limit": "200"},
     ).get("data", [])
-    for version in versions:
-        print_resource("version", version, ("versionString", "appStoreState", "releaseType", "createdDate"))
-    return versions
 
 
 def version_named(versions: list[dict], version_string: str) -> dict | None:
     return next((version for version in versions if attrs(version).get("versionString") == version_string), None)
 
 
-def inventory(app: dict, build: dict, version: dict | None, source_version: dict) -> None:
-    print_resource("app", app, ("name", "bundleId", "sku"))
-    print_resource("authorized-build", build, ("version", "processingState", "uploadedDate", "expired"))
-    print_resource("target-version", version, ("versionString", "appStoreState", "releaseType", "createdDate"))
-    inspected_version = version or source_version
-    print_resource("metadata-source-version", inspected_version,
-                   ("versionString", "appStoreState", "releaseType", "copyright"))
-    selected = request("GET", f"/v1/appStoreVersions/{inspected_version['id']}/build").get("data")
-    print_resource("selected-build", selected, ("version", "processingState", "uploadedDate"))
-    localizations = request(
-        "GET", f"/v1/appStoreVersions/{inspected_version['id']}/appStoreVersionLocalizations?limit=200"
+def version_localizations(version_id: str) -> list[dict]:
+    return request(
+        "GET", f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations?limit=200"
     ).get("data", [])
-    for localization in localizations:
-        print_resource("localization", localization,
-                       ("locale", "whatsNew", "description", "keywords", "marketingUrl",
-                        "promotionalText", "supportUrl"))
-        screenshot_sets = request(
+
+
+def localization_named(version_id: str, locale: str) -> dict | None:
+    return next((item for item in version_localizations(version_id) if attrs(item).get("locale") == locale), None)
+
+
+def source_metadata(source_version: dict) -> tuple[dict, dict, str]:
+    source_localization = localization_named(source_version["id"], LOCALE)
+    if not source_localization:
+        raise RuntimeError(f"Live {SOURCE_VERSION} has no {LOCALE} localization")
+    source_review = request(
+        "GET", f"/v1/appStoreVersions/{source_version['id']}/appStoreReviewDetail"
+    ).get("data")
+    if not source_review:
+        raise RuntimeError(f"Live {SOURCE_VERSION} has no review detail")
+    notes = attrs(source_review).get("notes") or ""
+    password = os.environ["HERDR_REVIEW_DEMO_PASSWORD"]
+    notes, replacements = re.subn(r"herdr-review-demo-[A-Za-z0-9_-]+", password, notes)
+    if replacements != 1 or password not in notes:
+        raise RuntimeError("Could not replace exactly one demo credential in inherited review notes")
+    return source_localization, source_review, notes
+
+
+def active_submissions(app_id: str) -> list[dict]:
+    submissions = query(f"/v1/apps/{app_id}/reviewSubmissions", **{"limit": "50"}).get("data", [])
+    return [submission for submission in submissions if attrs(submission).get("state") != "COMPLETE"]
+
+
+def create_version(app: dict, source_version: dict) -> dict:
+    source = attrs(source_version)
+    body = {
+        "data": {
+            "type": "appStoreVersions",
+            "attributes": {
+                "platform": "IOS",
+                "versionString": VERSION,
+                "releaseType": source.get("releaseType") or "AFTER_APPROVAL",
+                "copyright": source.get("copyright") or "2026 Jerry Fanelli",
+            },
+            "relationships": {"app": relationship("apps", app["id"])},
+        }
+    }
+    version = request("POST", "/v1/appStoreVersions", body).get("data")
+    if not version:
+        raise RuntimeError("Creating App Store version returned no resource")
+    print_resource("created-version", version, ("versionString", "appStoreState", "releaseType"))
+    return version
+
+
+def select_build(version: dict, build: dict) -> None:
+    request(
+        "PATCH",
+        f"/v1/appStoreVersions/{version['id']}",
+        {
+            "data": {
+                "type": "appStoreVersions",
+                "id": version["id"],
+                "relationships": {"build": relationship("builds", build["id"])},
+            }
+        },
+    )
+    selected = request("GET", f"/v1/appStoreVersions/{version['id']}/build").get("data")
+    if not selected or selected["id"] != build["id"]:
+        raise RuntimeError("App Store version did not retain exact build 156")
+    print_resource("selected-build", selected, ("version", "processingState", "uploadedDate"))
+
+
+def ensure_localization(version: dict, source_localization: dict) -> dict:
+    localization = localization_named(version["id"], LOCALE)
+    if localization:
+        localization = request(
+            "PATCH",
+            f"/v1/appStoreVersionLocalizations/{localization['id']}",
+            {
+                "data": {
+                    "type": "appStoreVersionLocalizations",
+                    "id": localization["id"],
+                    "attributes": {"whatsNew": WHATS_NEW},
+                }
+            },
+        ).get("data")
+    else:
+        allowed = ("description", "keywords", "marketingUrl", "promotionalText", "supportUrl")
+        copied = {key: attrs(source_localization).get(key) for key in allowed}
+        copied = {key: value for key, value in copied.items() if value is not None}
+        copied.update({"locale": LOCALE, "whatsNew": WHATS_NEW})
+        localization = request(
+            "POST",
+            "/v1/appStoreVersionLocalizations",
+            {
+                "data": {
+                    "type": "appStoreVersionLocalizations",
+                    "attributes": copied,
+                    "relationships": {
+                        "appStoreVersion": relationship("appStoreVersions", version["id"])
+                    },
+                }
+            },
+        ).get("data")
+    if not localization or attrs(localization).get("whatsNew") != WHATS_NEW:
+        raise RuntimeError("Authorized release note was not saved exactly")
+    print_resource("release-note", localization, ("locale", "whatsNew"))
+    return localization
+
+
+def ensure_review_detail(version: dict, source_review: dict, notes: str) -> None:
+    target = request("GET", f"/v1/appStoreVersions/{version['id']}/appStoreReviewDetail").get("data")
+    allowed = (
+        "contactEmail",
+        "contactFirstName",
+        "contactLastName",
+        "contactPhone",
+        "demoAccountName",
+        "demoAccountPassword",
+        "demoAccountRequired",
+    )
+    copied = {key: attrs(source_review).get(key) for key in allowed}
+    copied = {key: value for key, value in copied.items() if value is not None}
+    copied["notes"] = notes
+    if target:
+        target = request(
+            "PATCH",
+            f"/v1/appStoreReviewDetails/{target['id']}",
+            {
+                "data": {
+                    "type": "appStoreReviewDetails",
+                    "id": target["id"],
+                    "attributes": copied,
+                }
+            },
+        ).get("data")
+    else:
+        target = request(
+            "POST",
+            "/v1/appStoreReviewDetails",
+            {
+                "data": {
+                    "type": "appStoreReviewDetails",
+                    "attributes": copied,
+                    "relationships": {
+                        "appStoreVersion": relationship("appStoreVersions", version["id"])
+                    },
+                }
+            },
+        ).get("data")
+    if not target or os.environ["HERDR_REVIEW_DEMO_PASSWORD"] not in (attrs(target).get("notes") or ""):
+        raise RuntimeError("Rotated demo credential was not saved in review instructions")
+    print(f"review-detail: id={target['id']} contact-and-rotated-demo-instructions=verified")
+
+
+def verify_screenshots(localization: dict) -> None:
+    expected = {"APP_IPHONE_67", "APP_IPAD_PRO_3GEN_129"}
+    for attempt in range(8):
+        sets = request(
             "GET", f"/v1/appStoreVersionLocalizations/{localization['id']}/appScreenshotSets?limit=200"
         ).get("data", [])
-        for screenshot_set in screenshot_sets:
-            print_resource("screenshot-set", screenshot_set, ("screenshotDisplayType",))
-    review_detail = request(
-        "GET", f"/v1/appStoreVersions/{inspected_version['id']}/appStoreReviewDetail"
+        present = {attrs(item).get("screenshotDisplayType") for item in sets}
+        print(f"screenshot-sets attempt={attempt + 1}: {sorted(present)}")
+        if expected <= present:
+            return
+        time.sleep(10)
+    raise RuntimeError(f"New version did not inherit required screenshots: expected {sorted(expected)}")
+
+
+def create_and_submit_review(app: dict, version: dict) -> dict:
+    submission = request(
+        "POST",
+        "/v1/reviewSubmissions",
+        {
+            "data": {
+                "type": "reviewSubmissions",
+                "attributes": {"platform": "IOS"},
+                "relationships": {"app": relationship("apps", app["id"])},
+            }
+        },
     ).get("data")
-    print_resource("review-detail", review_detail,
-                   ("contactFirstName", "contactLastName", "contactPhone", "contactEmail",
-                    "demoAccountRequired", "notes"))
-    submissions = query(f"/v1/apps/{app['id']}/reviewSubmissions", **{"limit": "50"}).get("data", [])
-    for submission in submissions:
-        print_resource("review-submission", submission, ("platform", "state", "submittedDate"))
+    if not submission:
+        raise RuntimeError("Creating review submission returned no resource")
+    item = request(
+        "POST",
+        "/v1/reviewSubmissionItems",
+        {
+            "data": {
+                "type": "reviewSubmissionItems",
+                "relationships": {
+                    "reviewSubmission": relationship("reviewSubmissions", submission["id"]),
+                    "appStoreVersion": relationship("appStoreVersions", version["id"]),
+                },
+            }
+        },
+    ).get("data")
+    if not item:
+        raise RuntimeError("Creating review submission item returned no resource")
+    submitted = request(
+        "PATCH",
+        f"/v1/reviewSubmissions/{submission['id']}",
+        {
+            "data": {
+                "type": "reviewSubmissions",
+                "id": submission["id"],
+                "attributes": {"submitted": True},
+            }
+        },
+    ).get("data")
+    if not submitted:
+        raise RuntimeError("Review submission PATCH returned no resource")
+    print_resource("submitted-review", submitted, ("platform", "state", "submittedDate"))
+    return submitted
+
+
+def verify_submission(version_id: str, submission_id: str) -> None:
+    for attempt in range(20):
+        version = request("GET", f"/v1/appStoreVersions/{version_id}").get("data")
+        submission = request("GET", f"/v1/reviewSubmissions/{submission_id}").get("data")
+        version_state = attrs(version).get("appStoreState") if version else None
+        review_state = attrs(submission).get("state") if submission else None
+        print(f"verification attempt={attempt + 1}: appStoreState={version_state} reviewState={review_state}")
+        if version_state in SUBMITTED_VERSION_STATES and review_state in SUBMITTED_REVIEW_STATES:
+            print("APP_STORE_SUBMISSION_VERIFIED")
+            return
+        if review_state in {"UNRESOLVED_ISSUES", "CANCELING"}:
+            raise RuntimeError(f"Review submission entered failure state {review_state}")
+        time.sleep(15)
+    raise RuntimeError("Timed out waiting for App Store review submission acceptance")
 
 
 def main() -> None:
-    if MODE != "inspect":
-        raise RuntimeError(f"This exact branch is read-only; unsupported MODE={MODE}")
     app, build = app_and_build()
     versions = versions_for_app(app["id"])
-    version = version_named(versions, VERSION)
-    source_version = version_named(versions, "1.0.5")
+    source_version = version_named(versions, SOURCE_VERSION)
     if not source_version:
-        raise RuntimeError("Cannot find live 1.0.5 metadata source")
-    inventory(app, build, version, source_version)
+        raise RuntimeError(f"Cannot find live {SOURCE_VERSION} metadata source")
+    source_localization, source_review, notes = source_metadata(source_version)
+    target = version_named(versions, VERSION)
+    print_resource("app", app, ("name", "bundleId", "sku"))
+    print_resource("authorized-build", build, ("version", "processingState", "uploadedDate", "expired"))
+    print_resource("target-before", target, ("versionString", "appStoreState", "releaseType"))
+
+    if target and attrs(target).get("appStoreState") in SUBMITTED_VERSION_STATES:
+        selected = request("GET", f"/v1/appStoreVersions/{target['id']}/build").get("data")
+        localization = localization_named(target["id"], LOCALE)
+        if not selected or selected["id"] != build["id"]:
+            raise RuntimeError("Submitted version does not use exact authorized build 156")
+        if not localization or attrs(localization).get("whatsNew") != WHATS_NEW:
+            raise RuntimeError("Submitted version does not contain exact authorized release note")
+        print("APP_STORE_SUBMISSION_ALREADY_VERIFIED")
+        return
+
+    active = active_submissions(app["id"])
+    if active:
+        details = [(item["id"], attrs(item).get("state")) for item in active]
+        raise RuntimeError(f"Refusing to overlap an active review submission: {details}")
+    if target and attrs(target).get("appStoreState") != "PREPARE_FOR_SUBMISSION":
+        raise RuntimeError(f"Target version is not mutable: {attrs(target).get('appStoreState')}")
+    if not target:
+        target = create_version(app, source_version)
+
+    select_build(target, build)
+    localization = ensure_localization(target, source_localization)
+    ensure_review_detail(target, source_review, notes)
+    verify_screenshots(localization)
+    submission = create_and_submit_review(app, target)
+    verify_submission(target["id"], submission["id"])
 
 
 if __name__ == "__main__":

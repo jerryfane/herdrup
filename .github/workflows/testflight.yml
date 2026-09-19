@@ -1,4 +1,4 @@
-name: App Store Submission Inspection
+name: App Store Submission 1.0.6
 
 on:
   workflow_dispatch:
@@ -7,9 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  submit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     # Release credentials are intentionally available only to main and v* tags.
     environment: testflight
     steps:
@@ -20,10 +20,10 @@ jobs:
           python3 -m venv /tmp/asc
           /tmp/asc/bin/pip install --quiet --disable-pip-version-check 'pyjwt~=2.9' 'cryptography~=43.0'
 
-      - name: Inspect Herdr 1.0.6 build 156 without mutation
+      - name: Submit Herdr 1.0.6 build 156 for App Store review
         env:
-          MODE: inspect
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_P8_BASE64 }}
+          HERDR_REVIEW_DEMO_PASSWORD: ${{ secrets.HERDR_REVIEW_DEMO_PASSWORD }}
         run: /tmp/asc/bin/python .github/scripts/asc_submit_release.py
