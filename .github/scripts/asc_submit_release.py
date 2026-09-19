@@ -98,8 +98,8 @@ def app_and_build() -> tuple[dict, dict]:
 
 def find_version(app_id: str) -> dict | None:
     versions = query(
-        "/v1/appStoreVersions",
-        **{"filter[app]": app_id, "filter[platform]": "IOS", "limit": "200"},
+        f"/v1/apps/{app_id}/appStoreVersions",
+        **{"filter[platform]": "IOS", "limit": "200"},
     ).get("data", [])
     for version in versions:
         print_resource("version", version, ("versionString", "appStoreState", "releaseType", "createdDate"))
@@ -116,7 +116,7 @@ def inventory(app: dict, build: dict, version: dict | None) -> None:
         localizations = request("GET", f"/v1/appStoreVersions/{version['id']}/appStoreVersionLocalizations?limit=200").get("data", [])
         for localization in localizations:
             print_resource("localization", localization, ("locale", "whatsNew", "description", "supportUrl"))
-    submissions = query("/v1/reviewSubmissions", **{"filter[app]": app["id"], "limit": "50"}).get("data", [])
+    submissions = query(f"/v1/apps/{app['id']}/reviewSubmissions", **{"limit": "50"}).get("data", [])
     for submission in submissions:
         print_resource("review-submission", submission, ("platform", "state", "submittedDate"))
 
