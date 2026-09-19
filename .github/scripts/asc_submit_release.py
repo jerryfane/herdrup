@@ -20,6 +20,10 @@ BUILD_NUMBER = "156"
 LOCALE = "en-US"
 WHATS_NEW = "Smoother keyboard transitions and improved reply-field spacing."
 MODE = os.environ.get("MODE", "inspect")
+for required in ("ASC_ISSUER_ID", "ASC_KEY_ID", "ASC_P8_BASE64"):
+    if not os.environ.get(required):
+        raise RuntimeError(f"Missing required release credential: {required}")
+
 
 
 def token() -> str:

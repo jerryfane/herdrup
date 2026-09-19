@@ -10,6 +10,8 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Release credentials are intentionally available only to main and v* tags.
+    environment: testflight
     steps:
       - uses: actions/checkout@v4
 
