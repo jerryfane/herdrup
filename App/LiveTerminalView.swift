@@ -2453,7 +2453,15 @@ struct LiveTerminalView: UIViewRepresentable {
             lastCompleteDraw = nil
             pendingSafeRepaint = false
             tailPublishHeld = true
-            if backingDrawComplete, let surface, let image = surface.captureTerminalFrame() {
+            // `userTookControl()` clears `backingDrawComplete` so a stale pre-input
+            // frame can never hide terminal input. A composer Send is different: the
+            // input lives in the composer, and the keyboard relayout starts immediately
+            // after that explicit input, before SwiftTerm could emit another draw. The
+            // pixels currently DISPLAYED are therefore the fresh post-input frame we
+            // need to hold. Without this exemption `.keyboard` passed the closed-burst
+            // guard but still installed no cover; CI35402218214 proved it twice.
+            if (backingDrawComplete || reason == .keyboard),
+               let surface, let image = surface.captureTerminalFrame() {
                 surface.installCover(image)
             }
             armPresentationDeadline(after: Self.presentationDeadlineDuration)
