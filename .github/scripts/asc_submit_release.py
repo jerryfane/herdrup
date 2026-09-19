@@ -97,7 +97,7 @@ def app_and_build() -> tuple[dict, dict]:
     valid = [
         build for build in builds
         if attrs(build).get("processingState") == "VALID"
-        and attrs(build).get("expired") is not True
+        and attrs(build).get("expired") is False
     ]
     if len(valid) != 1:
         raise RuntimeError(f"Expected one VALID build {BUILD_NUMBER}; found {len(valid)}")
@@ -162,7 +162,7 @@ def create_version(app: dict, source_version: dict) -> dict:
             "attributes": {
                 "platform": "IOS",
                 "versionString": VERSION,
-                "releaseType": source.get("releaseType") or "AFTER_APPROVAL",
+                "releaseType": "AFTER_APPROVAL",
                 "copyright": source.get("copyright") or "2026 Jerry Fanelli",
             },
             "relationships": {"app": relationship("apps", app["id"])},
@@ -309,12 +309,15 @@ def review_submission_items(submission_id: str) -> list[dict]:
     return request("GET", f"/v1/reviewSubmissions/{submission_id}/items?limit=200").get("data", [])
 
 
-def review_item_version_id(item_id: str) -> str:
-    version = request("GET", f"/v1/reviewSubmissionItems/{item_id}/appStoreVersion").get("data")
+def review_item_version_id(item: dict) -> str:
+    version = (
+        item.get("relationships", {})
+        .get("appStoreVersion", {})
+        .get("data")
+    )
     if not version:
-        raise RuntimeError(f"Review submission item {item_id} has no App Store version")
+        raise RuntimeError(f"Review submission item {item['id']} has no App Store version relationship")
     return version["id"]
-
 
 def resumable_submission(active: list[dict], version: dict) -> dict | None:
     if not active:
@@ -327,7 +330,7 @@ def resumable_submission(active: list[dict], version: dict) -> dict | None:
     if state != "READY_FOR_REVIEW":
         raise RuntimeError(f"Active review submission {submission['id']} is not resumable: {state}")
     items = review_submission_items(submission["id"])
-    version_ids = {review_item_version_id(item["id"]) for item in items}
+    version_ids = {review_item_version_id(item) for item in items}
     if version_ids and version_ids != {version["id"]}:
         raise RuntimeError(
             f"Active review submission {submission['id']} belongs to other versions: {sorted(version_ids)}"
@@ -372,7 +375,7 @@ def create_and_submit_review(app: dict, version: dict, submission: dict | None) 
         if not item:
             raise RuntimeError("Creating review submission item returned no resource")
     else:
-        version_ids = {review_item_version_id(item["id"]) for item in items}
+        version_ids = {review_item_version_id(item) for item in items}
         if version_ids != {version["id"]}:
             raise RuntimeError(
                 f"Review submission {submission['id']} contains other versions: {sorted(version_ids)}"
@@ -416,12 +419,20 @@ def main() -> None:
     source_version = version_named(versions, SOURCE_VERSION)
     if not source_version:
         raise RuntimeError(f"Cannot find live {SOURCE_VERSION} metadata source")
+    if attrs(source_version).get("releaseType") != "AFTER_APPROVAL":
+        raise RuntimeError(
+            f"Live {SOURCE_VERSION} no longer uses AFTER_APPROVAL; refusing to change release policy"
+        )
     source_localization, source_review, notes = source_metadata(source_version)
     target = version_named(versions, VERSION)
     print_resource("app", app, ("name", "bundleId", "sku"))
     print_resource("authorized-build", build, ("version", "processingState", "uploadedDate", "expired"))
     print_resource("target-before", target, ("versionString", "appStoreState", "releaseType"))
 
+    if target and attrs(target).get("releaseType") != "AFTER_APPROVAL":
+        raise RuntimeError(
+            f"Target version release policy is {attrs(target).get('releaseType')}, not AFTER_APPROVAL"
+        )
     if target and attrs(target).get("appStoreState") in SUBMITTED_VERSION_STATES:
         selected = request("GET", f"/v1/appStoreVersions/{target['id']}/build").get("data")
         localization = localization_named(target["id"], LOCALE)
