@@ -96,26 +96,47 @@ def app_and_build() -> tuple[dict, dict]:
     return app, build
 
 
-def find_version(app_id: str) -> dict | None:
+def versions_for_app(app_id: str) -> list[dict]:
     versions = query(
         f"/v1/apps/{app_id}/appStoreVersions",
         **{"filter[platform]": "IOS", "limit": "200"},
     ).get("data", [])
     for version in versions:
         print_resource("version", version, ("versionString", "appStoreState", "releaseType", "createdDate"))
-    return next((version for version in versions if attrs(version).get("versionString") == VERSION), None)
+    return versions
 
 
-def inventory(app: dict, build: dict, version: dict | None) -> None:
+def version_named(versions: list[dict], version_string: str) -> dict | None:
+    return next((version for version in versions if attrs(version).get("versionString") == version_string), None)
+
+
+def inventory(app: dict, build: dict, version: dict | None, source_version: dict) -> None:
     print_resource("app", app, ("name", "bundleId", "sku"))
     print_resource("authorized-build", build, ("version", "processingState", "uploadedDate", "expired"))
     print_resource("target-version", version, ("versionString", "appStoreState", "releaseType", "createdDate"))
-    if version:
-        selected = request("GET", f"/v1/appStoreVersions/{version['id']}/build").get("data")
-        print_resource("selected-build", selected, ("version", "processingState", "uploadedDate"))
-        localizations = request("GET", f"/v1/appStoreVersions/{version['id']}/appStoreVersionLocalizations?limit=200").get("data", [])
-        for localization in localizations:
-            print_resource("localization", localization, ("locale", "whatsNew", "description", "supportUrl"))
+    inspected_version = version or source_version
+    print_resource("metadata-source-version", inspected_version,
+                   ("versionString", "appStoreState", "releaseType", "copyright"))
+    selected = request("GET", f"/v1/appStoreVersions/{inspected_version['id']}/build").get("data")
+    print_resource("selected-build", selected, ("version", "processingState", "uploadedDate"))
+    localizations = request(
+        "GET", f"/v1/appStoreVersions/{inspected_version['id']}/appStoreVersionLocalizations?limit=200"
+    ).get("data", [])
+    for localization in localizations:
+        print_resource("localization", localization,
+                       ("locale", "whatsNew", "description", "keywords", "marketingUrl",
+                        "promotionalText", "supportUrl"))
+        screenshot_sets = request(
+            "GET", f"/v1/appStoreVersionLocalizations/{localization['id']}/appScreenshotSets?limit=200"
+        ).get("data", [])
+        for screenshot_set in screenshot_sets:
+            print_resource("screenshot-set", screenshot_set, ("screenshotDisplayType",))
+    review_detail = request(
+        "GET", f"/v1/appStoreVersions/{inspected_version['id']}/appStoreReviewDetail"
+    ).get("data")
+    print_resource("review-detail", review_detail,
+                   ("contactFirstName", "contactLastName", "contactPhone", "contactEmail",
+                    "demoAccountRequired", "notes"))
     submissions = query(f"/v1/apps/{app['id']}/reviewSubmissions", **{"limit": "50"}).get("data", [])
     for submission in submissions:
         print_resource("review-submission", submission, ("platform", "state", "submittedDate"))
@@ -125,9 +146,12 @@ def main() -> None:
     if MODE != "inspect":
         raise RuntimeError(f"This exact branch is read-only; unsupported MODE={MODE}")
     app, build = app_and_build()
-    version = find_version(app["id"])
-    inventory(app, build, version)
-    print("READ_ONLY_INSPECTION_COMPLETE")
+    versions = versions_for_app(app["id"])
+    version = version_named(versions, VERSION)
+    source_version = version_named(versions, "1.0.5")
+    if not source_version:
+        raise RuntimeError("Cannot find live 1.0.5 metadata source")
+    inventory(app, build, version, source_version)
 
 
 if __name__ == "__main__":
