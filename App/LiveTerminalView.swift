@@ -677,6 +677,12 @@ struct LiveTerminalView: UIViewRepresentable {
         private var keyboardSweepDeadlineTask: Task<Void, Never>?
         /// The newest fit proposed during the sweep. Only this one is ever sent.
         private var deferredKeyboardTarget: (cols: Int, rows: Int)?
+        /// The frame on screen at the exact composer Send event. `userTookControl`
+        /// removes any old cover immediately, but the same event dismisses the keyboard
+        /// before SwiftTerm can draw again. Hold this candidate briefly and consume it
+        /// ONLY if that keyboard transition follows.
+        private var pendingHostInputFrame: UIView?
+        private var pendingHostInputFrameTask: Task<Void, Never>?
 
         /// A completed paint, tagged with everything that must still hold for it to
         /// count as the finished frame for the current burst.
@@ -831,6 +837,13 @@ struct LiveTerminalView: UIViewRepresentable {
             guard token != lastUserInputToken else { return }
             lastUserInputToken = token
             guard !stopped, foreground else { return }
+            pendingHostInputFrameTask?.cancel()
+            pendingHostInputFrame = surface?.captureTerminalFrame()
+            pendingHostInputFrameTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                self?.pendingHostInputFrame = nil
+                self?.pendingHostInputFrameTask = nil
+            }
             userTookControl()
         }
 
@@ -1717,6 +1730,9 @@ struct LiveTerminalView: UIViewRepresentable {
             keyboardSweepDeadlineTask?.cancel()
             keyboardSweepDeadlineTask = nil
             deferredKeyboardTarget = nil
+            pendingHostInputFrameTask?.cancel()
+            pendingHostInputFrameTask = nil
+            pendingHostInputFrame = nil
             streamTask?.cancel()
             streamTask = nil
             watchdogTask?.cancel()          // stop the stream-stuck watchdog
@@ -2448,6 +2464,15 @@ struct LiveTerminalView: UIViewRepresentable {
                       desiredTargetChangedAt.map({ ContinuousClock.now - $0 >= Self.resizeSettleDuration }) ?? true
                 else { return }
             }
+            let hostInputFrame: UIView?
+            if reason == .keyboard {
+                hostInputFrame = pendingHostInputFrame
+                pendingHostInputFrame = nil
+                pendingHostInputFrameTask?.cancel()
+                pendingHostInputFrameTask = nil
+            } else {
+                hostInputFrame = nil
+            }
             presentationGeneration += 1
             presentationActive = true
             presentationClosed = false
@@ -2461,15 +2486,9 @@ struct LiveTerminalView: UIViewRepresentable {
             lastCompleteDraw = nil
             pendingSafeRepaint = false
             tailPublishHeld = true
-            // `userTookControl()` clears `backingDrawComplete` so a stale pre-input
-            // frame can never hide terminal input. A composer Send is different: the
-            // input lives in the composer, and the keyboard relayout starts immediately
-            // after that explicit input, before SwiftTerm could emit another draw. The
-            // pixels currently DISPLAYED are therefore the fresh post-input frame we
-            // need to hold. Without this exemption `.keyboard` passed the closed-burst
-            // guard but still installed no cover; CI35402218214 proved it twice.
-            if (backingDrawComplete || reason == .keyboard),
-               let surface, let image = surface.captureTerminalFrame() {
+            if let surface, let image = hostInputFrame
+                ?? ((backingDrawComplete || reason == .keyboard)
+                    ? surface.captureTerminalFrame() : nil) {
                 surface.installCover(image)
             }
             armPresentationDeadline(after: Self.presentationDeadlineDuration)
