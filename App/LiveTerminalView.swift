@@ -837,6 +837,12 @@ struct LiveTerminalView: UIViewRepresentable {
             guard token != lastUserInputToken else { return }
             lastUserInputToken = token
             guard !stopped, foreground else { return }
+            prepareHostInputFrameAndTakeControl()
+        }
+
+        /// Shared by the real host-input token and the DEBUG receipt that must perform
+        /// host input + keyboard notification in one main-actor event.
+        private func prepareHostInputFrameAndTakeControl() {
             pendingHostInputFrameTask?.cancel()
             pendingHostInputFrame = surface?.captureTerminalFrame()
             pendingHostInputFrameTask = Task { @MainActor [weak self] in
@@ -1012,7 +1018,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
                     isCovered: { [weak surface] in surface?.isCovered ?? false },
                     coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
-                    closePresentation: { [weak self] in self?.userTookControl() },
+                    closePresentation: { [weak self] in self?.prepareHostInputFrameAndTakeControl() },
                     isForeground: { [weak self] in self?.foreground ?? false })
             }
             #endif
