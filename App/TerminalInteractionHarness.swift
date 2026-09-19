@@ -339,7 +339,6 @@ final class TerminalInteractionHarness: ObservableObject {
         let requestFit: (Int, Int) -> Void
         let isCovered: () -> Bool
         let coverInstalls: () -> Int
-        let closePresentation: () -> Void
         let isForeground: () -> Bool
         var cellSize = CGSize.zero
         var painted: [String: Any] = [:]
@@ -355,12 +354,10 @@ final class TerminalInteractionHarness: ObservableObject {
     static func register(paneID: String, view: TerminalView,
                          requestFit: @escaping (Int, Int) -> Void, isCovered: @escaping () -> Bool,
                          coverInstalls: @escaping () -> Int,
-                         closePresentation: @escaping () -> Void,
                          isForeground: @escaping () -> Bool) {
         guard enabled else { return }
         shared.surfaces[paneID] = Surface(view: view, requestFit: requestFit,
                                          isCovered: isCovered, coverInstalls: coverInstalls,
-                                         closePresentation: closePresentation,
                                          isForeground: isForeground)
     }
     static func unregister(paneID: String, view: TerminalView) {
@@ -531,13 +528,6 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
-        case "input-then-keyboard-hide":
-            // The phone does these in ONE Send event: explicit input closes the old
-            // presentation, then resigning the field starts the keyboard transition.
-            // Two XCUITest taps cannot preserve that ordering because each waits for
-            // quiescence; run both production callbacks on the main actor instead.
-            surfaces[activeID]?.closePresentation()
-            sweepKeyboard(hiding: true)
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -673,8 +663,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide",
-         "input-then-keyboard-hide"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {
