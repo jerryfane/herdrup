@@ -2292,9 +2292,17 @@ struct LiveTerminalView: UIViewRepresentable {
         private func beginKeyboardSweep(duration: Double) {
             guard !stopped, foreground else { return }
             keyboardSweepActive = true
-            // The cover is NOT installed here: a keyboard that does not resize this pane
-            // must not freeze it. `onGeometryWillChange` retains the frame on the first
-            // layout pass that really changes, with this sweep's `.keyboard` reason.
+            // On iPhone the software keyboard is full-width and this notification always
+            // changes the pane's safe-area height. Capture NOW, while `.keyboard` is
+            // unambiguous and immediately after Send closed the old presentation.
+            // SwiftUI may defer `layoutSubviews` until after this sweep's deadline, which
+            // made a layout-only classification miss the exemption in CI35408586711.
+            //
+            // iPad stays layout-driven: floating/split keyboards can post the same
+            // notification without resizing the pane, and must not freeze it.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                beginResizePresentation(reason: .keyboard)
+            }
             keyboardSweepDeadlineTask?.cancel()
             let window = max(Duration.seconds(max(0, duration)), Self.keyboardSweepMinimumDuration)
             let backstop = window + Self.keyboardSweepGrace
