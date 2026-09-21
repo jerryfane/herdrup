@@ -1818,6 +1818,10 @@ struct TerminalHomeView: View {
         guard !search.isEmpty else { return fullList.sections }
         let filtered = agents.filter {
             $0.displayName.localizedCaseInsensitiveContains(search)
+                // The raw name still carries the peer's alias; keep searching it so
+                // typing a profile id (or the alias shown before labels landed)
+                // still finds that machine's agents.
+                || ($0.name ?? "").localizedCaseInsensitiveContains(search)
                 || ($0.terminalTitleStripped ?? "").localizedCaseInsensitiveContains(search)
         }
         return AgentList(agents: filtered, livePaneIDs: livePaneIDs).sections
@@ -6793,7 +6797,7 @@ struct SettingsView: View {
                     .font(Typography.app(18, .bold)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(peer.alias)
+                Text(peer.displayName)
                     .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                 Text("\(peer.agentCount) agent\(peer.agentCount == 1 ? "" : "s")")
                     .font(Typography.app(13)).foregroundStyle(Palette.textDim)
