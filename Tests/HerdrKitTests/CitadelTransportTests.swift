@@ -71,7 +71,7 @@ final class CitadelTransportTests: XCTestCase {
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(22).bigEndian
         guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(AF_INET, sockStream, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
         var tv = timeval(tv_sec: 1, tv_usec: 0)
