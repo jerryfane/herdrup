@@ -299,6 +299,13 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// agent or a non-federated server — decoded leniently, so an older or
     /// non-federated server is unaffected.
     public let machineID: String?
+    /// The peer's human label, when the daemon reports one. `machineID` is the
+    /// saved profile's immutable id, so since the daemon moved SSH federation
+    /// onto saved machines it is a 32-character hex string — and it is also the
+    /// `<alias>/…` prefix baked into `name`, which is why unlabelled rows read
+    /// as `2cc0ffe…/voice`. Absent on a local agent, an older daemon, or an
+    /// explicit non-saved peer; decoded leniently so those stay unaffected.
+    public let machineLabel: String?
     public let reachability: String?
     public let lastKnownStatus: String?
     /// Present only for an archived agent (issue #173). Its presence is the
@@ -343,8 +350,23 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public var isArchived: Bool { archived != nil }
 
     /// Human label for a pane, preferring the agent's assigned name.
+    ///
+    /// A federated agent's `name` arrives prefixed with its peer's ALIAS, which is
+    /// the routing key, not a label. While aliases came from hand-written config
+    /// they read as `pi-burj/voice`; since the daemon moved SSH federation onto
+    /// saved machines the alias is the profile's immutable 32-hex id, so the same
+    /// row reads `2cc0ffe3a0753cafcf28f46a7bb29351/voice`. Swap that one prefix
+    /// for the peer's label when the daemon sends one.
+    ///
+    /// Only the exact `<machineID>/` prefix is replaced: the remainder may itself
+    /// contain slashes (`…/w1:pB` style ids), and a local agent has no prefix to
+    /// touch. An unlabelled peer keeps the raw name rather than inventing one.
     public var displayName: String {
-        name ?? terminalTitleStripped ?? paneID
+        let raw = name ?? terminalTitleStripped ?? paneID
+        guard let machineID, let machineLabel, !machineLabel.isEmpty else { return raw }
+        let prefix = "\(machineID)/"
+        guard raw.hasPrefix(prefix) else { return raw }
+        return "\(machineLabel)/\(raw.dropFirst(prefix.count))"
     }
 
     public var isWorking: Bool { agentStatus == "working" }
@@ -400,6 +422,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case turnEpoch = "turn_epoch"
         case lastCompletedTurn = "last_completed_turn"
         case machineID = "machine_id"
+        case machineLabel = "machine_label"
         case lastKnownStatus = "last_known_status"
         case accountConfigDir = "account_config_dir"
         case accountUnresolved = "account_unresolved"

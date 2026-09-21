@@ -12,12 +12,15 @@ final class FederationTests: XCTestCase {
     /// wire path the app does. A remote agent carries `machine_id`; a local one
     /// leaves it nil.
     private func agent(
-        pane: String, machineID: String? = nil, reachability: String? = nil, status: String? = nil
+        pane: String, machineID: String? = nil, reachability: String? = nil, status: String? = nil,
+        name: String? = nil, machineLabel: String? = nil
     ) throws -> AgentInfo {
         var obj: [String: Any] = ["pane_id": pane]
         if let machineID { obj["machine_id"] = machineID }
         if let reachability { obj["reachability"] = reachability }
         if let status { obj["agent_status"] = status }
+        if let name { obj["name"] = name }
+        if let machineLabel { obj["machine_label"] = machineLabel }
         let data = try JSONSerialization.data(withJSONObject: obj)
         return try JSONDecoder().decode(AgentInfo.self, from: data)
     }
@@ -96,5 +99,39 @@ final class FederationTests: XCTestCase {
             try agent(pane: "p2", status: "idle"),
         ])
         XCTAssertTrue(peers.isEmpty, "with no machine_id anywhere there are no federation peers")
+    }
+
+    /// A federated agent's name arrives prefixed with its peer's ALIAS. Since the
+    /// daemon moved SSH federation onto saved machines that alias is the profile's
+    /// 32-hex id, so the roster read `2cc0ffe…/voice` on every remote row. The
+    /// daemon also sends `machine_label`, and the display name must use it.
+    func testRemoteAgentDisplayNameUsesTheMachineLabel() throws {
+        let hex = "2cc0ffe3a0753cafcf28f46a7bb29351"
+        let remote = try agent(
+            pane: "\(hex)/p1", machineID: hex, name: "\(hex)/voice", machineLabel: "pi-burj")
+        XCTAssertEqual(remote.displayName, "pi-burj/voice",
+                       "the peer's label must replace the alias prefix the daemon bakes into name")
+    }
+
+    /// Only the exact alias prefix is swapped: remote ids may contain further
+    /// slashes, and losing them would break the name shown for pane-style agents.
+    func testLabelSwapPreservesTheRestOfTheRemoteName() throws {
+        let hex = "2cc0ffe3a0753cafcf28f46a7bb29351"
+        let remote = try agent(
+            pane: "\(hex)/p1", machineID: hex, name: "\(hex)/w1:pB", machineLabel: "pi-burj")
+        XCTAssertEqual(remote.displayName, "pi-burj/w1:pB")
+    }
+
+    /// An unlabelled peer (older daemon, or an explicit non-saved peer) keeps the
+    /// raw name. Inventing a label would hide which machine a row belongs to.
+    func testUnlabelledPeerKeepsTheRawName() throws {
+        let remote = try agent(pane: "mcb/p1", machineID: "mcb", name: "mcb/shell")
+        XCTAssertEqual(remote.displayName, "mcb/shell")
+    }
+
+    /// A local agent has no alias prefix and must be left completely alone.
+    func testLocalAgentNameIsUntouched() throws {
+        let local = try agent(pane: "p1", name: "jarvis")
+        XCTAssertEqual(local.displayName, "jarvis")
     }
 }
