@@ -129,6 +129,24 @@ final class FederationTests: XCTestCase {
         XCTAssertEqual(remote.displayName, "mcb/shell")
     }
 
+
+    /// The Settings peer row renders `displayName`; with saved-machine aliases
+    /// being 32-hex profile ids, showing the alias there read as `2cc0ffe…`.
+    func testPeerSummaryPrefersTheMachineLabel() throws {
+        let hex = "2cc0ffe3a0753cafcf28f46a7bb29351"
+        let peers = PeerSummary.peerSummaries(from: [
+            try agent(pane: "\(hex)/p1", machineID: hex, machineLabel: "pi-burj"),
+            try agent(pane: "\(hex)/p2", machineID: hex, machineLabel: "pi-burj"),
+        ])
+        XCTAssertEqual(peers.map(\.displayName), ["pi-burj"])
+        XCTAssertEqual(peers.map(\.alias), [hex], "identity must stay the alias")
+    }
+
+    /// An unlabelled peer still shows its alias rather than nothing.
+    func testPeerSummaryFallsBackToTheAlias() throws {
+        let peers = PeerSummary.peerSummaries(from: [try agent(pane: "mcb/p1", machineID: "mcb")])
+        XCTAssertEqual(peers.map(\.displayName), ["mcb"])
+    }
     /// A local agent has no alias prefix and must be left completely alone.
     func testLocalAgentNameIsUntouched() throws {
         let local = try agent(pane: "p1", name: "jarvis")

@@ -22,6 +22,12 @@ public struct PeerSummary: Equatable, Identifiable, Sendable {
     /// The peer's alias — the shared `machineID` its agents carry (also the
     /// `<alias>/…` prefix on their names/pane ids). Its identity here too.
     public let alias: String
+    /// The peer's human label when the daemon reports one. Since SSH federation
+    /// moved onto saved machines the alias is a 32-hex profile id, so a row that
+    /// renders `alias` alone reads `2cc0ffe…` instead of `pi-burj`. Identity stays
+    /// the alias; this is presentation only, and is nil on an older daemon or an
+    /// explicit non-saved peer.
+    public let label: String?
     /// How many of this peer's agents are in the current list.
     public let agentCount: Int
     /// The aggregate reachability across this peer's agents (worst case wins).
@@ -29,8 +35,14 @@ public struct PeerSummary: Equatable, Identifiable, Sendable {
 
     public var id: String { alias }
 
-    public init(alias: String, agentCount: Int, reachability: PeerReachability) {
+    /// What a peer row should show: the label when there is one, else the alias.
+    public var displayName: String { label ?? alias }
+
+    public init(
+        alias: String, label: String? = nil, agentCount: Int, reachability: PeerReachability
+    ) {
         self.alias = alias
+        self.label = label
         self.agentCount = agentCount
         self.reachability = reachability
     }
@@ -47,6 +59,7 @@ public struct PeerSummary: Equatable, Identifiable, Sendable {
             .map { alias, group in
                 PeerSummary(
                     alias: alias,
+                    label: group.compactMap(\.machineLabel).first(where: { !$0.isEmpty }),
                     agentCount: group.count,
                     reachability: aggregateReachability(group))
             }
