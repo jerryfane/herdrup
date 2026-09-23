@@ -259,9 +259,9 @@ public actor HerdrClient {
     /// to have the server report a real `delivery`; without it herdr returns an
     /// unconditional `writtenToPty`, so the app cannot tell a started turn from a
     /// stranded draft. Returns the server's `delivery` (nil when it did not
-    /// determine one). THROWS the server's `APIError` on rejection (agent_not_ready
-    /// / agent_input_pending / agent_prompt_not_received / timeout), so a
-    /// non-delivery is never silent.
+    /// determine one). THROWS the server's `APIError` on rejection, so a non-delivery
+    /// is never silent — but not every rejection IS a non-delivery: classify it with
+    /// `PromptRejection` before handing text back for a resend.
     @discardableResult
     public func prompt(
         pane: String,

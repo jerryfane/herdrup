@@ -189,6 +189,26 @@ final class PromptDeliveryTests: XCTestCase {
             XCTAssertEqual(e.code, "agent_input_pending")
         }
     }
+
+    /// herdr#210: the daemon returns these only AFTER writing the prompt to the PTY. Read
+    /// as non-delivery, the composer handed the text back and the next tap sent it twice.
+    func testRejectionsAfterThePtyWriteMayHaveReachedTheAgent() {
+        for code in ["timeout", "agent_prompt_unverifiable", "agent_prompt_stalled",
+                     "agent_prompt_unsubmitted"] {
+            XCTAssertTrue(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
+                          "'\(code)' is written-but-unconfirmed; handing it back invites a duplicate send")
+        }
+    }
+
+    /// The other side of the same rule: a genuine non-delivery, or a code this client
+    /// cannot read, must still give the reader their text back.
+    func testGenuineNonDeliveryIsNotTreatedAsReached() {
+        for code in ["agent_prompt_not_received", "agent_not_ready", "agent_blocked",
+                     "agent_input_pending", "pane_not_found", "some_future_code"] {
+            XCTAssertFalse(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
+                           "'\(code)' did not land; the reader's text would be lost")
+        }
+    }
 }
 
 /// Normalizing an arbitrary folder name to herdr's agent-name grammar, so

@@ -584,6 +584,56 @@ public struct PromptResult: Decodable, Sendable, Equatable {
     public let delivery: PromptDelivery?
 }
 
+/// What a REJECTED `agent.prompt` says about where the text is now.
+///
+/// Not every error from `agent.prompt` means the text failed to land. The daemon returns
+/// some codes only AFTER it has already written the prompt to the PTY (herdr
+/// `src/api/wait.rs`): they report that it could not CONFIRM the submission, not that
+/// there was none. A client that reads those as "send failed" hands the text back and
+/// invites a second send of something the agent most likely already has — the false
+/// failure and the duplicated follow-up of herdr#210. Most agents are on that path:
+/// only a manifest with a `[composer]` section can be observed at all, so for every
+/// other agent an honest daemon can never do better than "unverifiable".
+///
+/// ONE classification, so the composer's plain send, its attachment send and the note
+/// it shows cannot disagree about which codes mean the text is gone.
+public enum PromptRejection: Equatable, Sendable {
+    /// Written to the PTY; the daemon could neither confirm nor deny the submission.
+    /// `timeout` (the status wait ran out after the write) and
+    /// `agent_prompt_unverifiable` (the pane has no composer to observe; the daemon's
+    /// own message says "do not treat this as non-delivery").
+    case unconfirmed
+    /// Written to the PTY, but the daemon watched and did not see it submit
+    /// (`agent_prompt_stalled`).
+    case stalled
+    /// Written, and still sitting unsubmitted in the agent's OWN composer
+    /// (`agent_prompt_unsubmitted`).
+    ///
+    /// Counted as reached, NOT as a failure to hand back: the text is visible in the
+    /// terminal, so nothing is lost, while restoring it into the app's composer makes
+    /// the obvious next tap a resend that stacks a second copy behind the first in the
+    /// agent's composer. The fix the reader needs is Enter on the draft already there.
+    case leftInComposer
+    /// Never reached the agent: occupant changed, agent not ready, input pending, a
+    /// refusal, or any code this client does not know. Unknown codes land here on
+    /// purpose — giving the reader their text back is the safe answer to an error we
+    /// cannot read.
+    case notDelivered
+
+    public init(_ error: APIError) {
+        switch error.code {
+        case "timeout", "agent_prompt_unverifiable": self = .unconfirmed
+        case "agent_prompt_stalled": self = .stalled
+        case "agent_prompt_unsubmitted": self = .leftInComposer
+        default: self = .notDelivered
+        }
+    }
+
+    /// True when the text may already be with the agent, so handing it (or an
+    /// attachment batch) back for a resend would duplicate the prompt.
+    public var mayHaveReachedAgent: Bool { self != .notDelivered }
+}
+
 // MARK: - Events
 
 /// Subscription types the server actually accepts.
