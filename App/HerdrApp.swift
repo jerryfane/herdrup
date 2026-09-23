@@ -5999,6 +5999,12 @@ struct SettingsView: View {
     /// The "add a machine" federation setup guide, opened from the Federation
     /// section's "How to add a machine" row. A child sheet over Settings.
     @State private var showFederationSetup = false
+    /// Saved machines include profiles that have no agents yet; the agent-derived
+    /// peer list remains a fallback for an older daemon without `machine.status`.
+    @State private var savedMachines: [SavedMachineStatus]?
+    @State private var pendingFederate: SavedMachineStatus?
+    @State private var federationBusyID: String?
+    @State private var federationError: String?
     /// The tip jar (StoreKit 2). Renders nothing until products load, so the section
     /// is invisible before the App Store Connect products exist.
     @ObservedObject private var tipStore = TipStore.shared
@@ -6049,6 +6055,30 @@ struct SettingsView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
+        .confirmationDialog(
+            pendingFederate.map { "Federate \($0.displayLabel)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingFederate != nil },
+                set: { if !$0 { pendingFederate = nil } }
+            ),
+            presenting: pendingFederate
+        ) { machine in
+            Button("Allow federation") { Task { await changeFederation(machine, enabled: true) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The coordinator will keep an SSH connection to this machine and can control its Herdr session.")
+        }
+        .alert(
+            "Federation change failed",
+            isPresented: Binding(
+                get: { federationError != nil },
+                set: { if !$0 { federationError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(federationError ?? "")
+        }
         // Load the tip products when Settings opens. No-ops after a successful load;
         // re-tries after a prior failure, so products created in ASC later appear.
         .task { await tipStore.loadProducts() }
@@ -6056,6 +6086,7 @@ struct SettingsView: View {
         // `try?` so an older daemon without `accounts.list` (or a transient failure)
         // just leaves the section empty rather than surfacing an error here.
         .task { accounts = (try? await client.accountsList()) ?? [] }
+        .task { savedMachines = try? await client.machineStatuses() }
         // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
         // `server.staged_update` leaves it nil (version line + update callout simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
@@ -6768,17 +6799,28 @@ struct SettingsView: View {
         return false
     }
 
-    /// The remote machines (federation peers) whose agents this home box lists —
-    /// one row per peer, derived from the injected `agents` (grouped by machineID,
-    /// reachability aggregated worst-case in HerdrKit's `PeerSummary`). Empty until
-    /// a machine running the herdr fork is added; the "How to add a machine" row
-    /// opens the setup guide.
+    /// Saved machine profiles include ones not yet opted into federation. The
+    /// agent-derived list remains the fallback for older Herdr servers.
     @ViewBuilder
     private var federationSection: some View {
         let peers = PeerSummary.peerSummaries(from: agents)
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("FEDERATION")
-            if peers.isEmpty {
+            if let machines = savedMachines {
+                if machines.isEmpty {
+                    federationEmpty
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(machines.enumerated()), id: \.element.id) { index, machine in
+                            savedMachineRow(machine, peer: peers.first { $0.alias == machine.profileID })
+                            if index < machines.count - 1 { rowDivider }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                    .padding(.horizontal, 16).padding(.top, 10)
+                }
+            } else if peers.isEmpty {
                 federationEmpty
             } else {
                 VStack(spacing: 0) {
@@ -6798,13 +6840,61 @@ struct SettingsView: View {
         }
     }
 
+    private func changeFederation(_ machine: SavedMachineStatus, enabled: Bool) async {
+        federationBusyID = machine.profileID
+        defer { federationBusyID = nil }
+        do {
+            try await client.setMachineFederation(profileID: machine.profileID, enabled: enabled)
+            savedMachines = try await client.machineStatuses()
+        } catch {
+            federationError = "\(error)"
+            savedMachines = try? await client.machineStatuses()
+        }
+    }
+
+    private func savedMachineRow(_ machine: SavedMachineStatus, peer: PeerSummary?) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: machine.profileID))
+                    .frame(width: 40, height: 40)
+                Text(AgentIdentity.glyph(for: machine.profileID))
+                    .font(Typography.app(18, .bold)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(machine.displayLabel)
+                    .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                Text((machine.savedState == "disabled" ? "Disabled" :
+                    machine.hasFederationPolicy ? (machine.federationReachability ?? "Connecting") : "Not federated")
+                    + (peer.map { " · \($0.agentCount) agent\($0.agentCount == 1 ? "" : "s")" } ?? "")
+                    + (machine.stale ? " (stale)" : ""))
+                    .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+            }
+            Spacer(minLength: 8)
+            if let peer { peerBadge(peer.reachability) }
+            if federationBusyID == machine.profileID {
+                ProgressView()
+            } else {
+                Button(machine.hasFederationPolicy ? "Unfederate" : "Federate") {
+                    if machine.hasFederationPolicy {
+                        Task { await changeFederation(machine, enabled: false) }
+                    } else {
+                        pendingFederate = machine
+                    }
+                }
+                .font(Typography.app(13, .semibold))
+                .disabled(federationBusyID != nil || machine.savedState == "disabled")
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
     /// Local-only: no agent carries a machineID, so there are no remote peers yet.
     /// Explainer copy in the section body rather than a bare empty card.
     private var federationEmpty: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("No machines connected yet.")
+            Text("No saved machines yet.")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-            Text("Machines running an agent appear here.")
+            Text("Save an SSH machine on your home box, then opt it into federation here.")
                 .font(Typography.app(13)).foregroundStyle(Palette.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
         }

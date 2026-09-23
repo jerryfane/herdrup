@@ -89,6 +89,13 @@ public protocol HerdrTransport: Sendable {
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error>
 }
 
+/// Optional host capability for changing saved-machine federation through Herdr's CLI.
+/// Only the SSH transport can run a command on the connected coordinator; the
+/// ordinary API transport remains a single-request JSON channel.
+public protocol MachineFederationTransport: HerdrTransport {
+    func setMachineFederation(profileID: String, enabled: Bool) async throws
+}
+
 public enum TransportError: Error, CustomStringConvertible {
     case socketCreationFailed(errno: Int32)
     case connectFailed(path: String, errno: Int32)

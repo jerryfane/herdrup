@@ -38,7 +38,7 @@ final class FirstPastThePost: @unchecked Sendable {
     }
 }
 
-public actor CitadelTransport: HerdrTransport {
+public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     private let credentials: SSHCredentials
     private let hostKeyValidator: SSHHostKeyValidator
     private var client: SSHClient?
@@ -271,8 +271,9 @@ public actor CitadelTransport: HerdrTransport {
     /// executable, it prints `herdrNotInstalledSentinel` and exits BEFORE exec, so
     /// `classifyBridgeFailure` can raise `.herdrNotInstalled` and the client can
     /// offer install guidance instead of surfacing a raw stderr line.
-    static let herdrPathResolution =
-        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" api-bridge "#
+    static let herdrExecutableResolution =
+        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" "#
+    static let herdrPathResolution = herdrExecutableResolution + "api-bridge "
 
     /// Classifies a bridge failure from its stderr and the remote EXIT CODE. When
     /// herdr is absent the exec wrapper prints `herdrNotInstalledSentinel` (see
@@ -328,6 +329,42 @@ public actor CitadelTransport: HerdrTransport {
         return try await Self.parseBridgeOutput(
             output, host: credentials.host, onBytesReceived: onBytesReceived
         )
+    }
+
+    /// Run exactly one fixed machine command on the connected coordinator.
+    /// Profile IDs are validated before shell interpolation; no general-purpose
+    /// remote command API is exposed to callers.
+    public func setMachineFederation(profileID: String, enabled: Bool) async throws {
+        guard profileID.count == 32, profileID.utf8.allSatisfy({
+            (48...57).contains($0) || (97...102).contains($0)
+        }) else {
+            throw TransportError.bridgeFailed(stderr: "Invalid saved-machine profile ID")
+        }
+        let command = Self.herdrExecutableResolution
+            + "machine " + (enabled ? "federate " : "unfederate ") + profileID
+        let output = try await connectedClient().executeCommandStream(command)
+        var stderr = ""
+        var received = 0
+        do {
+            for try await chunk in output {
+                switch chunk {
+                case .stdout(let bytes), .stderr(let bytes):
+                    received += bytes.readableBytes
+                    guard received <= 64 * 1024 else {
+                        throw TransportError.bridgeFailed(stderr: "Machine command returned too much output")
+                    }
+                    if case .stderr = chunk {
+                        stderr += String(buffer: bytes)
+                    }
+                }
+            }
+        } catch let failure as RemoteExitError {
+            throw Self.classifyBridgeFailure(
+                stderr: stderr.isEmpty ? "Machine command failed (exit \(failure.remoteExitCode))" : stderr,
+                exitCode: failure.remoteExitCode,
+                host: credentials.host
+            )
+        }
     }
 
     /// Consumes the api-bridge exec output stream into its single reply line, or throws
