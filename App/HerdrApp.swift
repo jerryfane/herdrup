@@ -4888,14 +4888,11 @@ struct TerminalPaneContent: View {
         .padding(.horizontal, 12).padding(.top, 10)
     }
 
-    /// [Switch] — send `/tui default` through the SAME confirmed-delivery prompt path the reply
-    /// box uses (`client.prompt` with `waitUntil: anyAgentStatus`), then close the banner for good
-    /// ONLY on a clean delivery. `/tui default` runs as a Claude Code slash command AND persists to
-    /// the host's ~/.claude/settings.json, so this one switch both flips the current agent live and
-    /// makes every future Claude Code agent open in classic (smooth-scroll) mode. `waitUntil` makes
-    /// the server report a truthful delivery and THROW on a stranded draft / not-ready composer,
-    /// rather than the unconditional written-to-pty a bare prompt returns — which would dismiss the
-    /// banner while nothing actually switched (the round-1 failure, in a narrower form).
+    /// [Switch] sends `/tui default` with `waitUntil: anyAgentStatus`. A confirmed
+    /// delivery closes the banner; an uncertain result also closes it rather than
+    /// inviting a duplicate send. Genuine non-delivery keeps the retry available.
+    /// Claude Code persists the slash command in ~/.claude/settings.json, so one
+    /// successful switch also changes future agents on that host.
     private func switchToClassicTui() {
         // Coalesce repeated taps: without this each tap would queue another /tui default prompt
         // (the reply box's send is already gated by `sending`; the banner had no equivalent).

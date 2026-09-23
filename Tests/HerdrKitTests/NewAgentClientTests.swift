@@ -190,13 +190,13 @@ final class PromptDeliveryTests: XCTestCase {
         }
     }
 
-    /// herdr#210: the daemon returns these only AFTER writing the prompt to the PTY. Read
-    /// as non-delivery, the composer handed the text back and the next tap sent it twice.
-    func testRejectionsAfterThePtyWriteMayHaveReachedTheAgent() {
+    /// herdr#210: timeout can happen before or after the PTY write; the other
+    /// observation codes follow it. None justify an automatic resend.
+    func testUncertainOrWrittenPromptIsNotOfferedForAutomaticRetry() {
         for code in ["timeout", "agent_prompt_unverifiable", "agent_prompt_stalled",
                      "agent_prompt_unsubmitted"] {
             XCTAssertTrue(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
-                          "'\(code)' is written-but-unconfirmed; handing it back invites a duplicate send")
+                          "'\(code)' may already have reached the agent; handing it back invites a duplicate send")
         }
     }
 
