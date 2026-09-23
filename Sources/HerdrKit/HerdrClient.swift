@@ -85,7 +85,7 @@ public actor HerdrClient {
     /// remains the source of truth after the command returns.
     public func setMachineFederation(profileID: String, enabled: Bool) async throws {
         guard let machineTransport = transport as? any MachineFederationTransport else {
-            throw TransportError.bridgeFailed(stderr: "Machine federation requires an SSH connection")
+            throw TransportError.machineCommandFailed(stderr: "Machine federation requires an SSH connection")
         }
         try await machineTransport.setMachineFederation(profileID: profileID, enabled: enabled)
     }
