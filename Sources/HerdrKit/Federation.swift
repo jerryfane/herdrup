@@ -17,18 +17,20 @@ public struct SavedMachineStatus: Decodable, Identifiable, Sendable {
     public let profileID: String
     public let displayLabel: String
     public let savedState: String
+    public let federationConfigured: Bool?
     public let federationReachability: String?
     public let stale: Bool
 
     public var id: String { profileID }
     public var hasFederationPolicy: Bool {
-        savedState == "coordinated" || savedState == "coordinator_disabled"
+        federationConfigured ?? (savedState == "coordinated" || savedState == "coordinator_disabled")
     }
 
     enum CodingKeys: String, CodingKey {
         case profileID = "profile_id"
         case displayLabel = "display_label"
         case savedState = "saved_state"
+        case federationConfigured = "federation_configured"
         case federationReachability = "federation_reachability"
         case stale
     }

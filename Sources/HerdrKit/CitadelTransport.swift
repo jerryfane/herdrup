@@ -338,7 +338,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         guard profileID.count == 32, profileID.utf8.allSatisfy({
             (48...57).contains($0) || (97...102).contains($0)
         }) else {
-            throw TransportError.bridgeFailed(stderr: "Invalid saved-machine profile ID")
+            throw TransportError.machineCommandFailed(stderr: "Invalid saved-machine profile ID")
         }
         let command = Self.herdrExecutableResolution
             + "machine " + (enabled ? "federate " : "unfederate ") + profileID
@@ -351,7 +351,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
                 case .stdout(let bytes), .stderr(let bytes):
                     received += bytes.readableBytes
                     guard received <= 64 * 1024 else {
-                        throw TransportError.bridgeFailed(stderr: "Machine command returned too much output")
+                        throw TransportError.machineCommandFailed(stderr: "Machine command returned too much output")
                     }
                     if case .stderr = chunk {
                         stderr += String(buffer: bytes)
@@ -359,11 +359,15 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
                 }
             }
         } catch let failure as RemoteExitError {
-            throw Self.classifyBridgeFailure(
+            let reason = Self.classifyBridgeFailure(
                 stderr: stderr.isEmpty ? "Machine command failed (exit \(failure.remoteExitCode))" : stderr,
                 exitCode: failure.remoteExitCode,
                 host: credentials.host
             )
+            if case .bridgeFailed(let stderr) = reason {
+                throw TransportError.machineCommandFailed(stderr: stderr)
+            }
+            throw reason
         }
     }
 

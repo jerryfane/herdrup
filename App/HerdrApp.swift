@@ -6069,7 +6069,7 @@ struct SettingsView: View {
             Text("The coordinator will keep an SSH connection to this machine and can control its Herdr session.")
         }
         .alert(
-            "Federation change failed",
+            "Federation status",
             isPresented: Binding(
                 get: { federationError != nil },
                 set: { if !$0 { federationError = nil } }
@@ -6804,29 +6804,23 @@ struct SettingsView: View {
     @ViewBuilder
     private var federationSection: some View {
         let peers = PeerSummary.peerSummaries(from: agents)
+        let machines = savedMachines ?? []
+        let extraPeers = peers.filter { peer in
+            !machines.contains { $0.profileID == peer.alias }
+        }
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("FEDERATION")
-            if let machines = savedMachines {
-                if machines.isEmpty {
-                    federationEmpty
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(machines.enumerated()), id: \.element.id) { index, machine in
-                            savedMachineRow(machine, peer: peers.first { $0.alias == machine.profileID })
-                            if index < machines.count - 1 { rowDivider }
-                        }
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
-                    .padding(.horizontal, 16).padding(.top, 10)
-                }
-            } else if peers.isEmpty {
+            if machines.isEmpty && extraPeers.isEmpty {
                 federationEmpty
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(peers.enumerated()), id: \.element.id) { index, peer in
+                    ForEach(Array(machines.enumerated()), id: \.element.id) { index, machine in
+                        savedMachineRow(machine, peer: peers.first { $0.alias == machine.profileID })
+                        if index < machines.count - 1 || !extraPeers.isEmpty { rowDivider }
+                    }
+                    ForEach(Array(extraPeers.enumerated()), id: \.element.id) { index, peer in
                         peerRow(peer)
-                        if index < peers.count - 1 { rowDivider }
+                        if index < extraPeers.count - 1 { rowDivider }
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -6845,10 +6839,14 @@ struct SettingsView: View {
         defer { federationBusyID = nil }
         do {
             try await client.setMachineFederation(profileID: machine.profileID, enabled: enabled)
+        } catch {
+            federationError = "Change failed: \(error)"
+            return
+        }
+        do {
             savedMachines = try await client.machineStatuses()
         } catch {
-            federationError = "\(error)"
-            savedMachines = try? await client.machineStatuses()
+            federationError = "Change applied, but status could not refresh: \(error)"
         }
     }
 
@@ -6856,6 +6854,8 @@ struct SettingsView: View {
         let state: String
         if machine.savedState == "disabled" {
             state = "Disabled"
+        } else if machine.savedState == "coordinator_disabled" {
+            state = "Coordinator off"
         } else if machine.hasFederationPolicy {
             state = machine.federationReachability ?? "Connecting"
         } else {
@@ -6868,9 +6868,9 @@ struct SettingsView: View {
         if machine.stale { detail += " (stale)" }
         return HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: machine.profileID))
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: machine.displayLabel))
                     .frame(width: 40, height: 40)
-                Text(AgentIdentity.glyph(for: machine.profileID))
+                Text(AgentIdentity.glyph(for: machine.displayLabel))
                     .font(Typography.app(18, .bold)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -6892,7 +6892,7 @@ struct SettingsView: View {
                     }
                 }
                 .font(Typography.app(13, .semibold))
-                .disabled(federationBusyID != nil || machine.savedState == "disabled")
+                .disabled(federationBusyID != nil || (machine.savedState == "disabled" && !machine.hasFederationPolicy))
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
