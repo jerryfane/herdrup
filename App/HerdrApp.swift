@@ -6853,7 +6853,20 @@ struct SettingsView: View {
     }
 
     private func savedMachineRow(_ machine: SavedMachineStatus, peer: PeerSummary?) -> some View {
-        HStack(spacing: 12) {
+        let state: String
+        if machine.savedState == "disabled" {
+            state = "Disabled"
+        } else if machine.hasFederationPolicy {
+            state = machine.federationReachability ?? "Connecting"
+        } else {
+            state = "Not federated"
+        }
+        var detail = state
+        if let peer {
+            detail += " · \(peer.agentCount) agent\(peer.agentCount == 1 ? "" : "s")"
+        }
+        if machine.stale { detail += " (stale)" }
+        return HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: machine.profileID))
                     .frame(width: 40, height: 40)
@@ -6863,10 +6876,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(machine.displayLabel)
                     .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                Text((machine.savedState == "disabled" ? "Disabled" :
-                    machine.hasFederationPolicy ? (machine.federationReachability ?? "Connecting") : "Not federated")
-                    + (peer.map { " · \($0.agentCount) agent\($0.agentCount == 1 ? "" : "s")" } ?? "")
-                    + (machine.stale ? " (stale)" : ""))
+                Text(detail)
                     .font(Typography.app(13)).foregroundStyle(Palette.textDim)
             }
             Spacer(minLength: 8)
