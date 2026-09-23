@@ -189,6 +189,26 @@ final class PromptDeliveryTests: XCTestCase {
             XCTAssertEqual(e.code, "agent_input_pending")
         }
     }
+
+    /// herdr#210: timeout can happen before or after the PTY write; the other
+    /// observation codes follow it. None justify an automatic resend.
+    func testUncertainOrWrittenPromptIsNotOfferedForAutomaticRetry() {
+        for code in ["timeout", "agent_prompt_unverifiable", "agent_prompt_stalled",
+                     "agent_prompt_unsubmitted"] {
+            XCTAssertTrue(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
+                          "'\(code)' may already have reached the agent; handing it back invites a duplicate send")
+        }
+    }
+
+    /// The other side of the same rule: a genuine non-delivery, or a code this client
+    /// cannot read, must still give the reader their text back.
+    func testGenuineNonDeliveryIsNotTreatedAsReached() {
+        for code in ["agent_prompt_not_received", "agent_not_ready", "agent_blocked",
+                     "agent_input_pending", "pane_not_found", "some_future_code"] {
+            XCTAssertFalse(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
+                           "'\(code)' did not land; the reader's text would be lost")
+        }
+    }
 }
 
 /// Normalizing an arbitrary folder name to herdr's agent-name grammar, so

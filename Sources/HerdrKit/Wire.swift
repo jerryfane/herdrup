@@ -584,6 +584,54 @@ public struct PromptResult: Decodable, Sendable, Equatable {
     public let delivery: PromptDelivery?
 }
 
+/// What a REJECTED `agent.prompt` says about where the text is now.
+///
+/// Some daemon codes mean the text was written but submission could not be observed.
+/// A `timeout` is less precise: a caller with a short wait, or a Windows daemon,
+/// can time out before the write. The client cannot tell which side of the write
+/// timed out, so it must not invite an automatic retry that could duplicate it.
+/// Other post-write codes are `agent_prompt_unverifiable`, `agent_prompt_stalled`
+/// and `agent_prompt_unsubmitted`. Most agents lack a `[composer]` observation,
+/// so unverifiable is common rather than evidence of non-delivery.
+///
+/// ONE classification, so the composer's plain send, its attachment send and the note
+/// it shows cannot disagree about which codes mean the text is gone.
+public enum PromptRejection: Equatable, Sendable {
+    /// The daemon could not confirm delivery. `agent_prompt_unverifiable` follows
+    /// the PTY write; `timeout` can also occur before it. Both require checking
+    /// the terminal before deciding whether to send again.
+    case unconfirmed
+    /// Written to the PTY, but the daemon watched and did not see it submit
+    /// (`agent_prompt_stalled`).
+    case stalled
+    /// Written, and still sitting unsubmitted in the agent's OWN composer
+    /// (`agent_prompt_unsubmitted`).
+    ///
+    /// Counted as reached, NOT as a failure to hand back: the text is visible in the
+    /// terminal, so nothing is lost, while restoring it into the app's composer makes
+    /// the obvious next tap a resend that stacks a second copy behind the first in the
+    /// agent's composer. The fix the reader needs is Enter on the draft already there.
+    case leftInComposer
+    /// Never reached the agent: occupant changed, agent not ready, input pending, a
+    /// refusal, or any code this client does not know. Unknown codes land here on
+    /// purpose — giving the reader their text back is the safe answer to an error we
+    /// cannot read.
+    case notDelivered
+
+    public init(_ error: APIError) {
+        switch error.code {
+        case "timeout", "agent_prompt_unverifiable": self = .unconfirmed
+        case "agent_prompt_stalled": self = .stalled
+        case "agent_prompt_unsubmitted": self = .leftInComposer
+        default: self = .notDelivered
+        }
+    }
+
+    /// True when the text may already be with the agent, so handing it (or an
+    /// attachment batch) back for a resend would duplicate the prompt.
+    public var mayHaveReachedAgent: Bool { self != .notDelivered }
+}
+
 // MARK: - Events
 
 /// Subscription types the server actually accepts.

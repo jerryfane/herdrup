@@ -4888,24 +4888,20 @@ struct TerminalPaneContent: View {
         .padding(.horizontal, 12).padding(.top, 10)
     }
 
-    /// [Switch] — send `/tui default` through the SAME confirmed-delivery prompt path the reply
-    /// box uses (`client.prompt` with `waitUntil: anyAgentStatus`), then close the banner for good
-    /// ONLY on a clean delivery. `/tui default` runs as a Claude Code slash command AND persists to
-    /// the host's ~/.claude/settings.json, so this one switch both flips the current agent live and
-    /// makes every future Claude Code agent open in classic (smooth-scroll) mode. `waitUntil` makes
-    /// the server report a truthful delivery and THROW on a stranded draft / not-ready composer,
-    /// rather than the unconditional written-to-pty a bare prompt returns — which would dismiss the
-    /// banner while nothing actually switched (the round-1 failure, in a narrower form).
+    /// [Switch] sends `/tui default` with `waitUntil: anyAgentStatus`. A confirmed
+    /// delivery closes the banner; an uncertain result also closes it rather than
+    /// inviting a duplicate send. Genuine non-delivery keeps the retry available.
+    /// Claude Code persists the slash command in ~/.claude/settings.json, so one
+    /// successful switch also changes future agents on that host.
     private func switchToClassicTui() {
         // Coalesce repeated taps: without this each tap would queue another /tui default prompt
         // (the reply box's send is already gated by `sending`; the banner had no equivalent).
         guard !switchingTui else { return }
         switchingTui = true
         let pane = paneID
-        // Mark the one-time prompt answered ONLY after the send is CONFIRMED delivered. If it fails
-        // (agent not at a ready composer, a stranded draft, a transient error), keep the banner so the
-        // reader can retry instead of silently believing they switched while scrolling stays laggy. On
-        // success the banner is dismissed for ALL agents (Claude Code persists the classic setting).
+        // A confirmed send dismisses the banner. An uncertain result also dismisses
+        // it: leaving a one-tap retry after the PTY may have received /tui default
+        // would queue a duplicate. The note directs the reader to the terminal.
         Task {
             defer { switchingTui = false }
             do {
@@ -4913,6 +4909,13 @@ struct TerminalPaneContent: View {
                                             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
                 tuiClassicPrompted = true
                 actionNote = "Switched. Claude Code will open in smooth-scroll mode from now on"
+            } catch let error as APIError {
+                if PromptRejection(error).mayHaveReachedAgent {
+                    tuiClassicPrompted = true
+                    actionNote = Self.promptRejectionNote(for: error)
+                } else {
+                    actionNote = "Couldn't switch. Tap Switch to try again"
+                }
             } catch {
                 actionNote = "Couldn't switch. Tap Switch to try again"
             }
@@ -5385,8 +5388,8 @@ struct TerminalPaneContent: View {
         // sweep.
         //
         // It is still only ever THIS text: restored below if the send was refused or
-        // failed, and never over something typed since (the composer stays editable for
-        // the whole round trip — see the `isEnabled` comment in replyBar).
+        // did not land, and never over something typed since (the composer stays
+        // editable for the whole round trip — see the `isEnabled` comment in replyBar).
         let clearedReply: String?
         if case .submitText(let text) = action, reply == text, !text.isEmpty {
             clearedReply = text
@@ -5423,13 +5426,15 @@ struct TerminalPaneContent: View {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
             } catch let apiError as APIError {
-                actionNote = Self.promptFailureNote(for: apiError)
-                // NOT ON A TIMEOUT. `agent.prompt` writes the text and schedules the
-                // Enter, so a timeout means "sent, awaiting confirmation" (see
-                // promptFailureNote): putting the text back there would invite a second
-                // send of something the agent already has. Every other code says it did
-                // not land, and the reader should get their text back.
-                if apiError.code != "timeout" { restoreClearedReply() }
+                actionNote = Self.promptRejectionNote(for: apiError)
+                // NOT WHEN THE TEXT MAY ALREADY BE WITH THE AGENT. `agent.prompt` writes
+                // the text before it tries to observe the submission, so a timeout, an
+                // unverifiable or stalled submission, or a draft left in the agent's own
+                // composer all mean the agent has (or can see) it — `PromptRejection`
+                // says which codes those are. Putting the text back would make the next
+                // tap a duplicate send. Every other code says it did not land, and the
+                // reader should get their text back.
+                if !PromptRejection(apiError).mayHaveReachedAgent { restoreClearedReply() }
             } catch {
                 actionNote = "send failed: \(error)"
                 restoreClearedReply()
@@ -5521,7 +5526,23 @@ struct TerminalPaneContent: View {
                 replySendingAttachmentID = nil
 
                 let prompt = Self.attachmentPrompt(text: text, delivered: delivered)
-                try await submitPrompt(pane: paneID, text: prompt)
+                // A rejection that may still have reached the agent (`PromptRejection`)
+                // counts as DELIVERED here, exactly like a confirmed submit: the prompt is
+                // in the agent's PTY, so keeping the chips and the caption would make the
+                // one-tap retry submit it a second time (the grams themselves are
+                // remembered by message id; it is the prompt that would duplicate). Only a
+                // genuine non-delivery keeps everything for the retry.
+                do {
+                    try await submitPrompt(pane: paneID, text: prompt)
+                } catch let apiError as APIError {
+                    guard PromptRejection(apiError).mayHaveReachedAgent else {
+                        actionNote = Self.attachmentFailureNote(
+                            Self.promptRejectionNote(for: apiError),
+                            delivered: delivered.count, total: attachments.count)
+                        return
+                    }
+                    actionNote = Self.promptRejectionNote(for: apiError)
+                }
                 // Only now: the prompt is what makes the posted grams meaningful, so a
                 // failure before this point keeps every chip (with its resume state) for
                 // a one-tap retry.
@@ -5530,11 +5551,6 @@ struct TerminalPaneContent: View {
                 if reply == text { reply = "" }
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await refresh()
-            } catch let apiError as APIError {
-                replyFailedAttachmentID = replySendingAttachmentID
-                actionNote = Self.attachmentFailureNote(
-                    Self.promptFailureNote(for: apiError),
-                    delivered: delivered.count, total: attachments.count)
             } catch {
                 replyFailedAttachmentID = replySendingAttachmentID
                 actionNote = Self.attachmentFailureNote(
@@ -5660,9 +5676,9 @@ struct TerminalPaneContent: View {
         // wait-match path is always `written_to_pty` (the Enter is still ~300ms
         // out). Showing a "waiting to submit" note after every reply would read as
         // "it didn't send" for the very bug this fixes, and invite a re-send. A
-        // GENUINE non-delivery (occupant changed, agent not ready, input pending)
-        // THROWS an APIError that `send` surfaces via `promptFailureNote`; so on a
-        // clean return, clear the note.
+        // rejection THROWS an APIError that the callers classify with
+        // `PromptRejection` and surface via `promptRejectionNote`; so on a clean
+        // return, clear the note.
         _ = try await client.prompt(
             pane: pane, text: text,
             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
@@ -5670,8 +5686,22 @@ struct TerminalPaneContent: View {
     }
 
     /// Maps a prompt rejection to a note the reader can act on — no more silent
-    /// non-delivery.
-    private static func promptFailureNote(for error: APIError) -> String {
+    /// non-delivery, and no false "send failed" for text the agent may already have.
+    ///
+    /// Driven by the same `PromptRejection` the send paths use to decide whether to
+    /// hand the text back, so the note can never say "failed" while the composer stays
+    /// empty, or "sent" while the text comes back for a resend.
+    private static func promptRejectionNote(for error: APIError) -> String {
+        switch PromptRejection(error) {
+        case .unconfirmed:
+            return "couldn't confirm delivery — check the terminal before sending again"
+        case .stalled:
+            return "sent, but the agent wasn't seen submitting it — check the terminal"
+        case .leftInComposer:
+            return "left unsubmitted in the agent's prompt — tap Enter to send it"
+        case .notDelivered:
+            break
+        }
         switch error.code {
         case "agent_blocked", "agent_input_pending":
             // The agent is showing a menu (plan-approval / question). Routing normally
@@ -5682,8 +5712,6 @@ struct TerminalPaneContent: View {
             return "agent not ready, try again"
         case "agent_prompt_not_received":
             return "not delivered, try again"
-        case "timeout":
-            return "sent, awaiting confirmation"
         default:
             return "send failed: \(error)"
         }
