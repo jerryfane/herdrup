@@ -4902,10 +4902,9 @@ struct TerminalPaneContent: View {
         guard !switchingTui else { return }
         switchingTui = true
         let pane = paneID
-        // Mark the one-time prompt answered ONLY after the send is CONFIRMED delivered. If it fails
-        // (agent not at a ready composer, a stranded draft, a transient error), keep the banner so the
-        // reader can retry instead of silently believing they switched while scrolling stays laggy. On
-        // success the banner is dismissed for ALL agents (Claude Code persists the classic setting).
+        // A confirmed send dismisses the banner. An uncertain result also dismisses
+        // it: leaving a one-tap retry after the PTY may have received /tui default
+        // would queue a duplicate. The note directs the reader to the terminal.
         Task {
             defer { switchingTui = false }
             do {
@@ -4913,6 +4912,13 @@ struct TerminalPaneContent: View {
                                             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
                 tuiClassicPrompted = true
                 actionNote = "Switched. Claude Code will open in smooth-scroll mode from now on"
+            } catch let error as APIError {
+                if PromptRejection(error).mayHaveReachedAgent {
+                    tuiClassicPrompted = true
+                    actionNote = Self.promptRejectionNote(for: error)
+                } else {
+                    actionNote = "Couldn't switch. Tap Switch to try again"
+                }
             } catch {
                 actionNote = "Couldn't switch. Tap Switch to try again"
             }
@@ -5691,7 +5697,7 @@ struct TerminalPaneContent: View {
     private static func promptRejectionNote(for error: APIError) -> String {
         switch PromptRejection(error) {
         case .unconfirmed:
-            return "sent — couldn't confirm the agent received it"
+            return "couldn't confirm delivery — check the terminal before sending again"
         case .stalled:
             return "sent, but the agent wasn't seen submitting it — check the terminal"
         case .leftInComposer:

@@ -586,22 +586,20 @@ public struct PromptResult: Decodable, Sendable, Equatable {
 
 /// What a REJECTED `agent.prompt` says about where the text is now.
 ///
-/// Not every error from `agent.prompt` means the text failed to land. The daemon returns
-/// some codes only AFTER it has already written the prompt to the PTY (herdr
-/// `src/api/wait.rs`): they report that it could not CONFIRM the submission, not that
-/// there was none. A client that reads those as "send failed" hands the text back and
-/// invites a second send of something the agent most likely already has — the false
-/// failure and the duplicated follow-up of herdr#210. Most agents are on that path:
-/// only a manifest with a `[composer]` section can be observed at all, so for every
-/// other agent an honest daemon can never do better than "unverifiable".
+/// Some daemon codes mean the text was written but submission could not be observed.
+/// A `timeout` is less precise: a caller with a short wait, or a Windows daemon,
+/// can time out before the write. The client cannot tell which side of the write
+/// timed out, so it must not invite an automatic retry that could duplicate it.
+/// Other post-write codes are `agent_prompt_unverifiable`, `agent_prompt_stalled`
+/// and `agent_prompt_unsubmitted`. Most agents lack a `[composer]` observation,
+/// so unverifiable is common rather than evidence of non-delivery.
 ///
 /// ONE classification, so the composer's plain send, its attachment send and the note
 /// it shows cannot disagree about which codes mean the text is gone.
 public enum PromptRejection: Equatable, Sendable {
-    /// Written to the PTY; the daemon could neither confirm nor deny the submission.
-    /// `timeout` (the status wait ran out after the write) and
-    /// `agent_prompt_unverifiable` (the pane has no composer to observe; the daemon's
-    /// own message says "do not treat this as non-delivery").
+    /// The daemon could not confirm delivery. `agent_prompt_unverifiable` follows
+    /// the PTY write; `timeout` can also occur before it. Both require checking
+    /// the terminal before deciding whether to send again.
     case unconfirmed
     /// Written to the PTY, but the daemon watched and did not see it submit
     /// (`agent_prompt_stalled`).
