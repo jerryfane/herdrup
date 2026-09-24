@@ -46,6 +46,16 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         XCTAssertEqual(reply.value as? String, draft)
     }
 
+    func testFirstNativeBackspaceDeliversBeforeFocusBinding() {
+        launch("control")
+        let before = probe()["bytes"] as? String ?? ""
+        app.buttons["fixture-native-first-backspace"].tap()
+        wait {
+            guard let bytes = $0["bytes"] as? String, bytes != before else { return false }
+            return bytes.hasSuffix("7f ") || bytes.hasSuffix("08 ")
+        }
+    }
+
     func testLegacyPreviousIsOneEventThenOrdinaryCharacter() throws {
         launch("control"); focusTerminal()
         let draft = reply.value as? String

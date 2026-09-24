@@ -371,10 +371,8 @@ struct LiveTerminalView: UIViewRepresentable {
         }
     }
 
-    /// A `TerminalView` that accepts terminal input on iPhone and on iPad with a
-    /// hardware keyboard. On iPhone its normal UIKit input view is retained so the
-    /// software keyboard can type directly into the PTY. An iPad without a hardware
-    /// keyboard stays selection-and-copy only.
+    /// A `TerminalView` that supports direct PTY typing with software and hardware
+    /// keyboards on every iOS idiom without sacrificing selection and copy.
     ///
     /// SCROLL is the LIBRARY's job now. On a normal (shell) buffer the reader
     /// finger-scrolls the retained scrollback through SwiftTerm's own `UIScrollView`,
@@ -1039,6 +1037,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 self?.applyControlModifier()
             }
             view.onCancelControl = { [weak self] in
+                self?.adoptNativeInputFocus()
                 self?.cancelArmedControl()
                 self?.userTookControl()
             }
@@ -1173,10 +1172,9 @@ struct LiveTerminalView: UIViewRepresentable {
             // It re-presents only and does not re-select, so the word SwiftTerm just selected
             // survives. `showStandardContextMenu(at:)` DOES call `becomeFirstResponder()`
             // (iOSTerminalView.swift:1392-1396) — an earlier comment here claimed it takes no
-            // responder and that was simply false. The practical effect is small, since on
-            // iPhone `focusTap` already holds the responder and on iPad the terminal's
-            // inputView is zero-frame, but it does bypass the `wantsTerminalKeyFocus` gate, so
-            // the hop's `foreground`/`stopped` guards are load-bearing rather than belt-and-braces.
+            // responder and that was simply false. `focusTap` normally claims the responder
+            // first on every idiom, but this async hop can still bypass
+            // `wantsTerminalKeyFocus`; its `foreground`/`stopped` guards are necessary.
             //
             // Declared BEFORE `clearTap` so that recognizer's "every 2-tap recognizer must
             // fail" loop keeps meaning exactly that.

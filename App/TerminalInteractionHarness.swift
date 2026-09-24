@@ -532,6 +532,11 @@ final class TerminalInteractionHarness: ObservableObject {
                 _ = view.becomeFirstResponder()
                 view.insertText("p")
             }
+        case "native-first-backspace":
+            if let view = surfaces[activeID]?.view {
+                _ = view.becomeFirstResponder()
+                view.deleteBackward()
+            }
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -667,7 +672,8 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "native-first-key"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide",
+         "native-first-key", "native-first-backspace"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {
