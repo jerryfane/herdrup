@@ -37,7 +37,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testLegacyPreviousIsOneEventThenOrdinaryCharacter() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         let draft = reply.value as? String
         chord("p")
         input("second-known-command", previous: 1)
@@ -56,7 +56,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testKittyHistoryUsesNativeEnhancedEncodingOnce() throws {
-        launch("control"); try requireDirectInput()
+        launch("control")
         command("kitty"); focusTerminal()
         chord("p"); input("second-known-command", previous: 1)
         XCTAssertEqual(probe()["kittyPrevious"] as? Int, 1)
@@ -69,7 +69,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testTwoTapsCancelInDirectInput() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCTAssertTrue(armed, "one tap must arm the one-shot")
         cap("terminal-ctrl").tap()
@@ -94,7 +94,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testDeleteNonASCIICompositionAndPasteDisarm() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         typeDirect("x")
         cap("terminal-ctrl").tap(); typeDirect(XCUIKeyboardKey.delete.rawValue)
         input("", previous: 0)
@@ -119,7 +119,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testExplicitKeycapAndKeyboardDismissalDisarm() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         cap("Tab").tap()
         typeDirect("p"); input("p", previous: 0)
@@ -145,7 +145,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
 func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCTAssertTrue(armed)
         onscreen("Dictate", timeout: 5)?.tap()
@@ -193,7 +193,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
     }
 
         func testAppDeactivationDisarmsBeforeNextDirectKey() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
         app.activate()
@@ -211,7 +211,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
     }
 
     func testPaneSwitchAndTypingDuringCoverDoNotLeakOrRearm() throws {
-        launch("resize"); try requireDirectInput(); focusTerminal()
+        launch("resize"); focusTerminal()
         cap("terminal-ctrl").tap(); command("switch")
         wait { ($0["pane"] as? String) == "ix:b" }
         focusTerminal(); typeDirect("p"); input("p", previous: 0)

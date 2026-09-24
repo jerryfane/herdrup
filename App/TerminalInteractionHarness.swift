@@ -475,7 +475,6 @@ final class TerminalInteractionHarness: ObservableObject {
             value["covered"] = surface.isCovered()
             value["coverInstalls"] = surface.coverInstalls()
             value["focused"] = surface.view?.isFirstResponder ?? false
-            value["keyDriveEnabled"] = (surface.view as? LiveTerminalView.ReadOnlyTerminalView)?.keyDriveEnabled ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search
             // test can say which half is broken: a non-zero total here with an empty counter
             // in the UI means the wiring, not the engine.

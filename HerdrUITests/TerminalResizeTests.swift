@@ -102,13 +102,6 @@ class TerminalInteractionTestCase: XCTestCase {
         Thread.sleep(forTimeInterval: 0.25)
     }
 
-    func requireDirectInput() throws {
-        let state = wait { $0["keyDriveEnabled"] != nil }
-        if state["iPad"] as? Bool == true && state["keyDriveEnabled"] as? Bool == false {
-            throw XCTSkip("iPad direct input requires an attached hardware keyboard; production keyDriveEnabled is false. No simulator bypass is installed; physical-keyboard receipt remains unverified.")
-        }
-        XCTAssertEqual(state["keyDriveEnabled"] as? Bool, true, "iPhone direct input must remain eligible")
-    }
 
     func focusTerminal() {
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
@@ -131,14 +124,10 @@ class TerminalInteractionTestCase: XCTestCase {
             terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
         }
         wait { ($0["focused"] as? Bool) == true }
-        // A SOFTWARE KEYBOARD IS A PHONE-ONLY PREREQUISITE. iPad deliberately installs
-        // an empty input view and drives keys from the attached hardware keyboard, so
-        // requiring `app.keyboards` there failed every iPad case on a condition the
-        // product is designed never to satisfy. On the phone the keyboard really is the
-        // input path: returning from dictation left the terminal first responder with
-        // none, the keystroke went nowhere, and no bytes reached the fixture — which
-        // from outside looks exactly like a modifier that ate the key.
-        if probe()["iPad"] as? Bool != true, !app.keyboards.element.exists {
+        // Software keys must appear when no hardware keyboard is attached,
+        // regardless of phone or tablet idiom. Otherwise a focused terminal can
+        // silently drop the keystroke after a responder transition.
+        if probe()["physicalKeyboard"] as? Bool != true, !app.keyboards.element.exists {
             terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
             XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
                           "direct input needs the software keyboard. \(elementDump())")
@@ -146,13 +135,11 @@ class TerminalInteractionTestCase: XCTestCase {
         app.typeText(text)
     }
 
-    /// Whether a keystroke can actually be delivered right now: a software keyboard on
-    /// the phone, or the terminal holding the responder on iPad, where keys arrive from
-    /// the attached hardware keyboard and no software keyboard ever appears. Used to
-    /// separate "the app did the wrong thing" from "this environment cannot type".
+    /// Direct input requires the terminal responder and either the attached
+    /// hardware keyboard or a visible software keyboard on any device idiom.
     var canTypeDirectly: Bool {
-        if probe()["iPad"] as? Bool == true { return probe()["focused"] as? Bool == true }
-        return app.keyboards.element.exists
+        probe()["focused"] as? Bool == true &&
+            (probe()["physicalKeyboard"] as? Bool == true || app.keyboards.element.exists)
     }
 
     /// Every button with its identifier, label and frame. Attached to a reachability
