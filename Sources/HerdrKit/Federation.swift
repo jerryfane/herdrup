@@ -11,6 +11,31 @@ public enum PeerReachability: Equatable, Sendable {
     case reachable, degraded, offline
 }
 
+/// One saved SSH profile from `machine.status`. Unlike an agent-derived peer,
+/// this remains visible before it has been opted into federation.
+public struct SavedMachineStatus: Decodable, Identifiable, Sendable {
+    public let profileID: String
+    public let displayLabel: String
+    public let savedState: String
+    public let federationConfigured: Bool?
+    public let federationReachability: String?
+    public let stale: Bool
+
+    public var id: String { profileID }
+    public var hasFederationPolicy: Bool {
+        federationConfigured ?? (savedState == "coordinated" || savedState == "coordinator_disabled")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profileID = "profile_id"
+        case displayLabel = "display_label"
+        case savedState = "saved_state"
+        case federationConfigured = "federation_configured"
+        case federationReachability = "federation_reachability"
+        case stale
+    }
+}
+
 /// A remote machine (federation peer) as summarized from the agent list: one entry
 /// per distinct `machineID`, carrying how many of that peer's agents the home box
 /// currently lists and the aggregate reachability across them.

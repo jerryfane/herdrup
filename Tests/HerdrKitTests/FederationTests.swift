@@ -147,6 +147,22 @@ final class FederationTests: XCTestCase {
         let peers = PeerSummary.peerSummaries(from: [try agent(pane: "mcb/p1", machineID: "mcb")])
         XCTAssertEqual(peers.map(\.displayName), ["mcb"])
     }
+    func testDisabledProfileStillExposesItsFederationPolicy() throws {
+        let configured = try JSONDecoder().decode(SavedMachineStatus.self, from: Data("""
+        {"profile_id":"2cc0ffe3a0753cafcf28f46a7bb29351",
+         "display_label":"pi-burj","saved_state":"disabled",
+         "federation_configured":true,"stale":false}
+        """.utf8))
+        XCTAssertTrue(configured.hasFederationPolicy)
+
+        let unconfigured = try JSONDecoder().decode(SavedMachineStatus.self, from: Data("""
+        {"profile_id":"2cc0ffe3a0753cafcf28f46a7bb29351",
+         "display_label":"pi-burj","saved_state":"disabled",
+         "federation_configured":false,"stale":false}
+        """.utf8))
+        XCTAssertFalse(unconfigured.hasFederationPolicy)
+    }
+
     /// A local agent has no alias prefix and must be left completely alone.
     func testLocalAgentNameIsUntouched() throws {
         let local = try agent(pane: "p1", name: "jarvis")

@@ -72,6 +72,24 @@ public actor HerdrClient {
         try await call("agent.list", EmptyParams(), as: AgentListResult.self).agents
     }
 
+    private struct MachineStatusResult: Decodable {
+        let machines: [String: SavedMachineStatus]
+    }
+
+    public func machineStatuses() async throws -> [SavedMachineStatus] {
+        let result = try await call("machine.status", EmptyParams(), as: MachineStatusResult.self)
+        return result.machines.values.sorted { $0.displayLabel < $1.displayLabel }
+    }
+
+    /// The SSH host executes Herdr's fixed one-machine command; `machine.status`
+    /// remains the source of truth after the command returns.
+    public func setMachineFederation(profileID: String, enabled: Bool) async throws {
+        guard let machineTransport = transport as? any MachineFederationTransport else {
+            throw TransportError.machineCommandFailed(stderr: "Machine federation requires an SSH connection")
+        }
+        try await machineTransport.setMachineFederation(profileID: profileID, enabled: enabled)
+    }
+
     /// Every credential account (subscription) the daemon knows about, for the
     /// Settings → Accounts list and the per-agent "Swap subscription" menu. Mirrors
     /// `agentList()`: a small parameterless JSON query. THROWS the server's

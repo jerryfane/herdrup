@@ -89,6 +89,13 @@ public protocol HerdrTransport: Sendable {
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error>
 }
 
+/// Optional host capability for changing saved-machine federation through Herdr's CLI.
+/// Only the SSH transport can run a command on the connected coordinator; the
+/// ordinary API transport remains a single-request JSON channel.
+public protocol MachineFederationTransport: HerdrTransport {
+    func setMachineFederation(profileID: String, enabled: Bool) async throws
+}
+
 public enum TransportError: Error, CustomStringConvertible {
     case socketCreationFailed(errno: Int32)
     case connectFailed(path: String, errno: Int32)
@@ -107,6 +114,7 @@ public enum TransportError: Error, CustomStringConvertible {
     /// The api-bridge (or the remote shell) produced no reply on stdout but wrote
     /// to stderr — surfaced rather than handed back as an empty, undecodable line.
     case bridgeFailed(stderr: String)
+    case machineCommandFailed(stderr: String)
     /// herdr is not installed on the host: neither on `PATH` nor at the default
     /// `~/.local/bin/herdr`, so the api-bridge command line has no executable to
     /// run. Distinguished from a generic `bridgeFailed` by an explicit sentinel the
@@ -150,6 +158,8 @@ public enum TransportError: Error, CustomStringConvertible {
             return "host key for \(h) rejected: \(fp) does not match the pinned key"
         case .bridgeFailed(let stderr):
             return "api-bridge produced no reply; stderr: \(stderr)"
+        case .machineCommandFailed(let stderr):
+            return "machine command failed: \(stderr)"
         case .herdrNotInstalled(let h):
             return "herdr is not installed on \(h)"
         case .herdrIncompatible(let h):

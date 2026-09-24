@@ -20,41 +20,33 @@ struct FederationSetupView: View {
 
     private static let steps: [Step] = [
         .init(symbol: "arrow.down.circle",
-              title: "Install the herdr fork",
-              detail: "On the machine, install the jerryfane/herdr fork; it has the api-bridge the home box connects through. Official herdr does not."),
+              title: "Install Herdr",
+              detail: "Install the jerryfane/herdr fork on the other machine and start its Herdr server."),
         .init(symbol: "network",
-              title: "Put it on your network",
-              detail: "Join it to your Tailscale tailnet (or any address your home box can reach) and authorize your home box's SSH key."),
-        .init(symbol: "doc.badge.gearshape",
-              title: "Add it to your config",
-              detail: "Add a peer to ~/.config/herdr/config.toml: an alias and ssh://user@host."),
-        .init(symbol: "arrow.clockwise",
-              title: "Reload, no restart",
-              detail: "Run herdr server reload-config on the home box. The machine's agents appear here; no restart needed."),
+              title: "Connect over SSH",
+              detail: "Join it to your Tailscale tailnet (or another reachable network), check its SSH host key, and authorize your home box's SSH public key."),
+        .init(symbol: "desktopcomputer",
+              title: "Save the machine",
+              detail: "On your home box run the command below. It saves an SSH profile without granting continuous federation access."),
+        .init(symbol: "point.3.connected.trianglepath.dotted",
+              title: "Opt in explicitly",
+              detail: "Tap Federate beside the saved machine here, or run herdr machine federate <label> on the home box. A remote identity change fails closed."),
     ]
 
-    /// The config snippet the third step describes, shown as a mono chip.
-    private static let configSnippet = """
-    [[federation.peers]]
-    alias = "mac-studio"
-    endpoint = "ssh://user@mac-studio"
-    """
-
-    /// The whole guide as a paste-ready instruction for an agent — built from the SAME config snippet
-    /// shown above so the on-screen steps and the copied text can never drift. Handed to
-    /// `CopyForAgentButton`; the owner pastes it to an agent to have the machine added for them.
+    private static let addCommand = "herdr machine add --label mac-studio user@mac-studio"
+    /// A paste-ready instruction for an agent; it matches the on-screen
+    /// saved-machine and explicit federation steps.
     static let agentPrompt = """
-    Add another machine to my herd so its agents show up in the herdr app, and walk me through each step as you do it.
+    Add another machine to my Herdr federation so its agents show up in HerdrUp.
 
-    1. Install the jerryfane/herdr fork on the machine — it has the api-bridge my home box connects through (official herdr does not).
-    2. Put it on my network: join it to my Tailscale tailnet (or any address my home box can reach) and authorize my home box's SSH key on it.
-    3. Add it as a peer in ~/.config/herdr/config.toml:
-    \(Self.configSnippet)
-    4. Apply it with no restart:
-    herdr server reload-config
+    1. Install the jerryfane/herdr fork on that machine and start its Herdr server.
+    2. Connect it over Tailscale or another trusted network. Check its SSH host key and authorize my home box's SSH public key.
+    3. On my home box, save a profile: \(Self.addCommand)
+    4. After confirming the target, opt it in with `herdr machine federate mac-studio` (or the Federate button in HerdrUp Settings). Check `herdr machine status` for reachability.
 
-    First ask me the machine's alias and its ssh user@host (Tailscale IP or name), then carry it out and tell me the exact steps and commands you ran.
+    Ask me for the machine label and SSH user@host first. Explain that continuous federation gives the home box full SSH authority over that Herdr session; do not copy private keys.
     """
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,8 +55,8 @@ struct FederationSetupView: View {
             ScrollView {
                 VStack(spacing: 10) {
                     ForEach(Self.steps) { row(for: $0) }
-                    configCard
-                    reloadCard
+                    addCard
+                    federateCard
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 14)
@@ -123,14 +115,13 @@ struct FederationSetupView: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
     }
 
-    /// The peer stanza to paste into config.toml — machine voice in a raised chip,
-    /// the same mono-chip idiom the shortcuts / keycap surfaces use.
-    private var configCard: some View {
+    /// Command to save a machine without granting it continuous access.
+    private var addCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("~/.config/herdr/config.toml")
+            Text("On the home box")
                 .font(Typography.app(12, .semibold))
                 .foregroundStyle(Palette.textFaint)
-            Text(Self.configSnippet)
+            Text(Self.addCommand)
                 .font(Typography.machine(13))
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
@@ -143,14 +134,13 @@ struct FederationSetupView: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
     }
 
-    /// The reload command — the one step that makes the new peer's agents appear,
-    /// no restart. Same mono chip as the config snippet.
-    private var reloadCard: some View {
+    /// Federation stays opt-in after a profile has been saved.
+    private var federateCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Then, on the home box")
                 .font(Typography.app(12, .semibold))
                 .foregroundStyle(Palette.textFaint)
-            Text("herdr server reload-config")
+            Text("herdr machine federate mac-studio")
                 .font(Typography.machine(13))
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
