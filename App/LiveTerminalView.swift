@@ -1034,7 +1034,10 @@ struct LiveTerminalView: UIViewRepresentable {
             view.onWillInsertText = { [weak self] text, composing in
                 self?.prepareForInsertedText(text, composing: composing)
             }
-            view.onWillHandleHardwareKeys = { [weak self] in self?.applyControlModifier() }
+            view.onWillHandleHardwareKeys = { [weak self] in
+                self?.adoptNativeInputFocus()
+                self?.applyControlModifier()
+            }
             view.onCancelControl = { [weak self] in
                 self?.cancelArmedControl()
                 self?.userTookControl()
@@ -2607,7 +2610,18 @@ struct LiveTerminalView: UIViewRepresentable {
             applyingControlModifier = false
         }
 
+        /// UIKit can make SwiftTerm first responder before the simultaneous tap
+        /// recognizer updates the SwiftUI focus binding. An actual native key event
+        /// is explicit intent, unlike protocol replies emitted by SwiftTerm itself.
+        private func adoptNativeInputFocus() {
+            guard !stopped, foreground, view?.isFirstResponder == true,
+                  !directFocusIntended else { return }
+            directFocusIntended = true
+            onTerminalFocusRequest?()
+        }
+
         private func prepareForInsertedText(_ text: String, composing: Bool) {
+            adoptNativeInputFocus()
             userTookControl()
             guard !composing, text.unicodeScalars.count == 1, let character = text.first,
                   InputRouter.controlByte(for: character) != nil else {

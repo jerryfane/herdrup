@@ -527,6 +527,11 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
+        case "native-first-key":
+            if let view = surfaces[activeID]?.view {
+                _ = view.becomeFirstResponder()
+                view.insertText("p")
+            }
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -662,7 +667,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "native-first-key"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

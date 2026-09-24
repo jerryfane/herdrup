@@ -36,6 +36,16 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         }
     }
 
+    /// UIKit may deliver a native key before the simultaneous tap recognizer
+    /// updates SwiftUI. Exercise the real SwiftTerm encoder and pane input path.
+    func testFirstNativeKeyDeliversBeforeFocusBinding() {
+        launch("control")
+        let draft = reply.value as? String
+        app.buttons["fixture-native-first-key"].tap()
+        input("p", previous: 0)
+        XCTAssertEqual(reply.value as? String, draft)
+    }
+
     func testLegacyPreviousIsOneEventThenOrdinaryCharacter() throws {
         launch("control"); focusTerminal()
         let draft = reply.value as? String
