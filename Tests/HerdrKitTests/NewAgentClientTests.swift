@@ -194,10 +194,23 @@ final class PromptDeliveryTests: XCTestCase {
     /// observation codes follow it. None justify an automatic resend.
     func testUncertainOrWrittenPromptIsNotOfferedForAutomaticRetry() {
         for code in ["timeout", "agent_prompt_unverifiable", "agent_prompt_stalled",
+                     "agent_status_unobserved_after_submit",
                      "agent_prompt_unsubmitted"] {
             XCTAssertTrue(PromptRejection(APIError(code: code, message: "")).mayHaveReachedAgent,
                           "'\(code)' may already have reached the agent; handing it back invites a duplicate send")
         }
+    }
+
+    /// A known PTY write on an older daemon is not the same as a timeout whose
+    /// write may never have happened.
+    func testPromptReceiptDistinguishesWrittenFromUnknown() {
+        XCTAssertEqual(PromptRejection(APIError(code: "timeout", message: "")), .unconfirmed)
+        for code in ["agent_prompt_unverifiable", "agent_prompt_stalled"] {
+            XCTAssertEqual(PromptRejection(APIError(code: code, message: "")), .writtenUnverified)
+        }
+        XCTAssertEqual(PromptRejection(
+            APIError(code: "agent_status_unobserved_after_submit", message: "")
+        ), .submittedStatusUnknown)
     }
 
     /// The other side of the same rule: a genuine non-delivery, or a code this client

@@ -228,10 +228,8 @@ final class CitadelTransportTests: XCTestCase {
         XCTAssertEqual(host, "box.example", "the host was not carried through")
     }
 
-    /// Exit code 2 (clap's usage error for an unknown subcommand) with no sentinel
-    /// means herdr is present but doesn't understand `api-bridge` — too old, or not
-    /// the fork. It classifies as `.herdrIncompatible(host:)` so the client can say
-    /// "update / install the fork" instead of showing "command failed, exit code 2".
+    /// A specific rejection of the api-bridge subcommand, not exit 2 alone,
+    /// identifies an old or incompatible installed Herdr.
     func testClassifyBridgeFailureExitTwoIsIncompatible() {
         let stderr = "error: unrecognized subcommand 'api-bridge'\n"
         let error = CitadelTransport.classifyBridgeFailure(
@@ -240,6 +238,16 @@ final class CitadelTransportTests: XCTestCase {
             return XCTFail("expected .herdrIncompatible, got \(error)")
         }
         XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    func testUnrelatedExitTwoPreservesDiagnostic() {
+        let stderr = "error: invalid request argument\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 2, host: "box.example")
+        guard case TransportError.bridgeFailed(let diagnostic) = error else {
+            return XCTFail("an unrelated usage error was labelled incompatible: \(error)")
+        }
+        XCTAssertEqual(diagnostic, stderr)
     }
 
     /// The sentinel outranks the exit code: an absent herdr must read as
@@ -253,9 +261,7 @@ final class CitadelTransportTests: XCTestCase {
         }
     }
 
-    /// Any OTHER stderr stays a generic `.bridgeFailed` — the sentinel is the only
-    /// signal that promotes it, so an unrelated failure is never mislabelled as
-    /// "herdr not installed" (which would wrongly tell the user to reinstall).
+    /// An unrelated stderr remains generic rather than asking for a reinstall.
     func testClassifyBridgeFailurePassesThroughUnrelatedStderr() {
         let stderr = "api-bridge: permission denied while opening the control socket\n"
         // A non-2, non-sentinel failure (e.g. exit 1) stays a generic bridge failure.
@@ -340,6 +346,38 @@ final class CitadelTransportTests: XCTestCase {
             finishThrowing: FakeExit(remoteExitCode: 1))
         let reply = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
         XCTAssertEqual(reply, "{\"ok\":true}")
+    }
+
+    /// A compatible bridge writes a structured error on stdout and exits
+    /// successfully when its local API socket is absent or refuses connections.
+    func testOfflineDaemonFromBridgeReplyIsTyped() async {
+        for (message, trailingNewline) in [
+            ("No such file or directory (os error 2)", true),
+            ("Connection refused (os error 111)", false)
+        ] {
+            let reply = #"{"id":"req-1","error":{"code":"transport_error","message":"api-bridge: \#(message)"}}"#
+            let stream = bridgeStream(stdout: [reply + (trailingNewline ? "\n" : "")])
+            do {
+                _ = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+                XCTFail("expected an unavailable daemon for \(message)")
+            } catch let error as TransportError {
+                guard case .daemonUnavailable(let host) = error else {
+                    return XCTFail("expected .daemonUnavailable, got \(error)")
+                }
+                XCTAssertEqual(host, "box.example")
+                XCTAssertTrue(error.description.contains("not responding"))
+                XCTAssertFalse(error.description.contains("stopped"))
+            } catch {
+                XCTFail("unexpected \(error)")
+            }
+        }
+    }
+
+    func testUnrelatedTransportErrorIsNotMislabelledOffline() async throws {
+        let reply = #"{"id":"req-1","error":{"code":"transport_error","message":"api-bridge: Broken pipe (os error 32)"}}"#
+        let stream = bridgeStream(stdout: [reply + "\n"])
+        let result = try await CitadelTransport.parseBridgeOutput(stream, host: "box.example")
+        XCTAssertEqual(result, reply)
     }
 
     /// A clean exit-0 close with no reply surfaces `.closedBeforeResponse`, not a hang.

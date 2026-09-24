@@ -1455,6 +1455,9 @@ struct TerminalHomeView: View {
     /// Only swaps the guidance heading/subtitle; the fix (install/update the fork) is
     /// the same, so it reuses the same recovery screen.
     @State private var herdrIncompatibleBuild = false
+    /// An installed, compatible binary whose API daemon/socket is not responding
+    /// needs start/check guidance, not another install.
+    @State private var unavailableDaemonHost: String?
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
@@ -3037,6 +3040,7 @@ struct TerminalHomeView: View {
         if trustFailed { trustFailed = false }
         if herdrMissing { herdrMissing = false }
         if herdrIncompatibleBuild { herdrIncompatibleBuild = false }
+        if unavailableDaemonHost != nil { unavailableDaemonHost = nil }
         if loading { loading = false }
     }
 
@@ -3580,6 +3584,16 @@ struct TerminalHomeView: View {
             // diagnostic and know they need to go install the fork.
             if herdrMissing {
                 herdrInstallGuidance
+            } else if let host = unavailableDaemonHost {
+                VStack(spacing: 10) {
+                    Text("herdr API daemon not responding")
+                        .font(Typography.app(18, .semibold)).foregroundStyle(Palette.died)
+                    Text("The herdr binary is installed on \(host), but its API daemon could not be reached. Start or check the herdr daemon on that host, then retry.")
+                        .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                        .multilineTextAlignment(.center)
+                    Button("retry") { Task { await load() } }
+                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                }
             } else {
                 Text(error).font(Typography.machine(13)).foregroundStyle(Palette.died)
                     .multilineTextAlignment(.center)
@@ -3763,6 +3777,7 @@ struct TerminalHomeView: View {
             let rejected: String?
             var notInstalled = false
             var incompatibleBuild = false
+            var daemonHost: String?
             if let transportError = error as? TransportError {
                 if case .hostKeyRejected(_, let fingerprint) = transportError {
                     rejected = fingerprint
@@ -3775,6 +3790,9 @@ struct TerminalHomeView: View {
                     if case .herdrIncompatible = transportError {
                         notInstalled = true
                         incompatibleBuild = true
+                    }
+                    if case .daemonUnavailable(let host) = transportError {
+                        daemonHost = host
                     }
                 }
             } else {
@@ -3791,6 +3809,7 @@ struct TerminalHomeView: View {
                 // branch; a no-herdr connect always has an empty list, so it surfaces here.
                 herdrMissing = notInstalled
                 herdrIncompatibleBuild = incompatibleBuild
+                unavailableDaemonHost = daemonHost
             }
             // DROP a pending deep-link this failed load couldn't service, rather than leave it armed:
             // a push targets a just-now event, so firing it after some much-later successful load would
@@ -4252,6 +4271,12 @@ struct TerminalPaneContent: View {
     /// A drag is hovering the reply bar, so the target says so before the drop lands.
     @State private var replyDropTargeted = false
     @State private var sending = false
+    /// Keycap writes share one ordered drain; prompt/attachment sends retain their
+    /// own in-flight guard without throttling a rapid run of terminal keys.
+    @State private var keySendTask: Task<Void, Never>?
+    /// A failed key invalidates only keys queued before the failure; a new tap can retry.
+    @State private var keyFailureEpoch = 0
+    @State private var keySendSequence = 0
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
     /// `/tui default` prompts (the reply box's send is gated by `sending`; this is its analogue).
@@ -4445,16 +4470,17 @@ struct TerminalPaneContent: View {
                 // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
-                                 // `!findFocused` matters: on iPad this expression is TRUE on
-                                 // every pass, so without it the terminal reclaims first
-                                 // responder the moment the find field takes it and the search
-                                 // box cannot be typed into at all.
+                                 // The find and reply fields own their own responders.
+                                 // Terminal focus is never inferred from device idiom.
                                  wantsTerminalKeyFocus: isForeground && !replyFocused && !findFocused
-                                     && (terminalInputFocused || UIDevice.current.userInterfaceIdiom == .pad),
+                                     && terminalInputFocused,
                                  // Set by the collapse chevron so the resign in updateUIView can
                                  // tell a deliberate dismissal from an incidental body pass.
                                  collapseToken: terminalCollapseToken,
-                                 onTerminalFocusRequest: { terminalInputFocused = true },
+                                 onTerminalFocusRequest: {
+                                     replyFocused = false
+                                     terminalInputFocused = true
+                                 },
                                  jumpToTailToken: jumpToTailToken,
                                  onTailStateChange: { terminalAtTail = $0 },
                                  // The host's current belief, so a `streamGen` remount seeds a
@@ -4985,9 +5011,8 @@ struct TerminalPaneContent: View {
         Button { ctrlArmed = false; send(.key(key)) } label: {
             ComposerQuickKeyLabel(text: label ?? key, imageName: image, primary: primary)
         }
-        // Disabled while a pre-fill is pending too: a stray Return during automatic
-        // delivery could race the in-flight agent.prompt (and Return into a booting
-        // shell is the execute-unintended hazard we are closing).
+        // Only a real prompt/attachment transaction or pending prefill blocks
+        // keycaps; ordinary key writes are ordered without a cooldown.
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(key))
     }
@@ -5070,7 +5095,10 @@ struct TerminalPaneContent: View {
                 // Dictation owns the field; an upload must not resign its first responder.
                 isEnabled: !replyDictating,
                 isFocused: replyFocused,
-                onFocusChange: { replyFocused = $0 },
+                onFocusChange: { focused in
+                    replyFocused = focused
+                    if focused { terminalInputFocused = false }
+                },
                 onChange: { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 },
@@ -5397,49 +5425,96 @@ struct TerminalPaneContent: View {
         } else {
             clearedReply = nil
         }
-        // The ATTACHMENT path keeps its own late clear (`sendPromptWithAttachments`): its
-        // caption has to survive a batch that failed halfway so the retry chips can send
-        // it again. That send therefore still costs the second resize; deliberate, and a
-        // separate change if it ever matters (review f2).
+        // An attachment batch keeps its caption until every upload and its prompt
+        // have completed; its separate path above owns the late clear.
         func restoreClearedReply() {
             guard let clearedReply, reply.isEmpty else { return }
             reply = clearedReply
         }
-        Task {
+        let isKeyAction: Bool
+        switch plan {
+        case .keys, .rawText: isKeyAction = true
+        default: isKeyAction = false
+        }
+        // Keep rapid taps responsive, but dispatch their writes in order. A failure
+        // cancels keys already queued behind it rather than silently changing a chord.
+        let precedingKeySend = keySendTask
+        let queuedEpoch = keyFailureEpoch
+        let sequence: Int?
+        if isKeyAction {
+            keySendSequence += 1
+            sequence = keySendSequence
+        } else {
+            sequence = nil
             sending = true
-            defer { sending = false }
+        }
+        let task = Task {
+            if let precedingKeySend { await precedingKeySend.value }
+            defer {
+                if !isKeyAction { sending = false }
+                if let sequence, keySendSequence == sequence { keySendTask = nil }
+            }
+            if isKeyAction && keyFailureEpoch != queuedEpoch {
+                return
+            }
             do {
                 switch plan {
                 case .prompt(let pane, let text):
-                    // submitPrompt confirms delivery and sets the note from it.
                     try await submitPrompt(pane: pane, text: text)
                 case .text(let pane, let text):
-                    try await client.sendText(pane: pane, text: text); actionNote = nil
+                    try await client.sendText(pane: pane, text: text)
+                    actionNote = nil
                 case .rawText(let pane, let text):
-                    try await client.sendText(pane: pane, text: text); actionNote = nil
+                    try await client.sendText(pane: pane, text: text)
+                    actionNote = nil
                 case .keys(let pane, let keys):
-                    try await client.sendKeys(pane: pane, keys: keys); actionNote = nil
+                    try await client.sendKeys(pane: pane, keys: keys)
+                    actionNote = nil
                 case .refused(let reason):
-                    actionNote = "not sent: \(reason)"; restoreClearedReply(); return
+                    actionNote = "not sent: \(reason)"
+                    restoreClearedReply()
+                    return
                 }
-                // Give the pane a beat to reflect the input, then re-read.
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                await refresh()
+                // The live stream provides output; only a prompt send needs to
+                // re-resolve agent status and input mode.
+                if !isKeyAction { await refresh() }
             } catch let apiError as APIError {
-                actionNote = Self.promptRejectionNote(for: apiError)
-                // NOT WHEN THE TEXT MAY ALREADY BE WITH THE AGENT. `agent.prompt` writes
-                // the text before it tries to observe the submission, so a timeout, an
-                // unverifiable or stalled submission, or a draft left in the agent's own
-                // composer all mean the agent has (or can see) it — `PromptRejection`
-                // says which codes those are. Putting the text back would make the next
-                // tap a duplicate send. Every other code says it did not land, and the
-                // reader should get their text back.
-                if !PromptRejection(apiError).mayHaveReachedAgent { restoreClearedReply() }
+                if isKeyAction { keyFailureEpoch += 1 }
+                if case .prompt = plan {
+                    actionNote = Self.promptRejectionNote(for: apiError)
+                    // A post-write/unknown rejection must not put text back for
+                    // another tap; a definite pre-write rejection can be retried.
+                    if !PromptRejection(apiError).mayHaveReachedAgent {
+                        restoreClearedReply()
+                    }
+                } else if isKeyAction {
+                    let prefix = apiError.code == "timeout"
+                        ? "Key delivery uncertain — check the terminal"
+                        : "send failed: \(apiError)"
+                    let suffix = sequence.map { keySendSequence > $0 } == true
+                        ? "; later queued keys were not sent" : ""
+                    actionNote = prefix + suffix
+                } else {
+                    actionNote = "send failed: \(apiError)"
+                    restoreClearedReply()
+                }
             } catch {
-                actionNote = "send failed: \(error)"
-                restoreClearedReply()
+                if isKeyAction {
+                    keyFailureEpoch += 1
+                    let suffix = sequence.map { keySendSequence > $0 } == true
+                        ? "; later queued keys were not sent" : ""
+                    actionNote = "Key delivery uncertain — check the terminal before trying again" + suffix
+                } else if case .prompt = plan {
+                    // A transport failure does not prove whether the server wrote
+                    // bytes before losing the response. Don't invite a blind resend.
+                    actionNote = "couldn't confirm delivery — check the terminal before sending again"
+                } else {
+                    actionNote = "send failed: \(error)"
+                    restoreClearedReply()
+                }
             }
         }
+        if isKeyAction { keySendTask = task }
     }
     /// Uploads and posts every staged attachment, then submits ONE prompt naming them
     /// all.
@@ -5464,8 +5539,10 @@ struct TerminalPaneContent: View {
             return
         }
 
+        sending = true
+        let precedingKeySend = keySendTask
         Task {
-            sending = true
+            if let precedingKeySend { await precedingKeySend.value }
             replyFailedAttachmentID = nil
             defer { sending = false; replyUploadBytes = nil; replySendingAttachmentID = nil }
             var delivered: [(attachment: PromptAttachment, messageID: String)] = []
@@ -5542,10 +5619,12 @@ struct TerminalPaneContent: View {
                         return
                     }
                     actionNote = Self.promptRejectionNote(for: apiError)
+                } catch {
+                    actionNote = "couldn't confirm delivery — check the terminal before sending again"
                 }
-                // Only now: the prompt is what makes the posted grams meaningful, so a
-                // failure before this point keeps every chip (with its resume state) for
-                // a one-tap retry.
+                // Only a definite pre-write rejection keeps the chips and caption
+                // for a one-tap retry. A lost response may follow a PTY write, so
+                // unknown delivery also clears them rather than duplicating a prompt.
                 let deliveredIDs = Set(delivered.map(\.attachment.id))
                 replyAttachments.removeAll { deliveredIDs.contains($0.id) }
                 if reply == text { reply = "" }
@@ -5665,24 +5744,20 @@ struct TerminalPaneContent: View {
         send(.rawSequence(String(ctrl)))
     }
 
-    /// Submits a reply as a prompt WITH delivery confirmation. Sets the visible note
-    /// from herdr's `delivery`: a confirmed turn (`submitted`) clears it, while a
-    /// stranded draft (`writtenToPty` — bytes in the composer but no turn started,
-    /// the herdr#18/#26 state) is surfaced rather than shown as sent. Throws the
-    /// server's APIError on rejection so `send` can show a clear reason.
+    /// A successful PTY write is not proof that the agent submitted a turn.
+    /// Keep its receipt visible rather than inviting a duplicate send.
     private func submitPrompt(pane: String, text: String) async throws {
-        // agent.prompt writes the text AND schedules a guarded Enter, so the reply
-        // submits regardless of the immediate `delivery` — which on the fast
-        // wait-match path is always `written_to_pty` (the Enter is still ~300ms
-        // out). Showing a "waiting to submit" note after every reply would read as
-        // "it didn't send" for the very bug this fixes, and invite a re-send. A
-        // rejection THROWS an APIError that the callers classify with
-        // `PromptRejection` and surface via `promptRejectionNote`; so on a clean
-        // return, clear the note.
-        _ = try await client.prompt(
+        let result = try await client.prompt(
             pane: pane, text: text,
             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
-        actionNote = nil
+        switch result.delivery {
+        case .submitted:
+            actionNote = nil
+        case .writtenToPty:
+            actionNote = "Sent to terminal; agent submission not verified"
+        case nil:
+            actionNote = "couldn't confirm delivery — check the terminal before sending again"
+        }
     }
 
     /// Maps a prompt rejection to a note the reader can act on — no more silent
@@ -5694,9 +5769,11 @@ struct TerminalPaneContent: View {
     private static func promptRejectionNote(for error: APIError) -> String {
         switch PromptRejection(error) {
         case .unconfirmed:
-            return "couldn't confirm delivery — check the terminal before sending again"
-        case .stalled:
-            return "sent, but the agent wasn't seen submitting it — check the terminal"
+            return "Couldn't tell whether the prompt reached the terminal — check before sending again"
+        case .writtenUnverified:
+            return "Sent to terminal; agent submission not verified"
+        case .submittedStatusUnknown:
+            return "Prompt submitted; requested agent state not confirmed — check the terminal"
         case .leftInComposer:
             return "left unsubmitted in the agent's prompt — tap Enter to send it"
         case .notDelivered:

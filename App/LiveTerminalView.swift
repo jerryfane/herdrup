@@ -49,13 +49,12 @@ struct FindRequest: Equatable {
 /// bytes to a real VT emulator, so the phone renders a grid-faithful terminal
 /// instead of a reflowed snapshot.
 ///
-/// iPhone, iPad, and hardware keyboards can drive the terminal directly. On iPhone,
-/// the terminal becomes first responder when the reply field is not focused and shows
-/// the software keyboard; SwiftTerm's delegate forwards its key→bytes translation to
-/// the PTY. The reply/Send bar remains the deliberate path for agent prompts and saved
-/// messages. SCROLL remains constrained: a pan on the alternate screen sends
-/// wheel/arrow sequences to the agent (see `handleScrollPan`), never a keystroke.
-/// iPad accepts direct terminal keys only while a hardware keyboard is present.
+/// A deliberate terminal tap gives SwiftTerm focus for direct PTY typing on iPhone,
+/// iPad (software or hardware keyboard), and iOS apps running on Apple Silicon Macs.
+/// SwiftTerm's delegate forwards its key→bytes translation to the PTY. The reply/Send
+/// bar remains the deliberate path for agent prompts and saved messages. SCROLL
+/// remains constrained: a pan on the alternate screen sends wheel/arrow sequences
+/// to the agent (see `handleScrollPan`), never a keystroke.
 ///
 /// Geometry: the view reports its own laid-out grid to the server via `setPTYSize`
 /// so the stream is generated at the phone's width. While the terminal view is open
@@ -87,8 +86,9 @@ struct LiveTerminalView: UIViewRepresentable {
     /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
     /// Whether the terminal itself should hold keyboard focus (drive keys straight to the PTY).
-    /// On iPhone this opens the software keyboard; on iPad it takes effect only with a
-    /// hardware keyboard. Refreshed on every update.
+    /// A deliberate tap on the terminal takes focus on every iOS idiom, including
+    /// iPad software keyboards and iOS apps running on Apple Silicon Macs.
+    /// Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
     /// Bumped by the reply bar's chevron to request a DELIBERATE collapse, as opposed to the many
     /// incidental body passes that also see `wantsTerminalKeyFocus == false`. Only a deliberate
@@ -202,16 +202,10 @@ struct LiveTerminalView: UIViewRepresentable {
         // resize frame must already be gone before the search scrolls the view underneath.
         context.coordinator.onFindResult = onFindResult
         context.coordinator.performFind(findRequest)
-        // Drive terminal responder ownership from SwiftUI intent.
-        //
-        // RESPONDER OWNERSHIP AND KEY ROUTING ARE SEPARATE CONCERNS, and conflating them
-        // cost the Copy menu on iPad without a hardware keyboard: gating the *become* on
-        // `keyDriveEnabled` meant the responder was never taken there, and SwiftTerm's
-        // `doubleTap` selects without taking it either, so `canPerformAction` refused Copy.
-        // Owning the responder is free on every platform: iPhone shows its keyboard
-        // (which is wanted, it is how you type), and every other idiom has the zero-frame
-        // `emptyInputView`, so nothing appears. KEY ROUTING stays gated on
-        // `keyDriveEnabled` inside the `send` delegate, which is the only place it belongs.
+        // A deliberate terminal tap takes focus on every idiom; a composer/find tap
+        // relinquishes it, and a background pane never keeps it. SwiftTerm selection
+        // needs the responder for Copy, so incidental updates do not resign
+        // mid-selection.
         //
         // A BACKGROUNDED pane drops its selection UNCONDITIONALLY and resigns if it holds
         // the responder. The clear sits OUTSIDE the first-responder test on purpose: nested
@@ -395,18 +389,10 @@ struct LiveTerminalView: UIViewRepresentable {
     /// (`Coordinator.handleScrollPan`), which sends wheel/arrow scroll INTO a
     /// full-screen TUI that keeps no scrollback of its own.
     final class ReadOnlyTerminalView: TerminalView {
-        /// Direct terminal input is available on iPhone through the software keyboard
-        /// and on iPad through a physical keyboard. A large iPhone in landscape must
-        /// still use the phone path, so this keys off idiom rather than size class.
-        var keyDriveEnabled: Bool {
-            UIDevice.current.userInterfaceIdiom == .phone
-                || (UIDevice.current.userInterfaceIdiom == .pad && GCKeyboard.coalesced != nil)
-        }
-        /// First responder is allowed on every platform because SwiftTerm text selection
-        /// requires it. On iPhone it also presents the software keyboard; on iPad without
-        /// a hardware keyboard, input remains disabled by `keyDriveEnabled`.
+        /// Selection/Copy and direct terminal typing both need SwiftTerm's responder.
+        /// Do not hide the software keyboard on iPad or infer keyboard availability
+        /// from GCKeyboard: it can be nil even for an iOS app on a Mac with a keyboard.
         override var canBecomeFirstResponder: Bool { true }
-        private let emptyInputView = UIView(frame: .zero)
 
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
@@ -414,11 +400,6 @@ struct LiveTerminalView: UIViewRepresentable {
             // flush and the library's scroll-offset math (`maxContentOffsetY`) free of a
             // shifting safe-area / keyboard inset.
             contentInsetAdjustmentBehavior = .never
-            // Keep iPhone's system keyboard. On iPad, suppress a software keyboard while
-            // preserving hardware-key delivery and selection/copy behavior.
-            if UIDevice.current.userInterfaceIdiom != .phone {
-                inputView = emptyInputView
-            }
             inputAccessoryView = nil
         }
 
@@ -486,7 +467,6 @@ struct LiveTerminalView: UIViewRepresentable {
             + ["[", "]", "\\", "^", "_", " "]
 
         override var keyCommands: [UIKeyCommand]? {
-            guard keyDriveEnabled else { return nil }
             return Self.controlChordInputs.map { input in
                 let command = UIKeyCommand(input: input,
                                            modifierFlags: .control,
@@ -1068,39 +1048,11 @@ struct LiveTerminalView: UIViewRepresentable {
                     guard let self, !self.stopped, !self.applyingControlModifier else { return }
                     self.controlArmedSetter?(false)
                 }
-            // Turn the VIEW's touch→mouse-byte conversion OFF unconditionally. Two reasons:
-            // (1) under key drive a tap SwiftTerm turned into a mouse report could leak bytes to
-            // the PTY (`send` FORWARDS output there); (2) in the read-only case it lets a tap or
-            // long-press start a LOCAL text selection instead of being swallowed as a mouse event
-            // over a mouse-mode TUI. This touches ONLY the view's tap-to-mouse conversion — NOT
-            // the emulator's `term.mouseMode` (what emitScroll/handleScrollPan read), so alt-screen
-            // / Claude-Code wheel scroll is unaffected.
+            // Turn the view's touch→mouse-byte conversion off: a tap should start a
+            // local text selection rather than leak a mouse report to the PTY.
+            // This does not alter the emulator's alternate-screen wheel handling.
             view.allowMouseReporting = false
-            // Track hardware-keyboard connect/disconnect so key-drive focus follows the keyboard.
-            // On connect the front pane becomes first responder (gated by keyDriveEnabled);
-            // on disconnect it resigns. Tokens removed in stop().
-            keyboardObservers.append(
-                NotificationCenter.default.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { [weak self, weak view] _ in
-                    // NOT iPAD-ONLY ANY MORE. This comment used to say the keyDriveEnabled gate
-                    // "keeps this iPad-only (a BT keyboard on iPhone is a no-op, preserving the
-                    // read-only path)". That described the world before this PR: keyDriveEnabled
-                    // now includes .phone, so a Bluetooth keyboard connecting to an iPHONE also
-                    // makes the terminal first responder and drives the PTY. That follows from
-                    // iPhone typing being the feature, so it is intended — but it is UNVERIFIED,
-                    // since nothing here has been exercised with a BT keyboard on a phone, and a
-                    // comment claiming the old behaviour would have hidden that. Caught by review.
-                    //
-                    // A keyboard attached MID-session also needs mouse reporting off, or a tap
-                    // could leak a mouse report through the now-live send.
-                    guard let self, let view, self.foreground, view.keyDriveEnabled else { return }
-                    view.allowMouseReporting = false
-                    _ = view.becomeFirstResponder()
-                })
-            keyboardObservers.append(
-                NotificationCenter.default.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { [weak self, weak view] _ in
-                    self?.cancelArmedControl()
-                    view?.resignFirstResponder()
-                })
+            // Backgrounding cancels an armed Ctrl and the presentation cover.
             keyboardObservers.append(
                 NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification,
                                                        object: nil, queue: .main) { [weak self] _ in
@@ -1455,10 +1407,8 @@ struct LiveTerminalView: UIViewRepresentable {
         ///
         /// Deliberately does NOT clear a selection. Clearing here fired on tap 2 as well
         /// and wiped the word SwiftTerm had just selected on the same touch-up.
-        ///
-        /// No `keyDriveEnabled` gate: owning the responder costs nothing on an idiom that
-        /// cannot type (zero-frame `emptyInputView`), and whether keys reach the PTY is
-        /// decided in `send`.
+        /// Focus comes from a deliberate terminal tap, not keyboard presence;
+        /// selection and Copy still use the same responder.
         @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
             guard !stopped, foreground, gr.state == .ended else { return }
             // A TAP THAT STOPS A SCROLL IS NOT A REQUEST FOR THE KEYBOARD, and treating it as one
@@ -2647,7 +2597,7 @@ struct LiveTerminalView: UIViewRepresentable {
             applyingControlModifier = true
             defer { applyingControlModifier = false }
             view.controlModifier = !stopped && foreground && directFocusIntended
-                && view.isFirstResponder && view.keyDriveEnabled && (controlArmedGetter?() ?? false)
+                && view.isFirstResponder && (controlArmedGetter?() ?? false)
         }
 
         func cancelArmedControl() {
@@ -2681,16 +2631,14 @@ struct LiveTerminalView: UIViewRepresentable {
 
         // MARK: TerminalViewDelegate — terminal input
 
-        /// Forward SwiftTerm's key→bytes translation to the PTY whenever direct input
-        /// is enabled and the terminal owns focus. This includes iPhone software-keyboard
-        /// input and iPad hardware-keyboard input. Serialized through `enqueueInput` so
-        /// a fast key burst becomes ordered batches rather than concurrent channels.
+        /// Forward SwiftTerm's key→bytes translation to the PTY when the terminal
+        /// owns focus, on software and hardware keyboards alike. Serialized through
+        /// `enqueueInput` so a fast key burst remains ordered.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            // `foreground` is part of the guard, not just first-responder status. Panes stay
-            // MOUNTED when another is fronted, and a pane that held a selection keeps its
-            // responder for a moment, so first-responder alone would let a keystroke reach
-            // an agent nobody is looking at.
-            guard !stopped, foreground, let v = view, v.keyDriveEnabled, v.isFirstResponder else { return }
+            // Mounted background panes must not receive input even if they briefly
+            // retain first responder while selection/focus transitions settle.
+            guard !stopped, foreground, directFocusIntended,
+                  let v = view, v.isFirstResponder else { return }
             userTookControl()
             enqueueInput(String(decoding: data, as: UTF8.self))
         }

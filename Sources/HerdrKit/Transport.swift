@@ -122,12 +122,12 @@ public enum TransportError: Error, CustomStringConvertible {
     /// text), so the client can guide the user to install it rather than showing a
     /// raw stderr line.
     case herdrNotInstalled(host: String)
-    /// herdr IS installed on the host, but it does not understand the `api-bridge`
-    /// subcommand the app drives — an upstream/official build, or a fork too old to
-    /// have it. Its arg-parser exits with code 2, which `classifyBridgeFailure` maps
-    /// here so the client can say "update / install the fork" rather than showing a
-    /// raw "command failed, exit code 2".
+    /// herdr is installed but positively rejected the `api-bridge` subcommand
+    /// as unknown. Exit code 2 alone is not evidence of incompatibility.
     case herdrIncompatible(host: String)
+    /// A compatible api-bridge could not reach the host's local API socket.
+    /// This does not establish whether the daemon is stopped or merely not responding.
+    case daemonUnavailable(host: String)
     /// A password connection was attempted against a server that does not offer
     /// password authentication (e.g. `PasswordAuthentication no`). Distinct from a
     /// wrong password and from a host-key mismatch.
@@ -164,6 +164,8 @@ public enum TransportError: Error, CustomStringConvertible {
             return "herdr is not installed on \(h)"
         case .herdrIncompatible(let h):
             return "the herdr on \(h) is too old or isn't the fork. Update it (or install the fork) and reconnect"
+        case .daemonUnavailable(let h):
+            return "the herdr API daemon on \(h) is not responding; check that it is running and try again"
         case .passwordAuthUnsupported(let h):
             return "\(h) does not offer password authentication; use a key instead"
         case .authenticationFailed(let h):
