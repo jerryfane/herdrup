@@ -5750,7 +5750,7 @@ struct TerminalPaneContent: View {
         let result = try await client.prompt(
             pane: pane, text: text,
             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
-        switch result.delivery {
+        switch result {
         case .submitted:
             actionNote = nil
         case .writtenToPty:
