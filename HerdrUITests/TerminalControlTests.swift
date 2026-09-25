@@ -198,6 +198,13 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         // modifier.
         XCTAssertFalse(armed, "starting dictation must consume the armed one-shot")
         attach("dictation-start-disarmed")
+        // iOS can show a second, delayed system opt-in after the microphone
+        // permission prompts. Decline it before refocusing: XCTest otherwise
+        // taps its privacy link as an interruption and sends the next key nowhere.
+        let dictationOptIn = springboard.alerts["Enable Dictation?"]
+        if dictationOptIn.waitForExistence(timeout: 5) {
+            dictationOptIn.buttons["Not Now"].tap()
+        }
         // The ordinary-key half needs an input path, and a dictation attempt can leave
         // the phone with no keyboard: `focusTerminal` restores the responder, but iOS
         // does not always bring the keyboard back. The disarm above is the receipt this
