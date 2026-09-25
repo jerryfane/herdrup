@@ -4487,9 +4487,6 @@ struct TerminalPaneContent: View {
                                  // fresh Coordinator instead of replaying the last jump.
                                  isAtTail: terminalAtTail,
                                  fontSize: CGFloat(terminalFontSize),
-                                 // A federated/remote pane routes key-drive input via pane.send_text
-                                 // (home can't proxy the persistent pane.input.stream channel). (#139)
-                                 isFederated: agent?.machineID != nil,
                                  // Read on foreground to tell a suspended stream from a
                                  // still-running one; see the scenePhase handler below.
                                  liveness: terminalLiveness,

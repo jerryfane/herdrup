@@ -516,27 +516,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         }
     }
 
-    /// Opens a persistent input channel to one pane (issue #62): a dedicated SSH
-    /// exec channel running `herdr api-bridge --duplex`, over which
-    /// `PaneInputChannel` writes newline-delimited input frames to the daemon's
-    /// `pane.input.stream`. Uses its OWN connection (like `stream`) so input
-    /// backpressure never blocks the shared command socket or the pane.stream
-    /// firehose. `openLine` is the JSON `pane.input.stream` open request the
-    /// daemon's `--duplex` bridge reads first from stdin.
-    public nonisolated func openInputChannel(_ openLine: String) -> PaneInputChannel {
-        PaneInputChannel(
-            makeConnection: { try await self.makeConnection() },
-            command: Self.herdrPathResolution + "--duplex",
-            openLine: openLine
-        )
-    }
-
     /// Opens a streaming upload channel for one gram attachment: a dedicated SSH
     /// exec channel running `herdr api-bridge --duplex`, over which
     /// `GramUploadChannel` writes chunk frames to the daemon's
-    /// `gram.upload.stream`. Its OWN connection, like `stream` and
-    /// `openInputChannel`, so a multi-MB upload never blocks the shared command
-    /// client or the `pane.stream` firehose. `openLine` is the JSON
+    /// `gram.upload.stream`. Its own connection keeps upload backpressure off
+    /// the command socket and pane.stream firehose. `openLine` is the JSON
     /// `gram.upload.stream` open request the `--duplex` bridge reads first.
     ///
     /// Deliberately NOT part of `HerdrTransport`: that protocol has two members,

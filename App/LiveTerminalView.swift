@@ -115,11 +115,6 @@ struct LiveTerminalView: UIViewRepresentable {
     /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
     /// no view recreation.
     var fontSize: CGFloat = 12.5
-    /// Whether this pane's agent is federated/remote (`AgentInfo.machineID != nil`).
-    /// A federated pane routes key-drive input via `pane.send_text` (the home daemon
-    /// can't proxy the persistent `pane.input.stream` channel). Refreshed on every
-    /// update since the agent can resolve as federated after the view mounts. (#139)
-    var isFederated: Bool = false
     /// Shared with the host so it can ask whether this pane's stream is alive before
     /// deciding to remount on foreground. Written by the Coordinator, read by the host.
     var liveness: StreamLiveness? = nil
@@ -160,7 +155,6 @@ struct LiveTerminalView: UIViewRepresentable {
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
         let surface = TerminalSurfaceView(terminal: view)
         context.coordinator.onNavigate = onNavigate
-        context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
         // BEFORE attach, which starts the stream: the first frame must be recorded, or a
         // pane that connects while the app is backgrounding looks stale on return.
@@ -178,7 +172,6 @@ struct LiveTerminalView: UIViewRepresentable {
     func updateUIView(_ uiView: TerminalSurfaceView, context: Context) {
         let terminalView = uiView.terminal
         context.coordinator.onNavigate = onNavigate
-        context.coordinator.isFederated = isFederated
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
         // Live accessors, refreshed every pass: a captured Bool would be a snapshot of
         // the state as it was when this body ran, which is exactly the race that makes
@@ -547,13 +540,6 @@ struct LiveTerminalView: UIViewRepresentable {
         /// concurrent streams to a pane would let the FIRST close drop the shared lease
         /// while the second is still open (JARVIS review finding #2 — premature shrink).
         private let viewerID = UUID().uuidString
-        /// Whether this pane lives on a REMOTE (federated) machine (`AgentInfo.machineID
-        /// != nil`). The home daemon can route one-shot `pane.send_text` to a remote pane
-        /// (#84) but CANNOT proxy the persistent `pane.input.stream` duplex channel, so a
-        /// federated pane skips the channel and delivers every key-drive batch via
-        /// `sendText` (see `deliverInput`). Refreshed by `updateUIView` because the agent
-        /// can resolve as federated AFTER the view first mounts.
-        var isFederated = false
         private weak var view: ReadOnlyTerminalView?
         /// The container that owns the terminal and the resize cover. Same object for
         /// this coordinator's whole life; the terminal is never rebuilt for a resize.
@@ -1213,6 +1199,9 @@ struct LiveTerminalView: UIViewRepresentable {
             // The finger-scroll half of the Latest pill's tail state. Wired here, after the
             // gestures, so it is live for the reader's very first drag — the pill's primary case.
             observeContentOffset(view)
+            // Tests that inspect the untouched terminal need a baseline before a gesture
+            // publishes its first selection reading. Inert outside the mock DEBUG app.
+            publishSelectionProbe("mounted")
             startBackfill()   // fetch history CONCURRENTLY with the stream; the first reset awaits it
             start()
         }
@@ -1676,10 +1665,6 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollSendTask = nil
             inputSendTask?.cancel()         // no forwarded keystroke can reach an exited/replaced pane
             inputSendTask = nil
-            if let channel = inputChannel { // tear down the persistent input channel (issue #62)
-                inputChannel = nil
-                Task { await channel.close() }
-            }
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
             keyboardSweepActive = false
@@ -2661,12 +2646,6 @@ struct LiveTerminalView: UIViewRepresentable {
         /// delegate callback); the drain hops to the main actor for the async `sendText`.
         private var pendingInput = ""
         private var inputSendTask: Task<Void, Never>?
-        /// Persistent input channel (issue #62): opened lazily on first key-drive
-        /// input, after which keystrokes ride one held SSH channel instead of a
-        /// fresh `send_text` exec per batch. nil = not yet tried, or the daemon
-        /// lacks the method / the channel died = `send_text` fallback.
-        private var inputChannel: PaneInputChannel?
-        private var inputChannelTried = false
         private func enqueueInput(_ s: String) {
             guard !s.isEmpty else { return }
             pendingInput += s
@@ -2675,53 +2654,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 while let self, !self.stopped, !self.pendingInput.isEmpty {
                     let batch = self.pendingInput
                     self.pendingInput = ""
-                    await self.deliverInput(batch)
+                    _ = try? await self.client.sendText(pane: self.paneID, text: batch)
                 }
                 self?.inputSendTask = nil
             }
         }
 
-        /// Delivers one input batch, preferring the persistent `pane.input.stream`
-        /// channel and falling back to per-call `sendText`. Order is preserved: the
-        /// single `inputSendTask` drain calls this serially, and the channel writes
-        /// frames through one ordered writer.
-        @MainActor
-        private func deliverInput(_ batch: String) async {
-            // A federated (remote) pane can't host the persistent pane.input.stream duplex
-            // channel — the home daemon can't proxy it (channelSetupRejected) — so skip the
-            // channel entirely and route every batch through the federation-routable
-            // pane.send_text (#84). Order is still preserved: the single inputSendTask drain
-            // calls deliverInput serially. (#139)
-            if isFederated {
-                _ = try? await self.client.sendText(pane: self.paneID, text: batch)
-                return
-            }
-            // Open the channel lazily on first use. An older daemon without
-            // pane.input.stream makes start() throw, and we stay on send_text.
-            if !inputChannelTried {
-                inputChannelTried = true
-                if let channel = await client.openPaneInput(pane: paneID) {
-                    do {
-                        try await channel.start()
-                        inputChannel = channel
-                    } catch {
-                        await channel.close()
-                        inputChannel = nil
-                    }
-                }
-            }
-            if let channel = inputChannel, await channel.send(batch) {
-                return
-            }
-            // Channel unavailable or died mid-session: drop it and fall back. A
-            // dropped channel is NOT re-opened here (no replay) — a fresh
-            // Coordinator on reconnect retries the open.
-            if let channel = inputChannel {
-                await channel.close()
-                inputChannel = nil
-            }
-            _ = try? await self.client.sendText(pane: self.paneID, text: batch)
-        }
         /// SwiftTerm reports a 0...1 scroll position (`TerminalViewDelegate.scrolled`).
         /// A pane whose content fits the viewport can never be scrolled away from the
         /// tail, so treat it as parked; otherwise it is at the tail only at the bottom.
