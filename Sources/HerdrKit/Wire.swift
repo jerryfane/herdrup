@@ -584,26 +584,22 @@ public struct PromptResult: Decodable, Sendable, Equatable {
     public let delivery: PromptDelivery?
 }
 
-/// What a REJECTED `agent.prompt` says about where the text is now.
+/// What a rejected `agent.prompt` establishes about a send.
 ///
-/// Some daemon codes mean the text was written but submission could not be observed.
-/// A `timeout` is less precise: a caller with a short wait, or a Windows daemon,
-/// can time out before the write. The client cannot tell which side of the write
-/// timed out, so it must not invite an automatic retry that could duplicate it.
-/// Other post-write codes are `agent_prompt_unverifiable`, `agent_prompt_stalled`
-/// and `agent_prompt_unsubmitted`. Most agents lack a `[composer]` observation,
-/// so unverifiable is common rather than evidence of non-delivery.
+/// A timeout may occur before or after the PTY write, so it is not permission
+/// to resend. Older daemons report an acknowledged PTY write as
+/// `agent_prompt_unverifiable` or `agent_prompt_stalled`; these establish delivery
+/// to the terminal but not submission by the agent. Current daemons return the
+/// same distinction in `PromptResult.delivery` instead.
 ///
-/// ONE classification, so the composer's plain send, its attachment send and the note
-/// it shows cannot disagree about which codes mean the text is gone.
+/// One classification serves both composer restoration and the visible receipt.
 public enum PromptRejection: Equatable, Sendable {
-    /// The daemon could not confirm delivery. `agent_prompt_unverifiable` follows
-    /// the PTY write; `timeout` can also occur before it. Both require checking
-    /// the terminal before deciding whether to send again.
+    /// Unknown whether the PTY write happened.
     case unconfirmed
-    /// Written to the PTY, but the daemon watched and did not see it submit
-    /// (`agent_prompt_stalled`).
-    case stalled
+    /// Bytes reached the terminal; agent submission was not verified.
+    case writtenUnverified
+    /// Submission was confirmed, but a requested status was not observed.
+    case submittedStatusUnknown
     /// Written, and still sitting unsubmitted in the agent's OWN composer
     /// (`agent_prompt_unsubmitted`).
     ///
@@ -620,8 +616,9 @@ public enum PromptRejection: Equatable, Sendable {
 
     public init(_ error: APIError) {
         switch error.code {
-        case "timeout", "agent_prompt_unverifiable": self = .unconfirmed
-        case "agent_prompt_stalled": self = .stalled
+        case "timeout": self = .unconfirmed
+        case "agent_prompt_unverifiable", "agent_prompt_stalled": self = .writtenUnverified
+        case "agent_status_unobserved_after_submit": self = .submittedStatusUnknown
         case "agent_prompt_unsubmitted": self = .leftInComposer
         default: self = .notDelivered
         }
@@ -812,12 +809,6 @@ public enum TerminalStreamEvent: Sendable, Equatable {
 /// server defaults / resume hints (v1 ignores resume and always re-seeds). Nil
 /// optionals are omitted by the synthesized encoder, matching serde's
 /// `skip_serializing_if = "Option::is_none"`.
-/// Open params for the persistent `pane.input.stream` write channel (issue #62).
-public struct PaneInputStreamParams: Encodable, Sendable {
-    public let paneID: String
-    public init(paneID: String) { self.paneID = paneID }
-    enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
-}
 
 public struct PaneStreamParams: Encodable, Sendable {
     public let paneID: String

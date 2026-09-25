@@ -227,7 +227,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         # Run on Apple Silicon Macs as a "Designed for iPad" app (install on macOS).
         # The unchanged iOS binary runs under the Mac's iOS runtime — no Catalyst
-        # recompile. The pane.input.stream typing path works (idiom is .pad on Mac);
+        # recompile.
         # Live Activities / Dynamic Island are iOS-only and simply no-op on Mac. The
         # HerdrWidgets extension stays iOS-only (Live Activities are not on macOS).
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES

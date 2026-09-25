@@ -2,9 +2,8 @@ import Citadel
 import Foundation
 import NIOCore
 
-/// A streaming upload channel for ONE gram attachment — the file-transfer mirror
-/// of `PaneInputChannel`. Holds a single SSH exec channel running
-/// `herdr api-bridge --duplex` open for the upload's lifetime and writes
+/// A streaming upload channel for ONE gram attachment. Holds a single SSH
+/// exec channel running `herdr api-bridge --duplex` for the upload's lifetime and writes
 /// newline-delimited chunk frames to the daemon's `gram.upload.stream`, instead
 /// of one `herdr api-bridge` exec per chunk.
 ///
@@ -14,7 +13,7 @@ import NIOCore
 /// itself pinned at 48 KiB by the argv cap. Uploads are round-trip bound, not
 /// bandwidth bound. One held channel with 512 KiB frames removes both limits.
 ///
-/// Three deliberate differences from `PaneInputChannel`:
+/// Three upload-specific requirements:
 ///
 /// 1. The encoder must not escape `/`. Base64 is slash-dense (an all-`0xFF` chunk
 ///    is ALL `/`), and JSONEncoder's default escaping nearly doubles those bytes.

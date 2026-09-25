@@ -36,8 +36,28 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         }
     }
 
+    /// UIKit may deliver a native key before the simultaneous tap recognizer
+    /// updates SwiftUI. Exercise the real SwiftTerm encoder and pane input path.
+    func testFirstNativeKeyDeliversBeforeFocusBinding() {
+        launch("control")
+        let draft = reply.value as? String
+        app.buttons["fixture-native-first-key"].tap()
+        input("p", previous: 0)
+        XCTAssertEqual(reply.value as? String, draft)
+    }
+
+    func testFirstNativeBackspaceDeliversBeforeFocusBinding() {
+        launch("control")
+        let before = probe()["bytes"] as? String ?? ""
+        app.buttons["fixture-native-first-backspace"].tap()
+        wait {
+            guard let bytes = $0["bytes"] as? String, bytes != before else { return false }
+            return bytes.hasSuffix("7f ") || bytes.hasSuffix("08 ")
+        }
+    }
+
     func testLegacyPreviousIsOneEventThenOrdinaryCharacter() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         let draft = reply.value as? String
         chord("p")
         input("second-known-command", previous: 1)
@@ -56,7 +76,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testKittyHistoryUsesNativeEnhancedEncodingOnce() throws {
-        launch("control"); try requireDirectInput()
+        launch("control")
         command("kitty"); focusTerminal()
         chord("p"); input("second-known-command", previous: 1)
         XCTAssertEqual(probe()["kittyPrevious"] as? Int, 1)
@@ -69,7 +89,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testTwoTapsCancelInDirectInput() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCTAssertTrue(armed, "one tap must arm the one-shot")
         cap("terminal-ctrl").tap()
@@ -94,7 +114,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testDeleteNonASCIICompositionAndPasteDisarm() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         typeDirect("x")
         cap("terminal-ctrl").tap(); typeDirect(XCUIKeyboardKey.delete.rawValue)
         input("", previous: 0)
@@ -119,7 +139,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
     func testExplicitKeycapAndKeyboardDismissalDisarm() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         cap("Tab").tap()
         typeDirect("p"); input("p", previous: 0)
@@ -145,7 +165,7 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     }
 
 func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCTAssertTrue(armed)
         onscreen("Dictate", timeout: 5)?.tap()
@@ -178,6 +198,13 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         // modifier.
         XCTAssertFalse(armed, "starting dictation must consume the armed one-shot")
         attach("dictation-start-disarmed")
+        // iOS can show a second, delayed system opt-in after the microphone
+        // permission prompts. Decline it before refocusing: XCTest otherwise
+        // taps its privacy link as an interruption and sends the next key nowhere.
+        let dictationOptIn = springboard.alerts["Enable Dictation?"]
+        if dictationOptIn.waitForExistence(timeout: 5) {
+            dictationOptIn.buttons["Not Now"].tap()
+        }
         // The ordinary-key half needs an input path, and a dictation attempt can leave
         // the phone with no keyboard: `focusTerminal` restores the responder, but iOS
         // does not always bring the keyboard back. The disarm above is the receipt this
@@ -193,7 +220,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
     }
 
         func testAppDeactivationDisarmsBeforeNextDirectKey() throws {
-        launch("control"); try requireDirectInput(); focusTerminal()
+        launch("control"); focusTerminal()
         cap("terminal-ctrl").tap()
         XCUIDevice.shared.press(.home)
         app.activate()
@@ -211,7 +238,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
     }
 
     func testPaneSwitchAndTypingDuringCoverDoNotLeakOrRearm() throws {
-        launch("resize"); try requireDirectInput(); focusTerminal()
+        launch("resize"); focusTerminal()
         cap("terminal-ctrl").tap(); command("switch")
         wait { ($0["pane"] as? String) == "ix:b" }
         focusTerminal(); typeDirect("p"); input("p", previous: 0)

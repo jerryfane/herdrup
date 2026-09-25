@@ -475,7 +475,6 @@ final class TerminalInteractionHarness: ObservableObject {
             value["covered"] = surface.isCovered()
             value["coverInstalls"] = surface.coverInstalls()
             value["focused"] = surface.view?.isFirstResponder ?? false
-            value["keyDriveEnabled"] = (surface.view as? LiveTerminalView.ReadOnlyTerminalView)?.keyDriveEnabled ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search
             // test can say which half is broken: a non-zero total here with an empty counter
             // in the UI means the wiring, not the engine.
@@ -528,6 +527,16 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
+        case "native-first-key":
+            if let view = surfaces[activeID]?.view {
+                _ = view.becomeFirstResponder()
+                view.insertText("p")
+            }
+        case "native-first-backspace":
+            if let view = surfaces[activeID]?.view {
+                _ = view.becomeFirstResponder()
+                view.deleteBackward()
+            }
         case "bounce":
             let id = activeID
             Task { @MainActor in
@@ -663,7 +672,8 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide"]
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide",
+         "native-first-key", "native-first-backspace"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
     var body: some View {

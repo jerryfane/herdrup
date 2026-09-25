@@ -275,23 +275,39 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" "#
     static let herdrPathResolution = herdrExecutableResolution + "api-bridge "
 
-    /// Classifies a bridge failure from its stderr and the remote EXIT CODE. When
-    /// herdr is absent the exec wrapper prints `herdrNotInstalledSentinel` (see
-    /// `herdrPathResolution`) → `.herdrNotInstalled(host:)`. When herdr IS present but
-    /// does not understand the `api-bridge` subcommand — an upstream build, or a fork
-    /// too old to have it — its arg-parser (clap) rejects the subcommand and exits
-    /// with code 2 → `.herdrIncompatible(host:)`. Anything else stays a generic
-    /// `.bridgeFailed(stderr:)`. Pure, so it is host-testable without SSH.
+    /// Classify only a positively unsupported `api-bridge` command as an
+    /// incompatible installation. Exit 2 is also used for unrelated usage
+    /// failures, which must retain their actual diagnostic.
     static func classifyBridgeFailure(stderr: String, exitCode: Int, host: String) -> TransportError {
         if stderr.contains(herdrNotInstalledSentinel) { return .herdrNotInstalled(host: host) }
-        // clap's usage-error exit code. The only thing the wrapper runs is
-        // `herdr api-bridge`, so exit 2 almost always means herdr is there but can't run
-        // the app. TRADE-OFF: a fork that HAS api-bridge but exits 2 for an unrelated
-        // usage error is mis-badged "incompatible" — accepted, because the guidance is
-        // non-destructive advice and the alternative is the raw exit code; matching on
-        // clap's stderr text instead would re-couple to a fragile, version-specific string.
-        if exitCode == 2 { return .herdrIncompatible(host: host) }
+        if exitCode == 2 && [
+            "unrecognized subcommand 'api-bridge'",
+            "unknown subcommand 'api-bridge'",
+            "invalid subcommand 'api-bridge'",
+            "unexpected argument 'api-bridge'",
+            "Found argument 'api-bridge' which wasn't expected"
+        ].contains(where: { stderr.contains($0) }) {
+            return .herdrIncompatible(host: host)
+        }
         return .bridgeFailed(stderr: stderr)
+    }
+
+    /// The installed bridge reports Unix-socket connect failures as a correlated
+    /// JSON `transport_error` reply on stdout (normally with exit status zero).
+    /// Inspect only candidate error lines; normal API replies, including large
+    /// payloads, incur no JSON parse or extra Data allocation here.
+    static func daemonSocketFailure(in line: String, host: String) -> TransportError? {
+        guard line.contains("\"transport_error\""),
+              let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: Data(line.utf8)),
+              envelope.error.code == "transport_error"
+        else { return nil }
+        let message = envelope.error.message
+        guard message.hasPrefix("api-bridge: "),
+              message.contains("No such file or directory (os error 2)")
+                || message.contains("Connection refused (os error 111)")
+                || message.contains("Connection refused (os error 61)")
+        else { return nil }
+        return .daemonUnavailable(host: host)
     }
 
     /// The full exec command line: resolve herdr, then run
@@ -396,7 +412,10 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
                 case .stdout(let buffer):
                     received += buffer.readableBytes
                     onBytesReceived?(received)
-                    if let first = lines.append(buffer).first { return first }
+                    if let first = lines.append(buffer).first {
+                        if let error = daemonSocketFailure(in: first, host: host) { throw error }
+                        return first
+                    }
                 case .stderr(let buffer):
                     stderr += String(buffer: buffer)  // diagnostic text; a lossy decode is fine here
                 }
@@ -407,11 +426,19 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
             // visible — without it the raw "command failed, exit code N" escapes and the
             // not-installed / incompatible guidance is never reached. A reply may still
             // have arrived first (returned above); reaching here means it did not.
-            if lines.hasRemainder { return lines.flush() }
+            if lines.hasRemainder {
+                let line = lines.flush()
+                if let error = daemonSocketFailure(in: line, host: host) { throw error }
+                return line
+            }
             throw classifyBridgeFailure(stderr: stderr, exitCode: failure.remoteExitCode, host: host)
         }
         // Channel closed on exit 0 without a newline-terminated reply.
-        if lines.hasRemainder { return lines.flush() }   // a reply that lacked a trailing newline
+        if lines.hasRemainder {
+            let line = lines.flush()
+            if let error = daemonSocketFailure(in: line, host: host) { throw error }
+            return line
+        }
         // Empty stdout: surface the bridge/remote diagnostic rather than handing
         // the caller an empty string it can only fail to decode.
         if !stderr.isEmpty {
@@ -432,6 +459,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
             // finding #2 asked for this explicit ownership.)
             let connection = StreamConnection()
             let task = Task {
+                var stderr = ""
                 do {
                     let client = try await self.makeConnection()
                     await connection.adopt(client)
@@ -442,25 +470,37 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
                     // chunks is never corrupted.
                     var lines = LineAccumulator()
                     for try await chunk in output {
-                        guard case .stdout(let bytes) = chunk else { continue }
-                        for line in lines.append(bytes) { continuation.yield(line) }
+                        switch chunk {
+                        case .stdout(let bytes):
+                            for line in lines.append(bytes) {
+                                if let error = Self.daemonSocketFailure(in: line, host: self.credentials.host) {
+                                    throw error
+                                }
+                                continuation.yield(line)
+                            }
+                        case .stderr(let bytes):
+                            stderr += String(buffer: bytes)
+                        }
                     }
-                    if lines.hasRemainder { continuation.yield(lines.flush()) }
+                    if lines.hasRemainder {
+                        let line = lines.flush()
+                        if let error = Self.daemonSocketFailure(in: line, host: self.credentials.host) {
+                            throw error
+                        }
+                        continuation.yield(line)
+                    }
                     await connection.close()
                     continuation.finish()
                 } catch is CancellationError {
                     await connection.close()
                     continuation.finish()
                 } catch let failure as RemoteExitError {
-                    // Same non-zero-exit mapping as `roundTrip`, so a pane stream against
-                    // an incompatible/absent herdr fails legibly instead of as a raw
-                    // CommandFailed. This path accumulates no stderr, so classify by code
-                    // (exit 2 → incompatible); the sentinel case is caught by roundTrip
-                    // on the initial connect before any stream is opened.
+                    // Apply the same evidence-based classification as roundTrip;
+                    // a bare exit 2 is not proof the command is unsupported.
                     await connection.close()
                     continuation.finish(
                         throwing: Self.classifyBridgeFailure(
-                            stderr: "", exitCode: failure.remoteExitCode, host: self.credentials.host))
+                            stderr: stderr, exitCode: failure.remoteExitCode, host: self.credentials.host))
                 } catch {
                     await connection.close()
                     continuation.finish(throwing: error)
@@ -476,27 +516,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         }
     }
 
-    /// Opens a persistent input channel to one pane (issue #62): a dedicated SSH
-    /// exec channel running `herdr api-bridge --duplex`, over which
-    /// `PaneInputChannel` writes newline-delimited input frames to the daemon's
-    /// `pane.input.stream`. Uses its OWN connection (like `stream`) so input
-    /// backpressure never blocks the shared command socket or the pane.stream
-    /// firehose. `openLine` is the JSON `pane.input.stream` open request the
-    /// daemon's `--duplex` bridge reads first from stdin.
-    public nonisolated func openInputChannel(_ openLine: String) -> PaneInputChannel {
-        PaneInputChannel(
-            makeConnection: { try await self.makeConnection() },
-            command: Self.herdrPathResolution + "--duplex",
-            openLine: openLine
-        )
-    }
-
     /// Opens a streaming upload channel for one gram attachment: a dedicated SSH
     /// exec channel running `herdr api-bridge --duplex`, over which
     /// `GramUploadChannel` writes chunk frames to the daemon's
-    /// `gram.upload.stream`. Its OWN connection, like `stream` and
-    /// `openInputChannel`, so a multi-MB upload never blocks the shared command
-    /// client or the `pane.stream` firehose. `openLine` is the JSON
+    /// `gram.upload.stream`. Its own connection keeps upload backpressure off
+    /// the command socket and pane.stream firehose. `openLine` is the JSON
     /// `gram.upload.stream` open request the `--duplex` bridge reads first.
     ///
     /// Deliberately NOT part of `HerdrTransport`: that protocol has two members,
