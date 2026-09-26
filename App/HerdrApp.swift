@@ -3944,6 +3944,9 @@ struct ComposerTextField: UIViewRepresentable {
     var onReturn: ((String) -> Void)?
     var onCommandReturn: (() -> Void)?
     var onPasteFile: ((NSItemProvider) -> Bool)?
+    /// The pull-to-expand editor's height; nil lets the field size itself to its text,
+    /// up to `ComposerStyle.visibleLines`.
+    var fixedHeight: CGFloat?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3981,6 +3984,11 @@ struct ComposerTextField: UIViewRepresentable {
             view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
             view.typingAttributes = view.composerAttributes
             view.updatePlaceholder()
+            view.invalidateIntrinsicContentSize()
+            view.refreshScrollMode()
+        }
+        if view.fixedHeight != fixedHeight {
+            view.fixedHeight = fixedHeight
             view.invalidateIntrinsicContentSize()
             view.refreshScrollMode()
         }
@@ -4067,8 +4075,10 @@ struct ComposerTextField: UIViewRepresentable {
 
         @objc private func commandReturn() { onCommandReturn?() }
         private let placeholder = UILabel()
-        var minimumHeight: CGFloat = 24
-        var maximumHeight: CGFloat = 72
+        private(set) var lineHeight: CGFloat = 24
+        var fixedHeight: CGFloat?
+        var minimumHeight: CGFloat { fixedHeight ?? lineHeight }
+        var maximumHeight: CGFloat { fixedHeight ?? lineHeight * CGFloat(ComposerStyle.visibleLines) }
         private(set) var composerAttributes: [NSAttributedString.Key: Any] = [:]
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
@@ -4084,19 +4094,15 @@ struct ComposerTextField: UIViewRepresentable {
 
         func configureTypography() {
             let size = ComposerStyle.fontSize * Typography.scale
-            let lineHeight = ComposerStyle.lineHeight
-            guard font?.pointSize != size || minimumHeight != lineHeight || composerAttributes.isEmpty else { return }
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.minimumLineHeight = lineHeight
-            paragraph.maximumLineHeight = lineHeight
-            let face = UIFont(name: "Geist-Regular", size: size) ?? .systemFont(ofSize: size)
-            composerAttributes = [.font: face, .foregroundColor: UIColor(Palette.text), .paragraphStyle: paragraph]
+            guard font?.pointSize != size || lineHeight != ComposerStyle.lineHeight || composerAttributes.isEmpty
+            else { return }
+            composerAttributes = ComposerTextMetrics.attributes()
+            let face = composerAttributes[.font] as? UIFont ?? .systemFont(ofSize: size)
             let selection = selectedRange
             attributedText = NSAttributedString(string: text ?? "", attributes: composerAttributes)
             typingAttributes = composerAttributes
             selectedRange = selection
-            minimumHeight = lineHeight
-            maximumHeight = lineHeight * 3
+            lineHeight = ComposerStyle.lineHeight
             placeholder.font = face
         }
 
@@ -4166,16 +4172,8 @@ struct ComposerTextField: UIViewRepresentable {
         func fittingHeight(for width: CGFloat) -> CGFloat {
             let padding = 2 * textContainer.lineFragmentPadding
             let usable = max(1, width - textContainerInset.left - textContainerInset.right - padding)
-            // boundingRect drops a trailing newline, which would hide the empty line a
-            // pasted "a\n" ends on; the space gives that line something to measure.
-            var measured = text ?? ""
-            if measured.isEmpty || measured.hasSuffix("\n") { measured += " " }
-            let box = (measured as NSString).boundingRect(
-                with: CGSize(width: usable, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: composerAttributes,
-                context: nil)
-            return ceil(box.height / minimumHeight) * minimumHeight
+            return ComposerTextMetrics.height(of: text ?? "", width: usable,
+                                              attributes: composerAttributes, lineHeight: lineHeight)
         }
 
         /// Scrolling stays ON at every height. It used to be toggled with the content, which
@@ -4349,6 +4347,8 @@ struct TerminalPaneContent: View {
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
+    /// The terminal's current height: the room the composer's pull-to-expand editor may take.
+    @State private var terminalHeight: CGFloat = 0
     /// Find-bar state. `findRequest` is nil while the bar is closed, which is also what
     /// clears the highlight — see `LiveTerminalView.performFind`.
     @State private var findOpen = false
@@ -4498,6 +4498,7 @@ struct TerminalPaneContent: View {
                     .id(streamGen)
                     .accessibilityIdentifier("terminal-surface")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { terminalHeight = $0 }
                     // A small horizontal inset so the grid gets a clean, symmetric
                     // margin instead of the last column hugging the right edge.
                     .padding(.horizontal, 8)
@@ -4524,6 +4525,7 @@ struct TerminalPaneContent: View {
                 }
                 controlBar
                 replyBar
+                    .environment(\.composerEditorRoom, terminalHeight)
             }
         }
         // Left-edge swipe → back to the agents list. Edge-only, so it never fights the
@@ -5056,11 +5058,9 @@ struct TerminalPaneContent: View {
                         .accessibilityIdentifier("terminal-attachment-loading")
                     }
                 }
-                .padding(.horizontal, 2)
+                .padding(.horizontal, 7)
             }
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 1)
-            .padding(.bottom, 10)
         }
     }
 
@@ -5086,7 +5086,13 @@ struct TerminalPaneContent: View {
 
 
     private var replyBar: some View {
-        ComposerSurface(isFocused: replyFocused) {
+        AdaptiveComposer(
+            text: reply,
+            isFocused: replyFocused,
+            hasAccessory: !replyAttachments.isEmpty || loadingReplyAttachment,
+            showsLeading: composerKeyboard.isVisible && !findFocused && (replyFocused || terminalInputFocused),
+            isRecording: replyDictating
+        ) { editorHeight in
             ComposerTextField(
                 text: $reply,
                 // Dictation owns the field; an upload must not resign its first responder.
@@ -5107,29 +5113,25 @@ struct TerminalPaneContent: View {
                     ctrlArmed = false
                     sendTapped(currentText)
                 },
-                onPasteFile: pasteReplyAttachment
+                onPasteFile: pasteReplyAttachment,
+                fixedHeight: editorHeight
             )
             .frame(minWidth: 0, maxWidth: .infinity)
-            .padding(.horizontal, 2)
-            .padding(.leading, ComposerStyle.textLeadingInset)
-            .padding(.top, 2)
-            .padding(.bottom, 10)
-
+        } accessory: {
             replyAttachmentStrip
-
+        } leading: {
+            Button {
+                terminalCollapseToken += 1
+                ctrlArmed = false
+                replyFocused = false
+                terminalInputFocused = false
+            } label: {
+                ComposerActionIcon(image: Image("ComposerKeyboard"))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Collapse keyboard")
+        } actions: {
             HStack(spacing: 4) {
-                if composerKeyboard.isVisible && !findFocused && (replyFocused || terminalInputFocused) {
-                    Button {
-                        terminalCollapseToken += 1
-                        ctrlArmed = false
-                        replyFocused = false
-                        terminalInputFocused = false
-                    } label: {
-                        ComposerActionIcon(image: Image("ComposerKeyboard"))
-                    }
-                    .accessibilityLabel("Collapse keyboard")
-                }
-                Spacer(minLength: 0)
                 MicButton(text: $reply,
                           isActive: isForeground && !autoDelivering, recording: $replyDictating,
                           onStart: { ctrlArmed = false })
@@ -5156,7 +5158,6 @@ struct TerminalPaneContent: View {
                 }
             }
             .buttonStyle(.plain)
-            .padding(.top, 2)
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
         // DRAG AND DROP, the other half of "get a file in from a Mac or an iPad". The
