@@ -146,16 +146,20 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         chord("c"); input("")
         cap("terminal-ctrl").tap()
         let physicalKeyboard = try XCTUnwrap(probe()["physicalKeyboard"] as? Bool)
-        let softwareKeyboard = app.keyboards.firstMatch.exists
+        // A full software keyboard is what needs dismissing. GCKeyboard (the probe) can
+        // report a keyboard while the full software keyboard is still on screen, so it is
+        // printed for the record, not used to choose the expectation.
+        let keyboard = app.keyboards.firstMatch
+        let softwareKeyboard = keyboard.exists && keyboard.frame.height >= 150
         print("Keyboard dismissal: software=\(softwareKeyboard), physical=\(physicalKeyboard)")
-        if softwareKeyboard && !physicalKeyboard {
+        if softwareKeyboard {
             XCTAssertNotNil(onscreen("Collapse keyboard", timeout: 5),
-                            "the visible software keyboard must be dismissible without a physical keyboard")
+                            "a visible software keyboard must be dismissible")
             onscreen("Collapse keyboard")?.tap()
             wait { ($0["focused"] as? Bool) == false }
         } else {
             XCTAssertNil(onscreen("Collapse keyboard", timeout: 2),
-                         "a hidden or physical keyboard must not offer software-keyboard dismissal")
+                         "a hidden software keyboard (or a hardware keyboard's shortcut bar) needs no dismissal")
             // No dismissal occurred, so explicitly cancel the armed chord.
             cap("terminal-ctrl").tap()
             XCTAssertFalse(armed, "a second tap must cancel the one-shot")
