@@ -26,7 +26,9 @@ final class SpeechDictator: ObservableObject {
     /// A user-facing note (permission denied, unavailable), surfaced by `MicButton`.
     @Published private(set) var note: String?
 
-    private let recognizer = SFSpeechRecognizer()  // the user's current locale
+    /// Chosen when a session starts (see `DictationLocale`), so a language the user sets
+    /// up while the app is running is picked up without a relaunch.
+    private var recognizer: SFSpeechRecognizer?
     private let engine = AVAudioEngine()
     /// The recognition request the audio tap feeds. Held in a lock-guarded box because
     /// the tap runs on an audio thread and the request is SWAPPED on every segment roll
@@ -132,16 +134,11 @@ final class SpeechDictator: ObservableObject {
     }
 
     private func beginSession() throws {
-        guard let recognizer, recognizer.isAvailable else {
+        let choice = DictationLocale.choose()
+        recognizer = choice.recognizer
+        guard let recognizer else {
             state = .unavailable
-            note = "Dictation isn't available right now."
-            return
-        }
-        // On-device ONLY — we never fall back to Apple's server recognition, so the
-        // "stays on your phone" permission copy holds for every path.
-        guard recognizer.supportsOnDeviceRecognition else {
-            state = .unavailable
-            note = "On-device dictation isn't available for your language on this device."
+            note = choice.unavailableNote
             return
         }
 
@@ -276,6 +273,78 @@ final class SpeechDictator: ObservableObject {
     }
 
     private func teardown() { finishAudio() }
+}
+
+/// Which language dictation listens in.
+///
+/// `SFSpeechRecognizer()` uses the region format locale alone. That is often not a
+/// language the phone can transcribe on-device: an English phone set to an Italian
+/// region is "en_IT", and an on-device model exists only for the languages whose
+/// Dictation assets are installed. Try, in order, the region locale, the preferred
+/// languages, then the keyboards in use, mapping each to a locale the recognizer
+/// supports. Take the first that is available and can run on-device. We never fall back
+/// to Apple's servers: the permission copy promises speech stays on the phone.
+enum DictationLocale {
+    struct Choice {
+        let recognizer: SFSpeechRecognizer?
+        let unavailableNote: String
+    }
+
+    @MainActor
+    static func choose() -> Choice {
+        let supported = SFSpeechRecognizer.supportedLocales()
+        var tried = Set<String>()
+        var languages: [String] = []
+        var installedButBusy = false
+        for candidate in candidates() {
+            for locale in ranked(candidate, in: supported) where tried.insert(locale.identifier).inserted {
+                guard let recognizer = SFSpeechRecognizer(locale: locale),
+                      recognizer.supportsOnDeviceRecognition else { continue }
+                if recognizer.isAvailable { return Choice(recognizer: recognizer, unavailableNote: "") }
+                installedButBusy = true
+            }
+            if let code = candidate.language.languageCode?.identifier, !languages.contains(code) {
+                languages.append(code)
+            }
+        }
+        if installedButBusy {
+            return Choice(recognizer: nil, unavailableNote: "Dictation isn't available right now.")
+        }
+        let names = languages.prefix(2).compactMap { Locale.current.localizedString(forLanguageCode: $0) }
+        let language = names.isEmpty ? "your language" : names.joined(separator: " or ")
+        return Choice(
+            recognizer: nil,
+            unavailableNote: "On-device dictation isn't set up for \(language). Turn on Dictation in "
+                + "Settings › General › Keyboard, let the language download, then try again.")
+    }
+
+    /// Locales to try, most specific first, without duplicates.
+    @MainActor
+    static func candidates() -> [Locale] {
+        var identifiers = [Locale.current.identifier]
+        identifiers += Locale.preferredLanguages
+        identifiers += UITextInputMode.activeInputModes.compactMap(\.primaryLanguage)
+        var seen = Set<String>()
+        return identifiers
+            .filter { $0 != "dictation" && $0 != "emoji" }
+            .compactMap { seen.insert($0).inserted ? Locale(identifier: $0) : nil }
+    }
+
+    /// Every supported locale in `wanted`'s language, best first: the same region, then
+    /// the phone's own region, then the rest in a stable order. Only some of these have
+    /// an on-device model, so the caller tries them in turn.
+    static func ranked(_ wanted: Locale, in supported: Set<Locale>) -> [Locale] {
+        guard let language = wanted.language.languageCode?.identifier else { return [] }
+        func region(_ locale: Locale) -> String? { locale.region?.identifier }
+        func rank(_ locale: Locale) -> Int {
+            if region(locale) == region(wanted) { return 0 }
+            if region(locale) == region(Locale.current) { return 1 }
+            return 2
+        }
+        return supported
+            .filter { $0.language.languageCode?.identifier == language }
+            .sorted { (rank($0), $0.identifier) < (rank($1), $1.identifier) }
+    }
 }
 
 /// Thread-safe holder for the current recognition request. The audio tap (an audio thread)
