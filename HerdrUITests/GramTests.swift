@@ -145,6 +145,12 @@ final class GramTests: XCTestCase {
         let sendBottom = send.frame.maxY
         XCTAssertEqual(oneLine.midY, send.frame.midY, accuracy: 4,
                        "a one-line message shares a single row with the send button")
+        // No dead strip above a one-row composer (review f1 on #297 suspected an empty
+        // attachment slot added 8 points; it does not, and this keeps it that way).
+        let card = app.descendants(matching: .any)["composer-card"].firstMatch
+        XCTAssertTrue(card.exists)
+        XCTAssertLessThanOrEqual(card.frame.height - send.frame.height, 13,
+                                 "a one-row composer is the button row plus its padding, with no dead space")
 
         field.typeText("\ntwo\nthree")
         Thread.sleep(forTimeInterval: 0.6)
