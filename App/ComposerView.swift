@@ -1,5 +1,4 @@
 import Combine
-import GameController
 import HerdrKit
 import SwiftUI
 import UIKit
@@ -35,11 +34,17 @@ enum ComposerStyle {
 enum ComposerTextMetrics {
     static func attributes() -> [NSAttributedString.Key: Any] {
         let size = ComposerStyle.fontSize * Typography.scale
+        let lineHeight = ComposerStyle.lineHeight
         let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = ComposerStyle.lineHeight
-        paragraph.maximumLineHeight = ComposerStyle.lineHeight
+        paragraph.minimumLineHeight = lineHeight
+        paragraph.maximumLineHeight = lineHeight
         let face = UIFont(name: "Geist-Regular", size: size) ?? .systemFont(ofSize: size)
-        return [.font: face, .foregroundColor: UIColor(Palette.text), .paragraphStyle: paragraph]
+        // A fixed line taller than the font puts the spare height ABOVE the glyphs, so a
+        // single line sat low against the buttons it now shares a row with. The baseline
+        // lands at lineHeight + descender; lift it so the cap height is centred.
+        let lift = max(0, lineHeight / 2 + face.descender - face.capHeight / 2)
+        return [.font: face, .foregroundColor: UIColor(Palette.text), .paragraphStyle: paragraph,
+                .baselineOffset: lift]
     }
 
     /// The height `text` needs at `width`, measured from the string rather than from a
@@ -627,7 +632,14 @@ private struct ComposerProgressRing: View {
     }
 }
 
-/// Focus alone does not prove a software keyboard is on screen (notably on iPad).
+/// Whether a software keyboard is covering the screen, so the composer should offer a
+/// button to dismiss it. Focus alone does not prove that (notably on iPad).
+///
+/// Judged from the keyboard's on-screen height, not from `GCKeyboard`. With a hardware
+/// keyboard attached iOS shows only a short shortcut bar, and that stays hidden here. But
+/// `GCKeyboard.coalesced` can report a keyboard while the full software keyboard is still
+/// up (the simulator does; so can a phone with a paired keyboard), which used to hide the
+/// only way to dismiss it.
 @MainActor
 final class ComposerKeyboard: ObservableObject {
     @Published private(set) var isVisible = false
@@ -649,17 +661,14 @@ final class ComposerKeyboard: ObservableObject {
                 self?.keyboardFrame = .zero
                 self?.updateVisibility()
             }.store(in: &observations)
-        center.publisher(for: .GCKeyboardDidConnect)
-            .merge(with: center.publisher(for: .GCKeyboardDidDisconnect))
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateVisibility() }
-            .store(in: &observations)
     }
 
+    /// Taller than any shortcut or candidate bar shown with a hardware keyboard, shorter
+    /// than any software keyboard, including the iPad's floating one.
+    static let softwareKeyboardMinimumHeight: CGFloat = 150
+
     private func updateVisibility() {
-        isVisible = !ProcessInfo.processInfo.isiOSAppOnMac
-            && GCKeyboard.coalesced == nil
-            && !keyboardFrame.isEmpty
-            && keyboardFrame.intersects(UIScreen.main.bounds)
+        let covered = keyboardFrame.intersection(UIScreen.main.bounds).height
+        isVisible = !ProcessInfo.processInfo.isiOSAppOnMac && covered >= Self.softwareKeyboardMinimumHeight
     }
 }

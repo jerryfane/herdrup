@@ -128,6 +128,26 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
     }
 
+    /// Reported on TestFlight 170: the keyboard could not be dismissed from the composer.
+    /// Whenever a full software keyboard is on screen the composer must offer the button,
+    /// and tapping it must put the keyboard away.
+    func testFullSoftwareKeyboardCanBeDismissedFromComposer() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
+        app.launch()
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        let keyboard = app.keyboards.firstMatch
+        guard keyboard.waitForExistence(timeout: 5), keyboard.frame.height >= 150 else {
+            throw XCTSkip("no full software keyboard on this destination; nothing to dismiss")
+        }
+        let collapse = app.buttons["Collapse keyboard"].firstMatch
+        XCTAssertTrue(collapse.waitForExistence(timeout: 5), "a visible software keyboard must be dismissible")
+        collapse.tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "the collapse button puts the keyboard away")
+    }
+
     func testComposerStartsAsOneRowThenDropsToToolbarAndScrolls() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"

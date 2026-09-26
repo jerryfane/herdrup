@@ -428,16 +428,17 @@ final class TerminalSelectionTests: XCTestCase {
         XCTAssertTrue(app.keyboards.element.waitForExistence(timeout: 10),
                       "premise: the software keyboard must be visible")
         let chevron = app.buttons["Collapse keyboard"]
-        let physicalKeyboard = beforeReading.contains("hardware=1")
-        XCTAssertTrue(physicalKeyboard || beforeReading.contains("hardware=0"),
-                      "the receipt must identify the real keyboard state. probe[\(beforeReading)]")
-        if physicalKeyboard {
+        // Only a full software keyboard is dismissible. With a hardware keyboard iOS shows a
+        // short shortcut bar. The probe's GCKeyboard reading is recorded but not trusted:
+        // it can say "attached" while the full keyboard is on screen.
+        let fullKeyboard = app.keyboards.element.frame.height >= 150
+        if !fullKeyboard {
             XCTAssertFalse(chevron.waitForExistence(timeout: 2),
-                           "an attached keyboard must hide dismissal even with a word selected")
-            print("Selection dismissal: physical keyboard attached; hidden control verified. Software-only dismissal was not exercised.")
+                           "a hardware keyboard's shortcut bar must not offer dismissal")
+            print("Selection dismissal: only a shortcut bar is shown; hidden control verified. Dismissal was not exercised. probe[\(beforeReading)]")
             return
         }
-        print("Selection dismissal: no physical keyboard; exercising dismissal with selection.")
+        print("Selection dismissal: full software keyboard; exercising dismissal with selection. probe[\(beforeReading)]")
         XCTAssertTrue(chevron.waitForExistence(timeout: 5),
                       "the chevron is absent while the keyboard is up with a selection held — which IS the original defect: no affordance to dismiss with")
         chevron.tap()
