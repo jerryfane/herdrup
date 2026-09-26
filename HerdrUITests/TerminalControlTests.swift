@@ -503,23 +503,39 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.isHittable)
     }
 
+    /// Wraps just past one row, then deletes until the text fits again: the composer must
+    /// return to a single row (after the hysteresis margin), with text still in it.
+    /// Device-width independent: it types word by word until the toolbar appears.
     func testReplyComposerReturnsToOneRowWhenTextFitsAgain() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
-        field.typeText(String(repeating: "wrap ", count: 20))
+        field.typeText("wrap")
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 0.6)
-        XCTAssertLessThanOrEqual(field.frame.maxY, send.frame.minY + 1, "premise: the text wrapped")
+        func inToolbar() -> Bool { field.frame.maxY <= send.frame.minY + 1 }
+        func inOneRow() -> Bool { abs(field.frame.midY - send.frame.midY) <= 4 }
+        Thread.sleep(forTimeInterval: 0.4)
+        XCTAssertTrue(inOneRow(), "premise: a short reply starts in one row")
+
+        var words = 0
+        while !inToolbar() && words < 80 {
+            field.typeText(" wrap")
+            words += 1
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTAssertTrue(inToolbar(), "premise: the text wrapped into the toolbar layout")
 
         // One key per call: a single long string of deletes loses keystrokes.
-        for _ in 0..<97 { field.typeText(XCUIKeyboardKey.delete.rawValue) }
-        Thread.sleep(forTimeInterval: 0.6)
-        XCTAssertEqual((field.value as? String)?.count, 3)
-        XCTAssertEqual(field.frame.midY, send.frame.midY, accuracy: 4,
-                       "short text returns to the single row")
+        var deleted = 0
+        while !inOneRow() && deleted < 40 {
+            field.typeText(XCUIKeyboardKey.delete.rawValue)
+            deleted += 1
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTAssertTrue(inOneRow(), "text that fits again returns to the single row")
+        XCTAssertFalse(((field.value as? String) ?? "").isEmpty, "it returns before the field is empty")
     }
 
 
