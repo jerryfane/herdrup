@@ -440,7 +440,11 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         return true
     }
 
-    func testReplyComposerGrowsUpwardThenScrollsWithoutMovingSend() {
+    /// One row at rest; once the text wraps the buttons drop to a toolbar underneath and
+    /// the text grows upward above them. Send never moves vertically, and the field never
+    /// overlaps it. (The pull-to-expand handle is covered in GramTests: this harness's
+    /// terminal has no spare room for the editor with the keyboard up.)
+    func testReplyComposerStartsAsOneRowThenDropsToToolbarAndScrolls() {
         launch("control")
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
@@ -449,22 +453,27 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         field.typeText("one")
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.6)
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
+        XCTAssertEqual(oneLine.midY, send.frame.midY, accuracy: 4,
+                       "a one-line reply shares a single row with the send button")
+        XCTAssertLessThan(oneLine.maxX, send.frame.minX, "the text sits beside the buttons")
 
         field.typeText(String(repeating: " wrapped", count: 60))
-        Thread.sleep(forTimeInterval: 0.3)
-        let threeLines = field.frame
-        XCTAssertGreaterThan(threeLines.height, oneLine.height)
-        XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
+        Thread.sleep(forTimeInterval: 0.6)
+        let wrapped = field.frame
+        XCTAssertGreaterThan(wrapped.height, oneLine.height)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertLessThanOrEqual(wrapped.maxY, send.frame.minY + 1,
+                                 "wrapped text moves above a toolbar holding the buttons")
+        XCTAssertGreaterThan(wrapped.width, oneLine.width, "the wrapped text gets the full width")
         XCTAssertTrue(send.isHittable)
-        attach("terminal-composer-three-lines")
+        attach("terminal-composer-toolbar")
 
         field.typeText(String(repeating: " overflow", count: 20) + " tail-token")
         Thread.sleep(forTimeInterval: 0.3)
-        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
+        XCTAssertEqual(field.frame.height, wrapped.height, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
         XCTAssertTrue((field.value as? String)?.contains("tail-token") == true)
         let lower = field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
@@ -492,6 +501,25 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue((field.value as? String)?.contains("after-paste") == true,
                       "typing after a multiline paste should keep the composer editable")
         XCTAssertTrue(send.isHittable)
+    }
+
+    func testReplyComposerReturnsToOneRowWhenTextFitsAgain() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(String(repeating: "wrap ", count: 20))
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertLessThanOrEqual(field.frame.maxY, send.frame.minY + 1, "premise: the text wrapped")
+
+        // One key per call: a single long string of deletes loses keystrokes.
+        for _ in 0..<97 { field.typeText(XCUIKeyboardKey.delete.rawValue) }
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertEqual((field.value as? String)?.count, 3)
+        XCTAssertEqual(field.frame.midY, send.frame.midY, accuracy: 4,
+                       "short text returns to the single row")
     }
 
 

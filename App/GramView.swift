@@ -75,6 +75,8 @@ struct GramView: View {
     /// True while dictating into the composer, so the field is disabled (typing can't be
     /// overwritten by the next partial) while the live transcript still appends.
     @State private var draftDictating = false
+    /// The message feed's height: the room the composer's pull-to-expand editor may take.
+    @State private var feedHeight: CGFloat = 0
     @State private var sending = false
     /// A send failure. Kept SEPARATE from load state so a successful background poll
     /// never clears it before the owner sees it.
@@ -462,8 +464,10 @@ struct GramView: View {
                 .zIndex(1)
             Divider().overlay(Palette.hairlineQuiet)
             content
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
             bannerView
             composer
+                .environment(\.composerEditorRoom, feedHeight)
                 // The composer must ALWAYS fit: it holds the only way to send. Without a
                 // priority it is just another default-priority row, so when attachments add
                 // the chips strip and the progress block the stack's minimum can exceed the
@@ -501,8 +505,10 @@ struct GramView: View {
                 .layoutPriority(1)
                 .zIndex(1)
             content
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
             bannerView
             composer
+                .environment(\.composerEditorRoom, feedHeight)
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
         }
     }
@@ -1048,7 +1054,13 @@ struct GramView: View {
                 .accessibilityLabel("Attach file")
                 .disabled(sending || loadingPhoto)
             }
-            ComposerSurface(isFocused: composerFocused) {
+            AdaptiveComposer(
+                text: draft,
+                isFocused: composerFocused,
+                hasAccessory: !attachedFiles.isEmpty,
+                showsLeading: composerKeyboard.isVisible && composerFocused,
+                isRecording: draftDictating
+            ) { editorHeight in
                 ComposerTextField(
                     text: $draft,
                     isEnabled: !draftDictating,
@@ -1061,36 +1073,30 @@ struct GramView: View {
                     onCommandReturn: {
                         guard canSend else { return }
                         Task { await send() }
-                    }
+                    },
+                    fixedHeight: editorHeight
                 )
                 .frame(minWidth: 0, maxWidth: .infinity)
-                .padding(.horizontal, 2)
-                .padding(.leading, ComposerStyle.textLeadingInset)
-                .padding(.top, 2)
-                .padding(.bottom, 10)
-
+            } accessory: {
                 if !attachedFiles.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(attachedFiles) { file in attachmentChip(file) }
                         }
-                        .padding(.horizontal, 2)
+                        .padding(.horizontal, 7)
                     }
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 1)
-                    .padding(.bottom, 10)
                 }
-
+            } leading: {
+                Button {
+                    composerFocused = false
+                } label: {
+                    ComposerActionIcon(image: Image("ComposerKeyboard"))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Collapse keyboard")
+            } actions: {
                 HStack(spacing: 4) {
-                    if composerKeyboard.isVisible && composerFocused {
-                        Button {
-                            composerFocused = false
-                        } label: {
-                            ComposerActionIcon(image: Image("ComposerKeyboard"))
-                        }
-                        .accessibilityLabel("Collapse keyboard")
-                    }
-                    Spacer(minLength: 0)
                     MicButton(text: $draft, recording: $draftDictating)
                         .fixedSize()
                         .disabled(sending || loadingPhoto)
@@ -1115,7 +1121,6 @@ struct GramView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .padding(.top, 2)
             }
         }
         .padding(.horizontal, 16)

@@ -128,7 +128,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
     }
 
-    func testComposerGrowsUpwardThenScrollsWithoutMovingSend() {
+    func testComposerStartsAsOneRowThenDropsToToolbarAndScrolls() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "gram"
         app.launch()
@@ -140,27 +140,51 @@ final class GramTests: XCTestCase {
         field.tap()
         field.typeText("one")
         XCTAssertTrue(send.waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.6)
         let oneLine = field.frame
         let sendBottom = send.frame.maxY
+        XCTAssertEqual(oneLine.midY, send.frame.midY, accuracy: 4,
+                       "a one-line message shares a single row with the send button")
 
         field.typeText("\ntwo\nthree")
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.6)
         let threeLines = field.frame
         XCTAssertGreaterThan(threeLines.height, oneLine.height)
-        XCTAssertEqual(threeLines.maxY, oneLine.maxY, accuracy: 2)
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
+        XCTAssertLessThanOrEqual(threeLines.maxY, send.frame.minY + 1,
+                                 "wrapped text moves above a toolbar holding the buttons")
         XCTAssertTrue(send.isHittable)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "gram-composer-three-lines"
         screenshot.lifetime = .keepAlways
         add(screenshot)
 
-        field.typeText("\nfour")
-        Thread.sleep(forTimeInterval: 0.3)
-        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2)
+        // The pull-to-expand editor: the handle appears at three lines, a tap opens a
+        // taller editor above a fixed send button, and a second tap closes it.
+        let handle = app.descendants(matching: .any)["composer-expand-handle"].firstMatch
+        XCTAssertTrue(handle.waitForExistence(timeout: 3), "three lines offer the expand handle")
+        handle.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        XCTAssertGreaterThan(field.frame.height, threeLines.height + 20, "tapping the handle opens the editor")
+        XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2, "opening the editor does not move send")
+        let editor = XCTAttachment(screenshot: app.screenshot())
+        editor.name = "gram-composer-editor"
+        editor.lifetime = .keepAlways
+        add(editor)
+        handle.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2, "a second tap closes it")
+
+        field.typeText("\nfour\nfive")
+        Thread.sleep(forTimeInterval: 0.6)
+        let fiveLines = field.frame
+        XCTAssertGreaterThan(fiveLines.height, threeLines.height)
+        field.typeText("\nsix\nseven")
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertEqual(field.frame.height, fiveLines.height, accuracy: 2,
+                       "past five lines the text scrolls instead of growing")
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2)
-        XCTAssertTrue((field.value as? String)?.contains("four") == true)
+        XCTAssertTrue((field.value as? String)?.contains("seven") == true)
         XCTAssertTrue(send.isHittable)
     }
 }

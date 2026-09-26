@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import HerdrKit
 import Speech
@@ -60,6 +61,14 @@ final class SpeechDictator: ObservableObject {
     /// generation and no-ops if it no longer matches, so a stale callback from a retired
     /// task can't touch a newer one.
     private var generation = 0
+    /// Receives the input level (RMS of each tapped buffer) on the main actor while
+    /// recording, for the composer's waveform and glow. Measured in the tap that already
+    /// feeds recognition, so it costs no second audio path.
+    var levelHandler: ((Float) -> Void)? {
+        get { levelRelay.handler }
+        set { levelRelay.handler = newValue }
+    }
+    private let levelRelay = VoiceLevelRelay()
 
     var isRecording: Bool { state == .recording }
     /// Busy from the moment the mic is tapped (permission acquisition) through recording.
@@ -145,8 +154,10 @@ final class SpeechDictator: ObservableObject {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         let box = self.box
+        let relay = levelRelay
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             box.append(buffer)
+            relay.publish(VoiceLevelRelay.rms(of: buffer))
         }
         // Ready the first request BEFORE the engine runs, so the very first audio buffers
         // have a request to go to (the box is otherwise nil for a beat and drops them).
@@ -305,6 +316,9 @@ struct MicButton: View {
     var onStart: () -> Void = {}
 
     @Environment(\.scenePhase) private var scenePhase
+    /// The enclosing composer's level meter, when there is one; it drives the waveform
+    /// and the glowing border.
+    @Environment(VoiceLevelMeter.self) private var meter: VoiceLevelMeter?
     @StateObject private var dictator = SpeechDictator()
     /// The field's content when recording started; the transcript is appended after it.
     @State private var base: String = ""
@@ -317,16 +331,29 @@ struct MicButton: View {
             } else {
                 base = text
                 onStart()
+                let meter = meter
+                dictator.levelHandler = { level in meter?.push(level) }
                 dictator.start()
             }
         } label: {
-            ComposerActionIcon(
-                image: dictator.isRecording ? Image(systemName: "stop.circle.fill") : Image("ComposerMic"),
-                tint: dictator.isRecording ? Palette.died : tint
-            )
+            ZStack {
+                if dictator.state == .requesting {
+                    ProgressView().controlSize(.small).tint(Palette.textDim)
+                        .frame(width: 44, height: 44)
+                } else {
+                    ComposerActionIcon(
+                        image: dictator.isRecording ? Image(systemName: "stop.circle.fill") : Image("ComposerMic"),
+                        tint: dictator.isRecording ? Palette.died : tint
+                    )
+                    .contentTransition(.symbolEffect(.replace))
+                }
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: dictator.state)
         }
         .buttonStyle(.plain)
+        .background { if dictator.isRecording { VoiceRipples() } }
         .accessibilityLabel(dictator.isRecording ? "Stop dictation" : "Dictate")
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.7), trigger: dictator.isRecording)
         // Live-append the transcript to the bound field as partial results arrive.
         .onChange(of: dictator.transcript) { _, t in
             guard !t.isEmpty else { return }
@@ -334,7 +361,10 @@ struct MicButton: View {
         }
         // Mirror BUSY (requesting-or-recording), so the parent gates Send from the moment
         // the mic is tapped — not only once recognition is live.
-        .onChange(of: dictator.state) { _, _ in recording?.wrappedValue = dictator.isBusy }
+        .onChange(of: dictator.state) { _, state in
+            recording?.wrappedValue = dictator.isBusy
+            if state == .recording { meter?.begin() } else if !dictator.isBusy { meter?.end() }
+        }
         .onChange(of: isActive) { _, active in if !active { dictator.stop() } }
         .onChange(of: scenePhase) { _, phase in if phase != .active { dictator.stop() } }
         .onDisappear { dictator.stop() }
