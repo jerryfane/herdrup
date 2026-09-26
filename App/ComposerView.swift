@@ -328,6 +328,8 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
         .animation(rearrange, value: showsHandle)
         .onChange(of: wrapsNow) { _, now in wrapped = now }
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: ComposerStyle.cornerRadius, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("composer-card")
         .overlay {
             if isRecording {
                 VoiceGlowBorder(cornerRadius: ComposerStyle.cornerRadius)
