@@ -489,17 +489,28 @@ struct ComposerQuickKeyLabel: View {
     }
 }
 
+/// Clock-driven rather than a repeatForever `.animation(_, value:)`: that also caught any
+/// layout move in the same transaction as its onAppear (the composer rearranges as a send
+/// starts), so the icon swung between positions forever.
 private struct ComposerSendingIcon: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var spinning = false
 
     var body: some View {
-        Image("ComposerSending").resizable().renderingMode(.template)
-            .frame(width: 18, height: 18)
-            .rotationEffect(.degrees(spinning ? 360 : 0))
-            .animation(reduceMotion ? nil : .linear(duration: 1.2).repeatForever(autoreverses: false),
-                       value: spinning)
-            .onAppear { spinning = true }
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            Image("ComposerSending").resizable().renderingMode(.template)
+                .frame(width: 18, height: 18)
+                .rotationEffect(reduceMotion ? .zero : ClockSpin.angle(at: timeline.date, period: 1.2))
+        }
+        .frame(width: 18, height: 18)
+    }
+}
+
+/// A steady rotation read from the clock, for spinners that must never animate anything
+/// else.
+enum ClockSpin {
+    static func angle(at date: Date, period: TimeInterval, from start: Double = 0) -> Angle {
+        let turns = date.timeIntervalSinceReferenceDate / period
+        return .degrees(start + 360 * (turns - turns.rounded(.down)))
     }
 }
 
@@ -617,18 +628,17 @@ struct ComposerAttachmentChip: View {
 
 private struct ComposerProgressRing: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var spinning = false
 
     var body: some View {
         ZStack {
             Circle().stroke(Palette.hairline, lineWidth: 2)
-            Circle().trim(from: 0, to: 0.23)
-                .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .rotationEffect(.degrees(spinning ? 270 : -90))
-                .animation(reduceMotion ? nil : .linear(duration: 1.3).repeatForever(autoreverses: false),
-                           value: spinning)
+            TimelineView(.animation(paused: reduceMotion)) { timeline in
+                Circle().trim(from: 0, to: 0.23)
+                    .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(reduceMotion ? .degrees(-90)
+                                    : ClockSpin.angle(at: timeline.date, period: 1.3, from: -90))
+            }
         }
-        .onAppear { spinning = true }
     }
 }
 
