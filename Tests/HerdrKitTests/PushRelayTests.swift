@@ -110,6 +110,15 @@ final class PushRelayTests: XCTestCase {
         let bridge = await availability(reply:
             #"{"id":"x","error":{"code":"transport_error","message":"api-bridge: Broken pipe (os error 32)"}}"#)
         XCTAssertEqual(bridge, .unreachable)
+
+        // A daemon that knows the method but fails to answer it is not "too old": telling the
+        // user to update would send them after the wrong fix.
+        let internalError = await availability(reply:
+            #"{"id":"x","error":{"code":"internal_error","message":"push store unavailable"}}"#)
+        XCTAssertEqual(internalError, .unreachable)
+        let otherInvalid = await availability(reply:
+            #"{"id":"x","error":{"code":"invalid_request","message":"request line too long"}}"#)
+        XCTAssertEqual(otherInvalid, .unreachable)
     }
 
     // MARK: Relay enrollment
@@ -130,13 +139,19 @@ final class PushRelayTests: XCTestCase {
         super.tearDown()
     }
 
-    private func enroller(_ environment: PushRelayEnroller.Environment = .sandbox) -> PushRelayEnroller {
+    private func enroller(_ environment: PushRelayEnroller.Environment = .sandbox,
+                          clock: TestClock = TestClock()) -> PushRelayEnroller {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubRelay.self]
         return PushRelayEnroller(environment: environment,
                                  baseURL: URL(string: "https://relay.test")!,
                                  session: URLSession(configuration: config),
-                                 defaults: defaults)
+                                 defaults: defaults,
+                                 now: { clock.now })
+    }
+
+    final class TestClock: @unchecked Sendable {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
     }
 
     private let tokenA = String(repeating: "ab", count: 32)
@@ -169,7 +184,7 @@ final class PushRelayTests: XCTestCase {
         let first = enroller()
         let failed = await first.capability(kind: .device, token: tokenA)
         XCTAssertNil(failed)
-        // Same launch: not hammered again (registration still goes ahead without a capability).
+        // Right away: not hammered again (registration still goes ahead without a capability).
         _ = await first.capability(kind: .device, token: tokenA)
         XCTAssertEqual(StubRelay.requests.count, 1)
 
@@ -177,6 +192,27 @@ final class PushRelayTests: XCTestCase {
         StubRelay.respond = { _ in (200, #"{"capability":"hpr1.later"}"#) }
         let retried = await enroller().capability(kind: .device, token: tokenA)
         XCTAssertEqual(retried, "hpr1.later")
+        XCTAssertEqual(StubRelay.requests.count, 2)
+    }
+
+    /// A transient failure (rate limit, dropped network) must not downgrade the whole session:
+    /// the same process retries once the retry window has passed.
+    func testFailedEnrollmentIsRetriedInTheSameLaunchAfterTheRetryWindow() async {
+        StubRelay.respond = { _ in (429, #"{"error":"rate_limited"}"#) }
+        let clock = TestClock()
+        let relay = enroller(clock: clock)
+        let failed = await relay.capability(kind: .device, token: tokenA)
+        XCTAssertNil(failed)
+
+        StubRelay.respond = { _ in (200, #"{"capability":"hpr1.recovered"}"#) }
+        clock.now += PushRelayEnroller.retryAfter - 1
+        let tooSoon = await relay.capability(kind: .device, token: tokenA)
+        XCTAssertNil(tooSoon, "inside the window nothing is sent")
+        XCTAssertEqual(StubRelay.requests.count, 1)
+
+        clock.now += 2
+        let recovered = await relay.capability(kind: .device, token: tokenA)
+        XCTAssertEqual(recovered, "hpr1.recovered")
         XCTAssertEqual(StubRelay.requests.count, 2)
     }
 

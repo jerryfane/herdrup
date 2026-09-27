@@ -132,8 +132,18 @@ async function enroll(request: Request, env: Env, deps: Deps): Promise<Response>
   return json(200, { capability });
 }
 
+/**
+ * Accepted token lengths in hex. The sealed capability grows by ~4/3 of a character per token
+ * character, and daemons reject capabilities over 512 characters, so the longest accepted token
+ * must still seal under that bound (checked in the tests). Real device tokens are 64 hex and Live
+ * Activity push tokens are well under 256.
+ */
+export const TOKEN_HEX_BOUNDS: Record<Kind, [number, number]> = { device: [64, 200], activity: [32, 256] };
+/** The daemons' limit on a stored capability. */
+export const MAX_CAPABILITY_LENGTH = 512;
+
 export function validToken(kind: Kind, token: string): boolean {
-  const [min, max] = kind === "device" ? [64, 200] : [32, 512];
+  const [min, max] = TOKEN_HEX_BOUNDS[kind];
   return token.length >= min && token.length <= max && /^[0-9a-fA-F]+$/.test(token);
 }
 
@@ -294,7 +304,7 @@ export async function openCapability(key: CryptoKey, capability: string): Promis
 
 // ---------------------------------------------------------------- APNs provider token
 
-let jwtCache: { token: string; iat: number; keyId: string; teamId: string } | null = null;
+let jwtCache: { token: string; iat: number; keyId: string; teamId: string; pem: string } | null = null;
 let signingKeyCache: { pem: string; key: CryptoKey } | null = null;
 
 /** Test hook: forget the per-isolate JWT and signing key. */
@@ -309,6 +319,8 @@ export async function apnsJwt(pem: string, keyId: string, teamId: string, now: n
     jwtCache &&
     jwtCache.keyId === keyId &&
     jwtCache.teamId === teamId &&
+    // A rotated .p8 under the same key id must not keep signing with the old key.
+    jwtCache.pem === pem &&
     now >= jwtCache.iat &&
     now - jwtCache.iat < JWT_MAX_AGE_SECONDS
   ) {
@@ -324,7 +336,7 @@ export async function apnsJwt(pem: string, keyId: string, teamId: string, now: n
     new TextEncoder().encode(signingInput),
   );
   const token = `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
-  jwtCache = { token, iat: now, keyId, teamId };
+  jwtCache = { token, iat: now, keyId, teamId, pem };
   return token;
 }
 

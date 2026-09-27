@@ -1103,11 +1103,15 @@ public enum PushAvailability: Sendable, Equatable {
     /// The request never reached a daemon (SSH or bridge failure), so nothing is known.
     case unreachable
 
-    /// Classifies a failed `notifications.status`. A herdr without the method rejects the request
-    /// line with `invalid_request`; `transport_error` is the SSH bridge's own failure, not an answer.
+    /// Classifies a failed `notifications.status`. Only a herdr that predates the method is "too
+    /// old": it rejects the request line with `invalid_request` naming the unknown variant. Any
+    /// other error (the bridge's `transport_error`, an internal error, a rate limit) says nothing
+    /// about the daemon's version, so it is reported as unreachable rather than as an update hint.
     public init(failure: Error) {
         switch failure {
-        case let api as APIError where api.code != "transport_error": self = .daemonTooOld
+        case let api as APIError
+            where api.code == "invalid_request" && api.message.contains("unknown variant"):
+            self = .daemonTooOld
         case is DecodingError: self = .daemonTooOld
         default: self = .unreachable
         }

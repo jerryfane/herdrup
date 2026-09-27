@@ -4,8 +4,10 @@ import {
   handleRequest,
   importSealKey,
   openCapability,
+  MAX_CAPABILITY_LENGTH,
   resetJwtCache,
   sealCapability,
+  TOKEN_HEX_BOUNDS,
   type Deps,
   type Env,
   type LogLine,
@@ -149,6 +151,15 @@ describe("sealed capability", () => {
     expect(h.apnsCalls).toHaveLength(0);
   });
 
+  it("keeps the longest accepted token's capability within the daemons' 512-character limit", async () => {
+    // A daemon refuses a longer capability and with it the whole registration, silently.
+    for (const kind of ["device", "activity"] as const) {
+      const [, max] = TOKEN_HEX_BOUNDS[kind];
+      const capability = await enroll(h, kind, "f".repeat(max), "production");
+      expect(capability.length).toBeLessThanOrEqual(MAX_CAPABILITY_LENGTH);
+    }
+  });
+
   it("rejects an authentic capability whose claims are malformed", async () => {
     const key = await importSealKey(h.sealKeyB64);
     const bad = await sealCapability(key, { v: 1, k: "device", t: "NOT-HEX", e: "production", iat: NOW });
@@ -162,7 +173,7 @@ describe("enroll validation", () => {
     ["device", "a".repeat(201)],
     ["device", "g".repeat(64)],
     ["activity", "a".repeat(31)],
-    ["activity", "a".repeat(513)],
+    ["activity", "a".repeat(257)],
     ["activity", ""],
   ])("rejects %s token %s", async (kind, token) => {
     const res = await call(h, "POST", "/v1/enroll", { kind, token, environment: "production" });
@@ -174,7 +185,7 @@ describe("enroll validation", () => {
     ["device", 64],
     ["device", 200],
     ["activity", 32],
-    ["activity", 512],
+    ["activity", 256],
   ])("accepts %s token at boundary length %i", async (kind, length) => {
     const res = await call(h, "POST", "/v1/enroll", { kind, token: "F".repeat(length), environment: "production" });
     expect(res.status).toBe(200);
@@ -356,6 +367,27 @@ describe("APNs provider token", () => {
     );
     expect(valid).toBe(true);
     expect(base64UrlEncode(sig)).toBe(signature);
+  });
+
+  it("re-signs at once when the .p8 is rotated under the same key id", async () => {
+    const first = await sentJwt();
+    const other = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+    const der = new Uint8Array(await crypto.subtle.exportKey("pkcs8", other.privateKey));
+    h.env.APNS_KEY_P8 = `-----BEGIN PRIVATE KEY-----\n${b64(der).match(/.{1,64}/g)!.join("\n")}\n-----END PRIVATE KEY-----\n`;
+    const rotated = await sentJwt();
+    expect(rotated).not.toBe(first);
+    const [header, claims, signature] = rotated.split(".");
+    const sig = Uint8Array.from(atob(signature.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      other.publicKey,
+      sig,
+      new TextEncoder().encode(`${header}.${claims}`),
+    );
+    expect(valid).toBe(true);
   });
 
   it("reuses the token for under 50 minutes and re-signs after", async () => {

@@ -37,14 +37,21 @@ public actor PushRelayEnroller {
     /// Coalesces concurrent asks for the same token (connect and a prefs toggle can race) into
     /// one POST.
     private var inFlight: [String: Task<String?, Never>] = [:]
-    /// Tokens whose enrollment failed in this process. Not persisted: a relaunch retries.
-    private var failed: Set<String> = []
+    /// When enrollment last failed, per token. Most failures (a rate limit, a dropped network) are
+    /// transient, so a token is retried once `retryAfter` has passed; within that window
+    /// registration goes ahead without a capability instead of hammering the relay. Not
+    /// persisted: a relaunch retries at once.
+    private var failedAt: [String: Date] = [:]
+    public static let retryAfter: TimeInterval = 5 * 60
+    private let now: @Sendable () -> Date
 
     public init(environment: Environment,
                 baseURL: URL = PushRelayEnroller.defaultBaseURL,
                 session: URLSession? = nil,
-                defaults: UserDefaults = .standard) {
+                defaults: UserDefaults = .standard,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.environment = environment
+        self.now = now
         self.baseURL = baseURL
         self.defaults = defaults
         if let session {
@@ -63,7 +70,7 @@ public actor PushRelayEnroller {
         let token = token.lowercased()
         if let cached = cached(kind: kind, token: token) { return cached }
         let key = "\(kind.rawValue)|\(environment.rawValue)|\(token)"
-        if failed.contains(key) { return nil }
+        if let last = failedAt[key], now().timeIntervalSince(last) < Self.retryAfter { return nil }
         if let pending = inFlight[key] { return await pending.value }
 
         let task = Task { await Self.enroll(kind: kind, token: token, environment: environment,
@@ -73,8 +80,9 @@ public actor PushRelayEnroller {
         inFlight[key] = nil
         if let capability {
             store(capability, kind: kind, token: token)
+            failedAt[key] = nil
         } else {
-            failed.insert(key)
+            failedAt[key] = now()
         }
         return capability
     }
