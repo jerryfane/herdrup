@@ -292,6 +292,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Monotonic receipt for DEBUG/UI tests. Sampling `isCovered` is racy by design:
         /// a valid cover may live for only a few frames.
         private(set) var coverInstallCount = 0
+        /// How long the most recently removed cover stayed up, for the same receipts: the
+        /// difference between "settled promptly" and "sat until the ceiling".
+        private(set) var lastCoverMilliseconds = 0
+        private var coverInstalledAt: CFTimeInterval?
 
         init(terminal: ReadOnlyTerminalView) {
             self.terminal = terminal
@@ -334,10 +338,15 @@ struct LiveTerminalView: UIViewRepresentable {
             coverContent = content
             coverContentSize = content.bounds.size
             coverInstallCount += 1
+            coverInstalledAt = CACurrentMediaTime()
             layoutCover()
         }
 
         func removeCover() {
+            if let installed = coverInstalledAt, cover != nil {
+                lastCoverMilliseconds = Int(((CACurrentMediaTime() - installed) * 1000).rounded())
+            }
+            coverInstalledAt = nil
             cover?.removeFromSuperview()
             cover = nil
             coverContent = nil
@@ -641,6 +650,10 @@ struct LiveTerminalView: UIViewRepresentable {
         private var keyboardSweepDeadlineTask: Task<Void, Never>?
         /// The newest fit proposed during the sweep. Only this one is ever sent.
         private var deferredKeyboardTarget: (cols: Int, rows: Int)?
+        /// How much of the screen the software keyboard covered after the last keyboard
+        /// notification. A notification that leaves it unchanged (focus moving between
+        /// the terminal and the composer, an input-mode switch) cannot resize the pane.
+        private var keyboardCoveredHeight: CGFloat = 0
         /// The frame on screen at the exact composer Send event. `userTookControl`
         /// removes any old cover immediately, but the same event dismisses the keyboard
         /// before SwiftTerm can draw again. Hold this candidate briefly and consume it
@@ -982,6 +995,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     requestFit: { [weak self] cols, rows in self?.requestGeometry(cols: cols, rows: rows) },
                     isCovered: { [weak surface] in surface?.isCovered ?? false },
                     coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
+                    lastCoverMilliseconds: { [weak surface] in surface?.lastCoverMilliseconds ?? 0 },
                     isForeground: { [weak self] in self?.foreground ?? false })
             }
             #endif
@@ -1062,7 +1076,14 @@ struct LiveTerminalView: UIViewRepresentable {
                                                            queue: .main) { [weak self] note in
                         let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
                                         as? Double) ?? 0.25
-                        self?.beginKeyboardSweep(duration: duration)
+                        var covered: CGFloat?
+                        if note.name == UIResponder.keyboardWillHideNotification {
+                            covered = 0
+                        } else if let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                            let screen = self?.view?.window?.bounds ?? UIScreen.main.bounds
+                            covered = end.intersection(screen).height
+                        }
+                        self?.beginKeyboardSweep(duration: duration, coveredHeight: covered)
                     })
             }
             // Claim geometry ownership for this pane (see geometryGeneration): the newest
@@ -2246,18 +2267,25 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// A keyboard transition began. Retains the current frame for the whole sweep
         /// and holds its grid proposals until the animation stops moving.
-        private func beginKeyboardSweep(duration: Double) {
+        private func beginKeyboardSweep(duration: Double, coveredHeight: CGFloat?) {
+            // A notification that leaves the keyboard's on-screen height unchanged cannot
+            // resize this pane. It used to install the retained frame below anyway, and
+            // with no grid change nothing ever settled it, so live output froze for the
+            // whole ~1 s ceiling on every focus switch between terminal and composer.
+            // Tracked before the foreground guard so a pane fronted later is not stale.
+            let keyboardMoved = coveredHeight.map { abs($0 - keyboardCoveredHeight) >= 1 } ?? true
+            if let coveredHeight { keyboardCoveredHeight = coveredHeight }
             guard !stopped, foreground else { return }
             keyboardSweepActive = true
-            // On iPhone the software keyboard is full-width and this notification always
-            // changes the pane's safe-area height. Capture NOW, while `.keyboard` is
-            // unambiguous and immediately after Send closed the old presentation.
+            // On iPhone the software keyboard is full-width and a keyboard that moves
+            // always changes the pane's safe-area height. Capture NOW, while `.keyboard`
+            // is unambiguous and immediately after Send closed the old presentation.
             // SwiftUI may defer `layoutSubviews` until after this sweep's deadline, which
             // made a layout-only classification miss the exemption in CI35408586711.
             //
             // iPad stays layout-driven: floating/split keyboards can post the same
             // notification without resizing the pane, and must not freeze it.
-            if UIDevice.current.userInterfaceIdiom == .phone {
+            if keyboardMoved, UIDevice.current.userInterfaceIdiom == .phone {
                 beginResizePresentation(reason: .keyboard)
             }
             keyboardSweepDeadlineTask?.cancel()

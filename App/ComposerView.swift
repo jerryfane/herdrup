@@ -27,6 +27,14 @@ enum ComposerStyle {
     static let visibleLines = 5
     /// The drag handle appears once the text reaches this many lines.
     static let handleLines = 3
+    /// The round action buttons (mic, send, keyboard).
+    static let actionSize: CGFloat = 44
+    /// The card's padding around its row at rest.
+    static let surfacePadding: CGFloat = 6
+    /// The card's height at rest: one row of text beside the buttons. Hosts reserve
+    /// exactly this much layout height; everything taller draws upward over the content
+    /// above it, so typing never resizes that content.
+    static var restingHeight: CGFloat { max(lineHeight, actionSize) + 2 * surfacePadding }
 }
 
 /// The attributes the composer text view renders with, shared with the layout so the
@@ -206,8 +214,11 @@ private struct ComposerEditorRoomKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// The height of the composer host's flexible content (the terminal, or Gram's
-    /// message list). The pull-to-expand editor takes most of it; zero hides the handle.
+    /// How far the composer may grow above its resting row: the height of the host
+    /// content it grows over (the terminal) or into (Gram's message list, plus whatever
+    /// the composer has already taken from it). It MUST NOT change when the composer's
+    /// own height changes, or the drag handle can hide the room that made it appear.
+    /// Zero hides the handle.
     var composerEditorRoom: CGFloat {
         get { self[ComposerEditorRoomKey.self] }
         set { self[ComposerEditorRoomKey.self] = newValue }
@@ -246,11 +257,14 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
     @State private var editorHeight: CGFloat?
     @State private var dragStartHeight: CGFloat?
     @State private var dragBeganOpen = false
-    /// The host's flexible space (terminal or message list) with the editor closed. The
-    /// editor's size comes from this, frozen while it is open, because the editor itself
-    /// takes that space.
+    /// Space above the resting row that the composer may grow into, from the host. It
+    /// must not depend on the composer's own height (see `composerEditorRoom`).
     @Environment(\.composerEditorRoom) private var liveRoom
-    @State private var room: CGFloat = 0
+    /// The card's measured height, for how much of that room it already uses.
+    @State private var cardHeight: CGFloat = 0
+    /// Room left above the card with the editor closed. Frozen while the editor is open
+    /// or being dragged, because the editor itself uses it.
+    @State private var available: CGFloat = 0
 
     /// The text starts where it always has: 6 points of surface padding plus this.
     private static var fieldLeading: CGFloat { ComposerStyle.textLeadingInset + 7 }
@@ -279,18 +293,22 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
     }
 
     private var expanded: Bool { hasAccessory || editorOpen || wrapsNow }
-    /// Extra height the editor may take beyond the inline field: most of the host's
-    /// flexible space, keeping at least 96 points of it, in whole lines.
+    /// Content the editor always leaves visible above itself.
+    private static var editorKeepsVisible: CGFloat { 48 }
+    /// What the handle's own row adds to the card, so the room calculation can leave it
+    /// out: counting it let the handle hide itself as soon as it appeared.
+    private static var handleRowHeight: CGFloat { 9 }
+    /// Extra height the editor may take beyond the inline field: the room left above the
+    /// card, minus what must stay visible, in whole lines.
     private var editorExtra: CGFloat {
-        floor(max(0, room - 96) * 0.75 / lineHeight) * lineHeight
+        floor(max(0, available - Self.editorKeepsVisible) / lineHeight) * lineHeight
     }
     /// The handle only appears when opening the editor would show at least one more line.
     private var showsHandle: Bool {
         !isRecording && (editorOpen || (fullLines >= ComposerStyle.handleLines && editorExtra >= lineHeight))
     }
     private var naturalFieldHeight: CGFloat { CGFloat(min(fullLines, ComposerStyle.visibleLines)) * lineHeight }
-    /// The editor takes real layout height from the host's flexible space, as the
-    /// keyboard does.
+    /// The editor grows upward over the host's content, like the rest of the card.
     private var maxEditorHeight: CGFloat { naturalFieldHeight + editorExtra }
 
     private var growth: Animation? { reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86) }
@@ -322,10 +340,10 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
                 .composerRole(.actions)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { contentWidth = $0 }
-        .padding(.top, expanded ? (showsHandle ? 20 : 11) : 6)
-        .padding(.bottom, 6)
-        .padding(.leading, 6)
-        .padding(.trailing, 6)
+        .padding(.top, expanded ? (showsHandle ? 11 + Self.handleRowHeight : 11) : ComposerStyle.surfacePadding)
+        .padding(.bottom, ComposerStyle.surfacePadding)
+        .padding(.leading, ComposerStyle.surfacePadding)
+        .padding(.trailing, ComposerStyle.surfacePadding)
         .animation(growth, value: fullLines)
         .animation(rearrange, value: expanded)
         .animation(rearrange, value: isRecording)
@@ -357,10 +375,10 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
         .animation(rearrange, value: isRecording)
         .environment(meter)
         .fixedSize(horizontal: false, vertical: true)
-        .onChange(of: liveRoom, initial: true) { _, value in
-            if !editorOpen && dragStartHeight == nil { room = value }
-        }
-        .onChange(of: editorOpen) { _, open in if !open { room = liveRoom } }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
+        .onChange(of: liveRoom, initial: true) { _, _ in refreshAvailable() }
+        .onChange(of: cardHeight) { _, _ in refreshAvailable() }
+        .onChange(of: editorOpen) { _, _ in refreshAvailable() }
         // Sending or clearing the text, or starting to dictate, closes the editor.
         .onChange(of: trimmedEmpty) { _, empty in if empty { setEditor(nil) } }
         .onChange(of: isRecording) { _, recording in if recording { setEditor(nil) } }
@@ -408,6 +426,16 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
             .accessibilityIdentifier("composer-expand-handle")
     }
 
+    /// Room above the card = host room minus the card's growth past its resting row.
+    /// The handle row is left out of that growth, so showing the handle cannot take away
+    /// the room that made it appear.
+    private func refreshAvailable() {
+        guard !editorOpen, dragStartHeight == nil else { return }
+        let handleRow = showsHandle ? Self.handleRowHeight : 0
+        let grown = max(0, cardHeight - ComposerStyle.restingHeight - handleRow)
+        available = max(0, liveRoom - grown)
+    }
+
     private func setEditor(_ height: CGFloat?) {
         guard editorHeight != height else { return }
         if (height != nil) != editorOpen { editorToggles += 1 }
@@ -451,7 +479,7 @@ struct ComposerActionIcon: View {
             }
         }
         .foregroundStyle(tint ?? (primary ? Palette.ground : Palette.textDim))
-        .frame(width: 44, height: 44)
+        .frame(width: ComposerStyle.actionSize, height: ComposerStyle.actionSize)
         .contentShape(Circle())
         .opacity(isEnabled ? 1 : 0.45)
         .onHover { hovering = $0 }

@@ -4347,8 +4347,13 @@ struct TerminalPaneContent: View {
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
-    /// The terminal's current height: the room the composer's pull-to-expand editor may take.
+    /// The terminal's current height: the room the composer grows over.
     @State private var terminalHeight: CGFloat = 0
+    /// The note and quick-key row above the composer. With the composer's resting row,
+    /// the only layout height the bottom block reserves.
+    @State private var bottomChromeHeight: CGFloat = 0
+    private static let replyBarTopPadding: CGFloat = 4
+    private static let replyBarBottomPadding: CGFloat = 8
     /// Find-bar state. `findRequest` is nil while the bar is closed, which is also what
     /// clears the highlight — see `LiveTerminalView.performFind`.
     @State private var findOpen = false
@@ -4516,16 +4521,39 @@ struct TerminalPaneContent: View {
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                     }
-                if let note = actionNote {
-                    Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
-                        // Identified so a failing receipt can quote the refusal instead of
-                        // reporting only that nothing happened.
-                        .accessibilityIdentifier("terminal-action-note")
-                }
-                controlBar
-                replyBar
-                    .environment(\.composerEditorRoom, terminalHeight)
+                // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
+                // note and the quick keys above it) takes layout height. Every extra line,
+                // the toolbar, attachments, the drag handle and the editor draw upward
+                // over the terminal's bottom rows instead of taking them away. Each of
+                // those used to change the terminal's size, which sent set_pty_size, made
+                // the agent redraw its whole screen and froze the terminal behind a
+                // snapshot for up to a second: the "reload" felt while only typing (#301).
+                Color.clear
+                    .frame(height: bottomChromeHeight + ComposerStyle.restingHeight
+                        + Self.replyBarTopPadding + Self.replyBarBottomPadding)
+                    .overlay(alignment: .bottom) {
+                        VStack(spacing: 0) {
+                            VStack(spacing: 0) {
+                                if let note = actionNote {
+                                    Text(note).font(Typography.app(12)).foregroundStyle(Palette.textDim)
+                                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 4)
+                                        // Identified so a failing receipt can quote the refusal instead of
+                                        // reporting only that nothing happened.
+                                        .accessibilityIdentifier("terminal-action-note")
+                                }
+                                controlBar
+                            }
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomChromeHeight = $0 }
+                            // The terminal's height no longer depends on the composer, so it
+                            // is a stable measure of the room the composer grows over.
+                            replyBar
+                                .environment(\.composerEditorRoom, terminalHeight)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                        // Opaque, so rows the composer grows over do not show through the
+                        // gaps between the keycaps and around the card.
+                        .background(Palette.groundMachine)
+                    }
             }
         }
         // Left-edge swipe → back to the agents list. Edge-only, so it never fights the
@@ -5159,7 +5187,7 @@ struct TerminalPaneContent: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
+        .padding(.horizontal, 12).padding(.top, Self.replyBarTopPadding).padding(.bottom, Self.replyBarBottomPadding)
         // DRAG AND DROP, the other half of "get a file in from a Mac or an iPad". The
         // whole bar is the target, not just the field: a dragged file is aimed at the
         // composer, and a 40-point text view is a cruel thing to hit with a trackpad.

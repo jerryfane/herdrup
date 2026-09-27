@@ -590,4 +590,69 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("keyboard-hide-one-commit")
     }
 
+    /// TYPING NEVER RESIZES THE TERMINAL (#301). The composer floats over the terminal:
+    /// wrapping into the toolbar, growing to five lines, the drag handle and the editor
+    /// all draw over the terminal's bottom rows. Each used to change the terminal's
+    /// size, so the PTY was resized, the agent redrew its whole screen and a frozen
+    /// snapshot covered the terminal while it did.
+    func testComposerGrowthNeverResizesTheTerminal() {
+        launch("control")
+        let field = reply
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText("one")
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        // Focus may move the keyboard (or a hardware keyboard's bar): let that settle
+        // before taking the baseline.
+        Thread.sleep(forTimeInterval: 1.5)
+        wait { ($0["covered"] as? Bool) == false }
+        let before = probe()
+        let oneLine = field.frame
+
+        field.typeText(String(repeating: " wrapped", count: 60))
+        let handle = app.descendants(matching: .any)["composer-expand-handle"].firstMatch
+        if handle.waitForExistence(timeout: 3) {
+            handle.tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            handle.tap()
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertGreaterThan(field.frame.height, oneLine.height, "premise: the composer grew")
+        let after = probe()
+        XCTAssertEqual(after["rows"] as? Int, before["rows"] as? Int,
+                       "composer growth must not change the terminal grid: \(after)")
+        XCTAssertEqual(after["commits"] as? Int, before["commits"] as? Int,
+                       "composer growth must not resize the PTY: \(after)")
+        XCTAssertEqual(after["coverInstalls"] as? Int, before["coverInstalls"] as? Int,
+                       "composer growth must not freeze the terminal behind a snapshot: \(after)")
+        attach("terminal-composer-floats-over-terminal")
+    }
+
+    /// A KEYBOARD NOTIFICATION THAT MOVES NOTHING FREEZES NOTHING (#301). With the
+    /// keyboard up, moving focus between the terminal and the composer makes UIKit post
+    /// a keyboard notification with the same frame. On iPhone that used to install the
+    /// retained frame, and with no grid change nothing ever settled it, so live output
+    /// froze until the ~1 s ceiling on every switch.
+    func testUnchangedKeyboardNotificationDoesNotFreezeTheTerminal() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "iPad never retains a frame up front for a keyboard notification")
+        launch("control")
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2 }
+        let openRows = probe()["rows"] as? Int ?? 0
+        command("keyboard-show")
+        wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) < openRows }
+        let before = probe()
+
+        command("keyboard-nudge")
+        Thread.sleep(forTimeInterval: 1.5)
+        let after = probe()
+        XCTAssertEqual(after["coverInstalls"] as? Int, before["coverInstalls"] as? Int,
+                       "a keyboard that did not move must not retain a frame "
+                       + "(last cover \(after["lastCoverMs"] ?? "-") ms): \(after)")
+        XCTAssertEqual(after["rows"] as? Int, before["rows"] as? Int)
+        XCTAssertEqual(after["commits"] as? Int, before["commits"] as? Int)
+    }
+
 }

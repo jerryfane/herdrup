@@ -26,7 +26,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation
   shows a live waveform and a glowing border. Attachments show per-file progress inside
-  the card. Terminal quick keys stay above the card.
+  the card. Terminal quick keys stay above the card. In a terminal the composer grows
+  over the terminal's bottom rows instead of shrinking it, so typing never resizes the
+  agent's screen.
 
 ## Requirements
 

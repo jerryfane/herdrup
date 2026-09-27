@@ -339,6 +339,7 @@ final class TerminalInteractionHarness: ObservableObject {
         let requestFit: (Int, Int) -> Void
         let isCovered: () -> Bool
         let coverInstalls: () -> Int
+        let lastCoverMilliseconds: () -> Int
         let isForeground: () -> Bool
         var cellSize = CGSize.zero
         var painted: [String: Any] = [:]
@@ -354,10 +355,12 @@ final class TerminalInteractionHarness: ObservableObject {
     static func register(paneID: String, view: TerminalView,
                          requestFit: @escaping (Int, Int) -> Void, isCovered: @escaping () -> Bool,
                          coverInstalls: @escaping () -> Int,
+                         lastCoverMilliseconds: @escaping () -> Int,
                          isForeground: @escaping () -> Bool) {
         guard enabled else { return }
         shared.surfaces[paneID] = Surface(view: view, requestFit: requestFit,
                                          isCovered: isCovered, coverInstalls: coverInstalls,
+                                         lastCoverMilliseconds: lastCoverMilliseconds,
                                          isForeground: isForeground)
     }
     static func unregister(paneID: String, view: TerminalView) {
@@ -388,11 +391,22 @@ final class TerminalInteractionHarness: ObservableObject {
     /// The reported duration is UIKit's nominal 0.25s, which is what the pane keys its
     /// sweep window off.
     func sweepKeyboard(hiding: Bool) {
-        let duration = 0.25
         // A real iPhone keyboard is ~300pt. This is deliberately smaller so the smallest
         // simulator CI may pick still leaves the terminal a usable grid — the receipt is
         // about how many grids one animated sweep commits, not about the exact height.
-        let height: CGFloat = 220
+        postKeyboard(height: hiding ? 0 : 220, hiding: hiding)
+    }
+
+    /// A keyboard notification that leaves the keyboard where it is: what UIKit posts
+    /// when focus moves between the terminal and the composer with the keyboard up.
+    /// The pane's size does not change.
+    func nudgeKeyboard() {
+        postKeyboard(height: spacer.height, hiding: spacer.height == 0)
+    }
+
+    private func postKeyboard(height target: CGFloat, hiding: Bool) {
+        let duration = 0.25
+        let height: CGFloat = max(target, 1)
         let screen = surfaces[activeID]?.view?.window?.bounds
             ?? CGRect(x: 0, y: 0, width: 400, height: 900)
         let end = hiding
@@ -408,7 +422,7 @@ final class TerminalInteractionHarness: ObservableObject {
                 name: UIResponder.keyboardWillHideNotification, object: nil, userInfo: info)
         }
         withAnimation(.easeInOut(duration: duration)) {
-            spacer.height = hiding ? 0 : height
+            spacer.height = hiding ? 0 : target
         }
     }
     static func painted(paneID: String, view: TerminalView, cellSize: CGSize, complete: Bool) {
@@ -474,6 +488,7 @@ final class TerminalInteractionHarness: ObservableObject {
             value.merge(surface.isCovered() ? (surface.retained ?? surface.painted) : surface.painted) { _, rhs in rhs }
             value["covered"] = surface.isCovered()
             value["coverInstalls"] = surface.coverInstalls()
+            value["lastCoverMs"] = surface.lastCoverMilliseconds()
             value["focused"] = surface.view?.isFirstResponder ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search
             // test can say which half is broken: a non-zero total here with an empty counter
@@ -527,6 +542,7 @@ final class TerminalInteractionHarness: ObservableObject {
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
         case "keyboard-hide": sweepKeyboard(hiding: true)
+        case "keyboard-nudge": nudgeKeyboard()
         case "native-first-key":
             if let view = surfaces[activeID]?.view {
                 _ = view.becomeFirstResponder()
@@ -672,7 +688,7 @@ private struct TerminalInteractionControls: View {
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
-         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide",
+         "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "keyboard-nudge",
          "native-first-key", "native-first-backspace"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
