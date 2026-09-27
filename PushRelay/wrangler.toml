@@ -1,0 +1,16 @@
+name = "herdrup-push"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# Workers Rate Limiting bindings (push relay contract, herdrup#277).
+# ENROLL_LIMIT is keyed by CF-Connecting-IP; SEND_LIMIT by SHA-256 of the capability.
+[[ratelimits]]
+name = "ENROLL_LIMIT"
+namespace_id = "2771"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "SEND_LIMIT"
+namespace_id = "2772"
+simple = { limit = 120, period = 60 }

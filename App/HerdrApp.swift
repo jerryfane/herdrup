@@ -281,13 +281,20 @@ struct RootView: View {
 
     /// Send the APNs token (with the current category prefs) to the server, if we have both a live
     /// client and a token. Idempotent + fire-and-forget — a server without the method just throws.
+    /// The relay capability rides along when enrollment succeeded (usually from cache); without it
+    /// the token is still registered, so a machine with its own APNs key keeps pushing.
     private func registerPush(with explicitClient: HerdrClient? = nil) {
         // Prefer the client the caller JUST built (connect/reconnect pass it in) over the @State
         // `client`, which the SwiftUI setter may not have published through yet on the same tick.
         guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
-        let p = PushCenter.Prefs.current
-        let muted = Array(MuteStore.shared.mutedPanes)
-        Task { try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram, mutedPanes: muted) }
+        Task { @MainActor in
+            let capability = await PushCenter.relay.capability(kind: .device, token: token)
+            // Read the prefs AFTER enrolling (which can take up to its timeout), so a toggle
+            // flipped meanwhile is not overwritten by this call's older snapshot.
+            let p = PushCenter.Prefs.current
+            let muted = Array(MuteStore.shared.mutedPanes)
+            try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram, mutedPanes: muted, relayCapability: capability)
+        }
     }
 
     /// Register the current Live Activity push token with the server, if we have both a live client
@@ -295,7 +302,10 @@ struct RootView: View {
     /// just throws, and the widget still updates in the foreground.
     private func registerActivityPush(with explicitClient: HerdrClient? = nil) {
         guard let client = explicitClient ?? self.client, let token = liveActivity.pushToken else { return }
-        Task { try? await client.registerActivity(token: token) }
+        Task {
+            let capability = await PushCenter.relay.capability(kind: .activity, token: token)
+            try? await client.registerActivity(token: token, relayCapability: capability)
+        }
     }
 
     /// A push-category toggle changed while connected: re-register the current prefs with the server so the
@@ -6108,6 +6118,9 @@ struct SettingsView: View {
     @State private var pendingFederate: SavedMachineStatus?
     @State private var federationBusyID: String?
     @State private var federationError: String?
+    /// Whether the connected machine can send push (`notifications.status`); nil until the first
+    /// answer. Refreshed with the permission on appear and on foreground.
+    @State private var pushAvailability: PushAvailability?
     /// The tip jar (StoreKit 2). Renders nothing until products load, so the section
     /// is invisible before the App Store Connect products exist.
     @ObservedObject private var tipStore = TipStore.shared
@@ -6288,10 +6301,16 @@ struct SettingsView: View {
         } message: { result in
             Text(result)
         }
-        // Keep the notify section's permission state honest: on open, and again when the
-        // app returns to the foreground (the user may have flipped it in iOS Settings).
+        // Keep the notify section honest: the iOS permission and whether this machine can push,
+        // on open and again when the app returns to the foreground (the user may have flipped
+        // the permission in iOS Settings, or changed Herdr's push config meanwhile).
         .onAppear { refreshNotifyAuth() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { refreshNotifyAuth() } }
+        .task { await refreshPushAvailability() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            refreshNotifyAuth()
+            Task { await refreshPushAvailability() }
+        }
     }
 
     // MARK: Index → detail (iPhone NavigationStack)
@@ -6632,7 +6651,7 @@ struct SettingsView: View {
                 rowDivider
                 manageRow(.accounts, subtitle: accountsSubtitle) { manageAccountsTrailing }
                 rowDivider
-                manageRow(.notifications, subtitle: "Push via the herdr fork") { manageNotifyTrailing }
+                manageRow(.notifications, subtitle: "Push alerts from this machine") { manageNotifyTrailing }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
@@ -6815,7 +6834,7 @@ struct SettingsView: View {
 
     /// Shown only when the daemon has a staged self-update: an icon chip + "Update available" + the
     /// staged build's id/date, then an "Update & restart" action (a spinner replaces it while the
-    /// apply is in flight). Mirrors `notifyInfoRow`'s callout shape, in its own hairline card.
+    /// apply is in flight). Mirrors `notifyCallout`'s shape, in its own hairline card.
     @ViewBuilder
     private var daemonUpdateCallout: some View {
         if let staged = stagedUpdate?.staged {
@@ -7329,8 +7348,12 @@ struct SettingsView: View {
                 groupedToggleRow("An agent finishes", $notifyFinishes)
                 rowDivider
                 groupedToggleRow("A gram message arrives", $notifyGram)
+                if let fix = notifyPermissionFix {
+                    rowDivider
+                    notifyPermissionRow(fix)
+                }
                 rowDivider
-                notifyInfoRow
+                pushMachineRow
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
@@ -7359,43 +7382,105 @@ struct SettingsView: View {
         .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
     }
 
-    /// The honest requirement for the toggles above: push IS wired (the app registers
-    /// the device + these prefs with the daemon, which sends the APNs), but it only
-    /// fires when the machine runs the herdr fork and notifications are allowed. So the
-    /// row states the requirement, not a "coming soon" — the feature exists.
-    /// The honest status row under the toggles. It reflects the SYSTEM notification
-    /// permission: if it's off (never asked, or denied), the toggles alone deliver
-    /// nothing, so this offers the way to fix it — a prompt (notDetermined) or a jump to
-    /// iOS Settings (denied) — rather than letting the toggles fail silently.
-    private var notifyInfoRow: some View {
+    /// One status callout in the notify card: an icon chip, a title, a short explanation, and
+    /// an optional action. Shared by the iOS-permission row and the machine row.
+    private func notifyCallout<Action: View>(
+        icon: String, tint: Color, title: String, body: String,
+        @ViewBuilder action: () -> Action
+    ) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: notifyAuthIcon)
+            Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(notifyAuthTint)
+                .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Palette.surfaceRaised))
             VStack(alignment: .leading, spacing: 4) {
-                Text(notifyAuthTitle)
+                Text(title)
                     .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
-                Text(notifyAuthBody)
+                Text(body)
                     .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
-                switch notifyRowState {
-                case .needAllow:
-                    Button("Allow notifications") { requestNotifications() }
-                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
-                        .padding(.top, 2)
-                case .denied:
-                    Button("Open Settings") { openIOSSettings() }
-                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
-                        .padding(.top, 2)
-                case .ok:
-                    EmptyView()
-                }
+                action()
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// The SYSTEM notification permission, shown only when it needs fixing: if it's off (never
+    /// asked, or denied), the toggles alone deliver nothing, so this offers the fix — a prompt
+    /// (notDetermined) or a jump to iOS Settings (denied) — instead of failing silently.
+    @ViewBuilder
+    private func notifyPermissionRow(_ fix: NotifyPermissionFix) -> some View {
+        switch fix {
+        case .needAllow:
+            notifyCallout(
+                icon: "bell", tint: Palette.textDim, title: "Turn on notifications",
+                body: "Allow notifications so these alerts can reach you when an agent needs you or a gram arrives."
+            ) {
+                Button("Allow notifications") { requestNotifications() }
+                    .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
+                    .padding(.top, 2)
+            }
+        case .denied:
+            notifyCallout(
+                icon: "bell.slash", tint: Palette.waiting, title: "Notifications are off",
+                body: "herdrup can't send these alerts until you allow notifications in iOS Settings."
+            ) {
+                Button("Open Settings") { openIOSSettings() }
+                    .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    /// Whether the connected machine can actually send push, from its `notifications.status`.
+    /// The iOS permission above and this are independent: both must hold for an alert to arrive.
+    private var pushMachineRow: some View {
+        let (icon, tint, title, body) = pushMachineCopy
+        return notifyCallout(icon: icon, tint: tint, title: title, body: body) { EmptyView() }
+            .accessibilityIdentifier("settings-push-machine")
+    }
+
+    private var pushMachineCopy: (String, Color, String, String) {
+        switch pushAvailability {
+        case nil:
+            return ("bell", Palette.textFaint, "Checking this machine…", "Asking Herdr whether it can send notifications.")
+        case .unreachable:
+            return ("bell", Palette.textFaint, "Couldn't check this machine",
+                    "Herdr didn't answer. Reopen Settings to check again.")
+        case .daemonTooOld:
+            return ("arrow.down.circle", Palette.waiting, "Update Herdr on this machine to get notifications",
+                    "This version of Herdr can't send notifications to your iPhone.")
+        case .status(let status):
+            switch status.state {
+            case .relayReady:
+                return ("bell.badge", Palette.done, "Notifications are on",
+                        "This machine sends alerts through the HerdrUp push relay.")
+            case .directReady:
+                return ("bell.badge", Palette.done, "Notifications are on",
+                        "This machine sends alerts with its own Apple push key.")
+            case .unconfigured where status.mode == "direct":
+                return ("bell.slash", Palette.waiting, "This machine can't send notifications yet",
+                        "Herdr is set to push directly but has no Apple push key. Set push.mode to \"auto\" in Herdr's config to use the HerdrUp relay.")
+            case .unconfigured:
+                return ("bell.slash", Palette.waiting, "This machine can't send notifications yet",
+                        "This iPhone hasn't joined the HerdrUp push relay yet. Allow notifications, then reopen HerdrUp while connected.")
+            case .off:
+                return ("bell.slash", Palette.textDim, "Notifications are turned off in Herdr on this machine",
+                        "Set push.mode to \"auto\" in Herdr's config on this machine to turn them on.")
+            case .unsupported:
+                return ("bell.slash", Palette.waiting, "This machine can't send notifications",
+                        "Herdr is running without its server here. Start Herdr normally to get notifications.")
+            }
+        }
+    }
+
+    /// Ask the connected machine whether it can push. On appear and on foreground, so a config
+    /// change or a fresh relay enrollment shows up without reconnecting.
+    private func refreshPushAvailability() async {
+        pushAvailability = await client.pushAvailability()
     }
 
     /// At least one alert category is on. A permission FIX is only surfaced when this is
@@ -7403,44 +7488,13 @@ struct SettingsView: View {
     /// nor point to Settings (matching AppDelegate.requestAuthorizationIfWanted's gating).
     private var anyNotifyOn: Bool { notifyNeedsInput || notifyDies || notifyFinishes || notifyGram }
 
-    private enum NotifyRowState { case ok, needAllow, denied }
-    private var notifyRowState: NotifyRowState {
-        guard anyNotifyOn else { return .ok }
+    private enum NotifyPermissionFix { case needAllow, denied }
+    private var notifyPermissionFix: NotifyPermissionFix? {
+        guard anyNotifyOn else { return nil }
         switch notifyAuth {
         case .notDetermined: return .needAllow
         case .denied: return .denied
-        default: return .ok
-        }
-    }
-
-    private var notifyAuthIcon: String {
-        switch notifyRowState {
-        case .denied: return "bell.slash"
-        case .needAllow: return "bell"
-        case .ok: return "bell.badge"
-        }
-    }
-    private var notifyAuthTint: Color {
-        switch notifyRowState {
-        case .denied: return Palette.waiting
-        default: return Palette.textDim
-        }
-    }
-    private var notifyAuthTitle: String {
-        switch notifyRowState {
-        case .denied: return "Notifications are off"
-        case .needAllow: return "Turn on notifications"
-        case .ok: return "Push needs the herdr fork"
-        }
-    }
-    private var notifyAuthBody: String {
-        switch notifyRowState {
-        case .denied:
-            return "herdrup can't send these alerts until you allow notifications in iOS Settings."
-        case .needAllow:
-            return "Allow notifications so these alerts can reach you when an agent needs you or a gram arrives."
-        case .ok:
-            return "Alerts arrive when your machine runs the herdr fork and you allow notifications."
+        default: return nil
         }
     }
 
@@ -8200,6 +8254,7 @@ struct MockTransport: HerdrTransport {
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
+        if requestLine.contains("notifications.status") { return Self.notificationsStatus }
         if requestLine.contains("accounts.list") { return Self.accountsList }
         if requestLine.contains("agent.list") {
             if let rosterDriver {
@@ -8421,6 +8476,17 @@ struct MockTransport: HerdrTransport {
     static let demoLivePaneIDs: Set<String> = [
         "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2", "mcb-air/w1:p9",
     ]
+
+    /// `notifications.status` for the Settings mock. `HERDR_MOCK_PUSH_STATE` picks the daemon's
+    /// answer: a status `state` (default `relay_ready`), or `legacy` for a daemon that predates
+    /// the method and rejects the request line. Both shapes are decoded in PushRelayTests.
+    static var notificationsStatus: String {
+        let state = ProcessInfo.processInfo.environment["HERDR_MOCK_PUSH_STATE"] ?? "relay_ready"
+        if state == "legacy" {
+            return #"{"id":"","error":{"code":"invalid_request","message":"invalid request: unknown variant `notifications.status`"}}"#
+        }
+        return #"{"id":"mock","result":{"type":"notifications_status","state":"\#(state)","mode":"auto","relay_url":"https://push.herdrup.themartian.app","devices":1,"relay_devices":1}}"#
+    }
 
     /// `accounts.list` for the Settings mock render: two claude accounts (one active
     /// with usage, one exhausted), a codex account with tier-only usage, and a kimi

@@ -318,6 +318,9 @@ public actor HerdrClient {
         /// Public pane ids the owner muted on this device — the server skips their
         /// pushes. The client owns the set and sends the full list each time.
         let mutedPanes: [String]
+        /// The push relay's sealed capability for this token (`PushRelayEnroller`). Omitted when
+        /// nil, so a failed enrollment and an older daemon both see the pre-relay JSON.
+        let relayCapability: String?
         enum CodingKeys: String, CodingKey {
             case deviceToken = "device_token"
             case platform
@@ -326,6 +329,7 @@ public actor HerdrClient {
             case notifyFinishes = "notify_finishes"
             case notifyGram = "notify_gram"
             case mutedPanes = "muted_panes"
+            case relayCapability = "relay_capability"
         }
     }
 
@@ -334,22 +338,28 @@ public actor HerdrClient {
     /// category prefs. Idempotent — safe to re-send on every (re)connect and whenever a token or
     /// pref changes. A server that does not yet implement the method (or the `notify_gram` field)
     /// just ignores what it does not know, and an older server throws, which the caller ignores.
+    /// `relayCapability` lets a daemon without its own APNs key push through the relay; the raw
+    /// token is still sent so a daemon with a key keeps pushing directly.
     public func registerDevice(
         token: String, needsInput: Bool, dies: Bool, finishes: Bool, gram: Bool,
-        mutedPanes: [String] = []
+        mutedPanes: [String] = [], relayCapability: String? = nil
     ) async throws {
         _ = try await call("notifications.register_device",
                            RegisterDeviceParams(deviceToken: token, platform: "apns",
                                                 notifyNeedsInput: needsInput, notifyDies: dies,
                                                 notifyFinishes: finishes, notifyGram: gram,
-                                                mutedPanes: mutedPanes),
+                                                mutedPanes: mutedPanes,
+                                                relayCapability: relayCapability),
                            as: JSONNull.self)
     }
 
     struct RegisterActivityParams: Encodable {
         let activityPushToken: String
+        /// Omitted when nil, exactly like `RegisterDeviceParams.relayCapability`.
+        var relayCapability: String? = nil
         enum CodingKeys: String, CodingKey {
             case activityPushToken = "activity_push_token"
+            case relayCapability = "relay_capability"
         }
     }
 
@@ -359,9 +369,10 @@ public actor HerdrClient {
     /// token per running Live Activity). Idempotent — safe to re-send on (re)connect and each
     /// time the token rotates. A server that does not implement the method throws, which the
     /// caller ignores (the widget still updates in the foreground).
-    public func registerActivity(token: String) async throws {
+    public func registerActivity(token: String, relayCapability: String? = nil) async throws {
         _ = try await call("notifications.register_activity",
-                           RegisterActivityParams(activityPushToken: token),
+                           RegisterActivityParams(activityPushToken: token,
+                                                  relayCapability: relayCapability),
                            as: JSONNull.self)
     }
 
@@ -371,6 +382,22 @@ public actor HerdrClient {
         _ = try await call("notifications.unregister_activity",
                            RegisterActivityParams(activityPushToken: token),
                            as: JSONNull.self)
+    }
+
+    /// Whether this daemon can deliver push at all, and how (`notifications.status`). THROWS the
+    /// server's `APIError` on a daemon too old to know the method.
+    public func notificationsStatus() async throws -> NotificationsStatus {
+        try await call("notifications.status", EmptyParams(), as: NotificationsStatus.self)
+    }
+
+    /// `notificationsStatus` for Settings: a failure is classified (older daemon versus no answer
+    /// at all) instead of thrown, so the screen can tell the user which one it is.
+    public func pushAvailability() async -> PushAvailability {
+        do {
+            return .status(try await notificationsStatus())
+        } catch {
+            return PushAvailability(failure: error)
+        }
     }
 
     // MARK: - Gram (owner<->agent messages)
