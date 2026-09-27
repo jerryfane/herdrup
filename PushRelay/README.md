@@ -35,7 +35,7 @@ All bodies are JSON. Any other method or path returns 404.
 
 Token rules:
 - A `device` token is 64–200 hex characters.
-- An `activity` token is 32–512 hex characters.
+- An `activity` token is 32–256 hex characters, so its sealed capability stays within the daemon's 512-character limit.
 
 `alert` needs a `device` capability, and `liveactivity` needs an `activity`
 capability. The serialized `payload` can be at most 4096 bytes.
