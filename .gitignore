@@ -24,3 +24,8 @@ fastlane/
 
 # Local buildbox screenshot artifacts (never part of a PR)
 screenshots/
+
+# PushRelay (Cloudflare Worker): dependencies, wrangler state, local secrets.
+PushRelay/node_modules/
+PushRelay/.wrangler/
+PushRelay/.dev.vars
