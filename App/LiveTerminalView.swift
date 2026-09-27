@@ -283,6 +283,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Called immediately before the terminal's frame changes, so the owner can
         /// retain the current frame. Returns nothing: covering is the owner's choice.
         var onGeometryWillChange: (() -> Void)?
+        /// While live-anchored, the grid the CONTAINER fits. The terminal's own frame is
+        /// deliberately not the container then, so its proposals would be the old grid.
+        var onAnchoredFit: ((_ cols: Int, _ rows: Int) -> Void)?
+
+        /// A software-keyboard transition on iPhone: the terminal keeps its current grid
+        /// and pixel size and stays LIVE, positioned inside the moving container, until
+        /// the stream commits the grid the keyboard's sweep ended on.
+        private(set) var isLiveAnchored = false
 
         private var cover: UIView?
         private var coverContent: UIView?
@@ -309,11 +317,149 @@ struct LiveTerminalView: UIViewRepresentable {
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            if terminal.frame != bounds {
+            if !isLiveAnchored, terminal.frame != bounds {
+                // May start a live anchor, so the target is read after it.
                 onGeometryWillChange?()
-                terminal.frame = bounds
+            }
+            guard isLiveAnchored else {
+                if terminal.frame != bounds { terminal.frame = bounds }
+                layoutCover()
+                return
+            }
+            if terminal.getTerminal().rows == anchoredRows {
+                placeAnchored(anchoredFrame())
+                proposeAnchoredFit()
+            } else {
+                // The stream committed the container's grid: follow the container again,
+                // in the same pass as the reflow, so the two land on one frame.
+                endLiveAnchor()
             }
             layoutCover()
+        }
+
+        // MARK: live keyboard anchor
+        //
+        // The keyboard resizes the container over ~0.25s, but the PTY is resized once,
+        // at the end. Until that grid reaches the stream, a terminal laid out at the
+        // container's height would show the TOP of a grid taller than the pane (the
+        // prompt cut off under the keyboard) or a short grid with a gap below. It keeps
+        // its grid's pixel height instead and stays live, placed where the emulator's
+        // own resize to the container's fit will leave the same rows, so the commit
+        // reflows in place instead of jumping.
+
+        private var anchoredFit: (cols: Int, rows: Int, cell: CGSize)?
+        private var anchoredHeight: CGFloat = 0
+        private var anchoredRows = 0
+
+        /// Idempotent: the anchor holds the grid it started on until that grid is replaced.
+        func beginLiveAnchor() {
+            let rows = terminal.getTerminal().rows
+            guard !isLiveAnchored, terminal.frame.height > 0 else { return }
+            isLiveAnchored = true
+            // Never shorter than the grid: a sweep re-anchored mid-animation (the reader
+            // took control) finds the frame already squeezed.
+            anchoredHeight = max(terminal.frame.height, CGFloat(rows) * terminal.cellSize.height)
+            anchoredRows = rows
+            // The first layout proposes the container's fit; `requestGeometry` dedups.
+            anchoredFit = nil
+            setNeedsLayout()
+        }
+
+        /// Back to following the container. The relayout is this view's own, so it is not
+        /// reported as a geometry change: that would retain a frame for it.
+        func endLiveAnchor() {
+            guard isLiveAnchored else { return }
+            isLiveAnchored = false
+            anchoredFit = nil
+            placeAnchored(bounds)
+        }
+
+        /// New output can move the cursor, and a committed grid ends the anchoring: lay
+        /// out now, before the paint this output queued.
+        func contentDidChange() {
+            guard isLiveAnchored else { return }
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+
+        /// Moves the anchored terminal. A new HEIGHT leaves the scroller where the old one
+        /// put it (SwiftTerm re-pins only when the emulator itself changes), which showed
+        /// the top of the grid with the prompt below the view; a same-grid commit re-pins
+        /// it and repaints.
+        private func placeAnchored(_ frame: CGRect) {
+            guard terminal.frame != frame else { return }
+            let resized = terminal.frame.size != frame.size
+            terminal.frame = frame
+            if resized {
+                let emulator = terminal.getTerminal()
+                terminal.applyTerminalSize(cols: emulator.cols, rows: emulator.rows)
+            }
+        }
+
+        /// Proposes the container's fit when it changes (the keyboard moving, a font
+        /// change); the terminal's own frame says nothing about it while anchored.
+        func proposeAnchoredFit() {
+            guard isLiveAnchored, let fit = containerFit() else { return }
+            if let last = anchoredFit, last.cols == fit.cols, last.rows == fit.rows,
+               last.cell == fit.cell { return }
+            anchoredFit = fit
+            onAnchoredFit?(fit.cols, fit.rows)
+        }
+
+        /// SwiftTerm's own fit (`processSizeChange`), applied to the container.
+        private func containerFit() -> (cols: Int, rows: Int, cell: CGSize)? {
+            let cell = terminal.cellSize
+            guard cell.width > 0, cell.height > 0, bounds.width > 0, bounds.height > 0 else { return nil }
+            return (Int(bounds.width / cell.width), Int(bounds.height / cell.height), cell)
+        }
+
+        private func anchoredFrame() -> CGRect {
+            let spare = bounds.height - anchoredHeight
+            let y = anchoredOffset() ?? 0
+            return CGRect(x: 0, y: min(max(y, min(0, spare)), max(0, spare)),
+                          width: bounds.width, height: anchoredHeight)
+        }
+
+        /// How far down the container the anchored terminal must sit so its rows are
+        /// exactly where they will be once the emulator is resized to the container's
+        /// fit. Follows `Buffer.resize`: shrinking drops rows below the cursor first and
+        /// only then scrolls the top into history; growing pulls history back down, and
+        /// adds blank rows below once there is none. The scroller then bottom-aligns
+        /// whatever is taller than the view. nil for a reader in history, whose place the
+        /// emulator restores rather than re-flows: the view stays at the top.
+        private func anchoredOffset() -> CGFloat? {
+            let emulator = terminal.getTerminal()
+            let cell = terminal.cellSize.height
+            guard cell > 0, let fit = containerFit(), fit.rows >= 2 else { return nil }
+            let rows = anchoredRows, newRows = fit.rows
+            let lines = max(rows, Int((terminal.contentSize.height / cell).rounded()))
+            let history = lines - rows
+            guard emulator.buffer.yDisp >= history else { return nil }
+            let inset = terminal.adjustedContentInset.bottom
+            // The scroller's resting offset at the tail of `lines` in a view `height` tall.
+            func tail(lines: Int, rows: Int, height: CGFloat) -> CGFloat {
+                min(CGFloat(lines - rows) * cell, max(0, CGFloat(lines) * cell - height + inset))
+            }
+            // Old screen row `from` becomes new screen row `to`.
+            let from: Int, to: Int, newLines: Int
+            if newRows < rows {
+                let belowCursor = min(rows - newRows, max(0, rows - 1 - emulator.buffer.y))
+                from = rows - newRows - belowCursor
+                to = 0
+                newLines = lines - belowCursor
+            } else {
+                let pulled = emulator.isCurrentBufferAlternate ? 0 : min(newRows - rows, history)
+                from = 0
+                to = pulled
+                newLines = lines + newRows - rows - pulled
+            }
+            // The alternate screen keeps no history: whatever scrolled off is gone.
+            let kept = emulator.isCurrentBufferAlternate ? newRows : newLines
+            let before = CGFloat(history + from) * cell
+                - tail(lines: lines, rows: rows, height: anchoredHeight)
+            let after = CGFloat(kept - newRows + to) * cell
+                - tail(lines: kept, rows: newRows, height: bounds.height)
+            return after - before
         }
 
         /// Snapshot of the terminal exactly as it is on screen right now, or nil when
@@ -636,6 +782,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Added to the sweep's reported duration, so the LAST animation frame is inside
         /// the window.
         static let keyboardSweepGrace: Duration = .milliseconds(80)
+        /// Whether a keyboard sweep keeps the terminal live instead of covering it. iPhone
+        /// only: its keyboard is always full-width and bottom-docked, so the pane shrinks
+        /// from the bottom. iPad's floating/split keyboards can move without resizing the
+        /// pane, and its sweeps stay layout-driven and covered.
+        static var keyboardAnchorsLive: Bool { UIDevice.current.userInterfaceIdiom == .phone }
 
         /// A software-keyboard transition is animating this pane's height. UIKit reports
         /// the duration up front, so the whole sweep is ONE event with a known end.
@@ -741,7 +892,10 @@ struct LiveTerminalView: UIViewRepresentable {
         private var graphicsFilter = TerminalGraphicsFilter()
         private func feedFiltered(_ data: Data, into view: TerminalView) {
             let clean = graphicsFilter.filter([UInt8](data)[...])
-            if !clean.isEmpty { view.feed(byteArray: clean[...]) }
+            if !clean.isEmpty {
+                view.feed(byteArray: clean[...])
+                surface?.contentDidChange()
+            }
         }
 
         /// Auto-reconnect. `reconnectAttempts` drives capped exponential backoff (reset once a
@@ -820,12 +974,15 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Shared by the real host-input token and the DEBUG receipt that must perform
         /// host input + keyboard notification in one main-actor event.
         private func prepareHostInputFrameAndTakeControl() {
-            pendingHostInputFrameTask?.cancel()
-            pendingHostInputFrame = surface?.captureTerminalFrame()
-            pendingHostInputFrameTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: .seconds(1)) } catch { return }
-                self?.pendingHostInputFrame = nil
-                self?.pendingHostInputFrameTask = nil
+            // Only a covered keyboard sweep uses this picture; a live-anchored one does not.
+            if !Self.keyboardAnchorsLive {
+                pendingHostInputFrameTask?.cancel()
+                pendingHostInputFrame = surface?.captureTerminalFrame()
+                pendingHostInputFrameTask = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    self?.pendingHostInputFrame = nil
+                    self?.pendingHostInputFrameTask = nil
+                }
             }
             userTookControl()
         }
@@ -1003,6 +1160,15 @@ struct LiveTerminalView: UIViewRepresentable {
             // Installed BEFORE the stream starts, so the very first layout pass cannot
             // reflow the emulator to a locally guessed size ahead of the daemon's.
             view.sizeChangeRequestHandler = { [weak self] cols, rows in
+                // A live-anchored terminal is deliberately not the container's size, so
+                // its fit is not the one wanted: the container's is.
+                if let surface = self?.surface, surface.isLiveAnchored {
+                    surface.proposeAnchoredFit()
+                    return
+                }
+                self?.requestGeometry(cols: cols, rows: rows)
+            }
+            surface.onAnchoredFit = { [weak self] cols, rows in
                 self?.requestGeometry(cols: cols, rows: rows)
             }
             view.synchronizedOutputChangeHandler = { [weak self] active in
@@ -2154,6 +2320,9 @@ struct LiveTerminalView: UIViewRepresentable {
             lastCompleteDraw = nil
             if changed { resizeCount += 1 }
             view.applyTerminalSize(cols: newCols, rows: newRows)
+            // A live-anchored terminal now follows the container again, in the same
+            // layout pass as this reflow.
+            surface?.contentDidChange()
             streamAppliedGeometry = (cols: newCols, rows: newRows)
             streamGeometryRevision += 1
             if let response = responseGeometry, response == (cols: newCols, rows: newRows) {
@@ -2265,8 +2434,8 @@ struct LiveTerminalView: UIViewRepresentable {
             startGeometryDrain()
         }
 
-        /// A keyboard transition began. Retains the current frame for the whole sweep
-        /// and holds its grid proposals until the animation stops moving.
+        /// A keyboard transition began. Holds its grid proposals until the animation
+        /// stops moving; on iPhone the terminal stays live and anchored meanwhile.
         private func beginKeyboardSweep(duration: Double, coveredHeight: CGFloat?) {
             // A notification that leaves the keyboard's on-screen height unchanged cannot
             // resize this pane. It used to install the retained frame below anyway, and
@@ -2278,14 +2447,15 @@ struct LiveTerminalView: UIViewRepresentable {
             guard !stopped, foreground else { return }
             keyboardSweepActive = true
             // On iPhone the software keyboard is full-width and a keyboard that moves
-            // always changes the pane's safe-area height. Capture NOW, while `.keyboard`
-            // is unambiguous and immediately after Send closed the old presentation.
-            // SwiftUI may defer `layoutSubviews` until after this sweep's deadline, which
-            // made a layout-only classification miss the exemption in CI35408586711.
+            // always changes the pane's safe-area height. Anchor NOW, before the first
+            // animation frame lays the terminal out at the container's height (which
+            // would show the top of the old grid, prompt cut off under the keyboard).
+            // SwiftUI may also defer `layoutSubviews` until after this sweep's deadline,
+            // which made a layout-only classification miss the sweep in CI35408586711.
             //
             // iPad stays layout-driven: floating/split keyboards can post the same
             // notification without resizing the pane, and must not freeze it.
-            if keyboardMoved, UIDevice.current.userInterfaceIdiom == .phone {
+            if keyboardMoved, Self.keyboardAnchorsLive {
                 beginResizePresentation(reason: .keyboard)
             }
             keyboardSweepDeadlineTask?.cancel()
@@ -2416,6 +2586,9 @@ struct LiveTerminalView: UIViewRepresentable {
                 // A keyboard sweep is still OUR relayout, so it keeps the burst local
                 // for the settled test; only the server's own commit means .server.
                 if reason != .server { presentationReason = .local }
+                // A sweep that starts inside a burst (the previous keyboard's grid still
+                // settling) must not show the terminal cut off at the container either.
+                if reason == .keyboard, Self.keyboardAnchorsLive { surface?.beginLiveAnchor() }
                 return
             }
             // A gesture closes the entire in-flight burst, including its late markers.
@@ -2433,9 +2606,14 @@ struct LiveTerminalView: UIViewRepresentable {
                       desiredTargetChangedAt.map({ ContinuousClock.now - $0 >= Self.resizeSettleDuration }) ?? true
                 else { return }
             }
+            // On iPhone a keyboard sweep is not covered at all: the terminal stays live,
+            // anchored in the moving pane (`beginLiveAnchor`), so it needs no picture. The
+            // same holds for the sweep's own commit when input already closed its burst.
+            let anchorsLive = Self.keyboardAnchorsLive
+                && (reason == .keyboard || surface?.isLiveAnchored == true)
             let hostInputFrame: UIView?
             if reason == .keyboard {
-                hostInputFrame = pendingHostInputFrame
+                hostInputFrame = anchorsLive ? nil : pendingHostInputFrame
                 pendingHostInputFrame = nil
                 pendingHostInputFrameTask?.cancel()
                 pendingHostInputFrameTask = nil
@@ -2455,7 +2633,9 @@ struct LiveTerminalView: UIViewRepresentable {
             lastCompleteDraw = nil
             pendingSafeRepaint = false
             tailPublishHeld = true
-            if let surface, let image = hostInputFrame
+            if anchorsLive {
+                surface?.beginLiveAnchor()
+            } else if let surface, let image = hostInputFrame
                 ?? ((backingDrawComplete || reason == .keyboard)
                     ? surface.captureTerminalFrame() : nil) {
                 surface.installCover(image)
@@ -2576,7 +2756,9 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
-        private func finishPresentation() {
+        /// `keepingAnchor`: a live-anchored terminal is not a stale picture, so input need
+        /// not end it; it ends with the grid it was holding.
+        private func finishPresentation(keepingAnchor: Bool = false) {
             presentationDeadlineTask?.cancel()
             presentationDeadlineTask = nil
             presentationRevealTask?.cancel()
@@ -2586,6 +2768,7 @@ struct LiveTerminalView: UIViewRepresentable {
             presentationClosed = true
             tailPublishHeld = false
             surface?.removeCover()
+            if !keepingAnchor { surface?.endLiveAnchor() }
             if wasActive, !stopped, let view {
                 let maxOffset = max(0, view.contentSize.height - view.bounds.height)
                 reportTailState(atTail: view.contentOffset.y >= maxOffset - 1)
@@ -2601,7 +2784,9 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         private func userTookControl() {
-            if presentationActive { finishPresentation() }
+            // Unless nothing will replace the anchored grid: then it goes now.
+            let gridPending = keyboardSweepActive || resizeTask != nil || inflightTarget != nil
+            if presentationActive { finishPresentation(keepingAnchor: gridPending) }
         }
 
         // MARK: native one-shot Ctrl

@@ -216,6 +216,9 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         offset += UInt64(bytes.count)
     }
 
+    /// One live record, now; returns its number.
+    func appendNow() -> Int { locked { appendRecord(); return appended } }
+
     private func appendRecord() {
         appended += 1
         emitData(String(format: "\r\nAPPENDED%04d unique-live-record\r\nfixture> ", appended))
@@ -394,6 +397,7 @@ final class TerminalInteractionHarness: ObservableObject {
         // A real iPhone keyboard is ~300pt. This is deliberately smaller so the smallest
         // simulator CI may pick still leaves the terminal a usable grid — the receipt is
         // about how many grids one animated sweep commits, not about the exact height.
+        startSweepJournal()
         postKeyboard(height: hiding ? 0 : 220, hiding: hiding)
     }
 
@@ -433,7 +437,112 @@ final class TerminalInteractionHarness: ObservableObject {
         surface.painted = shared.viewport(view, cellSize: cellSize)
         surface.painted["complete"] = complete
         shared.surfaces[paneID] = surface
+        shared.sampleSweep()
         // A draw must not synchronously invalidate its SwiftUI host.
+    }
+
+    // MARK: on-screen sweep journal
+    //
+    // What the reader SEES during a keyboard sweep: the rows fully inside the pane, from
+    // the live terminal wherever it is placed, or from the retained frame while one
+    // covers it. Sampled every paint and every ~8ms, because the interesting window
+    // (the keyboard moving, the grid not yet committed) is shorter than one XCUITest
+    // probe round trip.
+
+    private struct SweepJournal {
+        let startedAt: CFTimeInterval
+        let rowsBefore: Int
+        var mark = ""
+        var markAt: CFTimeInterval = 0
+        var markSeenMs = -1
+        var markSeenRows = 0
+        var samples = 0
+        var promptMisses = 0
+        var missedScreen = ""
+        var firstMissMs = -1
+        var lastMissMs = -1
+    }
+    private var journal: SweepJournal?
+    /// Bumped per sweep, so a receipt never reads the previous sweep's closed journal.
+    private var journalSerial = 0
+    private var journalTimer: Timer?
+    /// Long enough to outlast a retained frame's ~1 s ceiling after the sweep.
+    private static let journalDuration: CFTimeInterval = 1.8
+
+    private func startSweepJournal() {
+        let rows = surfaces[activeID]?.view?.getTerminal().rows ?? 0
+        journal = SweepJournal(startedAt: CACurrentMediaTime(), rowsBefore: rows)
+        journalSerial += 1
+        journalTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { _ in
+            MainActor.assumeIsolated { TerminalInteractionHarness.shared.sampleSweep() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        journalTimer = timer
+    }
+
+    /// Appends one record to the active pane while its keyboard sweep is running.
+    private func appendSweepMark() {
+        guard journal != nil else { return }
+        journal?.mark = String(format: "APPENDED%04d", Self.driver.pane(activeID).appendNow())
+        journal?.markAt = CACurrentMediaTime()
+    }
+
+    private func sampleSweep() {
+        guard var entry = journal else { return }
+        let now = CACurrentMediaTime()
+        guard now - entry.startedAt < Self.journalDuration else {
+            // Closed: the results stay for the probe.
+            journalTimer?.invalidate()
+            journalTimer = nil
+            return
+        }
+        guard let surface = surfaces[activeID], let view = surface.view else { return }
+        // Only a state that could be on screen. Between a relayout and its paint (the run
+        // loop can fire this timer before Core Animation commits) the frame is new and
+        // the last paint is old; that pairing never reaches the display.
+        if view.layer.needsLayout() || view.layer.needsDisplay()
+            || view.superview?.layer.needsLayout() == true { return }
+        guard let rows = screenRows(surface) else { return }
+        entry.samples += 1
+        if !rows.contains(where: { $0.hasPrefix("fixture>") }) {
+            entry.promptMisses += 1
+            let at = Int(((now - entry.startedAt) * 1000).rounded())
+            if entry.firstMissMs < 0 { entry.firstMissMs = at }
+            entry.lastMissMs = at
+            if entry.missedScreen.isEmpty { entry.missedScreen = rows.suffix(3).joined(separator: " | ") }
+        }
+        if !entry.mark.isEmpty, entry.markSeenMs < 0, rows.contains(where: { $0.hasPrefix(entry.mark) }) {
+            entry.markSeenMs = Int(((now - entry.markAt) * 1000).rounded())
+            entry.markSeenRows = surface.view?.getTerminal().rows ?? 0
+        }
+        journal = entry
+    }
+
+    /// Rows fully visible inside the pane, from what was actually PAINTED: a retained
+    /// frame sits at the pane's origin at its captured size (`layoutCover`), the live
+    /// terminal's last paint sits wherever its frame is now.
+    private func screenRows(_ surface: Surface) -> [String]? {
+        guard let view = surface.view, let pane = view.superview, surface.cellSize.height > 0 else { return nil }
+        let cell = surface.cellSize.height
+        let covered = surface.isCovered()
+        let frame = covered ? (surface.retained ?? surface.painted) : surface.painted
+        let originY = covered ? 0 : view.frame.minY
+        let offset = CGFloat(frame["rowOffset"] as? Double ?? 0)
+        let rows = (frame["visible"] as? String ?? "").components(separatedBy: "\n")
+        return rows.enumerated().compactMap { index, text in
+            let top = originY + CGFloat(index) * cell - offset
+            return top >= -0.5 && top + cell <= pane.bounds.height + 0.5 ? text : nil
+        }
+    }
+
+    private func journalProbe() -> [String: Any] {
+        guard let entry = journal else { return [:] }
+        return ["sweepSerial": journalSerial, "sweepOpen": journalTimer != nil, "sweepSamples": entry.samples,
+                "sweepRowsBefore": entry.rowsBefore, "sweepMark": entry.mark,
+                "sweepMarkSeenMs": entry.markSeenMs, "sweepMarkSeenRows": entry.markSeenRows,
+                "sweepPromptMisses": entry.promptMisses, "sweepMissedScreen": entry.missedScreen,
+                "sweepMissMs": "\(entry.firstMissMs)-\(entry.lastMissMs)"]
     }
 
     /// The painted row as text. A DOUBLE-WIDTH glyph occupies two cells and the second
@@ -477,7 +586,8 @@ final class TerminalInteractionHarness: ObservableObject {
                 "records": records, "appendedRecords": appendedRecords,
                 "tail": view.contentOffset.y >= max(0, view.contentSize.height - view.bounds.height) - cellSize.height,
                 "cols": terminal.cols, "rows": terminal.rows,
-                "alternate": terminal.isCurrentBufferAlternate, "topPixelRow": top]
+                "alternate": terminal.isCurrentBufferAlternate, "topPixelRow": top,
+                "rowOffset": Double(view.contentOffset.y - CGFloat(top) * cellSize.height)]
     }
 
     func probe() -> String {
@@ -504,6 +614,7 @@ final class TerminalInteractionHarness: ObservableObject {
         value["commitCols"] = commitGrid?.cols ?? 0
         value["commitRows"] = commitGrid?.rows ?? 0
         value["keyboardSpacer"] = Int(spacer.height.rounded())
+        value.merge(journalProbe()) { _, rhs in rhs }
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }
@@ -541,6 +652,14 @@ final class TerminalInteractionHarness: ObservableObject {
         case "120x24": grid(120, 24)
         case "80x32": grid(80, 32)
         case "keyboard-show": sweepKeyboard(hiding: false)
+        case "keyboard-show-live":
+            // A line of output while the keyboard is still rising (the animation runs
+            // 0.25 s), long before the sweep's grid can reach the PTY.
+            sweepKeyboard(hiding: false)
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                appendSweepMark()
+            }
         case "keyboard-hide": sweepKeyboard(hiding: true)
         case "keyboard-nudge": nudgeKeyboard()
         case "native-first-key":
@@ -689,6 +808,7 @@ private struct TerminalInteractionControls: View {
          "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
          "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "keyboard-nudge",
+         "keyboard-show-live",
          "native-first-key", "native-first-backspace"]
         + TerminalInteractionDriver.Scenario.allCases.map(\.rawValue)
 
