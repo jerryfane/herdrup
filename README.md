@@ -37,6 +37,11 @@ public; it rides your own network). You need the fork that adds the gram / push 
 [**jerryfane/herdr**](https://github.com/jerryfane/herdr). The app tells you if it's talking to a
 daemon that doesn't have them.
 
+Push notifications go through the HerdrUp push relay (`push.herdrup.themartian.app`), so your machine
+needs no Apple push key. The app enrolls its push tokens with the relay and gives the daemon the sealed
+capability it gets back; notification text passes through the relay but is never stored or logged.
+Settings → Notifications shows whether the connected machine can send them.
+
 The SSH transport is **pure Swift** (swift-nio-ssh + [Citadel](https://github.com/orlandos-nl/Citadel)) —
 there is no system libssh2 to install, which is exactly what lets the protocol layer link into iOS.
 

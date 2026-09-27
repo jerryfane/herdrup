@@ -1,3 +1,4 @@
+import HerdrKit
 import SwiftUI
 
 /// The bridge between the UIKit `AppDelegate` (which owns the APNs registration + notification
@@ -10,6 +11,15 @@ import SwiftUI
 /// `@MainActor` annotation (which SwiftUI View property initializers don't play well with in 5.9).
 final class PushCenter: ObservableObject {
     static let shared = PushCenter()
+
+    /// Enrolls device and Live Activity tokens with the push relay, so a machine without its own
+    /// APNs key can still push. Debug builds carry sandbox tokens; TestFlight and the App Store
+    /// carry production ones.
+    #if DEBUG
+    static let relay = PushRelayEnroller(environment: .sandbox)
+    #else
+    static let relay = PushRelayEnroller(environment: .production)
+    #endif
 
     /// The APNs device token (lowercase hex), set by the AppDelegate on registration. Persisted so
     /// a relaunch/reconnect can re-send it to the server before any new registration callback.
@@ -29,11 +39,13 @@ final class PushCenter: ObservableObject {
         deviceToken = UserDefaults.standard.string(forKey: Self.tokenKey)
     }
 
-    /// Record a freshly-registered token (idempotent; persisted).
+    /// Record a freshly-registered token (idempotent; persisted), and start its relay enrollment
+    /// now so the capability is usually cached by the time a connection registers the token.
     func setToken(_ token: String) {
         guard token != deviceToken else { return }
         deviceToken = token
         UserDefaults.standard.set(token, forKey: Self.tokenKey)
+        Task { _ = await Self.relay.capability(kind: .device, token: token) }
     }
 
     /// A notification was tapped for `paneID` — deep-link to it when the view is ready.

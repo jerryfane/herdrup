@@ -1037,6 +1037,83 @@ public struct StagedUpdate: Decodable, Sendable, Equatable {
 /// transport drop as "restart initiated" and then re-poll `stagedUpdate()`.
 struct OkAck: Decodable, Sendable {}
 
+// MARK: - Push status (notifications.status)
+
+/// Result of `notifications.status` (`type: "notifications_status"`): whether this daemon can
+/// deliver push, and how. Never carries key material or tokens.
+public struct NotificationsStatus: Decodable, Sendable, Equatable {
+    public enum State: Sendable, Equatable {
+        /// The daemon runs without its session server, so it keeps no device registry.
+        case unsupported
+        /// `push.mode = "off"`.
+        case off
+        /// No APNs key in direct mode, or no relay-enrolled device yet in relay mode.
+        case unconfigured
+        case directReady
+        case relayReady
+    }
+
+    public let state: State
+    /// `auto` / `direct` / `relay` / `off`. A string, not an enum: it only picks guidance wording.
+    public let mode: String?
+    public let relayURL: String?
+    public let devices: Int
+    /// Registered devices that carry a relay capability (activities are not counted).
+    public let relayDevices: Int
+
+    public init(state: State, mode: String? = nil, relayURL: String? = nil,
+                devices: Int = 0, relayDevices: Int = 0) {
+        self.state = state
+        self.mode = mode
+        self.relayURL = relayURL
+        self.devices = devices
+        self.relayDevices = relayDevices
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, mode, devices
+        case relayURL = "relay_url"
+        case relayDevices = "relay_devices"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // A state a newer daemon adds must not fail the whole decode (which would read as "update
+        // Herdr"); it can only mean push is not ready yet, so it degrades to `unconfigured`.
+        switch try c.decode(String.self, forKey: .state) {
+        case "unsupported": state = .unsupported
+        case "off": state = .off
+        case "direct_ready": state = .directReady
+        case "relay_ready": state = .relayReady
+        default: state = .unconfigured
+        }
+        mode = try c.decodeIfPresent(String.self, forKey: .mode)
+        relayURL = try c.decodeIfPresent(String.self, forKey: .relayURL)
+        devices = try c.decodeIfPresent(Int.self, forKey: .devices) ?? 0
+        relayDevices = try c.decodeIfPresent(Int.self, forKey: .relayDevices) ?? 0
+    }
+}
+
+/// What Settings can say about push on the connected machine.
+public enum PushAvailability: Sendable, Equatable {
+    case status(NotificationsStatus)
+    /// The daemon answered but does not know `notifications.status` (or answered with something
+    /// this app cannot read): it predates relay push and needs updating.
+    case daemonTooOld
+    /// The request never reached a daemon (SSH or bridge failure), so nothing is known.
+    case unreachable
+
+    /// Classifies a failed `notifications.status`. A herdr without the method rejects the request
+    /// line with `invalid_request`; `transport_error` is the SSH bridge's own failure, not an answer.
+    public init(failure: Error) {
+        switch failure {
+        case let api as APIError where api.code != "transport_error": self = .daemonTooOld
+        case is DecodingError: self = .daemonTooOld
+        default: self = .unreachable
+        }
+    }
+}
+
 // MARK: - Folder browsing + agent kinds (fs.list_dir / agent.kinds)
 
 /// Result of `fs.list_dir` (`type: "dir_list"`): the resolved absolute `path` and its entries. The

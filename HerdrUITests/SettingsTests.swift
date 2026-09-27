@@ -255,4 +255,47 @@ final class SettingsTests: XCTestCase {
                 .firstMatch.waitForExistence(timeout: 5),
             "the weekly meter lost its window label, so two stacked meters cannot be told apart")
     }
+
+    /// THE MACHINE'S ANSWER REACHES THE SCREEN. The notify card used to say "Push needs the
+    /// herdr fork" whatever the daemon could do; it now renders `notifications.status`. Each
+    /// launch picks the mock daemon's answer through `HERDR_MOCK_PUSH_STATE`, including a
+    /// daemon too old to know the method (`legacy`), which must ask for an update rather than
+    /// fall back to a generic line.
+    func testNotificationsShowWhatThisMachineCanDo() {
+        let cases: [(state: String, title: String)] = [
+            ("relay_ready", "Notifications are on"),
+            ("unconfigured", "This machine can't send notifications yet"),
+            ("off", "Notifications are turned off in Herdr on this machine"),
+            ("legacy", "Update Herdr on this machine to get notifications"),
+        ]
+        for (state, title) in cases {
+            let app = XCUIApplication()
+            app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
+            app.launchEnvironment["HERDR_MOCK_PUSH_STATE"] = state
+            app.launch()
+
+            let manage = app.staticTexts["Notifications"].firstMatch
+            XCTAssertTrue(manage.waitForExistence(timeout: 15), "Settings should list Notifications")
+            manage.tap()
+
+            let row = app.staticTexts[title]
+            // The row sits under the four toggles; bring it into view before judging it.
+            var scrolls = 0
+            while scrolls < 6 {
+                if row.waitForExistence(timeout: 3), app.frame.contains(row.frame) { break }
+                app.swipeUp()
+                scrolls += 1
+            }
+
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "settings-push-\(state)"
+            shot.lifetime = .keepAlways
+            add(shot)
+
+            XCTAssertTrue(row.exists, "\(state): expected \"\(title)\"")
+            XCTAssertFalse(app.staticTexts["Push needs the herdr fork"].exists,
+                           "\(state): the old unconditional line is still shown")
+            app.terminate()
+        }
+    }
 }
