@@ -567,10 +567,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2 }
         let openRows = probe()["rows"] as? Int ?? 0
         var commits = probe()["commits"] as? Int ?? 0
-        var coverInstalls = probe()["coverInstalls"] as? Int ?? 0
 
         command("keyboard-show")
-        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) < openRows }
         let shown = (probe()["commits"] as? Int ?? 0) - commits
         XCTAssertLessThanOrEqual(shown, 2,
@@ -578,9 +576,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         attach("keyboard-show-one-commit")
 
         commits = probe()["commits"] as? Int ?? 0
-        coverInstalls = probe()["coverInstalls"] as? Int ?? 0
         command("keyboard-hide")
-        wait { ($0["coverInstalls"] as? Int ?? 0) > coverInstalls }
         wait { ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) == openRows }
         let hidden = (probe()["commits"] as? Int ?? 0) - commits
         XCTAssertLessThanOrEqual(hidden, 2,
@@ -588,6 +584,87 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(probe()["commitRows"] as? Int, openRows,
                        "the last commit must be the fit the sweep ENDED on")
         attach("keyboard-hide-one-commit")
+    }
+
+    /// THE TERMINAL STAYS LIVE WHILE THE KEYBOARD RISES. A keyboard sweep used to freeze
+    /// the terminal behind a snapshot, cut off at the keyboard's top edge, until the
+    /// agent redrew at the new grid about half a second later. Now the terminal keeps
+    /// its grid, sits so its prompt row stays above the keyboard, and keeps painting.
+    ///
+    /// The journal samples what is ON SCREEN (rows fully inside the pane, from the
+    /// snapshot while one covers it) every frame for the whole sweep, because the
+    /// window between the keyboard moving and the new grid landing is shorter than a
+    /// probe round trip.
+    func testKeyboardShowKeepsTheTerminalLive() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "iPad keyboard sweeps stay layout-driven and covered")
+        let open = naturalFixture()
+        let openRows = open["rows"] as? Int ?? 0
+        let serial = open["sweepSerial"] as? Int ?? 0
+
+        command("keyboard-show-live")
+        let shown = wait {
+            ($0["sweepSerial"] as? Int ?? 0) > serial && ($0["sweepOpen"] as? Bool) == false
+                && ($0["covered"] as? Bool) == false
+        }
+        XCTAssertGreaterThan(shown["sweepSamples"] as? Int ?? 0, 10, "premise: the sweep was sampled: \(shown)")
+        XCTAssertEqual(shown["sweepMarkSeenRows"] as? Int, openRows,
+                       "output written while the keyboard rose must be on screen before the new grid "
+                       + "lands, not after (seen \(shown["sweepMarkSeenMs"] ?? "-") ms late): \(shown)")
+        XCTAssertEqual(shown["sweepPromptMisses"] as? Int, 0,
+                       "the prompt row must stay on screen for the whole sweep: \(shown)")
+        XCTAssertEqual(shown["coverInstalls"] as? Int, open["coverInstalls"] as? Int,
+                       "a keyboard sweep must not freeze the terminal behind a snapshot: \(shown)")
+        XCTAssertEqual((shown["requests"] as? Int ?? 0) - (open["requests"] as? Int ?? 0), 1,
+                       "one keyboard transition is one PTY resize: \(shown)")
+        let settled = wait { ($0["rows"] as? Int ?? 0) == ($0["commitRows"] as? Int ?? -1) }
+        XCTAssertLessThan(settled["rows"] as? Int ?? 0, openRows, "the grid follows the keyboard: \(settled)")
+        XCTAssertTrue((settled["visible"] as? String ?? "").contains(shown["sweepMark"] as? String ?? "?"),
+                      "the live line survives the reflow: \(settled)")
+        attach("keyboard-show-live")
+    }
+
+    /// The same for the keyboard going away: the pane grows, the terminal keeps its grid
+    /// at the bottom (a band of ground above it) until the new grid lands, then fills.
+    func testKeyboardHideKeepsTheTerminalLive() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
+                          "iPad keyboard sweeps stay layout-driven and covered")
+        let open = naturalFixture()
+        let openRows = open["rows"] as? Int ?? 0
+        command("keyboard-show")
+        let up = wait {
+            ($0["sweepOpen"] as? Bool) == false && ($0["covered"] as? Bool) == false
+                && ($0["rows"] as? Int ?? 0) < openRows
+                && ($0["rows"] as? Int ?? 0) == ($0["commitRows"] as? Int ?? -1)
+        }
+        let serial = up["sweepSerial"] as? Int ?? 0
+
+        command("keyboard-hide")
+        let hidden = wait {
+            ($0["sweepSerial"] as? Int ?? 0) > serial && ($0["sweepOpen"] as? Bool) == false
+                && ($0["covered"] as? Bool) == false
+        }
+        XCTAssertEqual(hidden["sweepPromptMisses"] as? Int, 0,
+                       "the prompt row must stay on screen for the whole sweep: \(hidden)")
+        XCTAssertEqual(hidden["coverInstalls"] as? Int, up["coverInstalls"] as? Int,
+                       "a keyboard sweep must not freeze the terminal behind a snapshot: \(hidden)")
+        XCTAssertEqual((hidden["requests"] as? Int ?? 0) - (up["requests"] as? Int ?? 0), 1,
+                       "one keyboard transition is one PTY resize: \(hidden)")
+        let settled = wait { ($0["rows"] as? Int ?? 0) == ($0["commitRows"] as? Int ?? -1) }
+        XCTAssertEqual(settled["rows"] as? Int, openRows, "the grid returns to the open fit: \(settled)")
+        attach("keyboard-hide-live")
+    }
+
+    /// The resize fixture (a full screen of history above the prompt) at the pane's real
+    /// fit rather than its pinned 80x24, settled.
+    private func naturalFixture() -> [String: Any] {
+        launch("resize")
+        command("natural")
+        return wait {
+            ($0["covered"] as? Bool) == false && ($0["rows"] as? Int ?? 0) >= 2
+                && ($0["rows"] as? Int) == ($0["commitRows"] as? Int)
+                && ($0["cols"] as? Int) == ($0["commitCols"] as? Int)
+        }
     }
 
     /// TYPING NEVER RESIZES THE TERMINAL (#301). The composer floats over the terminal:
