@@ -77,6 +77,12 @@ struct GramView: View {
     @State private var draftDictating = false
     /// The message feed's height: the room the composer's pull-to-expand editor may take.
     @State private var feedHeight: CGFloat = 0
+    /// The composer card's height. Added back to the feed's so the room the composer
+    /// grows into does not shrink as the composer grows (see `composerEditorRoom`).
+    @State private var composerCardHeight: CGFloat = 0
+    private var composerRoom: CGFloat {
+        feedHeight + max(0, composerCardHeight - ComposerStyle.restingHeight)
+    }
     @State private var sending = false
     /// A send failure. Kept SEPARATE from load state so a successful background poll
     /// never clears it before the owner sees it.
@@ -467,7 +473,7 @@ struct GramView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
             bannerView
             composer
-                .environment(\.composerEditorRoom, feedHeight)
+                .environment(\.composerEditorRoom, composerRoom)
                 // The composer must ALWAYS fit: it holds the only way to send. Without a
                 // priority it is just another default-priority row, so when attachments add
                 // the chips strip and the progress block the stack's minimum can exceed the
@@ -508,7 +514,7 @@ struct GramView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
             bannerView
             composer
-                .environment(\.composerEditorRoom, feedHeight)
+                .environment(\.composerEditorRoom, composerRoom)
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
         }
     }
@@ -1122,6 +1128,7 @@ struct GramView: View {
                 }
                 .buttonStyle(.plain)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
