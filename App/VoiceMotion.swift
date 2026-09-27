@@ -81,17 +81,20 @@ final class VoiceLevelMeter {
 struct VoiceWaveformStrip: View {
     @Environment(VoiceLevelMeter.self) private var meter: VoiceLevelMeter?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var blink = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(Palette.died)
-                .frame(width: 8, height: 8)
-                .opacity(blink ? 0.3 : 1)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.6).repeatForever(autoreverses: true),
-                           value: blink)
-                .onAppear { blink = !reduceMotion }
+            // The blink is computed from the clock, not a repeatForever animation. A looping
+            // `.animation(_, value:)` also captured the dot's own move while the strip slid
+            // into place, so the dot swung between its old and new positions forever.
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { timeline in
+                let seconds = timeline.date.timeIntervalSinceReferenceDate
+                Circle()
+                    .fill(Palette.died)
+                    .frame(width: 8, height: 8)
+                    .opacity(reduceMotion ? 1 : 0.65 + 0.35 * cos(seconds * .pi / 0.6))
+            }
+            .frame(width: 8, height: 8)
             Canvas(opaque: false, rendersAsynchronously: false) { context, size in
                 Self.drawBars(meter?.history ?? [], in: context, size: size)
             }
