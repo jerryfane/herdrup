@@ -118,7 +118,8 @@ async function enroll(request: Request, env: Env, deps: Deps): Promise<Response>
     return bad("environment must be production or sandbox");
   }
   if (typeof token !== "string" || !validToken(kind, token)) {
-    return bad(kind === "device" ? "token must be 64-200 hex chars" : "token must be 32-512 hex chars");
+    const [min, max] = TOKEN_HEX_BOUNDS[kind];
+    return bad(`token must be ${min}-${max} hex chars`);
   }
 
   const capability = await sealCapability(sealKey, {
