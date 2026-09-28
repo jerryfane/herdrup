@@ -29,6 +29,12 @@ struct HerdrApp: App {
         WindowGroup {
             RootView()
                 .onOpenURL { url in
+                    // A guest invite (herdrup://guest-invite#…, or the relay's https /i# page)
+                    // opens the Accept screen; everything else is the agent deep link.
+                    if GuestInviteRouter.isInviteLink(url) {
+                        GuestInviteRouter.shared.open(url.absoluteString)
+                        return
+                    }
                     guard let paneID = AgentActivityDeepLink.agentID(from: url) else { return }
                     PushCenter.shared.tapped(paneID: paneID)
                 }
@@ -211,6 +217,14 @@ struct RootView: View {
     /// UI text-size multiplier (the "Text size" setting). Applied to `Typography`
     /// so all app chrome scales; the terminal has its own font control.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+    /// Guest access (#312): machines shared with this phone, the invite waiting on the
+    /// Accept screen, and the shared machine whose home is open (it takes precedence
+    /// over the owner session, which stays connected underneath).
+    @ObservedObject private var sharedMachines = SharedMachinesStore.shared
+    @ObservedObject private var invites = GuestInviteRouter.shared
+    @State private var openGuest: GuestAccess?
+    /// Whether launch already decided to open the only shared machine.
+    @State private var didAutoOpenGuest = false
 
     #if DEBUG
     /// One stable driver instance for the whole stress-test process. Recreating it
@@ -238,6 +252,18 @@ struct RootView: View {
             #endif
         }
         .preferredColorScheme(.dark)
+        .fullScreenCover(item: $invites.pending) { pending in
+            inviteAccept(pending.invite)
+        }
+        .alert("Can't open this invite", isPresented: Binding(
+            get: { invites.failure != nil },
+            set: { if !$0 { invites.failure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(invites.failure ?? "")
+        }
+        .onAppear { autoOpenSharedMachine() }
         // Reclaim gram attachment staging left by a PREVIOUS session (a crash or a
         // jetsam kill runs no cleanup) here rather than on the Gram page: bytes from a
         // killed session — up to ten 100 MB attachments — would otherwise survive every
@@ -247,7 +273,14 @@ struct RootView: View {
 
     @ViewBuilder
     private var liveContent: some View {
-        if let client, let credentials {
+        if let openGuest {
+            GuestHomeView(
+                access: openGuest,
+                connect: { try GuestConnection.open(openGuest) },
+                onBack: guestCanGoBack ? { self.openGuest = nil } : nil,
+                onLeave: { self.openGuest = nil })
+            .id(openGuest.id)
+        } else if let client, let credentials {
             TerminalHomeView(
                 client: client,
                 onDisconnect: { disconnect() },
@@ -275,8 +308,42 @@ struct RootView: View {
             // so the daemon starts/stops skipping that pane's pushes immediately.
             .onChange(of: mute.mutedPanes) { _, _ in registerPush() }
         } else {
-            ConnectView { connect($0) }
+            ConnectView(onConnect: { connect($0) }, onOpenShared: { openGuest = $0 })
         }
+    }
+
+    /// A guest-only phone (no machines of its own, one share) launches straight into
+    /// that share's home, which then has nowhere to go back to.
+    private var guestCanGoBack: Bool {
+        client != nil || !SavedHostsStore.shared.hosts.isEmpty || sharedMachines.machines.count > 1
+    }
+
+    private func autoOpenSharedMachine() {
+        #if DEBUG
+        guard ScreenshotMock.mode == nil else { return }
+        #endif
+        guard !didAutoOpenGuest else { return }
+        didAutoOpenGuest = true
+        if SavedHostsStore.shared.hosts.isEmpty, sharedMachines.machines.count == 1 {
+            openGuest = sharedMachines.machines[0]
+        }
+    }
+
+    /// The Accept screen for an invite that arrived as a link, a paste or a scan.
+    private func inviteAccept(_ invite: GuestInvite) -> some View {
+        GuestAcceptView(
+            invite: invite,
+            fingerprint: try? GuestDevice.identity().fingerprint,
+            accept: {
+                let identity = try GuestDevice.identity()
+                return try await GuestSession.accept(invite, identity: identity, device: UIDevice.current.model)
+            },
+            onAccepted: { access in
+                sharedMachines.add(access)
+                invites.pending = nil
+                openGuest = access
+            },
+            onCancel: { invites.pending = nil })
     }
 
     /// Send the APNs token (with the current category prefs) to the server, if we have both a live
@@ -429,7 +496,50 @@ struct RootView: View {
             // harness owns the Inbox/Saved binding (see GramScreenshotHarness); the messages +
             // claim states are the FYI.
             GramScreenshotHarness(client: mockClient)
+        case .guestAccept:
+            // Accept is injected: it returns the mock share without touching the network,
+            // then lands on guest home exactly like a live accept.
+            if let openGuest {
+                mockGuestHome(openGuest, initialTab: .agents)
+            } else {
+                GuestAcceptView(
+                    invite: GuestMockTransport.invite,
+                    fingerprint: try? GuestDevice.identity().fingerprint,
+                    accept: { GuestMockTransport.access },
+                    onAccepted: { access in
+                        sharedMachines.add(access)
+                        openGuest = access
+                    },
+                    onCancel: {})
+            }
+        case .guest, .guestSettings:
+            // After Leave the in-memory store is empty and the phone is back on onboarding.
+            if let access = sharedMachines.machines.first {
+                mockGuestHome(access, initialTab: mode == .guestSettings ? .settings : .agents)
+            } else {
+                ConnectView { _ in }
+            }
+        case .guestPane, .guestPaused, .guestBlocked:
+            GuestPaneView(
+                client: HerdrClient(transport: GuestMockTransport(
+                    scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked : .running)),
+                access: GuestMockTransport.access,
+                onClose: {})
         }
+    }
+
+    /// Guest home over the mock relay: the running scenario, whose agent.list also
+    /// carries an agent that was not shared, which the home must not show.
+    private func mockGuestHome(_ access: GuestAccess, initialTab: GuestHomeView.Tab) -> some View {
+        GuestHomeView(
+            access: access,
+            connect: {
+                GuestConnection(client: HerdrClient(transport: GuestMockTransport(scenario: .running)),
+                                fingerprint: try GuestDevice.identity().fingerprint)
+            },
+            initialTab: initialTab,
+            onBack: nil,
+            onLeave: { openGuest = nil })
     }
     #endif
 
@@ -560,8 +670,15 @@ enum HerdrSetup {
 
 struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
+    /// Opens the home of a machine someone shared with this phone.
+    var onOpenShared: (GuestAccess) -> Void = { _ in }
 
     @ObservedObject private var savedHosts = SavedHostsStore.shared
+    @ObservedObject private var sharedMachines = SharedMachinesStore.shared
+    /// The invite-code scanner (guest access, #312), and what it read: handed to the
+    /// router once the sheet is gone, so the Accept cover never races its dismissal.
+    @State private var showingInviteScan = false
+    @State private var scannedInvite: GuestInvite?
     /// The add/edit sheet target; nil = closed.
     @State private var editorTarget: HostEditorTarget?
     /// The scan-to-connect sheet (#126) — the path that needs no key, no host address and
@@ -583,6 +700,9 @@ struct ConnectView: View {
                     } else {
                         savedHostsSection
                     }
+                    if !sharedMachines.machines.isEmpty {
+                        sharedSection
+                    }
                     // Scanning is the PRIMARY action and manual entry the fallback, not
                     // the other way round. The manual path asks for a host address, a
                     // username and an ed25519 private key — three things a new user does
@@ -590,6 +710,7 @@ struct ConnectView: View {
                     scanButton
                     addHostButton
                     captions
+                    inviteEntry
                 }
                 .padding(22)
                 // Cap + center the column on iPad/macOS so the host list doesn't
@@ -613,6 +734,81 @@ struct ConnectView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingInviteScan, onDismiss: {
+            guard let invite = scannedInvite else { return }
+            scannedInvite = nil
+            GuestInviteRouter.shared.pending = PendingGuestInvite(invite: invite)
+        }) {
+            GuestInviteScanSheet { scannedInvite = $0 }
+        }
+    }
+
+    /// Machines other people shared: each opens its guest home over the relay.
+    private var sharedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("SHARED WITH YOU").font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+            }
+            ForEach(sharedMachines.machines) { access in
+                Button { onOpenShared(access) } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.2")
+                            .font(.system(size: 14, weight: .medium)).foregroundStyle(Palette.textDim)
+                            .frame(width: 36, height: 36)
+                            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(access.machineLabel).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+                            Text("\(access.agentName) · shared by \(access.ownerName)")
+                                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "arrow.right.circle.fill")
+                            .font(.system(size: 18)).foregroundStyle(Palette.textDim)
+                    }
+                    .padding(12)
+                    .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("shared-machine-row")
+                .contextMenu {
+                    Button(role: .destructive) { sharedMachines.remove(access) } label: {
+                        Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Someone shared an agent: open their invite link. The system PasteButton reads
+    /// the clipboard only when tapped, so there is no "Allow Paste" prompt (see
+    /// HostEditor); scanning covers an invite shown as a QR code.
+    private var inviteEntry: some View {
+        VStack(spacing: 10) {
+            Text("Got an invite link from someone?")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+            HStack(spacing: 10) {
+                PasteButton(payloadType: String.self) { items in
+                    Task { @MainActor in
+                        if let text = items.first { GuestInviteRouter.shared.open(text) }
+                    }
+                }
+                .labelStyle(.titleAndIcon)
+                .tint(Palette.surfaceRaised)
+                .buttonBorderShape(.capsule)
+                .controlSize(.large)
+                .accessibilityLabel("Paste invite link")
+                Button { showingInviteScan = true } label: {
+                    Label("Scan invite", systemImage: "qrcode.viewfinder")
+                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                        .padding(.horizontal, 16).frame(height: 44)
+                        .background(Palette.surface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 12)
     }
 
     private var scanButton: some View {
@@ -8137,6 +8333,7 @@ struct HtmlPreviewHarness: View {
 
 enum ScreenshotMock {
     case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
+    case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestSettings
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -8183,6 +8380,14 @@ enum ScreenshotMock {
         // `gram` renders the Gram page from a canned owner-view gram.list — the
         // messages, unread badge, claim states, and composer, for a layout FYI.
         case "gram": return .gram
+        // Guest access (#312): the invite accept screen, the guest home, the view-only
+        // pane in each state, and the guest Settings tab, all over GuestMockTransport.
+        case "guestaccept": return .guestAccept
+        case "guest": return .guest
+        case "guestpane": return .guestPane
+        case "guestpaused": return .guestPaused
+        case "guestblocked": return .guestBlocked
+        case "guestsettings": return .guestSettings
         default: return .list
         }
     }
