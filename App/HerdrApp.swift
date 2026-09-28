@@ -7953,7 +7953,7 @@ struct SettingsView: View {
     /// the OWNER CONFIRMED it is set to never expire with unlimited uses — recorded here
     /// because nothing in the app or in CI can detect a dead invite, and correcting one
     /// needs an App Store release. If it is ever rotated, prefer a vanity URL.
-    private static let discordInvite = URL(string: "https://discord.gg/TTFRHFyDXf")!
+    private static let discordInvite = URL(string: "https://discord.gg/pq7qj4dDqt")!
 
     private func copyDiagnostics() {
         // Host + app version only — never anything sensitive (no key, ever).
