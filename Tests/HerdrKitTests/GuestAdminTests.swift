@@ -225,4 +225,38 @@ final class GuestAdminTests: XCTestCase {
         XCTAssertEqual(entries[2].method, "pane.send_keys")
         XCTAssertNil(entries[3].guestID)
     }
+
+    // MARK: Which machines Settings reads
+
+    private func saved(_ json: String) throws -> [SavedMachineStatus] {
+        let wrapped = try JSONDecoder().decode([String: SavedMachineStatus].self, from: Data(json.utf8))
+        return Array(wrapped.values)
+    }
+
+    /// A saved machine running no agents still holds guests: it must be read (and so be
+    /// revocable) even though no agent names it. And a peer only known from its agents (an
+    /// older daemon without `machine.status`) must not drop out either.
+    func testDirectoryIsTheUnionOfSavedMachinesAndAgentPeers() throws {
+        let savedMachines = try saved(#"""
+        {"aa":{"profile_id":"aa","display_label":"mcb-air","saved_state":"coordinated","stale":false},
+         "bb":{"profile_id":"bb","display_label":"pi-burj","saved_state":"coordinated","stale":false}}
+        """#)
+        let peers = [
+            PeerSummary(alias: "bb", label: "stale-label", agentCount: 2, reachability: .reachable),
+            PeerSummary(alias: "cc", label: nil, agentCount: 1, reachability: .degraded),
+        ]
+        let directory = GuestMachine.directory(localLabel: "Jerry's Mac Studio",
+                                               savedMachines: savedMachines, agentPeers: peers)
+        XCTAssertEqual(directory, [
+            GuestMachine(alias: nil, label: "Jerry's Mac Studio"),
+            GuestMachine(alias: "cc", label: "cc"),
+            GuestMachine(alias: "aa", label: "mcb-air"),
+            GuestMachine(alias: "bb", label: "pi-burj"),
+        ], "every machine exactly once, the connected one first, saved labels over agent-derived ones")
+    }
+
+    func testDirectoryWithoutPeersIsJustTheConnectedMachine() {
+        XCTAssertEqual(GuestMachine.directory(localLabel: "box", savedMachines: [], agentPeers: []),
+                       [GuestMachine(alias: nil, label: "box")])
+    }
 }

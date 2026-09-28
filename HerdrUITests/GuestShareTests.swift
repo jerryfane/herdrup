@@ -18,10 +18,11 @@ final class GuestShareTests: XCTestCase {
     /// `still` makes llm-opt idle: the WORKING pill's endless pulse keeps the app from ever
     /// going idle, which costs a minute per XCUITest action. Only the screenshot keeps it.
     private func launch(_ mode: String, ownerName: String = "Jerry", pendingInvite: Bool = false,
-                        still: Bool = true) {
+                        still: Bool = true, environment: [String: String] = [:]) {
         app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launchEnvironment["HERDR_MOCK_OWNER_NAME"] = ownerName
+        app.launchEnvironment.merge(environment) { _, new in new }
         if still { app.launchEnvironment["HERDR_MOCK_STILL"] = "1" }
         if pendingInvite { app.launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
         app.launch()
@@ -210,6 +211,39 @@ final class GuestShareTests: XCTestCase {
         waitForExpectations(timeout: 10)
         XCTAssertFalse(text(containing: "PENDING INVITES").exists)
         XCTAssertTrue(element("guest-revoke-plotarmordev").exists, "cancelling an invite must not touch guests")
+    }
+
+    /// mcb-air is a saved machine with no agents, so nothing in the agent list names it. Its
+    /// guest must still be listed, from its own daemon, and be revocable there.
+    func testAGuestOnASavedMachineWithoutAgentsIsListedAndRevocable() {
+        launch("sharedaccess", environment: ["HERDR_MOCK_SAVED_PEER_GUEST": "1"])
+        openSharedAccess()
+        let revoke = element("guest-revoke-sam")
+        XCTAssertTrue(revoke.waitForExistence(timeout: 15),
+                      "a guest on an agent-less saved machine must be listed")
+        XCTAssertTrue(text(containing: "notes on mcb-air").exists, "the row must name the machine that holds it")
+        revoke.tap()
+        XCTAssertTrue(app.staticTexts["Revoke sam?"].waitForExistence(timeout: 5))
+        app.buttons["Revoke"].firstMatch.tap()
+        let gone = NSPredicate(format: "exists == false")
+        expectation(for: gone, evaluatedWith: revoke)
+        waitForExpectations(timeout: 10)
+        XCTAssertTrue(element("guest-revoke-plotarmordev").exists, "only sam is revoked")
+    }
+
+    /// A failed guest.audit must read as a failure, not as a guest who did nothing, and must
+    /// not hide the people and invites that did load.
+    func testAFailedAuditSaysSoInsteadOfAnEmptyLog() {
+        launch("sharedaccess", pendingInvite: true, environment: ["HERDR_MOCK_AUDIT_FAIL": "1"])
+        openSharedAccess()
+        let failure = element("guest-log-failure")
+        XCTAssertTrue(failure.waitForExistence(timeout: 15), "the audit failure must be shown")
+        XCTAssertTrue(failure.label.contains("Couldn't load the activity log"))
+        XCTAssertTrue(failure.label.contains("audit.jsonl is unreadable"), "the reason must be shown: \(failure.label)")
+        XCTAssertFalse(text(containing: "Nothing yet").exists, "a failed log is not an empty one")
+        XCTAssertTrue(element("guest-revoke-plotarmordev").exists, "people still load")
+        XCTAssertTrue(element("guest-cancel-sam").exists, "invites still load")
+        shoot("owner-7-audit-failed")
     }
 }
 

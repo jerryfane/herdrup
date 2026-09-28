@@ -4,13 +4,6 @@ import SwiftUI
 // Settings → Shared access: everyone the owner has shared an agent with, across the connected
 // machine and its federated peers, the invites nobody has used yet, and the activity log.
 
-/// One machine whose guest store Settings reads. `alias` nil is the connected machine; a
-/// peer is addressed by its saved alias, which the coordinator routes.
-struct GuestMachine: Hashable, Sendable {
-    let alias: String?
-    let label: String
-}
-
 @MainActor
 final class GuestAccessModel: ObservableObject {
     struct Person: Identifiable {
@@ -48,6 +41,9 @@ final class GuestAccessModel: ObservableObject {
     @Published private(set) var invites: [Invite] = []
     @Published private(set) var log: [LogLine] = []
     @Published private(set) var failures: [Failure] = []
+    /// Machines whose people loaded but whose `guest.audit` failed: the log is unknown there,
+    /// not empty, and must say so.
+    @Published private(set) var logFailures: [Failure] = []
     /// Relay links that are trying and failing, worth telling the owner about.
     @Published private(set) var troubledLinks: [TroubledLink] = []
     @Published private(set) var loaded = false
@@ -57,6 +53,7 @@ final class GuestAccessModel: ObservableObject {
         let listing: GuestListing?
         let entries: [GuestAuditEntry]
         let error: Error?
+        let auditError: Error?
     }
 
     var summary: String {
@@ -76,16 +73,29 @@ final class GuestAccessModel: ObservableObject {
         return parts.joined(separator: " · ")
     }
 
+    /// Bumped per load, so a slower earlier load (say, before `machine.status` answered and
+    /// named more machines) cannot overwrite a newer one.
+    private var generation = 0
+
     func load(client: HerdrClient, machines: [GuestMachine]) async {
+        generation += 1
+        let mine = generation
         let results = await withTaskGroup(of: (Int, MachineResult).self) { group in
             for (index, machine) in machines.enumerated() {
                 group.addTask {
                     do {
                         let listing = try await client.guestList(machine: machine.alias)
-                        let entries = (try? await client.guestAudit(limit: 100, machine: machine.alias)) ?? []
-                        return (index, MachineResult(machine: machine, listing: listing, entries: entries, error: nil))
+                        do {
+                            let entries = try await client.guestAudit(limit: 100, machine: machine.alias)
+                            return (index, MachineResult(machine: machine, listing: listing, entries: entries,
+                                                         error: nil, auditError: nil))
+                        } catch {
+                            return (index, MachineResult(machine: machine, listing: listing, entries: [],
+                                                         error: nil, auditError: error))
+                        }
                     } catch {
-                        return (index, MachineResult(machine: machine, listing: nil, entries: [], error: error))
+                        return (index, MachineResult(machine: machine, listing: nil, entries: [],
+                                                     error: error, auditError: nil))
                     }
                 }
             }
@@ -93,6 +103,7 @@ final class GuestAccessModel: ObservableObject {
             for await result in group { out.append(result) }
             return out.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        guard mine == generation else { return }
         apply(results)
     }
 
@@ -102,6 +113,7 @@ final class GuestAccessModel: ObservableObject {
         var invites: [Invite] = []
         var log: [LogLine] = []
         var failures: [Failure] = []
+        var logFailures: [Failure] = []
         var links: [TroubledLink] = []
         for result in results {
             if let error = result.error {
@@ -112,6 +124,9 @@ final class GuestAccessModel: ObservableObject {
                 continue
             }
             guard let listing = result.listing else { continue }
+            if let auditError = result.auditError {
+                logFailures.append(Failure(machine: result.machine, message: GuestAdminError.message(auditError)))
+            }
             people += listing.activeGuests.map { Person(guest: $0, machine: result.machine) }
             invites += listing.pendingInvites(nowMs: nowMs).map { Invite(invite: $0, machine: result.machine) }
             if let link = listing.link, link.state == .retrying {
@@ -131,6 +146,7 @@ final class GuestAccessModel: ObservableObject {
         self.invites = invites.sorted { ($0.invite.createdMs ?? 0) > ($1.invite.createdMs ?? 0) }
         self.log = log.sorted { $0.entry.tsMs > $1.entry.tsMs }
         self.failures = failures
+        self.logFailures = logFailures
         self.troubledLinks = links
         loaded = true
     }
@@ -284,8 +300,10 @@ struct GuestAccessSection: View {
 
     // MARK: Log
 
+    /// A failed `guest.audit` is a row of its own, never the empty state: "nothing yet" would
+    /// claim a guest did nothing when the log simply could not be read.
     @ViewBuilder private var logCard: some View {
-        if model.log.isEmpty {
+        if model.log.isEmpty && model.logFailures.isEmpty {
             GuestStyle.card {
                 Text(model.loaded ? "Nothing yet. Every message and file a guest sends is recorded here."
                                   : "Loading…")
@@ -295,12 +313,30 @@ struct GuestAccessSection: View {
             }
         } else {
             GuestStyle.card {
-                ForEach(Array(model.log.enumerated()), id: \.element.id) { index, line in
+                ForEach(Array(model.logFailures.enumerated()), id: \.element.id) { index, failure in
                     if index > 0 { GuestStyle.divider }
+                    logFailureRow(failure)
+                }
+                ForEach(Array(model.log.enumerated()), id: \.element.id) { index, line in
+                    if index > 0 || !model.logFailures.isEmpty { GuestStyle.divider }
                     GuestLogRow(line: line)
                 }
             }
         }
+    }
+
+    private func logFailureRow(_ failure: GuestAccessModel.Failure) -> some View {
+        let source = failure.machine.alias == nil ? "" : " from \(failure.machine.label)"
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12)).foregroundStyle(Palette.waiting)
+            Text("Couldn't load the activity log\(source): \(failure.message)")
+                .font(Typography.app(13.5)).foregroundStyle(Palette.textDim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("guest-log-failure")
     }
 
     // MARK: Your name

@@ -10,12 +10,17 @@ import SwiftUI
 /// Launch environment:
 /// - `HERDR_MOCK_OWNER_NAME`: preset "Your name"; `-` clears it to exercise the first-share ask.
 /// - `HERDR_MOCK_GUEST_INVITE=1`: start with one pending invite (for "sam").
+/// - `HERDR_MOCK_SAVED_PEER_GUEST=1`: the agent-less saved machine mcb-air holds guest `sam`.
+/// - `HERDR_MOCK_AUDIT_FAIL=1`: the connected machine's `guest.audit` fails.
 /// - `HERDR_MOCK_STILL=1`: llm-opt reads idle instead of working. The WORKING pill pulses
 ///   forever, which holds XCUITest's wait-for-idle for a minute per action; only the
 ///   screenshot capture keeps the design's WORKING state.
 enum GuestShareMock {
     static let machineLabel = "Jerry's Mac Studio"
     static let peerAlias = "2cc0ffe3a0753cafcf28f46a7bb29351"
+    /// A saved machine that is federated but runs no agents right now, so nothing in
+    /// `agent.list` names it; only `machine.status` does.
+    static let savedPeerAlias = "5b7e1d20c4a94f3e8d6b0a1c2e3f4a5b"
 
     static let agentStatus = ProcessInfo.processInfo.environment["HERDR_MOCK_STILL"] == "1" ? "idle" : "working"
 
@@ -63,22 +68,31 @@ enum GuestShareMock {
     }
 }
 
-/// The guest store the mock daemon keeps: the local machine starts with plotarmordev on
-/// llm-opt and three log lines; the peer starts empty.
+/// The guest stores the mock daemons keep, one per machine (`""` is the connected machine):
+/// the local machine starts with plotarmordev on llm-opt and three log lines; pi-burj (an
+/// agent-derived peer) starts empty; mcb-air, a saved machine with NO agents, holds `sam`
+/// when `HERDR_MOCK_SAVED_PEER_GUEST=1`.
 final class GuestShareMockStore: @unchecked Sendable {
     static let shared = GuestShareMockStore()
 
+    private struct Machine {
+        var guests: [[String: Any]] = []
+        var invites: [[String: Any]] = []
+        var audit: [[String: Any]] = []
+    }
+
     private let lock = NSLock()
-    private var guests: [[String: Any]]
-    private var invites: [[String: Any]]
-    private var audit: [[String: Any]]
+    private var machines: [String: Machine] = [:]
     private var inviteSeq = 0
+    /// `HERDR_MOCK_AUDIT_FAIL=1`: the connected machine's `guest.audit` fails.
+    private let auditFails = ProcessInfo.processInfo.environment["HERDR_MOCK_AUDIT_FAIL"] == "1"
 
     private static let fingerprint = "SHA256:9f3a·e71c·04bd·c21e"
     private static let grant: [String: Any] = ["terminal_id": "t-llm", "agent_name": "llm-opt",
                                                "agent_session": ["source": "hook", "agent": "omp", "kind": "session_id", "value": "s1"]]
 
     private init() {
+        let env = ProcessInfo.processInfo.environment
         let now = Date()
         let nowMs = Self.ms(now)
         // Today's 11:40 / 11:42 / 11:44, as in the design, so the log reads like it.
@@ -86,26 +100,38 @@ final class GuestShareMockStore: @unchecked Sendable {
             let date = Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: now) ?? now
             return Self.ms(date)
         }
-        guests = [[
+        var local = Machine()
+        local.guests = [[
             "guest_id": "g-plot", "name": "plotarmordev", "fingerprint": Self.fingerprint,
             "device": "iPhone", "grant": Self.grant, "created_ms": today(11, 40),
             "last_seen_ms": nowMs - 2 * 60 * 1000, "revoked": false,
         ]]
-        invites = []
-        audit = [
+        local.audit = [
             Self.entry(today(11, 44), "upload", extra: ["file": ["name": "prompt-set-v2.jsonl", "size": 49_152, "sha256": "5e1f"]]),
             Self.entry(today(11, 42), "prompt", extra: ["text": "can you rerun the TensorFold bench against our Q5 build and send me the table?"]),
             Self.entry(today(11, 40), "accepted"),
         ]
-        if ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_INVITE"] == "1" {
-            invites.append(Self.invite(id: "inv-sam", name: "sam", createdMs: nowMs - 60_000))
+        if env["HERDR_MOCK_GUEST_INVITE"] == "1" {
+            local.invites.append(Self.invite(id: "inv-sam", name: "sam", createdMs: nowMs - 60_000))
         }
+        machines[""] = local
+        machines[GuestShareMock.peerAlias] = Machine()
+        var saved = Machine()
+        if env["HERDR_MOCK_SAVED_PEER_GUEST"] == "1" {
+            saved.guests = [[
+                "guest_id": "g-sam", "name": "sam", "fingerprint": "SHA256:51c0·2ab9·7e04·d3f8",
+                "device": "iPad", "grant": ["terminal_id": "t-notes", "agent_name": "notes"],
+                "created_ms": nowMs - 3_600_000, "last_seen_ms": NSNull(), "revoked": false,
+            ]]
+        }
+        machines[GuestShareMock.savedPeerAlias] = saved
     }
 
     private static func ms(_ date: Date) -> UInt64 { UInt64(date.timeIntervalSince1970 * 1000) }
 
-    private static func entry(_ ts: UInt64, _ event: String, extra: [String: Any] = [:]) -> [String: Any] {
-        var e: [String: Any] = ["ts_ms": ts, "guest_id": "g-plot", "name": "plotarmordev",
+    private static func entry(_ ts: UInt64, _ event: String, guestID: String = "g-plot",
+                              name: String = "plotarmordev", extra: [String: Any] = [:]) -> [String: Any] {
+        var e: [String: Any] = ["ts_ms": ts, "guest_id": guestID, "name": name,
                                 "fingerprint": fingerprint, "event": event, "pane": "w1:p1"]
         e.merge(extra) { _, new in new }
         return e
@@ -120,20 +146,21 @@ final class GuestShareMockStore: @unchecked Sendable {
     func answer(method: String, params: [String: Any]) -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        // A peer has its own (empty) store: the coordinator routed the call there.
-        if params["machine"] != nil {
-            switch method {
-            case "guest.list": return ["type": "guest_list", "guests": [], "invites": [], "link": ["state": "off", "last_error": NSNull()]]
-            case "guest.audit": return ["type": "guest_audit", "entries": []]
-            default: return ["error": ["code": "guest_not_found", "message": "no such guest"]]
-            }
+        let key = params["machine"] as? String ?? ""
+        // The coordinator refuses a machine it has no saved profile for.
+        guard var machine = machines[key] else {
+            return ["error": ["code": "machine_not_found", "message": "no saved machine \(key)"]]
         }
+        defer { machines[key] = machine }
         switch method {
         case "guest.list":
-            return ["type": "guest_list", "guests": guests, "invites": invites,
-                    "link": ["state": "up", "last_error": NSNull()]]
+            return ["type": "guest_list", "guests": machine.guests, "invites": machine.invites,
+                    "link": ["state": key.isEmpty ? "up" : "off", "last_error": NSNull()]]
         case "guest.audit":
-            return ["type": "guest_audit", "entries": audit]
+            if auditFails && key.isEmpty {
+                return ["error": ["code": "internal", "message": "audit.jsonl is unreadable"]]
+            }
+            return ["type": "guest_audit", "entries": machine.audit]
         case "guest.invite.create":
             let name = params["name"] as? String ?? ""
             guard GuestName.isValid(name) else {
@@ -141,21 +168,22 @@ final class GuestShareMockStore: @unchecked Sendable {
             }
             inviteSeq += 1
             let invite = Self.invite(id: "inv-\(inviteSeq)", name: name, createdMs: Self.ms(Date()))
-            invites.append(invite)
+            machine.invites.append(invite)
             let payload = Base64URLMock.encode(#"{"v":1,"invite_id":"inv-\#(inviteSeq)","guest_name":"\#(name)","agent_name":"llm-opt"}"#)
             return ["type": "guest_invite", "invite": invite,
                     "url": "herdrup://guest-invite#\(payload)",
                     "web_url": "https://guest.herdrup.themartian.app/i#\(payload)"]
         case "guest.revoke":
             if let id = params["guest_id"] as? String,
-               let index = guests.firstIndex(where: { $0["guest_id"] as? String == id }) {
-                guests[index]["revoked"] = true
-                audit.insert(Self.entry(Self.ms(Date()), "revoked"), at: 0)
+               let index = machine.guests.firstIndex(where: { $0["guest_id"] as? String == id }) {
+                machine.guests[index]["revoked"] = true
+                let name = machine.guests[index]["name"] as? String ?? ""
+                machine.audit.insert(Self.entry(Self.ms(Date()), "revoked", guestID: id, name: name), at: 0)
                 return ["type": "guest_revoked", "guest_id": id, "closed_streams": 1]
             }
             if let id = params["invite_id"] as? String,
-               let index = invites.firstIndex(where: { $0["invite_id"] as? String == id }) {
-                invites.remove(at: index)
+               let index = machine.invites.firstIndex(where: { $0["invite_id"] as? String == id }) {
+                machine.invites.remove(at: index)
                 return ["type": "guest_revoked", "invite_id": id, "closed_streams": 0]
             }
             return ["error": ["code": "guest_not_found", "message": "no such guest or invite"]]
@@ -186,6 +214,7 @@ struct GuestShareMockTransport: HerdrTransport {
             return try await base.roundTrip(requestLine)
         }
         if method == "agent.list" { return Self.agentList }
+        if method == "machine.status" { return Self.machineStatus }
         guard method.hasPrefix("guest.") else { return try await base.roundTrip(requestLine) }
         let params = object["params"] as? [String: Any] ?? [:]
         let answer = GuestShareMockStore.shared.answer(method: method, params: params)
@@ -214,6 +243,14 @@ struct GuestShareMockTransport: HerdrTransport {
             continuation.onTermination = { _ in pings.cancel() }
         }
     }
+
+    /// Both peers are saved machines; only pi-burj runs an agent.
+    private static let machineStatus = #"""
+    {"id":"mock","result":{"type":"machine_status","machines":{
+      "2cc0ffe3a0753cafcf28f46a7bb29351":{"profile_id":"2cc0ffe3a0753cafcf28f46a7bb29351","display_label":"pi-burj","saved_state":"coordinated","federation_configured":true,"stale":false},
+      "5b7e1d20c4a94f3e8d6b0a1c2e3f4a5b":{"profile_id":"5b7e1d20c4a94f3e8d6b0a1c2e3f4a5b","display_label":"mcb-air","saved_state":"coordinated","federation_configured":true,"stale":false}
+    }}}
+    """#
 
     private static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[

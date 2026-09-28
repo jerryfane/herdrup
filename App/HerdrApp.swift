@@ -6388,7 +6388,12 @@ struct SettingsView: View {
         // `try?` so an older daemon without `accounts.list` (or a transient failure)
         // just leaves the section empty rather than surfacing an error here.
         .task { accounts = (try? await client.accountsList()) ?? [] }
-        .task { savedMachines = try? await client.machineStatuses() }
+        .task {
+            savedMachines = try? await client.machineStatuses()
+            // A saved machine that runs no agents is only known from `machine.status`, and it
+            // can still hold guests: read Shared access again once the profiles arrive.
+            await loadGuestAccess()
+        }
         // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
         // `server.staged_update` leaves it nil (version line + update callout simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
@@ -6694,9 +6699,10 @@ struct SettingsView: View {
     /// The connected machine plus every federated peer: each keeps its own guest store,
     /// which the coordinator reaches by the peer's alias.
     private func loadGuestAccess() async {
-        let local = GuestMachine(alias: nil, label: guestMachineLabel.isEmpty ? host : guestMachineLabel)
-        let peers = machinePeers.map { GuestMachine(alias: $0.alias, label: $0.displayName) }
-        await guestAccess.load(client: client, machines: [local] + peers)
+        let machines = GuestMachine.directory(
+            localLabel: guestMachineLabel.isEmpty ? host : guestMachineLabel,
+            savedMachines: savedMachines ?? [], agentPeers: machinePeers)
+        await guestAccess.load(client: client, machines: machines)
     }
 
     /// iPad "App & About": the light sections that stay inline on the iPhone index.
