@@ -71,8 +71,13 @@ final class GuestShareTests: XCTestCase {
     // MARK: Share + invite
 
     /// The design's frames (mock row 1) with llm-opt WORKING, for the owner-*.png screenshots.
-    /// Slow on purpose: every action waits out the pulse.
-    func testCaptureShareScreens() {
+    /// Opt-in (`TEST_RUNNER_HERDR_CAPTURE_GUEST_SCREENS=1`): the WORKING pill's endless pulse
+    /// keeps the app from idling, so every action here waits out XCUITest's 60 s idle timeout
+    /// and the capture takes over ten minutes, which the CI iPhone round cannot afford. The
+    /// same flows are proven quickly by the tests below.
+    func testCaptureShareScreens() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["HERDR_CAPTURE_GUEST_SCREENS"] == "1",
+                          "screenshot capture only; set TEST_RUNNER_HERDR_CAPTURE_GUEST_SCREENS=1")
         launch("share", still: false)
         XCTAssertTrue(text(containing: "Shared with plotarmordev").waitForExistence(timeout: 30))
         shoot("owner-4-chip")

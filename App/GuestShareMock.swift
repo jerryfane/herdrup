@@ -275,7 +275,11 @@ struct GuestShareMockTransport: HerdrTransport {
             "    prefill  \(bold)1,180 tok/s\(reset)",
             "\(blue)●\(reset) Writing results/tensorfold-q5.md",
         ].joined(separator: "\r\n")
-        let b64 = Data(("\u{1B}[2J\u{1B}[H" + body + "\r\n").utf8).base64EncodedString()
+        // Hide the cursor, as the agent's TUI does while it works. A visible cursor blinks
+        // forever (SwiftTerm's caret is a repeating animation), so the app never goes idle and
+        // every XCUITest action waits out its 60 s idle timeout, which is what pushed the CI
+        // iPhone round past its budget. The `scroll` mock hides it for the same reason.
+        let b64 = Data(("\u{1B}[2J\u{1B}[H" + body + "\r\n\u{1B}[?25l").utf8).base64EncodedString()
         return #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"\#(b64)"}"#
     }
 }
