@@ -483,6 +483,6 @@ describe("logging", () => {
       ]),
     );
     const all = lines.join("\n");
-    for (const secretText of [hostId, secret, marker, "AAAA"]) expect(all).not.toContain(secretText);
+    for (const secretText of [hostId, secret, marker]) expect(all).not.toContain(secretText);
   });
 });

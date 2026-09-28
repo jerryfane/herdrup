@@ -102,10 +102,12 @@ export class HostRelay extends DurableObject<Env> {
     const session = sql.exec<{ next_session: number }>("SELECT next_session FROM host WHERE id = 1").one().next_session;
     sql.exec("UPDATE host SET next_session = ? WHERE id = 1", session >= MAX_SESSION_ID ? 1 : session + 1);
 
+    // OPEN goes first: if the host socket fails now, no orphan guest socket is left behind.
+    // Nothing yields before the accept, so the host can't answer the session before it exists.
+    host.send(encodeFrame(OPEN, session));
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, ["guest", `session:${session}`]);
     server.serializeAttachment({ role: "guest", session } satisfies Attachment);
-    host.send(encodeFrame(OPEN, session));
     log({ endpoint, outcome: "opened" });
     return new Response(null, { status: 101, webSocket: client });
   }
