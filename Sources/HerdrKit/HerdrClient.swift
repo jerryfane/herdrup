@@ -1357,6 +1357,45 @@ public actor HerdrClient {
             viewerID: viewerID, ttl: ttl)
         return try await call("pane.set_pty_size", params, as: PanePtySize.self)
     }
+
+    // MARK: - Guest access (owner)
+
+    /// Create a one-use invite for a live agent (`guest.invite.create`). `target` is the
+    /// daemon-local pane id; for a federated agent pass the peer alias as `machine` (see
+    /// `GuestRoute`). Owner-only: a federation token or a guest gets `forbidden`, and a
+    /// Windows daemon answers `unsupported`.
+    public func guestInviteCreate(
+        target: String, name: String, ownerName: String, machineLabel: String,
+        ttlSecs: UInt64? = nil, machine: String? = nil
+    ) async throws -> GuestInviteCreated {
+        try await call("guest.invite.create",
+                       GuestInviteCreateParams(target: target, name: name, ownerName: ownerName,
+                                               machineLabel: machineLabel, ttlSecs: ttlSecs,
+                                               machine: machine),
+                       as: GuestInviteCreated.self)
+    }
+
+    /// Guests, invites and the relay link state of one machine (`guest.list`). Fingerprints only.
+    public func guestList(machine: String? = nil) async throws -> GuestListing {
+        try await call("guest.list", GuestListParams(machine: machine), as: GuestListing.self)
+    }
+
+    /// Revoke a guest (its live sessions close immediately) or cancel an unused invite.
+    public func guestRevoke(_ target: GuestRevokeTarget, machine: String? = nil) async throws {
+        _ = try await call("guest.revoke", GuestRevokeParams(target: target, machine: machine),
+                           as: OkAck.self)
+    }
+
+    /// The guest activity log, newest first (`guest.audit`). `limit` is clamped to the
+    /// daemon's 1...500; `beforeMs` pages further back.
+    public func guestAudit(
+        guestID: String? = nil, limit: Int = 100, beforeMs: UInt64? = nil, machine: String? = nil
+    ) async throws -> [GuestAuditEntry] {
+        try await call("guest.audit",
+                       GuestAuditParams(guestID: guestID, limit: limit, beforeMs: beforeMs,
+                                        machine: machine),
+                       as: GuestAuditResult.self).entries
+    }
 }
 
 /// Who the app reports as the actor when it archives an agent, and why.
