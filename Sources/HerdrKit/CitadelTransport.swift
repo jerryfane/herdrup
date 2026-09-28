@@ -324,6 +324,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         ].contains(where: { stderr.contains($0) }) {
             return .herdrIncompatible(host: host)
         }
+        // 127 is a shell's "could not run that command". With the sentinel ruled out,
+        // herdr itself never started: the account's shell rejected the command line
+        // (fish did, before herdrup#276) or herdr's exec failed. Calling that a
+        // bridge that "produced no reply" pointed at a daemon that was never reached.
+        if exitCode == 127 { return .remoteShellFailed(host: host, stderr: stderr) }
         return .bridgeFailed(stderr: stderr)
     }
 

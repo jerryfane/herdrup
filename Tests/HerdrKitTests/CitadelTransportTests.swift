@@ -256,6 +256,20 @@ final class CitadelTransportTests: XCTestCase {
         XCTAssertEqual(host, "box.example", "the host was not carried through")
     }
 
+    /// herdrup#276: a login shell that cannot parse the command exits 127 with its
+    /// own diagnostic, before herdr runs. That is reported as the shell failing to
+    /// start herdr, not as an api-bridge that ran and "produced no reply".
+    func testClassifyExit127WithoutSentinelBlamesTheShell() {
+        let stderr = "fish: Unsupported use of '='. In fish, please use 'set HERDR $(command -v herdr)'.\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 127, host: "box.example")
+        guard case TransportError.remoteShellFailed(let host, let diagnostic) = error else {
+            return XCTFail("expected .remoteShellFailed, got \(error)")
+        }
+        XCTAssertEqual(host, "box.example", "the host was not carried through")
+        XCTAssertEqual(diagnostic, stderr, "the shell's diagnostic was not preserved")
+    }
+
     /// A specific rejection of the api-bridge subcommand, not exit 2 alone,
     /// identifies an old or incompatible installed Herdr.
     func testClassifyBridgeFailureExitTwoIsIncompatible() {
