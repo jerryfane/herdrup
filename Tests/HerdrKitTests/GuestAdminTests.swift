@@ -255,6 +255,25 @@ final class GuestAdminTests: XCTestCase {
         ], "every machine exactly once, the connected one first, saved labels over agent-derived ones")
     }
 
+    /// A saved profile that has not opted into federation is not a peer: asking it for guests
+    /// would only surface a routing failure in Settings. It still keeps its saved label if its
+    /// agents already name it.
+    func testDirectorySkipsSavedMachinesThatAreNotFederated() throws {
+        let savedMachines = try saved(#"""
+        {"aa":{"profile_id":"aa","display_label":"mcb-air","saved_state":"coordinated","stale":false},
+         "dd":{"profile_id":"dd","display_label":"pi-tv","saved_state":"saved","federation_configured":false,"stale":false},
+         "ee":{"profile_id":"ee","display_label":"joltra","saved_state":"saved","federation_configured":false,"stale":false}}
+        """#)
+        let peers = [PeerSummary(alias: "ee", label: "old", agentCount: 1, reachability: .reachable)]
+        let directory = GuestMachine.directory(localLabel: "box", savedMachines: savedMachines,
+                                               agentPeers: peers)
+        XCTAssertEqual(directory, [
+            GuestMachine(alias: nil, label: "box"),
+            GuestMachine(alias: "ee", label: "joltra"),
+            GuestMachine(alias: "aa", label: "mcb-air"),
+        ], "an unfederated saved profile is read only when its agents already name it")
+    }
+
     func testDirectoryWithoutPeersIsJustTheConnectedMachine() {
         XCTAssertEqual(GuestMachine.directory(localLabel: "box", savedMachines: [], agentPeers: []),
                        [GuestMachine(alias: nil, label: "box")])

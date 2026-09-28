@@ -341,15 +341,17 @@ public struct GuestMachine: Hashable, Sendable {
     }
 
     /// Every machine that can hold guests: the connected one first, then the UNION of the
-    /// saved machine profiles and the peers that currently expose agents, by alias. A saved
-    /// machine running no agents still keeps its guests and invites, so it must be listed;
-    /// an agent-derived peer covers an older daemon without `machine.status`. Peers sort by
-    /// label; a saved profile's label wins over the one derived from agents.
+    /// federated saved machine profiles and the peers that currently expose agents, by alias.
+    /// A federated machine running no agents still keeps its guests and invites, so it must
+    /// be listed; an agent-derived peer covers an older daemon without `machine.status`. A
+    /// saved profile that has not opted into federation is not a routable peer (the
+    /// coordinator would refuse the request), so it is skipped unless its agents already
+    /// name it. Peers sort by label; a saved profile's label wins over the agent-derived one.
     public static func directory(localLabel: String, savedMachines: [SavedMachineStatus],
                                  agentPeers: [PeerSummary]) -> [GuestMachine] {
         var labels: [String: String] = [:]
         for peer in agentPeers { labels[peer.alias] = peer.displayName }
-        for saved in savedMachines {
+        for saved in savedMachines where saved.hasFederationPolicy || labels[saved.profileID] != nil {
             let label = saved.displayLabel.trimmingCharacters(in: .whitespaces)
             labels[saved.profileID] = label.isEmpty ? (labels[saved.profileID] ?? saved.profileID) : label
         }
