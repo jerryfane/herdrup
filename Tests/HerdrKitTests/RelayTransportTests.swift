@@ -269,7 +269,23 @@ final class RelayTransportTests: XCTestCase {
                        .relayRejected(status: 426, code: nil))
     }
 
+    /// A host that aborts mid-response closes 1000 with a reason; that is a failure,
+    /// not a short reply.
+    func testHostAbortWithReasonIsAnError() async throws {
+        let host = FakeHost()
+        host.serve = { _ in [Data("{\"partial".utf8)] }
+        host.closeAfterServe = .closed(code: 1000, reason: "overloaded")
+        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        do {
+            _ = try await transport.roundTrip("x")
+            XCTFail("expected an error")
+        } catch let error as GuestError {
+            XCTAssertEqual(error, .connectionClosed(code: 1000, reason: "overloaded"))
+        }
+    }
+
     func testCloseCodeMapping() {
+        XCTAssertEqual(RelayTransport.error(forClose: 1000, reason: "host_busy") as? GuestError, .hostBusy)
         XCTAssertEqual(RelayTransport.error(forClose: 1001, reason: "host_offline") as? GuestError, .hostOffline)
         XCTAssertEqual(RelayTransport.error(forClose: 1009, reason: nil) as? GuestError, .messageTooLarge)
         XCTAssertEqual(RelayTransport.error(forClose: 1003, reason: "") as? GuestError,

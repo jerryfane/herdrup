@@ -132,7 +132,9 @@ final class RelaySession: @unchecked Sendable {
                 throw GuestError.secureChannelFailed(failure.description)
             }
         case .closed(let code, let reason):
-            if code == 1000 { return nil }
+            // A normal end carries no reason; a host that aborts (decrypt_failed,
+            // overloaded, internal) closes 1000 WITH one, which must not read as EOF.
+            if code == 1000, reason?.isEmpty ?? true { return nil }
             throw RelayTransport.error(forClose: code, reason: reason)
         }
     }
@@ -206,6 +208,7 @@ public struct RelayTransport: HerdrTransport {
 
     /// Maps a WebSocket close the relay or host sent to a guest error.
     static func error(forClose code: Int, reason: String?) -> Error {
+        if reason == "host_busy" { return GuestError.hostBusy }
         switch code {
         case 1001: return GuestError.hostOffline
         case 1009: return GuestError.messageTooLarge
