@@ -63,15 +63,21 @@ struct GuestMockTransport: HerdrTransport {
             return #"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(sharedAgentJSON),\#(Self.otherAgentJSON)]}}"#
         case "agent.get":
             return #"{"id":"\#(id)","result":{"type":"agent_info","agent":\#(sharedAgentJSON)}}"#
-        case "agent.prompt":
+        case "agent.prompt", "gram.upload_chunk", "gram.post":
+            // Everything that reaches the agent is refused while it isn't running.
             if scenario == .paused {
                 return Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")
             }
-            return #"{"id":"\#(id)","result":{"type":"agent_prompted","delivery":"submitted"}}"#
-        case "gram.upload_chunk":
-            return #"{"id":"\#(id)","result":{"type":"ok"}}"#
-        default:  // gram.post
-            return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"gg1","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
+            switch method {
+            case "agent.prompt":
+                return #"{"id":"\#(id)","result":{"type":"agent_prompted","delivery":"submitted"}}"#
+            case "gram.upload_chunk":
+                return #"{"id":"\#(id)","result":{"type":"ok"}}"#
+            default:
+                return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"gg1","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
+            }
+        default:
+            return #"{"id":"\#(id)","result":{}}"#
         }
     }
 
@@ -122,6 +128,8 @@ struct GuestMockTransport: HerdrTransport {
     static let cols = 48
     static let rows = 30
 
+    /// A guest sees a FIXED projection of an agent: exactly these keys, and name, agent and
+    /// display_agent may be null. No cwd, titles, workspace, tab or session.
     private var sharedAgentJSON: String {
         let status = switch scenario {
         case .running: "working"
@@ -129,12 +137,12 @@ struct GuestMockTransport: HerdrTransport {
         case .blocked: "blocked"
         }
         let running = scenario != .paused
-        return #"{"pane_id":"w1-3","name":"llm-opt","agent":"omp","agent_status":"\#(status)","cwd":"/Users/jerry/repos/llm-opt","terminal_title":"benchmarking Q5 kernels","terminal_title_stripped":"benchmarking Q5 kernels","guest_running":\#(running)}"#
+        return #"{"terminal_id":"w1-3","pane_id":"w1-3","name":"llm-opt","agent":"omp","display_agent":"omp","agent_status":"\#(status)","guest_running":\#(running)}"#
     }
 
     /// Not shared with this guest; the UI must never show it.
     private static let otherAgentJSON =
-        #"{"pane_id":"w1-1","name":"jarvis","agent":"claude","agent_status":"idle","cwd":"/Users/jerry/herdr-ios","terminal_title_stripped":"asking to run tests","guest_running":false}"#
+        #"{"terminal_id":"term_jarvis","pane_id":"w1-1","name":"jarvis","agent":"claude","display_agent":null,"agent_status":"idle","guest_running":false}"#
 
     private static let esc = "\u{1b}["
     private static let body = esc + "38;2;201;205;224m"

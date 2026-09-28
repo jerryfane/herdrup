@@ -454,7 +454,9 @@ struct GuestPaneView: View {
     private func refresh() async {
         do {
             let agents = try await client.agentList()
-            let shared = agents.first { $0.name == access.agentName }
+            // The grant's terminal id first; name may be null in a guest's projection.
+            let shared = agents.first { $0.terminalID == access.agentTarget || $0.paneID == access.agentTarget }
+                ?? agents.first { $0.name == access.agentName }
             agent = shared ?? agent
             connectionNote = nil
             // No agent, or one the host says isn't in the foreground: paused.
