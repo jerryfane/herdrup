@@ -64,6 +64,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # LoginShellCommandTests runs the app's SSH exec commands through every login
+      # shell it finds, because sshd hands them to the ACCOUNT's shell and a fish
+      # account broke every channel (herdrup#276). The container has only sh, bash
+      # and dash; without these the test skips the shells that actually broke.
+      - name: Install login shells
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends fish zsh tcsh csh
+
       - name: Build
         run: swift build
 
