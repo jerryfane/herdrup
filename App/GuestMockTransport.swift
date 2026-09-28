@@ -157,6 +157,8 @@ struct GuestMockTransport: HerdrTransport {
     private static let highlight = esc + "48;2;24;25;53m"
     private static let reset = esc + "0m"
     private static let eol = esc + "K" + reset + "\r\n"
+    /// The agent's TUI hides the cursor while it works, as in the mock.
+    private static let hideCursor = esc + "?25l"
 
     private static var runningTranscript: String {
         faint + "~/repos/llm-opt" + reset + "\r\n"
@@ -170,7 +172,7 @@ struct GuestMockTransport: HerdrTransport {
             + blue + "●" + body + " Running bench/tensorfold.sh --q5 …" + reset + "\r\n"
             + body + "   decode   " + white + "41.2 tok/s" + body + "  " + green + "(+36%)" + reset + "\r\n"
             + body + "   prefill  " + white + "1,180 tok/s" + reset + "\r\n"
-            + blue + "●" + body + " Writing results/tensorfold-q5.md" + reset
+            + blue + "●" + body + " Writing results/tensorfold-q5.md" + reset + hideCursor
     }
 
     private static var blockedTranscript: String {
@@ -179,7 +181,7 @@ struct GuestMockTransport: HerdrTransport {
             + blue + "●" + body + " Writing results/tensorfold-q5.md" + reset + "\r\n"
             + amber + "?" + reset + " " + white + "Delete old results/tensorfold-*.md (3 files)?" + reset + "\r\n"
             + "  " + white + "❯ Yes" + reset + "\r\n"
-            + body + "    No" + reset
+            + body + "    No" + reset + hideCursor
     }
 
     // MARK: - Wire helpers
