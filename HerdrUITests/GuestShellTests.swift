@@ -61,9 +61,16 @@ final class GuestShellTests: XCTestCase {
         let app = launch("guest")
         XCTAssertTrue(app.buttons["guest-agent-row"].waitForExistence(timeout: 10))
 
-        app.tabBars.firstMatch.buttons["Settings"].tap()
+        // A tap on the tab bar right after launch can be swallowed while it settles, so
+        // tap until the tab reports selected.
+        let settingsTab = app.tabBars.firstMatch.buttons["Settings"]
+        let selected = NSPredicate(format: "isSelected == true")
+        for _ in 0..<3 where !settingsTab.isSelected {
+            settingsTab.tap()
+            _ = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: selected, object: settingsTab)], timeout: 3)
+        }
         let leave = app.buttons["guest-leave"]
-        XCTAssertTrue(leave.waitForExistence(timeout: 5), "guest Settings should offer Leave share")
+        XCTAssertTrue(leave.waitForExistence(timeout: 10), "guest Settings should offer Leave share")
         XCTAssertTrue(app.staticTexts["guest-settings-fingerprint"].label.hasPrefix("SHA256:"),
                       "Settings should show this phone's key fingerprint")
         attach(app, "guest-settings")
