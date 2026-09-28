@@ -15,10 +15,14 @@ final class GuestShareTests: XCTestCase {
         app = nil
     }
 
-    private func launch(_ mode: String, ownerName: String = "Jerry", pendingInvite: Bool = false) {
+    /// `still` makes llm-opt idle: the WORKING pill's endless pulse keeps the app from ever
+    /// going idle, which costs a minute per XCUITest action. Only the screenshot keeps it.
+    private func launch(_ mode: String, ownerName: String = "Jerry", pendingInvite: Bool = false,
+                        still: Bool = true) {
         app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launchEnvironment["HERDR_MOCK_OWNER_NAME"] = ownerName
+        if still { app.launchEnvironment["HERDR_MOCK_STILL"] = "1" }
         if pendingInvite { app.launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
         app.launch()
     }
@@ -61,12 +65,25 @@ final class GuestShareTests: XCTestCase {
 
     // MARK: Share + invite
 
+    /// The design's frames (mock row 1) with llm-opt WORKING, for the owner-*.png screenshots.
+    /// Slow on purpose: every action waits out the pulse.
+    func testCaptureShareScreens() {
+        launch("share", still: false)
+        XCTAssertTrue(text(containing: "Shared with plotarmordev").waitForExistence(timeout: 30))
+        shoot("owner-4-chip")
+        openShareSheet()
+        typeGuestName("plotarmordev\n")
+        shoot("owner-1-share")
+        element("guest-share-create").tap()
+        XCTAssertTrue(element("guest-invite-qr").waitForExistence(timeout: 30))
+        shoot("owner-2-invite")
+    }
+
     func testShareShowsTheLabelThenCreatesAnInviteWithQRAndLinks() {
         launch("share")
         // The chip names the guest who already holds llm-opt.
         XCTAssertTrue(text(containing: "Shared with plotarmordev").waitForExistence(timeout: 20),
                       "the pane header should say who the agent is shared with")
-        shoot("owner-4-chip")
 
         openShareSheet()
         XCTAssertFalse(element("guest-owner-name").exists, "a known owner name must not be asked again")
@@ -79,8 +96,6 @@ final class GuestShareTests: XCTestCase {
         XCTAssertTrue(text(containing: "Type into the terminal").exists)
         XCTAssertTrue(text(containing: "keystrokes can't carry a name").exists)
         XCTAssertTrue(create.isEnabled)
-        element("guest-share-name").typeText("\n")   // Done: drop the keyboard for the shot
-        shoot("owner-1-share")
 
         create.tap()
         XCTAssertTrue(element("guest-invite-qr").waitForExistence(timeout: 10), "no QR code after Create invite")
@@ -91,7 +106,6 @@ final class GuestShareTests: XCTestCase {
         let copy = element("guest-invite-copy")
         copy.tap()
         XCTAssertTrue(app.buttons["Copied"].waitForExistence(timeout: 3), "Copy link gave no feedback")
-        shoot("owner-2-invite")
     }
 
     func testAnInvalidNameIsRejectedBeforeAnythingIsSent() {

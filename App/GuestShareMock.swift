@@ -10,12 +10,17 @@ import SwiftUI
 /// Launch environment:
 /// - `HERDR_MOCK_OWNER_NAME`: preset "Your name"; `-` clears it to exercise the first-share ask.
 /// - `HERDR_MOCK_GUEST_INVITE=1`: start with one pending invite (for "sam").
+/// - `HERDR_MOCK_STILL=1`: llm-opt reads idle instead of working. The WORKING pill pulses
+///   forever, which holds XCUITest's wait-for-idle for a minute per action; only the
+///   screenshot capture keeps the design's WORKING state.
 enum GuestShareMock {
     static let machineLabel = "Jerry's Mac Studio"
     static let peerAlias = "2cc0ffe3a0753cafcf28f46a7bb29351"
 
+    static let agentStatus = ProcessInfo.processInfo.environment["HERDR_MOCK_STILL"] == "1" ? "idle" : "working"
+
     static let agent: AgentInfo = decodeAgent(
-        #"{"pane_id":"w1:p1","terminal_id":"t-llm","name":"llm-opt","agent":"omp","agent_status":"working","cwd":"/Users/jerry/repos"}"#)
+        #"{"pane_id":"w1:p1","terminal_id":"t-llm","name":"llm-opt","agent":"omp","agent_status":"\#(agentStatus)","cwd":"/Users/jerry/repos"}"#)
 
     /// A federated agent, so Settings reads a second guest store through the coordinator.
     static let peerAgent: AgentInfo = decodeAgent(
@@ -212,7 +217,7 @@ struct GuestShareMockTransport: HerdrTransport {
 
     private static let agentList = #"""
     {"id":"mock","result":{"type":"agent_list","agents":[
-      {"pane_id":"w1:p1","terminal_id":"t-llm","name":"llm-opt","agent":"omp","agent_status":"working","cwd":"/Users/jerry/repos"},
+      {"pane_id":"w1:p1","terminal_id":"t-llm","name":"llm-opt","agent":"omp","agent_status":"\#(GuestShareMock.agentStatus)","cwd":"/Users/jerry/repos"},
       {"pane_id":"2cc0ffe3a0753cafcf28f46a7bb29351/w1:p2","terminal_id":"2cc0ffe3a0753cafcf28f46a7bb29351/t-voice","name":"2cc0ffe3a0753cafcf28f46a7bb29351/voice","machine_id":"2cc0ffe3a0753cafcf28f46a7bb29351","machine_label":"pi-burj","agent":"claude","agent_status":"idle","cwd":"/home/pi/voice"}
     ]}}
     """#
