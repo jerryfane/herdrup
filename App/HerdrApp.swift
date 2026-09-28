@@ -7949,10 +7949,11 @@ struct SettingsView: View {
         .accessibilityIdentifier("settings-discord")
     }
 
-    /// The invite. A raw code rather than a vanity URL, which is safe to ship because
-    /// the OWNER CONFIRMED it is set to never expire with unlimited uses — recorded here
-    /// because nothing in the app or in CI can detect a dead invite, and correcting one
-    /// needs an App Store release. If it is ever rotated, prefer a vanity URL.
+    /// The invite. A raw code rather than a vanity URL. The previous code, TTFRHFyDXf,
+    /// was believed never to expire but did (#302). This one was checked on 2026-09-28
+    /// with Discord's invite API: `expires_at` is null. Nothing in the app or in CI can
+    /// detect a dead invite, and correcting one needs an App Store release, so re-check
+    /// it before each release; if it is ever rotated, prefer a vanity URL.
     private static let discordInvite = URL(string: "https://discord.gg/pq7qj4dDqt")!
 
     private func copyDiagnostics() {
