@@ -364,11 +364,7 @@ struct GuestInviteView: View {
                 HStack(spacing: 10) {
                     Button {
                         UIPasteboard.general.string = created.webURL
-                        copied = true
-                        Task {
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            copied = false
-                        }
+                        copied = true   // stays: the link on the clipboard does not expire
                     } label: {
                         Text(copied ? "Copied" : "Copy link")
                     }
