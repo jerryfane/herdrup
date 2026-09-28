@@ -290,6 +290,7 @@ struct RootView: View {
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
             .id(session)
+            .environment(\.guestMachineLabel, Self.hostLabel(for: credentials))
             // A device token can arrive AFTER connect (the APNs callback is async + independent of
             // SSH); register it whenever it lands while connected.
             .onChange(of: push.deviceToken) { _, _ in registerPush() }
@@ -437,6 +438,10 @@ struct RootView: View {
             }
         case .settings:
             SettingsView(client: mockClient, agents: [], host: "mac.tail-scale.ts.net")
+        case .share:
+            GuestShareMock.paneView()
+        case .sharedAccess:
+            GuestShareMock.settingsView()
         case .htmlPreview:
             HtmlPreviewHarness()
         case .widgets:
@@ -543,6 +548,19 @@ struct RootView: View {
     }
     #endif
 
+    /// The saved host's NICKNAME when there is one (falling back to the raw host/IP), so the
+    /// lock screen and guest invites read "My Mac" rather than an address. Match the saved
+    /// record the SAME way connect-from-saved does (HostEndpoint.parse): `saved.host` may be
+    /// "host:port" while `creds.host`/`creds.port` are already parsed apart, so a raw string
+    /// compare would miss any host saved with an explicit port.
+    private static func hostLabel(for creds: SSHCredentials) -> String {
+        let saved = SavedHostsStore.shared.hosts.first { saved in
+            guard let ep = HostEndpoint.parse(saved.host) else { return false }
+            return ep.host == creds.host && ep.port == creds.port && saved.username == creds.username
+        }
+        return saved?.label ?? creds.host
+    }
+
     private func connect(_ creds: SSHCredentials) {
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
@@ -551,16 +569,7 @@ struct RootView: View {
         client = newClient
         // Bring up the session Live Activity (#90) in a "connecting" state; the home
         // view's onChange pushes real agent status the moment the first list arrives.
-        // Label it with the saved host's NICKNAME when there is one (falling back to the
-        // raw host/IP), so the lock screen reads "My Mac" rather than an address. Match the
-        // saved record the SAME way connect-from-saved does (HostEndpoint.parse, above):
-        // `saved.host` may be "host:port" while `creds.host`/`creds.port` are already parsed
-        // apart, so a raw string compare would miss any host saved with an explicit port.
-        let savedLabel = SavedHostsStore.shared.hosts.first { saved in
-            guard let ep = HostEndpoint.parse(saved.host) else { return false }
-            return ep.host == creds.host && ep.port == creds.port && saved.username == creds.username
-        }?.label
-        LiveActivityController.shared.start(hostLabel: savedLabel ?? creds.host, state: LiveActivityController.connecting)
+        LiveActivityController.shared.start(hostLabel: Self.hostLabel(for: creds), state: LiveActivityController.connecting)
         // PRE-WARM: start the SSH handshake + first agent fetch the instant Connect
         // is tapped, so it overlaps the ConnectView→TerminalHomeView transition
         // instead of following it. The transport dedups concurrent connects, so this
@@ -2296,7 +2305,7 @@ struct TerminalHomeView: View {
             // App & About first (owner request), then the config sections. Explicit order
             // rather than `SettingsSection.allCases` so it's local to the sidebar and the
             // enum's declaration order stays untouched.
-            ForEach([SettingsSection.about, .machines, .accounts, .notifications, .appearance], id: \.self) { section in
+            ForEach([SettingsSection.about, .machines, .accounts, .notifications, .sharedAccess, .appearance], id: \.self) { section in
                 Button {
                     settingsAnchor = section
                 } label: {
@@ -4456,6 +4465,8 @@ struct TerminalPaneContent: View {
     /// they are all named by ONE prompt, so the agent gets a single turn that points at
     /// the whole set. Capped at `GramView.Staging.maxAttachments`.
     @State private var replyAttachments: [PromptAttachment] = []
+    /// The ••• "Share with someone" sheet and the guests who hold this agent (the header chip).
+    @StateObject private var guestShare = GuestSharePaneModel()
     @State private var loadingReplyAttachment = false
     /// Progress belongs to an attachment identity, including while its gram is posting.
     @State private var replyUploadBytes: (sent: Int, total: Int)?
@@ -4889,6 +4900,8 @@ struct TerminalPaneContent: View {
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(group.color.opacity(0.12)).clipShape(Capsule())
 
+                    if let chip = guestShare.chipText { GuestShareChip(text: chip) }
+
                     Spacer(minLength: 6)
 
                     // Center: how long the agent has been in this status (live).
@@ -4911,6 +4924,8 @@ struct TerminalPaneContent: View {
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .background(Palette.surface)
+        .modifier(GuestSharePresenter(model: guestShare, client: client, agent: agent,
+                                      fallbackTitle: title, isForeground: isForeground))
     }
 
     /// When the agent entered its current status — the SAME anchor the list card's
@@ -4977,6 +4992,12 @@ struct TerminalPaneContent: View {
                 Button {
                     terminalFontSize = 12.5
                 } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
+            }
+            if agent != nil {
+                Button {
+                    guestShare.isSharing = true
+                } label: { Label("Share with someone", systemImage: "person.badge.plus") }
+                .accessibilityIdentifier("terminal-share")
             }
             Button {
                 mute.toggle(paneID)
@@ -6105,13 +6126,14 @@ struct TerminalPaneContent: View {
 /// sections (Trouble / Help / Support / About) — rendered INLINE on the iPhone
 /// index, and as a single "App & About" detail on the iPad split.
 enum SettingsSection: Hashable, CaseIterable {
-    case machines, accounts, notifications, about, appearance
+    case machines, accounts, notifications, sharedAccess, about, appearance
 
     var label: String {
         switch self {
         case .machines:      return "Machines"
         case .accounts:      return "Accounts"
         case .notifications: return "Notifications"
+        case .sharedAccess:  return "Shared access"
         case .about:         return "App & About"
         case .appearance:    return "Text size"
         }
@@ -6122,6 +6144,7 @@ enum SettingsSection: Hashable, CaseIterable {
         case .machines:      return "server.rack"
         case .accounts:      return "key.horizontal"
         case .notifications: return "bell"
+        case .sharedAccess:  return "person.2"
         case .about:         return "info.circle"
         case .appearance:    return "textformat.size"
         }
@@ -6304,6 +6327,9 @@ struct SettingsView: View {
     /// The apply outcome, shown in an alert (nil = no alert). Distinguishes a clean update, a
     /// partial disk-stale warning, a rolled-back failure, and an unconfirmed "still restarting".
     @State private var updateResult: String?
+    /// Settings → Shared access: guests, pending invites and the activity log, across machines.
+    @StateObject private var guestAccess = GuestAccessModel()
+    @Environment(\.guestMachineLabel) private var guestMachineLabel
 
     var body: some View {
         Group {
@@ -6366,6 +6392,8 @@ struct SettingsView: View {
         // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
         // `server.staged_update` leaves it nil (version line + update callout simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
+        // The Shared access row's summary; `try?`-style degrade lives in the model.
+        .task { await loadGuestAccess() }
         // "How to set up accounts" — a step-by-step guide for adding another
         // subscription on the box (accounts live there, not in the app).
         .sheet(isPresented: $showAccountsSetup) {
@@ -6534,6 +6562,7 @@ struct SettingsView: View {
         case .machines:      machinesDetail(showBack: showBack)
         case .accounts:      accountsDetail(showBack: showBack)
         case .notifications: notificationsDetail(showBack: showBack)
+        case .sharedAccess:  sharedAccessDetail(showBack: showBack)
         case .about:         aboutDetail(showBack: showBack)
         case .appearance:    appearanceDetail(showBack: showBack)
         }
@@ -6652,6 +6681,22 @@ struct SettingsView: View {
                        showBack: showBack) {
             notifySection
         }
+    }
+
+    private func sharedAccessDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Shared access", subtitle: guestAccess.summary, showBack: showBack) {
+            GuestAccessSection(client: client, model: guestAccess) { await loadGuestAccess() }
+        }
+        .task { await loadGuestAccess() }
+        .refreshable { await loadGuestAccess() }
+    }
+
+    /// The connected machine plus every federated peer: each keeps its own guest store,
+    /// which the coordinator reaches by the peer's alias.
+    private func loadGuestAccess() async {
+        let local = GuestMachine(alias: nil, label: guestMachineLabel.isEmpty ? host : guestMachineLabel)
+        let peers = machinePeers.map { GuestMachine(alias: $0.alias, label: $0.displayName) }
+        await guestAccess.load(client: client, machines: [local] + peers)
     }
 
     /// iPad "App & About": the light sections that stay inline on the iPhone index.
@@ -6812,6 +6857,8 @@ struct SettingsView: View {
                 manageRow(.accounts, subtitle: accountsSubtitle) { manageAccountsTrailing }
                 rowDivider
                 manageRow(.notifications, subtitle: "Push alerts from this machine") { manageNotifyTrailing }
+                rowDivider
+                manageRow(.sharedAccess, subtitle: "People you share an agent with") { manageSharedTrailing }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
@@ -6860,6 +6907,10 @@ struct SettingsView: View {
                 .background(Capsule().fill(Palette.died.opacity(0.12)))
                 .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
         }
+    }
+
+    @ViewBuilder private var manageSharedTrailing: some View {
+        Text(guestAccess.summary).font(Typography.machine(12)).foregroundStyle(Palette.textDim)
     }
 
     @ViewBuilder private var manageNotifyTrailing: some View {
@@ -8334,6 +8385,8 @@ struct HtmlPreviewHarness: View {
 enum ScreenshotMock {
     case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestSettings
+    // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
+    case share, sharedAccess
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -8347,6 +8400,8 @@ enum ScreenshotMock {
         case "rosterstress": return .rosterStress
         case "pane": return .pane
         case "settings": return .settings
+        case "share": return .share
+        case "sharedaccess": return .sharedAccess
         // `htmlpreview` renders the received-document viewer over a file whose script
         // REWRITES the page, so a receipt can read off the rendered text whether the
         // Settings switch let it run. Same view and same @AppStorage key the Gram page
