@@ -1,0 +1,48 @@
+/* HerdrUp palette and type, as in the app and the guest-access mock. */
+@font-face{font-family:"Geist";font-weight:400;font-display:swap;src:url(/fonts/Geist-Regular.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:600;font-display:swap;src:url(/fonts/Geist-SemiBold.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:700;font-display:swap;src:url(/fonts/Geist-Bold.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-weight:500;font-display:swap;src:url(/fonts/IBMPlexMono-Medium.woff2) format("woff2")}
+
+:root{
+  --ground:#13162A;--surface:#1D2038;--raised:#262A45;--hair:#2E3358;--hairq:#232742;
+  --ink:#EEF0F7;--dim:#99A0BC;--faint:#666D91;--brand:#7A6FF0;--amber:#E9A63C;--you:#b7a8ff;
+  --app:"Geist",-apple-system,system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%;background:var(--ground);color:var(--ink);font-family:var(--app);-webkit-font-smoothing:antialiased}
+[hidden]{display:none!important}
+main{max-width:440px;min-height:100vh;min-height:100dvh;margin:0 auto;display:flex;flex-direction:column;
+  padding:max(40px,env(safe-area-inset-top)) 0 max(34px,env(safe-area-inset-bottom))}
+.mono{font-family:var(--mono);font-weight:500}
+.you{color:var(--you)}
+
+.hero{margin:30px 24px 0;text-align:center}
+.ava{width:72px;height:72px;border-radius:18px;margin:0 auto 16px;display:grid;place-items:center;
+  font:700 34px var(--app);color:#fff;background:linear-gradient(160deg,#9486ff,#6a5ce6)}
+.hero h1{font:700 24px var(--app);letter-spacing:-.01em;overflow-wrap:anywhere}
+.hero p{font:400 15px var(--app);color:var(--dim);margin-top:8px;line-height:1.5}
+
+.sec{display:flex;align-items:center;gap:8px;margin:26px 16px 8px;font:600 12px var(--mono);letter-spacing:.13em;
+  color:var(--faint);text-transform:uppercase}
+.sec::after{content:"";flex:1;height:1px;background:var(--hairq)}
+.card{margin:0 16px;background:var(--surface);border:1px solid var(--hair);border-radius:18px;overflow:hidden}
+.kv{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 16px;
+  border-bottom:1px solid var(--hairq);font-size:15px}
+.kv:last-child{border-bottom:0}
+.kv span:first-child{color:var(--dim);flex:none}
+.kv span:last-child{text-align:right;overflow-wrap:anywhere}
+.kv .mono{font-size:13.5px}
+.expiry{margin:10px 16px 0;font:400 13px var(--app);color:var(--faint);text-align:center}
+.expiry.expired{color:var(--amber)}
+.note{margin:14px 16px 0;padding:12px 14px;border-radius:14px;background:rgba(122,111,240,.09);
+  border:1px solid rgba(122,111,240,.28);color:var(--dim);font-size:13px;line-height:1.5}
+.note b{font-weight:600}
+.problem{margin:22px 16px 0;padding:12px 14px;border-radius:14px;background:rgba(233,166,60,.08);
+  border:1px solid rgba(233,166,60,.3);color:var(--dim);font-size:13px;line-height:1.5}
+
+.foot{margin:auto 16px 0;padding-top:28px;display:flex;flex-direction:column;gap:10px}
+.btn{height:50px;border-radius:25px;display:grid;place-items:center;font:600 16px var(--app);text-decoration:none}
+.btn.primary{background:var(--ink);color:var(--ground)}
+.btn.quiet{background:var(--raised);color:var(--ink)}
+.hint{font:400 12.5px var(--app);color:var(--faint);text-align:center;line-height:1.5;margin-top:4px}

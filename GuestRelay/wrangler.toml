@@ -1,0 +1,32 @@
+name = "herdrup-guest"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+workers_dev = true
+# Attached on deploy; the zone themartian.app must be on the deploying account.
+routes = [{ pattern = "guest.herdrup.themartian.app", custom_domain = true }]
+
+# The /i invite landing page and its fonts. Matching requests never reach the Worker,
+# so they are not logged. The Worker never uses ASSETS; the tests fetch through it.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# One Durable Object per host_id (guest access contract, herdrup#309/#310).
+[[durable_objects.bindings]]
+name = "HOSTS"
+class_name = "HostRelay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HostRelay"]
+
+# Both keyed by CF-Connecting-IP and checked before the Durable Object is reached.
+[[ratelimits]]
+name = "GUEST_CONNECT_LIMIT"
+namespace_id = "3101"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "HOST_CONNECT_LIMIT"
+namespace_id = "3102"
+simple = { limit = 10, period = 60 }

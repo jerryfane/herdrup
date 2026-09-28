@@ -29,3 +29,8 @@ screenshots/
 PushRelay/node_modules/
 PushRelay/.wrangler/
 PushRelay/.dev.vars
+
+# GuestRelay (Cloudflare Worker): dependencies, wrangler state, local secrets.
+GuestRelay/node_modules/
+GuestRelay/.wrangler/
+GuestRelay/.dev.vars
