@@ -153,22 +153,24 @@ final class CitadelTransportTests: XCTestCase {
     /// so the string must mean the same thing to fish, csh and tcsh as to sh: words
     /// separated by spaces, each a bare word from a small safe alphabet or a
     /// single-quoted string holding no character some shell does not take literally
-    /// inside single quotes. Parsing it by exactly that grammar must recover
-    /// `/bin/sh -c <launcher> sh api-bridge <base64>` with the request intact. The
-    /// real shells run it in `LoginShellCommandTests`.
+    /// inside single quotes, none as long as Debian csh's ~8 KiB word limit. Parsing
+    /// it by exactly that grammar must recover `/bin/sh -c <script> sh <base64
+    /// pieces>` with the request intact. The real shells run it in
+    /// `LoginShellCommandTests`.
     func testBridgeCommandIsOneQuotedSimpleCommandForAnyLoginShell() throws {
-        // Every character the grammar forbids, and long enough that line-wrapping
-        // base64 would put a newline in the argument.
-        let request = String(repeating: #"{"text":"it's \"q\" \\ !x $(id) `id`\n"},"#, count: 20)
+        // Every character the grammar forbids, and a base64 argument well past csh's
+        // word limit, long enough that line-wrapping base64 would add a newline.
+        let request = String(repeating: #"{"text":"it's \"q\" \\ !x $(id) `id`\n"},"#, count: 400)
         let command = try CitadelTransport.bridgeCommand(for: request)
 
         let words = try Self.wordsEveryShellAgreesOn(command)
-        XCTAssertEqual(words.count, 6, "unexpected command shape: \(words)")
-        XCTAssertEqual(Array(words.prefix(2)), ["/bin/sh", "-c"], "the launcher is not handed to /bin/sh")
-        XCTAssertEqual(words[2], CitadelTransport.herdrLauncherScript, "the launcher script was altered by quoting")
-        XCTAssertEqual(Array(words[3...4]), ["sh", "api-bridge"])
-        let decoded = try XCTUnwrap(Data(base64Encoded: words[5]).map { String(decoding: $0, as: UTF8.self) },
-                                    "the request argument is not valid base64")
+        guard words.count >= 5 else { return XCTFail("unexpected command shape: \(words)") }
+        XCTAssertEqual(Array(words.prefix(2)), ["/bin/sh", "-c"], "the script is not handed to /bin/sh")
+        XCTAssertEqual(words[3], "sh", "the script's $0 is missing, so the payload shifts into it")
+        let longest = try XCTUnwrap(words.map(\.utf8.count).max())
+        XCTAssertLessThan(longest, 8_000, "a \(longest)-byte word; Debian csh fails with Word too long")
+        let decoded = try XCTUnwrap(Data(base64Encoded: words[4...].joined()).map { String(decoding: $0, as: UTF8.self) },
+                                    "the request pieces do not rejoin into valid base64")
         XCTAssertEqual(decoded, request, "the request was altered in transit")
     }
 
