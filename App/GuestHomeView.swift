@@ -203,7 +203,7 @@ struct GuestHomeView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(access.agentName)
                     .font(Typography.app(17, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                Text(running ? row.map { meta($0.info) } ?? "" : "\(access.agentName) isn't running")
+                Text(running ? row.map(meta) ?? "" : "\(access.agentName) isn't running")
                     .font(Typography.machine(13.5)).foregroundStyle(Palette.textDim).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -224,13 +224,10 @@ struct GuestHomeView: View {
         .padding(.horizontal, 16)
     }
 
-    private func meta(_ info: AgentInfo) -> String {
-        switch (info.guestFolder, info.terminalTitleStripped) {
-        case let (f?, a?): return "\(f) · \(a)"
-        case let (f?, nil): return f
-        case let (nil, a?): return a
-        case (nil, nil): return info.agent ?? access.agentName
-        }
+    /// The guest projection carries no cwd or title, so the meta is the agent kind and
+    /// its state ("omp · working"), or the state alone when the kind is unknown.
+    private func meta(_ row: AgentRow) -> String {
+        [row.info.agent, row.group.label].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func edge(_ group: AgentGroup) -> Color {
@@ -324,8 +321,9 @@ struct GuestHomeView: View {
             let agents = try await client.agentList()
             // The host already lists only the shared agent; the app still shows nothing
             // else, so a host bug cannot reveal the owner's other agents.
-            // Matched by name: the grant's target is a terminal id, not a pane id.
-            let shared = agents.first { $0.name == access.agentName }
+            // Matched by the grant's terminal id, else by name (the projection may omit it).
+            let shared = agents.first { $0.terminalID == access.agentTarget }
+                ?? agents.first { $0.name == access.agentName }
             status = .live(shared.map { AgentRow(info: $0) })
         } catch is CancellationError {
             return
