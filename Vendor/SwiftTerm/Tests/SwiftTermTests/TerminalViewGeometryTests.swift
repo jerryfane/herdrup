@@ -11,6 +11,30 @@ import XCTest
 final class TerminalViewGeometryTests: XCTestCase {
     private let escape = "\u{1b}"
 
+    /// The first UIKit view in this hostless test process pays UIKit's one-time setup,
+    /// and on a simulator booted moments earlier that setup can block for minutes: CI
+    /// charged 24-620 s of it to whichever test happened to run first, and a local repro
+    /// spent 111 s inside the first `UIScrollView` init. Pay it once here, and log it,
+    /// so each test's time and allowance measure only that test.
+    nonisolated override class func setUp() {
+        super.setUp()
+        let start = Date()
+        MainActor.assumeIsolated {
+            _ = TerminalView(frame: CGRect(x: 0, y: 0, width: 64, height: 48),
+                             font: UIFont.monospacedSystemFont(ofSize: 14, weight: .regular))
+        }
+        print(String(format: "TerminalViewGeometryTests: first TerminalView took %.3f s",
+                     Date().timeIntervalSince(start)))
+    }
+
+    /// A real hang fails the test with a timeout instead of eating the CI round.
+    /// XCTest rounds this up to whole minutes and enforces it only when the run
+    /// passes `-test-timeouts-enabled YES`.
+    nonisolated override func setUp() {
+        super.setUp()
+        executionTimeAllowance = 120
+    }
+
     private func makeView() -> TerminalView {
         let view = TerminalView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
