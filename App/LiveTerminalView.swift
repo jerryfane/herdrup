@@ -101,6 +101,9 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Called after a terminal tap requests direct PTY input. The parent owns the
     /// SwiftUI focus state so a reply submission can dismiss the keyboard reliably.
     var onTerminalFocusRequest: () -> Void = {}
+    /// Called on the main actor when the live stream ends (nil = closed cleanly), before
+    /// the view decides whether to reconnect. Lets a host react to why it ended.
+    var onStreamEnded: (Error?) -> Void = { _ in }
     /// Bumped by the host to jump this pane to its newest output. `updateUIView`
     /// compares it against the value the Coordinator last executed, so each
     /// increment performs exactly one jump.
@@ -160,6 +163,7 @@ struct LiveTerminalView: UIViewRepresentable {
         let surface = TerminalSurfaceView(terminal: view)
         context.coordinator.onNavigate = onNavigate
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        context.coordinator.onStreamEnded = onStreamEnded
         // BEFORE attach, which starts the stream: the first frame must be recorded, or a
         // pane that connects while the app is backgrounding looks stale on return.
         context.coordinator.liveness = liveness
@@ -177,6 +181,7 @@ struct LiveTerminalView: UIViewRepresentable {
         let terminalView = uiView.terminal
         context.coordinator.onNavigate = onNavigate
         context.coordinator.onTerminalFocusRequest = onTerminalFocusRequest
+        context.coordinator.onStreamEnded = onStreamEnded
         // Live accessors, refreshed every pass: a captured Bool would be a snapshot of
         // the state as it was when this body ran, which is exactly the race that makes
         // an immediate keypress after a Ctrl tap miss the modifier.
@@ -964,6 +969,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Requests SwiftUI terminal-input focus after a tap. The parent controls
         /// actual responder ownership so it can dismiss the keyboard after Send.
         var onTerminalFocusRequest: (() -> Void)?
+        /// See `LiveTerminalView.onStreamEnded`. Refreshed by `updateUIView`.
+        var onStreamEnded: ((Error?) -> Void)?
         /// Publishes tail state to the host (see `LiveTerminalView.onTailStateChange`).
         /// Refreshed by `updateUIView`.
         var onTailStateChange: ((Bool) -> Void)?
@@ -2113,7 +2120,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// can never stall the live seed. Runs concurrently with the stream; the FIRST reset
         /// awaits this at the single point where the bytes must land above the seed.
         private func startBackfill() {
-            guard Self.backfillLines > 0 else { backfillTask = nil; return }
+            // View-only (a guest) may not call `agent.read`; the stream's reset is the seed.
+            guard !viewOnly, Self.backfillLines > 0 else { backfillTask = nil; return }
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
                 // Race the read against the timeout and take whichever finishes FIRST, ABANDONING
@@ -2351,6 +2359,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // torn-down view must not reconnect either.
             if sawExited { return }
             guard !stopped, view != nil else { return }
+            onStreamEnded?(error)
             // A PERMANENT server refusal is not a dropped connection. Reconnecting cannot
             // change the answer, so retrying only spins "reconnecting…" forever over a pane
             // that will never be served. Say so once and stop.
