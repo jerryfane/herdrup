@@ -90,6 +90,8 @@ struct LiveTerminalView: UIViewRepresentable {
     /// iPad software keyboards and iOS apps running on Apple Silicon Macs.
     /// Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
+    /// Guest view-only: no input or focus, never sizes the PTY; the stream's cols fit the width.
+    var viewOnly: Bool = false
     /// Bumped by the reply bar's chevron to request a DELIBERATE collapse, as opposed to the many
     /// incidental body passes that also see `wantsTerminalKeyFocus == false`. Only a deliberate
     /// collapse may resign the responder while a selection is held: see the resign branch in
@@ -150,6 +152,8 @@ struct LiveTerminalView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
     func makeUIView(context: Context) -> TerminalSurfaceView {
+        // BEFORE attach, which starts the stream and the geometry drain.
+        context.coordinator.viewOnly = viewOnly
         context.coordinator.paneFontSize =
             min(max(fontSize, Coordinator.minFontSize), Coordinator.maxFontSize)
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
@@ -185,8 +189,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
+        context.coordinator.viewOnly = viewOnly
         context.coordinator.setForeground(isForeground)
-        context.coordinator.directFocusIntended = wantsTerminalKeyFocus
+        context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         // Before the focus decision below: a host-delivered keycap is the user acting
         // on this pane, so it must drop a retained frame at once.
@@ -209,7 +214,7 @@ struct LiveTerminalView: UIViewRepresentable {
         //
         // Only a FOREGROUND pane mid-selection keeps its responder, which is what stops a
         // SwiftUI body pass from hiding the Copy menu.
-        if wantsTerminalKeyFocus {
+        if wantsTerminalKeyFocus && !viewOnly {
             if !terminalView.isFirstResponder { _ = terminalView.becomeFirstResponder() }
         } else {
             if !isForeground { terminalView.clearSelection() }
@@ -249,7 +254,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // Consumed HERE rather than beside `performJumpToTail`, so a pass that re-requests
             // focus cannot silently eat a collapse it was never going to act on.
             let deliberateCollapse = context.coordinator.consumeCollapse(ifTokenChanged: collapseToken)
-            if terminalView.isFirstResponder, !isForeground || deliberateCollapse || !terminalView.hasActiveSelection {
+            if terminalView.isFirstResponder,
+               viewOnly || !isForeground || deliberateCollapse || !terminalView.hasActiveSelection {
                 terminalView.resignFirstResponder()
                 // Losing the keyboard is an explicit dismissal: an armed one-shot must not
                 // survive to modify whatever is typed next, in this pane or another.
@@ -261,7 +267,12 @@ struct LiveTerminalView: UIViewRepresentable {
                 context.coordinator.publishSelectionProbe(deliberateCollapse ? "collapseResign" : "passResign")
             }
         }
-        context.coordinator.applyFont(size: fontSize)
+        // View-only: the width fit owns the font, so the `fontSize` preference is ignored.
+        if viewOnly {
+            context.coordinator.fitFontToStreamWidth()
+        } else {
+            context.coordinator.applyFont(size: fontSize)
+        }
         // After the focus decision above, so the native modifier matches the input path
         // that is actually live.
         context.coordinator.applyControlModifier()
@@ -286,6 +297,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// While live-anchored, the grid the CONTAINER fits. The terminal's own frame is
         /// deliberately not the container then, so its proposals would be the old grid.
         var onAnchoredFit: ((_ cols: Int, _ rows: Int) -> Void)?
+        /// After a layout pass that changed the container's width (rotation, split view).
+        var onWidthChange: (() -> Void)?
+        private var reportedWidth: CGFloat = 0
 
         /// A software-keyboard transition on iPhone: the terminal keeps its current grid
         /// and pixel size and stays LIVE, positioned inside the moving container, until
@@ -324,6 +338,7 @@ struct LiveTerminalView: UIViewRepresentable {
             guard isLiveAnchored else {
                 if terminal.frame != bounds { terminal.frame = bounds }
                 layoutCover()
+                reportWidthChange()
                 return
             }
             if terminal.getTerminal().rows == anchoredRows {
@@ -335,6 +350,13 @@ struct LiveTerminalView: UIViewRepresentable {
                 endLiveAnchor()
             }
             layoutCover()
+            reportWidthChange()
+        }
+
+        private func reportWidthChange() {
+            guard bounds.width != reportedWidth else { return }
+            reportedWidth = bounds.width
+            onWidthChange?()
         }
 
         // MARK: live keyboard anchor
@@ -538,7 +560,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Selection/Copy and direct terminal typing both need SwiftTerm's responder.
         /// Do not hide the software keyboard on iPad or infer keyboard availability
         /// from GCKeyboard: it can be nil even for an iOS app on a Mac with a keyboard.
-        override var canBecomeFirstResponder: Bool { true }
+        /// False while view-only, so no tap (ours or SwiftTerm's) can take the responder.
+        var allowsFocus = true
+        override var canBecomeFirstResponder: Bool { allowsFocus }
 
         override init(frame: CGRect, font: UIFont?) {
             super.init(frame: frame, font: font)
@@ -857,6 +881,10 @@ struct LiveTerminalView: UIViewRepresentable {
         private var applyingControlModifier = false
         private var controlResetObserver: NSObjectProtocol?
         var directFocusIntended = false
+        /// View-only (guest): never sizes the PTY, sends no bytes, never takes focus.
+        var viewOnly = false {
+            didSet { view?.allowsFocus = !viewOnly }
+        }
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
@@ -1030,6 +1058,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// splits missing private-use glyphs into `HerdrupSymbols` runs for SwiftTerm to draw.
         static let minFontSize: CGFloat = 9
         static let maxFontSize: CGFloat = 24
+        /// View-only fits the stream's cols to the width, which can need a smaller font.
+        static let viewOnlyMinFontSize: CGFloat = 4
         static let defaultFontSize: CGFloat = 12.5
         /// Terminal font size in points, driven by the `terminal.fontSize` preference.
         /// Instance (not static) so it can change at runtime: setting `view.font` from
@@ -1113,11 +1143,44 @@ struct LiveTerminalView: UIViewRepresentable {
         /// the authoritative grid still arrives in band, so the reader sees the old
         /// frame until the new one is ready rather than text reflowing under them.
         func applyFont(size: CGFloat) {
-            let clamped = min(max(size, Self.minFontSize), Self.maxFontSize)
-            guard clamped != paneFontSize else { return }
-            paneFontSize = clamped
+            setPaneFontSize(min(max(size, Self.minFontSize), Self.maxFontSize))
+        }
+
+        private func setPaneFontSize(_ size: CGFloat) {
+            guard size != paneFontSize else { return }
+            paneFontSize = size
             beginResizePresentation(reason: .local)
             view?.font = paneFont
+        }
+
+        private var lastViewOnlyFit: (cols: Int, width: CGFloat, size: CGFloat)?
+
+        /// View-only: the font at which exactly the stream's `cols` fill the container's
+        /// width. Measures `"W"`'s advance like `cellPixels` (the advance scales linearly
+        /// with point size) and targets SwiftTerm's pixel-snapped cell width, which rounds
+        /// the advance UP to the screen scale, so `cols` cells never overflow. The grid is
+        /// the stream's, untouched; a same-size commit reconciles scroller and cursor.
+        func fitFontToStreamWidth() {
+            guard viewOnly, let view, let cols = streamAppliedGeometry?.cols else { return }
+            let width = surface?.bounds.width ?? view.bounds.width
+            guard width > 0, cols > 0 else { return }
+            // `updateUIView` calls this on every body pass; only new inputs re-measure.
+            if let fit = lastViewOnlyFit, fit.cols == cols, fit.width == width,
+               fit.size == paneFontSize { return }
+            defer { lastViewOnlyFit = (cols: cols, width: width, size: paneFontSize) }
+            let reference = Self.maxFontSize
+            let advance = ("W" as NSString)
+                .size(withAttributes: [.font: Self.makePaneFont(size: reference)]).width
+            let scale = UIScreen.main.scale
+            let cell = floor(width / CGFloat(cols) * scale) / scale
+            guard advance > 0, cell > 0 else { return }
+            // A hair under the pixel boundary, so float error cannot ceil to the next pixel.
+            let fitted = reference * (cell - 0.01 / scale) / advance
+            let size = min(max(fitted, Self.viewOnlyMinFontSize), Self.maxFontSize)
+            guard abs(size - paneFontSize) >= 0.01 else { return }
+            setPaneFontSize(size)
+            let terminal = view.getTerminal()
+            view.applyTerminalSize(cols: terminal.cols, rows: terminal.rows)
         }
 
         /// Scrollback backfill — so scrolling up shows output produced BEFORE this connection
@@ -1145,6 +1208,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let view = surface.terminal
             self.view = view
             self.surface = surface
+            view.allowsFocus = !viewOnly
             view.terminalDelegate = self
             #if DEBUG
             MainActor.assumeIsolated {
@@ -1160,6 +1224,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // Installed BEFORE the stream starts, so the very first layout pass cannot
             // reflow the emulator to a locally guessed size ahead of the daemon's.
             view.sizeChangeRequestHandler = { [weak self] cols, rows in
+                // View-only: the stream's grid is authoritative; local fits are never proposed.
+                guard self?.viewOnly == false else { return }
                 // A live-anchored terminal is deliberately not the container's size, so
                 // its fit is not the one wanted: the container's is.
                 if let surface = self?.surface, surface.isLiveAnchored {
@@ -1169,6 +1235,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 self?.requestGeometry(cols: cols, rows: rows)
             }
             surface.onAnchoredFit = { [weak self] cols, rows in
+                guard self?.viewOnly == false else { return }
                 self?.requestGeometry(cols: cols, rows: rows)
             }
             view.synchronizedOutputChangeHandler = { [weak self] active in
@@ -1188,12 +1255,17 @@ struct LiveTerminalView: UIViewRepresentable {
             // The container tells us a frame change is imminent, while the current
             // rendering is still on screen and can be retained.
             surface.onGeometryWillChange = { [weak self] in
+                // View-only never requests geometry, so a local cover could only time out.
+                guard self?.viewOnly == false else { return }
                 // The reason is the sweep's: a keyboard-driven relayout may retain a
                 // frame even though the send that dismissed the keyboard just dropped
                 // one. This fires only when the frame REALLY changes, so a keyboard
                 // event that does not resize this pane still costs nothing.
                 self?.beginResizePresentation(
                     reason: self?.keyboardSweepActive == true ? .keyboard : .local)
+            }
+            surface.onWidthChange = { [weak self] in
+                self?.fitFontToStreamWidth()
             }
             view.onWillInsertText = { [weak self] text, composing in
                 self?.prepareForInsertedText(text, composing: composing)
@@ -1412,13 +1484,14 @@ struct LiveTerminalView: UIViewRepresentable {
             // reveal must not put them back where they were.
             userTookControl()
             let term = view.getTerminal()
-            if term.isCurrentBufferAlternate || term.mouseMode != .off {
+            // View-only sends nothing: the jump is a local scroll whatever the agent's mode.
+            if !viewOnly, term.isCurrentBufferAlternate || term.mouseMode != .off {
                 // Report the tail ONLY once the send has actually landed. Reporting up
                 // front cleared the pill while a rejected or dropped Ctrl+End left the
                 // agent's viewport exactly where it was, so the reader lost the affordance
                 // and the state lied at the same time.
                 Task { @MainActor [weak self] in
-                    guard let self, !self.stopped else { return }
+                    guard let self, !self.stopped, !self.viewOnly else { return }
                     do {
                         _ = try await self.client.sendText(pane: self.paneID, text: "\u{1b}[1;5F")
                         self.reportTailState(atTail: true)
@@ -1587,7 +1660,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Focus comes from a deliberate terminal tap, not keyboard presence;
         /// selection and Copy still use the same responder.
         @objc private func handleFocusTap(_ gr: UITapGestureRecognizer) {
-            guard !stopped, foreground, gr.state == .ended else { return }
+            // View-only never takes focus or raises a keyboard.
+            guard !stopped, foreground, !viewOnly, gr.state == .ended else { return }
             // A TAP THAT STOPS A SCROLL IS NOT A REQUEST FOR THE KEYBOARD, and treating it as one
             // is a defect the owner hit on a real iPhone: scrolling back through output would
             // "randomly" raise the keyboard, which relayouts the terminal band, resizes the PTY and
@@ -1898,7 +1972,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // Leave any existing registry entry in place on this early bail (a pane that never
             // laid out): an older release may still be in flight, and its entry is the only handle
             // a future re-lock has to await it.
-            guard let target, target.cols >= 4, target.rows >= 2 else { return }
+            // View-only never held a lease, and must never send `set_pty_size`.
+            guard !viewOnly, let target, target.cols >= 4, target.rows >= 2 else { return }
             let cols = target.cols
             let rows = target.rows
             // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
@@ -2138,12 +2213,12 @@ struct LiveTerminalView: UIViewRepresentable {
                     // Nothing unsettled: no drain, no request in flight, no target waiting
                     // to be sent, and no resize on screen. A keepalive must never overtake
                     // or duplicate a real geometry change.
-                    guard self.foreground, !self.relockPending, self.resizeTask == nil,
+                    guard !self.viewOnly, self.foreground, !self.relockPending, self.resizeTask == nil,
                           self.inflightTarget == nil, !self.presentationActive,
                           let target = self.confirmedTarget, self.desiredTarget == target,
                           target.cols >= 4, target.rows >= 2 else { continue }
                     let task = Task { @MainActor [weak self] in
-                        guard let self, !self.stopped, self.foreground else { return }
+                        guard let self, !self.stopped, !self.viewOnly, self.foreground else { return }
                         _ = try? await self.client.setPTYSize(
                             pane: self.paneID, cols: target.cols, rows: target.rows,
                             cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
@@ -2324,6 +2399,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // layout pass as this reflow.
             surface?.contentDidChange()
             streamAppliedGeometry = (cols: newCols, rows: newRows)
+            fitFontToStreamWidth()   // view-only: the stream's cols fill the width
             streamGeometryRevision += 1
             if let response = responseGeometry, response == (cols: newCols, rows: newRows) {
                 responseAwaitingMarker = false   // the request's marker has now landed
@@ -2373,7 +2449,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// shared PTY to the phone's fit; `releaseGeometryOwnership` hands ownership
         /// back with a `lock:false` on teardown.
         private func requestGeometry(cols: Int, rows: Int) {
-            guard !stopped else { return }   // teardown began — no new lock:true (review HIGH)
+            // Teardown began — no new lock:true (review HIGH). View-only never sizes the PTY.
+            guard !stopped, !viewOnly else { return }
             #if DEBUG
             let (cols, rows) = MainActor.assumeIsolated {
                 TerminalInteractionHarness.fit(paneID: paneID, cols: cols, rows: rows)
@@ -2501,14 +2578,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The single serialized drain. At most one `set_pty_size` in flight, and a
         /// target must stand still for `resizeSettleDuration` before it is sent.
         private func startGeometryDrain() {
-            guard !stopped, foreground, !relockPending, resizeTask == nil else { return }
+            guard !stopped, !viewOnly, foreground, !relockPending, resizeTask == nil else { return }
             guard let first = desiredTarget, first != confirmedTarget else { return }
             resizeTask = Task { @MainActor [weak self] in
                 // A lease keepalive already on the wire finishes first, so the two never
                 // overlap: the keepalive is not a geometry change and must not be treated
                 // as one, but it still owns the single in-flight slot while it runs.
                 await self?.keepaliveTask?.value
-                while let self, !Task.isCancelled, !self.stopped, self.foreground,
+                while let self, !Task.isCancelled, !self.stopped, !self.viewOnly, self.foreground,
                       let target = self.desiredTarget, target != self.confirmedTarget {
                     // A TRUE quiet window, measured monotonically from the last change.
                     // Comparing two endpoint samples called a sweep that returned to an
@@ -2520,7 +2597,7 @@ struct LiveTerminalView: UIViewRepresentable {
                             continue   // re-read: a newer target may have arrived meanwhile
                         }
                     }
-                    guard !Task.isCancelled, !self.stopped, self.foreground,
+                    guard !Task.isCancelled, !self.stopped, !self.viewOnly, self.foreground,
                           self.desiredTarget == target else { continue }
                     self.inflightTarget = target
                     let generation = self.targetGeneration
@@ -2581,7 +2658,8 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         private func beginResizePresentation(reason: PresentationReason) {
-            guard !stopped, foreground else { return }
+            // View-only only follows the stream: a local presentation would never settle.
+            guard !stopped, foreground, !viewOnly || reason == .server else { return }
             if presentationActive {
                 // A keyboard sweep is still OUR relayout, so it keeps the burst local
                 // for the settled test; only the server's own commit means .server.
@@ -2810,7 +2888,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// recognizer updates the SwiftUI focus binding. An actual native key event
         /// is explicit intent, unlike protocol replies emitted by SwiftTerm itself.
         private func adoptNativeInputFocus() {
-            guard !stopped, foreground, view?.isFirstResponder == true,
+            guard !stopped, !viewOnly, foreground, view?.isFirstResponder == true,
                   !directFocusIntended else { return }
             directFocusIntended = true
             onTerminalFocusRequest?()
@@ -2847,7 +2925,7 @@ struct LiveTerminalView: UIViewRepresentable {
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             // Mounted background panes must not receive input even if they briefly
             // retain first responder while selection/focus transitions settle.
-            guard !stopped, foreground, directFocusIntended,
+            guard !stopped, !viewOnly, foreground, directFocusIntended,
                   let v = view, v.isFirstResponder else { return }
             userTookControl()
             enqueueInput(String(decoding: data, as: UTF8.self))
@@ -2860,7 +2938,7 @@ struct LiveTerminalView: UIViewRepresentable {
         private var pendingInput = ""
         private var inputSendTask: Task<Void, Never>?
         private func enqueueInput(_ s: String) {
-            guard !s.isEmpty else { return }
+            guard !viewOnly, !s.isEmpty else { return }
             pendingInput += s
             guard inputSendTask == nil else { return }   // a drain is running; it will pick this up
             inputSendTask = Task { @MainActor [weak self] in
@@ -3055,7 +3133,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // continuing to make backgrounded panes non-hit-testable. Placed AFTER the
             // isScrollEnabled restore above, so a pane backgrounded mid-drag still gets its
             // native scroll back rather than being stranded disabled.
-            guard !stopped, foreground, let view else { return }   // teardown or hidden: send nothing
+            // Teardown, hidden, or view-only: send nothing (view-only never begins; see below).
+            guard !stopped, !viewOnly, foreground, let view else { return }
             let term = view.getTerminal()
             // omp (normal buffer + mouse off) scrolls natively; everything else we drive.
             guard term.isCurrentBufferAlternate || term.mouseMode != .off else { return }
@@ -3105,7 +3184,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// SGR mouse-wheel is pure ASCII, safe through the String `send_text` path;
         /// with no mouse reporting, fall back to arrow keys (best-effort).
         private func emitScroll(up: Bool, count: Int, at point: CGPoint, term: SwiftTerm.Terminal) {
-            guard count > 0 else { return }
+            guard !viewOnly, count > 0 else { return }
             let seq: String
             if term.mouseMode != .off {
                 // NOTE: SwiftTerm 1.11.2 keeps the mouse ENCODING (mouseProtocol)
@@ -3158,6 +3237,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// defend itself. Only this recognizer is gated, so the taps always begin.
         func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
             guard g === scrollPan else { return true }
+            // View-only: no agent scroll; the native pan scrolls local scrollback.
+            guard !viewOnly else { return false }
             guard let view, !view.hasActiveSelection else { return false }
             let term = view.getTerminal()
             return term.isCurrentBufferAlternate || term.mouseMode != .off
