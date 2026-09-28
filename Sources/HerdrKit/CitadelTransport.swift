@@ -228,8 +228,10 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
 
     /// Conservative ceiling on the full command line, well under the kernel's
     /// MAX_ARG_STRLEN (~131072 on a 4-KiB-page Linux host; the reviewer measured
-    /// E2BIG at exactly 131072). The margin absorbs the `herdr api-bridge `
-    /// prefix and cross-platform variance. base64's 4/3 expansion means the raw
+    /// E2BIG at exactly 131072). It bounds the WHOLE string `herdrCommand` builds,
+    /// wrapper included: sshd hands that entire string to the account's shell as ONE
+    /// `-c` argument, so it is the single largest argv element on the host. The
+    /// margin absorbs cross-platform variance. base64's 4/3 expansion means the raw
     /// request may be up to ~90 KiB — ample for every request except an enormous
     /// `agent.prompt` / `pane.send_text`, which is refused rather than failing at
     /// execve with no bridge to report it.
@@ -250,15 +252,15 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         Data(requestLine.utf8).base64EncodedString()
     }
 
-    /// Sentinel the exec wrapper prints to stderr when herdr is absent (see
-    /// `herdrPathResolution`). `classifyBridgeFailure` matches it to raise
+    /// Sentinel the launcher prints to stderr when herdr is absent (see
+    /// `herdrResolution`). `classifyBridgeFailure` matches it to raise
     /// `.herdrNotInstalled` rather than a generic `.bridgeFailed`. A fixed ASCII
     /// token, deliberately NOT the shell's locale-dependent "not found" wording.
     static let herdrNotInstalledSentinel = "__HERDR_NOT_INSTALLED__"
 
-    /// Resolves herdr on the remote host: prefer `PATH`, fall back to the
-    /// standard `~/.local/bin` install location — then GUARD that the resolved
-    /// path is actually executable before exec'ing it.
+    /// POSIX `sh` that resolves herdr on the remote host into `$HERDR`: prefer
+    /// `PATH`, fall back to the standard `~/.local/bin` install location — then
+    /// GUARD that the resolved path is actually executable before exec'ing it.
     ///
     /// A non-interactive SSH exec runs a NON-login shell, whose `PATH` does not
     /// include `~/.local/bin` — where herdr installs by default — so a bare
@@ -271,9 +273,72 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     /// executable, it prints `herdrNotInstalledSentinel` and exits BEFORE exec, so
     /// `classifyBridgeFailure` can raise `.herdrNotInstalled` and the client can
     /// offer install guidance instead of surfacing a raw stderr line.
-    static let herdrExecutableResolution =
-        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; exec "$HERDR" "#
-    static let herdrPathResolution = herdrExecutableResolution + "api-bridge "
+    ///
+    /// Only `/bin/sh` ever parses this; `herdrCommand` single-quotes it for the
+    /// account's shell, so it must stay `isShellLiteral`.
+    static let herdrResolution =
+        #"HERDR=$(command -v herdr || echo "$HOME/.local/bin/herdr"); [ -x "$HERDR" ] || { echo \#(herdrNotInstalledSentinel) >&2; exit 127; }; "#
+
+    /// Longest word a payload is split into. Debian's `csh` (bsd-csh) refuses a word
+    /// of about 8 KiB ("Word too long": 8100 bytes passed, 8189 failed), and a
+    /// request near `maxCommandBytes` is 120 KB of base64.
+    static let payloadWordBytes = 4096
+
+    /// Whether every login shell reads `word` literally inside single quotes: no `'`,
+    /// which ends the quote everywhere; no backslash, which fish still unescapes
+    /// there; no newline, which csh and tcsh reject; no `!`, which they
+    /// history-expand when interactive.
+    static func isShellLiteral(_ word: String) -> Bool {
+        !word.utf8.contains { byte in
+            byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\\") || byte == UInt8(ascii: "!")
+                || byte == UInt8(ascii: "\n") || byte == UInt8(ascii: "\r")
+        }
+    }
+
+    /// Whether `word` may appear unquoted in the `sh` script as one plain word.
+    static func isBareWord(_ word: String) -> Bool {
+        !word.isEmpty && word.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || byte == UInt8(ascii: "-")
+        }
+    }
+
+    /// The SSH exec command line that runs `herdr <arguments> [<payload>]` on the host.
+    ///
+    /// sshd does not exec this string: it runs it as `<account shell> -c <string>`,
+    /// and that shell may be fish, csh or tcsh, none of which speak POSIX sh: fish
+    /// rejects the `NAME=value` assignment and exits 127 before anything runs
+    /// (herdrup#276), and csh and tcsh have no `$(…)` or `{ …; }`. So the account's
+    /// shell sees one simple command that every shell parses identically —
+    /// `/bin/sh -c '<script>' sh '<payload word>'…` — and hands the script and each
+    /// payload word to `/bin/sh` unchanged. Every word is single-quoted and
+    /// `isShellLiteral`, so no escaping exists for a shell to interpret differently.
+    /// `/bin/sh` by absolute path: every POSIX host has it, and no `PATH` entry or
+    /// shell function can shadow it.
+    ///
+    /// `arguments` are fixed `isBareWord` words written into the script. `payload`
+    /// (base64) is split into `payloadWordBytes` words for csh, and the script
+    /// rejoins them into one final argument: with `IFS` empty, `"$*"` concatenates
+    /// the positional parameters with no separator.
+    static func herdrCommand(_ arguments: [String], payload: String? = nil) -> String {
+        assert(arguments.allSatisfy(isBareWord), "an argument that is not a plain word")
+        var script = herdrResolution
+        if payload != nil { script += "IFS=; " }
+        script += #"exec "$HERDR""#
+        for argument in arguments { script += " " + argument }
+        guard let payload else { return "/bin/sh -c '" + script + "'" }
+        assert(isShellLiteral(payload), "a payload some login shell would not read literally")
+
+        var command = "/bin/sh -c '" + script + #" "$*"' sh"#
+        var rest = payload[...]
+        repeat {
+            command += " '"
+            command += rest.prefix(payloadWordBytes)
+            command += "'"
+            rest = rest.dropFirst(payloadWordBytes)
+        } while !rest.isEmpty
+        return command
+    }
 
     /// Classify only a positively unsupported `api-bridge` command as an
     /// incompatible installation. Exit 2 is also used for unrelated usage
@@ -289,6 +354,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         ].contains(where: { stderr.contains($0) }) {
             return .herdrIncompatible(host: host)
         }
+        // 127 is a shell's "could not run that command". With the sentinel ruled out,
+        // herdr itself never started: the account's shell rejected the command line
+        // (fish did, before herdrup#276) or herdr's exec failed. Calling that a
+        // bridge that "produced no reply" pointed at a daemon that was never reached.
+        if exitCode == 127 { return .remoteShellFailed(host: host, stderr: stderr) }
         return .bridgeFailed(stderr: stderr)
     }
 
@@ -316,7 +386,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     /// command exceed the argv limit and fail opaquely on the host (herdr#39's
     /// client contract).
     static func bridgeCommand(for requestLine: String) throws -> String {
-        let command = herdrPathResolution + encodedRequest(for: requestLine)
+        let command = herdrCommand(["api-bridge"], payload: encodedRequest(for: requestLine))
         let byteCount = command.utf8.count
         guard byteCount <= maxCommandBytes else {
             throw TransportError.requestTooLarge(bytes: byteCount, max: maxCommandBytes)
@@ -356,8 +426,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
         }) else {
             throw TransportError.machineCommandFailed(stderr: "Invalid saved-machine profile ID")
         }
-        let command = Self.herdrExecutableResolution
-            + "machine " + (enabled ? "federate " : "unfederate ") + profileID
+        let command = Self.herdrCommand(["machine", enabled ? "federate" : "unfederate", profileID])
         let output = try await connectedClient().executeCommandStream(command)
         var stderr = ""
         var received = 0
@@ -530,7 +599,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     public nonisolated func openUploadChannel(_ openLine: String) -> GramUploadChannel {
         GramUploadChannel(
             makeConnection: { try await self.makeConnection() },
-            command: Self.herdrPathResolution + "--duplex",
+            command: Self.herdrCommand(["api-bridge", "--duplex"]),
             openLine: openLine
         )
     }

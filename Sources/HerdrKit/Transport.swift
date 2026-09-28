@@ -125,6 +125,12 @@ public enum TransportError: Error, CustomStringConvertible {
     /// herdr is installed but positively rejected the `api-bridge` subcommand
     /// as unknown. Exit code 2 alone is not evidence of incompatibility.
     case herdrIncompatible(host: String)
+    /// The exec channel exited 127 (a shell's "command not found / could not
+    /// run") without the not-installed sentinel: the host's shell never started
+    /// herdr. A login shell that could not parse the command line did exactly this
+    /// (fish, herdrup#276), as does an `exec` of a herdr the shell cannot run.
+    /// Kept apart from `bridgeFailed`, which blames an api-bridge that never ran.
+    case remoteShellFailed(host: String, stderr: String)
     /// A compatible api-bridge could not reach the host's local API socket.
     /// This does not establish whether the daemon is stopped or merely not responding.
     case daemonUnavailable(host: String)
@@ -164,6 +170,8 @@ public enum TransportError: Error, CustomStringConvertible {
             return "herdr is not installed on \(h)"
         case .herdrIncompatible(let h):
             return "the herdr on \(h) is too old or isn't the fork. Update it (or install the fork) and reconnect"
+        case .remoteShellFailed(let h, let stderr):
+            return "the shell on \(h) could not start herdr (exit 127); stderr: \(stderr)"
         case .daemonUnavailable(let h):
             return "the herdr API daemon on \(h) is not responding; check that it is running and try again"
         case .passwordAuthUnsupported(let h):

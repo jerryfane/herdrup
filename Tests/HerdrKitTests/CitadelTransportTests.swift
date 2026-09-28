@@ -149,71 +149,101 @@ final class CitadelTransportTests: XCTestCase {
         XCTAssertEqual(decoded, nasty, "the request was altered in transit")
     }
 
-    /// AXIS: the command resolves herdr's remote path rather than assuming it is
-    /// on the non-interactive SSH `PATH`. A live round-trip proved a bare
-    /// `herdr api-bridge` fails "command not found" because the default install
-    /// (`~/.local/bin`) is not on a non-login shell's PATH. The command must
-    /// therefore fall back to `$HOME/.local/bin/herdr` — this pins that so the
-    /// resolution cannot be silently dropped back to a bare `herdr`.
-    func testBridgeCommandResolvesHerdrPath() throws {
-        let command = try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#)
-
-        XCTAssertTrue(command.contains("command -v herdr"),
-                      "the command does not consult PATH for herdr")
-        XCTAssertTrue(command.contains("$HOME/.local/bin/herdr"),
-                      "the command does not fall back to the ~/.local/bin install location")
-        XCTAssertTrue(command.contains(" api-bridge "),
-                      "the command does not invoke the api-bridge subcommand")
-    }
-
-    /// The full exec command line is single-line — an SSH exec command line
-    /// cannot contain a raw newline, and base64 standard encoding without line
-    /// wrapping is what guarantees the argument stays on one line. (Foundation's
-    /// base64 does not wrap by default; this pins that assumption.)
-    func testBridgeCommandIsASingleLine() throws {
-        let request = String(repeating: #"{"k":"vvvvvvvvvv"},"#, count: 50)
+    /// herdrup#276. sshd runs the exec command through the ACCOUNT's login shell,
+    /// so the string must mean the same thing to fish, csh and tcsh as to sh: words
+    /// separated by spaces, each a bare word from a small safe alphabet or a
+    /// single-quoted string holding no character some shell does not take literally
+    /// inside single quotes, none as long as Debian csh's ~8 KiB word limit. Parsing
+    /// it by exactly that grammar must recover `/bin/sh -c <script> sh <base64
+    /// pieces>` with the request intact. The real shells run it in
+    /// `LoginShellCommandTests`.
+    func testBridgeCommandIsOneQuotedSimpleCommandForAnyLoginShell() throws {
+        // Every character the grammar forbids, and a base64 argument well past csh's
+        // word limit, long enough that line-wrapping base64 would add a newline.
+        let request = String(repeating: #"{"text":"it's \"q\" \\ !x $(id) `id`\n"},"#, count: 400)
         let command = try CitadelTransport.bridgeCommand(for: request)
-        XCTAssertFalse(command.contains("\n"), "the exec command line contains a newline")
+
+        let words = try Self.wordsEveryShellAgreesOn(command)
+        guard words.count >= 5 else { return XCTFail("unexpected command shape: \(words)") }
+        XCTAssertEqual(Array(words.prefix(2)), ["/bin/sh", "-c"], "the script is not handed to /bin/sh")
+        XCTAssertEqual(words[3], "sh", "the script's $0 is missing, so the payload shifts into it")
+        let longest = try XCTUnwrap(words.map(\.utf8.count).max())
+        XCTAssertLessThan(longest, 8_000, "a \(longest)-byte word; Debian csh fails with Word too long")
+        let decoded = try XCTUnwrap(Data(base64Encoded: words[4...].joined()).map { String(decoding: $0, as: UTF8.self) },
+                                    "the request pieces do not rejoin into valid base64")
+        XCTAssertEqual(decoded, request, "the request was altered in transit")
     }
 
-    /// AXIS: a request too large for the argv transport is refused with a clear
-    /// error, not allowed to fail opaquely at execve (E2BIG) on the host.
-    func testOversizedRequestIsRefused() {
-        // Just over the ceiling once base64-expanded.
-        let huge = String(repeating: "x", count: CitadelTransport.maxCommandBytes)
-        XCTAssertThrowsError(try CitadelTransport.bridgeCommand(for: huge)) { error in
-            guard case TransportError.requestTooLarge(let bytes, let max) = error else {
-                return XCTFail("wrong error: \(error)")
+    private struct NotPortable: Error, CustomStringConvertible { let description: String }
+
+    /// Splits `command` into words the way every login shell agrees on, or throws at
+    /// the first character where fish, csh, tcsh, bash, zsh or dash could differ.
+    private static func wordsEveryShellAgreesOn(_ command: String) throws -> [String] {
+        let bare = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-_.")
+        // Inside single quotes fish still unescapes `\\` and `\'`, csh and tcsh
+        // reject a newline and history-expand `!`.
+        let unsafeInQuotes = Set("\\!\n\r")
+        var words: [String] = []
+        var word = ""
+        var inWord = false
+        var quoted = false
+        for character in command {
+            if quoted {
+                if character == "'" {
+                    quoted = false
+                } else if unsafeInQuotes.contains(character) {
+                    throw NotPortable(description: "\(character.debugDescription) inside single quotes in word \(words.count + 1)")
+                } else {
+                    word.append(character)
+                }
+            } else if character == "'" {
+                quoted = true
+                inWord = true
+            } else if character == " " {
+                if inWord { words.append(word) }
+                word = ""
+                inWord = false
+            } else if bare.contains(character) {
+                word.append(character)
+                inWord = true
+            } else {
+                throw NotPortable(description: "unquoted \(character.debugDescription) in word \(words.count + 1)")
             }
-            XCTAssertGreaterThan(bytes, max, "refused a request that was within the limit")
         }
-        // A normal request is well under and does not throw.
-        XCTAssertNoThrow(try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#))
+        if quoted { throw NotPortable(description: "unterminated single quote") }
+        if inWord { words.append(word) }
+        return words
+    }
+
+    /// AXIS: the limit bounds the command line ACTUALLY sent, wrapper included — it is
+    /// one argv element to the account's shell, where E2BIG fails with no bridge to
+    /// report it. Across the boundary every accepted command fits, and a refusal
+    /// reports the true command size. Measuring only the base64 argument accepts
+    /// requests whose wrapped command exceeds the limit, which fails here.
+    func testRequestSizeLimitCountsTheWholeCommand() throws {
+        let limit = CitadelTransport.maxCommandBytes
+        var accepted = 0
+        var refused = 0
+        // base64 grows 4 bytes per 3 input bytes, so the base64 alone reaches the limit
+        // at the top of this range; the wrapper moves the real boundary inside it. Each
+        // step grows the command by 16 bytes, finer than the wrapper's size.
+        for size in stride(from: limit / 4 * 3 - 480, through: limit / 4 * 3, by: 12) {
+            let request = String(repeating: "x", count: size)
+            do {
+                let command = try CitadelTransport.bridgeCommand(for: request)
+                XCTAssertLessThanOrEqual(command.utf8.count, limit, "accepted a \(size)-byte request over the limit")
+                accepted += 1
+            } catch TransportError.requestTooLarge(let bytes, let max) {
+                XCTAssertEqual(max, limit)
+                XCTAssertGreaterThan(bytes, max, "refused a \(size)-byte request within the limit")
+                refused += 1
+            }
+        }
+        XCTAssertGreaterThan(accepted, 0, "the boundary is below the probed range")
+        XCTAssertGreaterThan(refused, 0, "the boundary is above the probed range")
     }
 
     // MARK: - "herdr not installed" detection
-
-    /// AXIS: the exec wrapper guards that the resolved herdr path is executable and,
-    /// when it is not, emits the sentinel and exits BEFORE `exec`. This is what lets
-    /// the client tell "herdr is not installed" apart from every other bridge failure
-    /// and show install guidance instead of a raw stderr line. Pins the guard so it
-    /// cannot be silently dropped back to an unconditional `exec`.
-    func testBridgeCommandGuardsHerdrExecutableWithSentinel() throws {
-        let command = try CitadelTransport.bridgeCommand(for: #"{"id":"1","method":"agent.list"}"#)
-
-        XCTAssertTrue(command.contains(#"[ -x "$HERDR" ]"#),
-                      "the command does not guard that the resolved herdr path is executable")
-        XCTAssertTrue(command.contains(CitadelTransport.herdrNotInstalledSentinel),
-                      "the command does not emit the not-installed sentinel")
-        // The guard must run BEFORE exec, otherwise exec of a missing file wins and
-        // the sentinel is never printed.
-        let guardIndex = try XCTUnwrap(command.range(of: #"[ -x "$HERDR" ]"#)?.lowerBound)
-        let execIndex = try XCTUnwrap(command.range(of: #"exec "$HERDR""#)?.lowerBound)
-        XCTAssertLessThan(guardIndex, execIndex, "the executable guard runs after exec, so it never fires")
-        // The installed path is unchanged: it still runs api-bridge.
-        XCTAssertTrue(command.contains(" api-bridge "),
-                      "the command no longer invokes the api-bridge subcommand for the installed path")
-    }
 
     /// A stderr carrying the sentinel classifies as `.herdrNotInstalled(host:)`,
     /// carrying the host through for the client's guidance copy.
@@ -226,6 +256,20 @@ final class CitadelTransportTests: XCTestCase {
             return XCTFail("expected .herdrNotInstalled, got \(error)")
         }
         XCTAssertEqual(host, "box.example", "the host was not carried through")
+    }
+
+    /// herdrup#276: a login shell that cannot parse the command exits 127 with its
+    /// own diagnostic, before herdr runs. That is reported as the shell failing to
+    /// start herdr, not as an api-bridge that ran and "produced no reply".
+    func testClassifyExit127WithoutSentinelBlamesTheShell() {
+        let stderr = "fish: Unsupported use of '='. In fish, please use 'set HERDR $(command -v herdr)'.\n"
+        let error = CitadelTransport.classifyBridgeFailure(
+            stderr: stderr, exitCode: 127, host: "box.example")
+        guard case TransportError.remoteShellFailed(let host, let diagnostic) = error else {
+            return XCTFail("expected .remoteShellFailed, got \(error)")
+        }
+        XCTAssertEqual(host, "box.example", "the host was not carried through")
+        XCTAssertEqual(diagnostic, stderr, "the shell's diagnostic was not preserved")
     }
 
     /// A specific rejection of the api-bridge subcommand, not exit 2 alone,
