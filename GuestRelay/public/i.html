@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#13162A">
+<meta name="robots" content="noindex">
+<title>HerdrUp invite</title>
+<link rel="stylesheet" href="/static/i.css">
+<script src="/static/i.js" defer></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div class="ava" id="avatar" aria-hidden="true">H</div>
+    <h1 id="title">You've been invited to HerdrUp</h1>
+    <p id="lead">Open this link on the iPhone where HerdrUp is installed.</p>
+  </section>
+
+  <div id="details" hidden>
+    <div class="sec">Details</div>
+    <div class="card">
+      <div class="kv"><span>Machine</span><span id="machine"></span></div>
+      <div class="kv"><span>Agent</span><span class="mono" id="agent"></span></div>
+      <div class="kv"><span>You appear as</span><span class="mono you" id="guest"></span></div>
+    </div>
+    <p class="expiry" id="expiry"></p>
+    <div class="note">Every message you send reaches <span id="note-agent"></span> starting with <b class="mono you" id="note-prefix"></b>. <span id="note-owner"></span> can see what you send and can remove access at any time.</div>
+  </div>
+
+  <p class="problem" id="problem" hidden></p>
+
+  <div class="foot">
+    <a class="btn primary" id="open" hidden>Open in HerdrUp</a>
+    <a class="btn quiet" href="https://apps.apple.com/app/id6798087089" rel="noopener">Get HerdrUp on the App Store</a>
+    <p class="hint">No HerdrUp yet? Install it, then come back to this page and tap Open in HerdrUp.</p>
+  </div>
+</main>
+</body>
+</html>
