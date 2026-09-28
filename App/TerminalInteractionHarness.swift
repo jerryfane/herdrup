@@ -605,6 +605,9 @@ final class TerminalInteractionHarness: ObservableObject {
             // in the UI means the wiring, not the engine.
             if let view = surface.view {
                 value["engineMatches"] = view.searchMatchSummary("RECORD").total
+                // The font the view has APPLIED, so a menu receipt can tell a Text size tap
+                // that landed from one that was dropped, before any grid change follows it.
+                value["fontPoints"] = Double(view.font.pointSize)
             }
         }
         value["mounted"] = surfaces.count
