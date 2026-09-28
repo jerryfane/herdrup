@@ -56,7 +56,9 @@ let package = Package(
         .testTarget(
             name: "HerdrKitTests",
             dependencies: ["HerdrKit", "AgentActivityState",
-                           .product(name: "Citadel", package: "Citadel")]),
+                           .product(name: "Citadel", package: "Citadel")],
+            // Read from disk by path (#filePath), like the README checks.
+            exclude: ["Fixtures"]),
         // The Live Activity's ContentState, compiled WITHOUT ActivityKit so it can be
         // tested on Linux. `sources` names the one file deliberately: its sibling in the
         // same directory imports ActivityKit and must stay out of this target.
