@@ -5638,7 +5638,10 @@ struct TerminalPaneContent: View {
                 replyUploadBytes = nil
                 replySendingAttachmentID = nil
 
-                let prompt = Self.attachmentPrompt(text: text, delivered: delivered)
+                let prompt = GramAttachmentPrompt.text(text, delivered: delivered.map {
+                    GramAttachmentPrompt.Delivered(
+                        name: $0.attachment.name, isImage: $0.attachment.isImage, messageID: $0.messageID)
+                })
                 // A rejection that may still have reached the agent (`PromptRejection`)
                 // counts as DELIVERED here, exactly like a confirmed submit: the prompt is
                 // in the agent's PTY, so keeping the chips and the caption would make the
@@ -5681,45 +5684,6 @@ struct TerminalPaneContent: View {
         guard let index = replyAttachments.firstIndex(where: { $0.id == attachment.id })
         else { return }
         replyAttachments[index] = attachment
-    }
-
-    /// ONE prompt for the whole batch. A single attachment keeps its original wording;
-    /// several are listed with one download command each, because an agent that gets a
-    /// prompt per file cannot see them as one request.
-    private static func attachmentPrompt(
-        text: String,
-        delivered: [(attachment: PromptAttachment, messageID: String)]
-    ) -> String {
-        func outputPath(_ attachment: PromptAttachment, _ messageID: String) -> String {
-            let rawExtension = URL(fileURLWithPath: attachment.name).pathExtension.lowercased()
-            let fileExtension = rawExtension.filter { $0.isLetter || $0.isNumber }
-            let stem = attachment.isImage ? "photo" : "file"
-            return "/tmp/herdr-\(stem)-\(messageID)"
-                + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
-        }
-        let reference: String
-        if delivered.count == 1, let only = delivered.first {
-            let path = outputPath(only.attachment, only.messageID)
-            let noun = only.attachment.isImage ? "Photo" : "File \(only.attachment.name)"
-            reference = """
-            [\(noun) attached via Herdr Gram message \(only.messageID). Download it with \
-            `herdr gram get-file \(only.messageID) -o \(path)`, then inspect \(path).]
-            """
-        } else {
-            let lines = delivered.map { item -> String in
-                let path = outputPath(item.attachment, item.messageID)
-                return "`herdr gram get-file \(item.messageID) -o \(path)`  (\(item.attachment.name))"
-            }
-            let paths = delivered.map { outputPath($0.attachment, $0.messageID) }
-            reference = """
-            [\(delivered.count) files attached via Herdr Gram. Download them with:
-            \(lines.joined(separator: "\n"))
-            then inspect \(paths.joined(separator: ", ")).]
-            """
-        }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? reference
-            : "\(text)\n\n\(reference)"
     }
 
     /// Says how much of a batch landed before the failure, so a retry is an informed act
