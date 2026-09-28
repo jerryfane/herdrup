@@ -10,8 +10,8 @@ import FoundationNetworking
 /// The capability is opaque: it is cached and sent back, never parsed. It is cached per
 /// (kind, token, environment) in `UserDefaults`, so a relaunch registers straight away without
 /// a network round trip, and a rotated token misses the cache and enrolls again. A failed
-/// enrollment returns nil (the caller registers without a capability) and is remembered for
-/// this process only, so it is retried on the next launch or with the next token.
+/// enrollment returns nil (the caller registers without a capability); the same token is
+/// retried after `retryAfter` in this process, and at once on the next launch.
 public actor PushRelayEnroller {
     public enum Kind: String, Sendable {
         /// The app's APNs device token (alert pushes).
