@@ -112,9 +112,10 @@ jobs:
 
   build-and-uitest:
     runs-on: macos-latest
-    # The per-suite first-run caps sum to 130 min (font 10, iPhone 50, iPad resize 25, iPad
-    # controls 15, SwiftTerm 2 x 15) before checkout, setup and the build. The job limit must sit
-    # above that, or a slow run is killed before later suites run and receipts upload.
+    # The per-suite first-run caps sum to 140 min (font 10, iPhone 50, iPad resize 25, iPad
+    # controls 15, SwiftTerm build 10 + 2 x 15) before checkout, setup and the build. The job
+    # limit must sit above that, or a slow run is killed before later suites run and receipts
+    # upload.
     timeout-minutes: 160
     steps:
       - uses: actions/checkout@v4
@@ -365,21 +366,39 @@ jobs:
           )
           failed=0
           TIMEOUT_BIN=$(command -v timeout || command -v gtimeout)
+          # BUILD OUTSIDE THE TIMED TEST WINDOW. Building inside `xcodebuild test` spent
+          # ~2.5 of the round's 15 minutes, and a round whose tests had already passed was
+          # killed before xcodebuild exited. Both simulators share one build product.
+          if ! "$TIMEOUT_BIN" --signal=INT 10m xcodebuild build-for-testing -scheme "$SCHEME" \
+              -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+              -derivedDataPath ../../.build-dd-swiftterm \
+              CODE_SIGNING_ALLOWED=NO 2>&1 | tee ../../TestReceipts/SwiftTermUIKit-build.log | xcbeautify; then
+            echo "::error::SwiftTerm test build failed; see TestReceipts/SwiftTermUIKit-build.log"
+            exit 1
+          fi
           for device in iPhone iPad; do
             if [ "$device" = iPhone ]; then udid="$IPHONE_UDID"; else udid="$IPAD_UDID"; fi
             label="SwiftTermUIKit-$device"
-            if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test -scheme "$SCHEME" \
+            # Earlier xcodebuild runs shut the simulator down, so the next one boots it
+            # itself. Boot it here and let boot finish before the timed run starts.
+            xcrun simctl boot "$udid" || true
+            xcrun simctl bootstatus "$udid" -b
+            if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$SCHEME" \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
+                -test-timeouts-enabled YES \
                 -only-testing:SwiftTermTests/TerminalViewGeometryTests \
                 -derivedDataPath ../../.build-dd-swiftterm \
                 -resultBundlePath "../../TestReceipts/$label-first.xcresult" \
                 CODE_SIGNING_ALLOWED=NO 2>&1 | tee "../../TestReceipts/$label-first.log" | xcbeautify; then
               failed=1
               echo "::error::$label first run failed; collecting raw diagnostics without erasing failure"
-              "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test -scheme "$SCHEME" \
+              xcrun simctl boot "$udid" || true
+              xcrun simctl bootstatus "$udid" -b
+              "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$SCHEME" \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
+                -test-timeouts-enabled YES \
                 -only-testing:SwiftTermTests/TerminalViewGeometryTests \
                 -derivedDataPath ../../.build-dd-swiftterm \
                 -resultBundlePath "../../TestReceipts/$label-diagnostic.xcresult" \
