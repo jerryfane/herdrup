@@ -568,7 +568,15 @@ struct LineAccumulator {
 
     /// Appends a chunk and returns the lines it completed (newline stripped).
     mutating func append(_ buffer: ByteBuffer) -> [String] {
-        bytes.append(contentsOf: buffer.readableBytesView)
+        append(bytes: buffer.readableBytesView)
+    }
+
+    mutating func append(_ data: Data) -> [String] {
+        append(bytes: data)
+    }
+
+    private mutating func append<Chunk: Sequence>(bytes chunk: Chunk) -> [String] where Chunk.Element == UInt8 {
+        bytes.append(contentsOf: chunk)
         var lines: [String] = []
         while let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) {
             lines.append(String(decoding: bytes[..<newline], as: UTF8.self))

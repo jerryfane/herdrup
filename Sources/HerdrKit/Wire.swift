@@ -49,6 +49,10 @@ public func permanentStreamRefusal(code: String) -> String? {
         return "this pane no longer exists on the server; not reconnecting"
     case "invalid_request":
         return "this server does not support live terminals; not reconnecting"
+    case "guest_revoked":
+        return "your access to this agent was revoked; not reconnecting"
+    case "guest_forbidden":
+        return "guests can't open this pane; not reconnecting"
     default:
         return nil
     }
@@ -327,6 +331,9 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// Present while a Claude Code/Codex transfer is staged or launching, and
     /// retained with its final outcome. Absent on older daemons.
     public let sessionTransfer: AgentSessionTransferInfo?
+    /// Guest connections only: whether the shared agent is the pane's foreground
+    /// program. False means guest access is paused. Absent for owners.
+    public let guestRunning: Bool?
 
     /// Stable list identity. A LIVE agent is keyed on its pane id, which is unique
     /// and stable while it runs. An ARCHIVED agent has NO pane — the server empties
@@ -427,6 +434,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
         case accountConfigDir = "account_config_dir"
         case accountUnresolved = "account_unresolved"
         case sessionTransfer = "session_transfer"
+        case guestRunning = "guest_running"
     }
 }
 

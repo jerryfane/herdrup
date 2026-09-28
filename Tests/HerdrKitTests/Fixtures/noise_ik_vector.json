@@ -1,0 +1,39 @@
+{
+  "description": "Noise IK transcript for HerdrUp guest sessions in the cacophony vector format, generated with snow by `cargo test write_noise_ik_vector -- --ignored` in jerryfane/herdr. The keys are the cacophony IK test-vector keys. The initiator is the guest and the responder the host; messages alternate from the initiator, so even indexes are guest to host. Hex is lowercase; *_text and *_public keys are informational.",
+  "handshake_hash": "713d185d63b1c997330839523601333896217053e11b415b28aa7cd8d62ad114",
+  "host_id": "AAECAwQFBgcICQoLDA0ODw",
+  "init_ephemeral": "893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b0569da977c464a",
+  "init_ephemeral_public": "ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944",
+  "init_prologue": "68657264722d67756573742f313a41414543417751464267634943516f4c4441304f4477",
+  "init_remote_static": "31e0303fd6418d2f8c0e78b91f22e8caed0fbe48656dcf4767e4834f701b8f62",
+  "init_static": "e61ef9919cde45dd5f82166404bd08e38bceb5dfdfded0a34c8df7ed542214d1",
+  "init_static_public": "6bc3822a2aa7f4e6981d6538692b3cdf3e6df9eea6ed269eb41d93c22757b75a",
+  "messages": [
+    {
+      "ciphertext": "ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944718da798efbcd91528520204f904b9bd6c7413dccdc214d951e15253e39987f144a5c92ba66e438adaef3cfe67c3f723f5def03b5427d5193fa08c2f42a12494efe46de196c41d9e4124203733c30d3b5f66ef339bc56b0a06174ff50c3b8195a3cc083d11d494c3c5986de99f5961925a02c1b051cfd84e6d30ca892ee802b916f22593e2127d013f1de7e01517cb20597840eb06de6047e67afda30108b0b2d13d25cb6ee37cd467a5215ceda70e0b8a1e32f872",
+      "payload": "7b22646576696365223a226950686f6e65222c22696e766974655f6964223a2245424553457851564668635947526f62484230654877222c22736563726574223a22494345694979516c4a69636f4b536f724c4330754c7a41784d6a4d304e5459334f446b364f7a7739506a38222c2276223a317d",
+      "payload_text": "{\"device\":\"iPhone\",\"invite_id\":\"EBESExQVFhcYGRobHB0eHw\",\"secret\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"v\":1}"
+    },
+    {
+      "ciphertext": "95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f1448088436536f41e2ac312969ce372711d743a01c4cac76385b1d59d88b9117d16cc66f3666de0872dcb4cd6a9209a85b587867bd284887b727d5750555965fe713a5d2acedfb39749f496e5a847a96d4016ac26bb1a5e66f3b4b2b1284898c017acf7bcd68eb7a66dd680d4595710d23d4118553e5cb1fcb88fb90cc6df91ab4696b18f6b21535ccc83759bb440cc2c3e505cdf70359382a325647f14836fcf8d883c0164907b6395ff2bd90def2487d2c7f58f403f0deb483950e58d689423",
+      "payload": "7b226167656e74223a7b226e616d65223a226c6c6d2d6f7074222c22746172676574223a2277312d31227d2c2267756573745f6964223a22675f5145464351305246526b64495355704c5445314f5477222c226d616368696e655f6c6162656c223a224a657272792773204d61632053747564696f222c226e616d65223a22706c6f7461726d6f72646576222c226f6b223a747275652c226f776e65725f6e616d65223a224a65727279227d",
+      "payload_text": "{\"agent\":{\"name\":\"llm-opt\",\"target\":\"w1-1\"},\"guest_id\":\"g_QEFCQ0RFRkdISUpLTE1OTw\",\"machine_label\":\"Jerry's Mac Studio\",\"name\":\"plotarmordev\",\"ok\":true,\"owner_name\":\"Jerry\"}"
+    },
+    {
+      "ciphertext": "3802d61983b67ce6d6f5a1e1002b08c22c0d2fde8dff2bbf6ff8224f7bd7beef89ed38ea65e3ae47f8386e582cd5242a8f405fc170f50a",
+      "payload": "7b226964223a2231222c226d6574686f64223a2270696e67222c22706172616d73223a7b7d7d0a",
+      "payload_text": "{\"id\":\"1\",\"method\":\"ping\",\"params\":{}}\n"
+    },
+    {
+      "ciphertext": "0c0128aec8cc361e9d466d823ec537414b230f93d8fe8aececd7693f81ded30d639f318a01a0248a0295e4fdeb103dd211b5d2e5c4e09cf769f14e3f46bc4f29e72ede7e734c3a80a89e94680d0b2af006d0f8",
+      "payload": "7b226964223a2231222c22726573756c74223a7b2274797065223a22706f6e67222c2276657273696f6e223a22302e392e31222c2270726f746f636f6c223a367d7d0a",
+      "payload_text": "{\"id\":\"1\",\"result\":{\"type\":\"pong\",\"version\":\"0.9.1\",\"protocol\":6}}\n"
+    }
+  ],
+  "prologue_text": "herdr-guest/1:AAECAwQFBgcICQoLDA0ODw",
+  "protocol_name": "Noise_IK_25519_ChaChaPoly_SHA256",
+  "resp_ephemeral": "bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b",
+  "resp_ephemeral_public": "95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f144808843",
+  "resp_prologue": "68657264722d67756573742f313a41414543417751464267634943516f4c4441304f4477",
+  "resp_static": "4a3acbfdb163dec651dfa3194dece676d437029c62a408b4c5ea9114246e4893"
+}
