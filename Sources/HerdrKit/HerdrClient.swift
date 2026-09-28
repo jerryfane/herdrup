@@ -1284,6 +1284,14 @@ public actor HerdrClient {
                                 break
                             }
                         }
+                        // A server can END a live stream with an error line after frames
+                        // (a guest stream closes with guest_paused or guest_revoked), so
+                        // every line is checked before the strict frame decode.
+                        let data = Data(line.utf8)
+                        if let err = try? decoder.decode(ErrorEnvelope.self, from: data) {
+                            continuation.finish(throwing: err.error)
+                            return
+                        }
                         // STRICT: every line after the ack must be a valid pane.bytes
                         // frame. A stateful byte stream cannot skip a corrupt line
                         // without desyncing the emulator (feeding the next frame mid
@@ -1292,7 +1300,7 @@ public actor HerdrClient {
                         // pane reseeds a fresh full-screen reset. The ack fall-through
                         // above lands here too, so a non-ack/non-frame leading line
                         // also fails loudly rather than being silently swallowed.
-                        let frame = try decoder.decode(StreamFrame.self, from: Data(line.utf8))
+                        let frame = try decoder.decode(StreamFrame.self, from: data)
                         continuation.yield(.frame(frame))
                     }
                     continuation.finish()
