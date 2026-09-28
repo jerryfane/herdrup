@@ -617,6 +617,10 @@ final class TerminalInteractionHarness: ObservableObject {
         value["commitCols"] = commitGrid?.cols ?? 0
         value["commitRows"] = commitGrid?.rows ?? 0
         value["keyboardSpacer"] = Int(spacer.height.rounded())
+        // The fixture's own record of what the last fit command asked for, so a receipt
+        // can tell a command tap that landed from one that was dropped.
+        value["naturalFit"] = naturalPanes.contains(id)
+        value["fixtureFit"] = fits[id].map { "\($0.0)x\($0.1)" } ?? ""
         value.merge(journalProbe()) { _, rhs in rhs }
         return TerminalInteractionDriver.json(value)
     }

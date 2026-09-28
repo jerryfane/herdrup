@@ -164,14 +164,32 @@ class TerminalInteractionTestCase: XCTestCase {
         return "textFields=[" + rows.joined(separator: " ") + "] keyboards=\(app.keyboards.count)"
     }
 
-    /// Fixture commands are plain buttons in the harness bar, so one laid-out tap is
-    /// enough — no popover to present and nothing to scroll.
-    func command(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
-        guard let item = onscreen("fixture-" + name) else {
-            XCTFail("Fixture command \(name) never became usable", file: file, line: line)
-            return
+    /// Fixture commands are plain buttons in the harness bar, so one laid-out tap
+    /// reaches them — no popover to present and nothing to scroll. Reaching is not
+    /// landing, though: on a loaded host a `natural` tap took 23 s to synthesize and
+    /// never registered, so the pane stayed on the fixture grid and the later font step
+    /// could not change its columns. `landed` names the harness state the command sets.
+    /// When it is given, a tap that did not produce that state is retried once, and
+    /// the state is checked again before the retry so a slow tap is never sent twice.
+    func command(_ name: String, file: StaticString = #filePath, line: UInt = #line,
+                 until landed: (([String: Any]) -> Bool)? = nil) {
+        for attempt in 0..<2 {
+            guard let item = onscreen("fixture-" + name) else {
+                XCTFail("Fixture command \(name) never became usable", file: file, line: line)
+                return
+            }
+            if attempt > 0, let landed, landed(probe()) { return }
+            item.tap()
+            guard let landed else { return }
+            if holds(within: 5, landed) { return }
         }
-        item.tap()
+        XCTFail("Fixture command \(name) never took effect. Last painted receipt: \(probe())",
+                file: file, line: line)
+    }
+
+    /// `landed` for a grid fixture command: the harness recorded that fit as the pane's.
+    func fixtureFit(_ grid: String) -> ([String: Any]) -> Bool {
+        { $0["fixtureFit"] as? String == grid }
     }
 
     /// Opens a real menu, taps one of its items, and waits until `landed` reports that
@@ -242,12 +260,12 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         let original = probe()["top"] as? String
         attach("history-before-80")
         for cycle in 0..<3 {
-            command("120x24"); settled(cols: 120, rows: 24); anchor()
-            command("80x24"); settled(cols: 80, rows: 24); anchor()
+            command("120x24", until: fixtureFit("120x24")); settled(cols: 120, rows: 24); anchor()
+            command("80x24", until: fixtureFit("80x24")); settled(cols: 80, rows: 24); anchor()
             XCTAssertEqual(probe()["top"] as? String, original, "Cycle \(cycle) drifted to another logical cell")
         }
-        command("80x32"); settled(cols: 80, rows: 32); anchor()
-        command("80x24"); settled(cols: 80, rows: 24); anchor()
+        command("80x32", until: fixtureFit("80x32")); settled(cols: 80, rows: 32); anchor()
+        command("80x24", until: fixtureFit("80x24")); settled(cols: 80, rows: 24); anchor()
         XCTAssertEqual(probe()["top"] as? String, original)
         XCTAssertEqual(probe()["opens"] as? Int, 1, "A resize must not replay/reset the stream")
         attach("history-after-cycles-and-height")
@@ -260,7 +278,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         }
         XCTAssertNotNil(onscreen("terminal-sidebar-toggle", timeout: 5),
                         "The iPad receipt must exercise the actual sidebar")
-        command("natural"); settled()
+        command("natural") { $0["naturalFit"] as? Bool == true }; settled()
         command("history"); anchor()
         let opens = probe()["opens"] as? Int
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
@@ -306,7 +324,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
     func testStationaryTargetAndSupersededInflightRequests() {
         launch("resize")
         let initial = probe()["requests"] as? Int ?? 0
-        command("120x24"); settled(cols: 120)
+        command("120x24", until: fixtureFit("120x24")); settled(cols: 120)
         XCTAssertEqual(probe()["requests"] as? Int, initial + 1)
         command("delayed")
         command("80x24")
@@ -328,7 +346,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             anchor(); attach("ordered-\(scenario)")
             XCTAssertEqual(probe()["opens"] as? Int, 1)
             command("quiet")
-            command("80x24"); settled(cols: 80); anchor()
+            command("80x24", until: fixtureFit("80x24")); settled(cols: 80); anchor()
         }
         command("server"); settled(cols: 120); anchor()
         attach("unsolicited-authoritative-resize")
@@ -371,10 +389,10 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         launch("resize")
         command("busy")
         wait { ($0["appended"] as? Int ?? 0) >= 3 }
-        command("120x24"); settled(cols: 120)
+        command("120x24", until: fixtureFit("120x24")); settled(cols: 120)
         wait { ($0["tail"] as? Bool) == true && ($0["visible"] as? String ?? "").contains("APPENDED") }
         command("history"); anchor()
-        command("80x24"); settled(cols: 80); anchor()
+        command("80x24", until: fixtureFit("80x24")); settled(cols: 80); anchor()
         command("tail")
         wait { ($0["tail"] as? Bool) == true && ($0["visible"] as? String ?? "").contains("fixture>") }
         command("quiet")
