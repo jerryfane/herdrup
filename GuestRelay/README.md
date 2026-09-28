@@ -44,10 +44,10 @@ URLSessionWebSocketTask can't read the body of a failed upgrade.
 
 | Status | Code | When |
 | --- | --- | --- |
-| 401 | `unauthorized` | Host only. The bearer is missing or malformed, or its hash doesn't match the stored one. |
+| 401 | `unauthorized` | Host only. The bearer is missing or malformed (refused in the Worker, before any Durable Object), or its hash doesn't match the stored one. |
 | 503 | `host_offline` | Guest only. No host socket is connected. |
 | 503 | `host_busy` | Guest only. The host already has 32 open sessions. |
-| 429 | `rate_limited` | Guest only. The same `CF-Connecting-IP` made more than 30 connects in 60 s. |
+| 429 | `rate_limited` | Either role, keyed by `CF-Connecting-IP`: more than 30 guest connects, or more than 10 host connects, in 60 s. Checked before the Durable Object is reached. |
 | 426 | `upgrade_required` | Either role. The request isn't a WebSocket upgrade. |
 | 404 | `not_found` | Any other method or path, or a malformed `host_id`. |
 
@@ -75,7 +75,7 @@ Messages on the host socket are binary frames: `type u8 | session u32 BE | paylo
 
 Session ids start at 1 and increase. They are stored per `host_id`, so they keep
 increasing across host reconnects and Durable Object restarts. After 2^32−1 they wrap
-to 1.
+to 1, and allocation skips any id that a socket still holds.
 
 ### Close propagation and limits
 
@@ -107,11 +107,15 @@ costs nothing while its object hibernates.
 | --- | --- | --- |
 | `HOSTS` | Durable Object `HostRelay` (SQLite, migration `v1`) | One object per `host_id` |
 | `GUEST_CONNECT_LIMIT` | Rate limit, 30 per 60 s | Guest connects, keyed by `CF-Connecting-IP` |
+| `HOST_CONNECT_LIMIT` | Rate limit, 10 per 60 s | Host connects, keyed by `CF-Connecting-IP` |
 | `ASSETS` | Static assets from `public/` | The `/i` page. The Worker never reads it; the tests fetch through it. |
 
 The Worker needs no secrets.
 
 ## Develop and deploy
+
+Needs Node 22 or later (`engines` in `package.json`), because the pinned wrangler
+requires it.
 
 ```sh
 cd GuestRelay

@@ -1,4 +1,4 @@
-import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { SELF, env, evictDurableObject, listDurableObjectIds, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Everything here runs against the real Worker and Durable Object in workerd. Each test
@@ -93,8 +93,8 @@ interface GuestSession {
   session: number;
 }
 
-function hostRequest(hostId: string, authorization?: string, upgrade = true): Promise<Response> {
-  const headers: Record<string, string> = {};
+function hostRequest(hostId: string, authorization?: string, upgrade = true, ip = freshIp()): Promise<Response> {
+  const headers: Record<string, string> = { "CF-Connecting-IP": ip };
   if (upgrade) headers.Upgrade = "websocket";
   if (authorization !== undefined) headers.Authorization = authorization;
   return SELF.fetch(`${ORIGIN}/v1/host/${hostId}`, { headers });
@@ -286,6 +286,26 @@ describe("guest sessions", () => {
     expect((await connectGuest(host, hostId)).session).toBe(1);
   });
 
+  it("skips ids still held by open sessions when the counter wraps", async () => {
+    const hostId = newHostId();
+    const host = await connectHost(hostId, newSecret());
+    const one = await connectGuest(host, hostId);
+    const two = await connectGuest(host, hostId);
+    expect([one.session, two.session]).toEqual([1, 2]);
+    await runInDurableObject(stub(hostId), (_, state) => {
+      state.storage.sql.exec("UPDATE host SET next_session = 4294967295");
+    });
+    expect((await connectGuest(host, hostId)).session).toBe(0xffff_ffff);
+    const wrapped = await connectGuest(host, hostId);
+    expect(wrapped.session).toBe(3);
+
+    // The old sessions still get only their own traffic.
+    host.send(frame(DATA, 1, utf8("to-one")));
+    host.send(frame(DATA, 3, utf8("to-three")));
+    expect(text(new Uint8Array((await one.guest.next()) as ArrayBuffer))).toBe("to-one");
+    expect(text(new Uint8Array((await wrapped.guest.next()) as ArrayBuffer))).toBe("to-three");
+  });
+
   it("keeps routing and numbering sessions after the object hibernates", async () => {
     const hostId = newHostId();
     const secret = newSecret();
@@ -402,6 +422,23 @@ describe("limits", () => {
     for (let i = 0; i < 30; i++) await expectError(await guestRequest(hostId, ip), 503, "host_offline");
     await expectError(await guestRequest(hostId, ip), 429, "rate_limited");
     await expectError(await guestRequest(hostId, freshIp()), 503, "host_offline");
+  });
+
+  it("limits host connects to 10 per minute per IP before the Durable Object is reached", async () => {
+    const ip = freshIp();
+    const hostIds: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const hostId = newHostId();
+      hostIds.push(hostId);
+      // Malformed bearers count toward the limit but are refused in the Worker.
+      await expectError(await hostRequest(hostId, "Bearer short", true, ip), 401, "unauthorized");
+    }
+    await expectError(await hostRequest(newHostId(), `Bearer ${newSecret()}`, true, ip), 429, "rate_limited");
+    expect((await hostRequest(newHostId(), `Bearer ${newSecret()}`, true, freshIp())).status).toBe(101);
+
+    // None of the refused connects created a Durable Object.
+    const created = new Set((await listDurableObjectIds(env.HOSTS)).map((id) => id.toString()));
+    for (const hostId of hostIds) expect(created.has(env.HOSTS.idFromName(hostId).toString())).toBe(false);
   });
 
   it("closes a guest that sends text with 1003 and tells the host", async () => {

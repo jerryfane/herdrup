@@ -3,7 +3,7 @@
 // hibernation; the object keeps nothing in memory between events.
 import { DurableObject } from "cloudflare:workers";
 import { CLOSE, DATA, OPEN, closeReason, encodeFrame, parseFrame } from "./frames";
-import { errorResponse, log, type Env } from "./relay";
+import { BEARER, errorResponse, log, type Env } from "./relay";
 
 /** Largest WebSocket message either side may send; anything bigger closes with 1009. */
 export const MAX_MESSAGE_BYTES = 70_000;
@@ -18,9 +18,6 @@ const CLOSE_UNSUPPORTED_DATA = 1003;
 const CLOSE_ABNORMAL = 1006;
 const CLOSE_TOO_BIG = 1009;
 const CLOSE_REPLACED = 4000;
-
-// relay_secret is b64url of 32 bytes: 43 characters.
-const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 
 interface Attachment {
   role: "host" | "guest";
@@ -97,9 +94,13 @@ export class HostRelay extends DurableObject<Env> {
       return errorResponse(503, "host_busy");
     }
 
-    // Persisted, so ids keep increasing across host reconnects and evictions.
+    // Persisted, so ids keep increasing across host reconnects and evictions. After the u32
+    // wrap, skip 0 and any id a socket still holds; few sockets are ever held, so this ends.
     const sql = this.ctx.storage.sql;
-    const session = sql.exec<{ next_session: number }>("SELECT next_session FROM host WHERE id = 1").one().next_session;
+    let session = sql.exec<{ next_session: number }>("SELECT next_session FROM host WHERE id = 1").one().next_session;
+    while (session === 0 || this.ctx.getWebSockets(`session:${session}`).length > 0) {
+      session = session >= MAX_SESSION_ID ? 1 : session + 1;
+    }
     sql.exec("UPDATE host SET next_session = ? WHERE id = 1", session >= MAX_SESSION_ID ? 1 : session + 1);
 
     // OPEN goes first: if the host socket fails now, no orphan guest socket is left behind.

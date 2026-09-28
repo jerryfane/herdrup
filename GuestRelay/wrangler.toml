@@ -20,8 +20,13 @@ class_name = "HostRelay"
 tag = "v1"
 new_sqlite_classes = ["HostRelay"]
 
-# Keyed by CF-Connecting-IP.
+# Both keyed by CF-Connecting-IP and checked before the Durable Object is reached.
 [[ratelimits]]
 name = "GUEST_CONNECT_LIMIT"
 namespace_id = "3101"
 simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "HOST_CONNECT_LIMIT"
+namespace_id = "3102"
+simple = { limit = 10, period = 60 }

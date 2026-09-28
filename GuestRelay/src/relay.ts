@@ -8,6 +8,7 @@ export const VERSION = "1.0.0";
 export interface Env {
   HOSTS: DurableObjectNamespace;
   GUEST_CONNECT_LIMIT?: RateLimit;
+  HOST_CONNECT_LIMIT?: RateLimit;
 }
 
 export type Endpoint = "/v1/host" | "/v1/guest";
@@ -24,6 +25,8 @@ export function log(line: LogLine): void {
 
 // host_id is b64url of 16 bytes: 22 characters.
 const SOCKET_PATH = /^\/v1\/(host|guest)\/[A-Za-z0-9_-]{22}$/;
+// relay_secret is b64url of 32 bytes: 43 characters.
+export const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -39,17 +42,20 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       log({ endpoint, outcome: "upgrade_required" });
       return errorResponse(426, "upgrade_required", { Upgrade: "websocket" });
     }
-    if (endpoint === "/v1/guest") {
-      const limiter = env.GUEST_CONNECT_LIMIT;
-      if (limiter === undefined) {
-        log({ endpoint, outcome: "not_configured" });
-        return errorResponse(500, "not_configured");
-      }
-      const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-      if (!(await limiter.limit({ key: ip })).success) {
-        log({ endpoint, outcome: "rate_limited" });
-        return errorResponse(429, "rate_limited");
-      }
+    // Both limits run before the Durable Object, so floods neither create objects nor cost hashing.
+    const limiter = endpoint === "/v1/host" ? env.HOST_CONNECT_LIMIT : env.GUEST_CONNECT_LIMIT;
+    if (limiter === undefined) {
+      log({ endpoint, outcome: "not_configured" });
+      return errorResponse(500, "not_configured");
+    }
+    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    if (!(await limiter.limit({ key: ip })).success) {
+      log({ endpoint, outcome: "rate_limited" });
+      return errorResponse(429, "rate_limited");
+    }
+    if (endpoint === "/v1/host" && !BEARER.test(request.headers.get("Authorization") ?? "")) {
+      log({ endpoint, outcome: "unauthorized" });
+      return errorResponse(401, "unauthorized");
     }
     const hostId = pathname.slice(pathname.lastIndexOf("/") + 1);
     return await env.HOSTS.get(env.HOSTS.idFromName(hostId)).fetch(request);
