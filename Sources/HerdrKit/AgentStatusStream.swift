@@ -92,6 +92,7 @@ public enum AgentStatusStreamLine: Sendable, Equatable {
             guard let p = payload(TurnPayload.self) else { return .unknown(raw: line) }
             return .turnCompleted(AgentTurnCompletion(
                 seq: probe.seq, paneID: p.pane.paneID, agentStatus: p.pane.agentStatus,
+                inputPending: p.pane.inputPending ?? false, inputPromptKind: p.pane.inputPromptKind,
                 turn: p.turn, turnEpoch: p.turnEpoch, outcome: p.outcome,
                 completedUnixMs: p.completedUnixMs))
         case "pane_created":
@@ -138,21 +139,29 @@ public struct AgentStatusChange: Sendable, Equatable {
     }
 }
 
-/// `pane.turn_completed`: the pane snapshot's status plus the finished turn.
+/// `pane.turn_completed`: the pane snapshot's status and input prompt plus the
+/// finished turn. The snapshot omits `input_pending` / `input_prompt_kind` when the
+/// pane is not waiting on input, so their absence means cleared.
 public struct AgentTurnCompletion: Sendable, Equatable {
     public let seq: UInt64?
     public let paneID: String
     public let agentStatus: String?
+    public let inputPending: Bool
+    public let inputPromptKind: String?
     public let turn: Int
     public let turnEpoch: UInt64
     public let outcome: String?
     public let completedUnixMs: Int64?
 
-    public init(seq: UInt64?, paneID: String, agentStatus: String?, turn: Int, turnEpoch: UInt64,
+    public init(seq: UInt64?, paneID: String, agentStatus: String?,
+                inputPending: Bool = false, inputPromptKind: String? = nil,
+                turn: Int, turnEpoch: UInt64,
                 outcome: String? = nil, completedUnixMs: Int64? = nil) {
         self.seq = seq
         self.paneID = paneID
         self.agentStatus = agentStatus
+        self.inputPending = inputPending
+        self.inputPromptKind = inputPromptKind
         self.turn = turn
         self.turnEpoch = turnEpoch
         self.outcome = outcome
@@ -196,7 +205,13 @@ extension AgentInfo {
             if let turn = change.turn { next.turn = turn }
             if let epoch = change.turnEpoch { next.turnEpoch = epoch }
         case .turn(let completion):
-            if let status = completion.agentStatus { next.setStatus(status, at: receivedAt) }
+            if let status = completion.agentStatus {
+                // A snapshot with a status is the pane's whole state, input prompt
+                // included: a turn that finished `done` ends a `blocked` prompt.
+                next.setStatus(status, at: receivedAt)
+                next.inputPending = completion.inputPending
+                next.inputPromptKind = completion.inputPromptKind
+            }
             next.turn = completion.turn
             next.turnEpoch = completion.turnEpoch
             next.lastCompletedTurn = CompletedTurn(
@@ -380,9 +395,13 @@ private struct TurnPayload: Decodable {
     struct Pane: Decodable {
         let paneID: String
         let agentStatus: String?
+        let inputPending: Bool?
+        let inputPromptKind: String?
         enum CodingKeys: String, CodingKey {
             case paneID = "pane_id"
             case agentStatus = "agent_status"
+            case inputPending = "input_pending"
+            case inputPromptKind = "input_prompt_kind"
         }
     }
 

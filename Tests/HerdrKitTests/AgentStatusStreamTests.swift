@@ -231,6 +231,27 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(row.lastCompletedTurn?.completedUnixMs, 777)
     }
 
+    /// herdrup#334: the turn event's pane snapshot omits `input_pending` once the
+    /// prompt is answered; a row that was waiting on input must stop needing you.
+    func testTurnCompletedClearsAnAnsweredInputPrompt() throws {
+        let agents = try decodeAgents(
+            #"[{"pane_id":"w1:p1","agent_status":"blocked","input_pending":true,"input_prompt_kind":"confirm","turn":2,"turn_epoch":1}]"#)
+        XCTAssertTrue(agents[0].isAwaitingMenuInput)
+        let finished = try AgentStatusStreamLine.decode(
+            #"{"seq":44,"event":"pane.turn_completed","data":{"pane":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"done","focused":false},"turn":3,"turn_epoch":1,"outcome":"completed"}}"#)
+        let row = try XCTUnwrap(agents.applying(XCTUnwrap(finished.liveUpdate), receivedAt: Date())?.first)
+        XCTAssertEqual(row.agentStatus, "done")
+        XCTAssertNotEqual(row.inputPending, true)
+        XCTAssertNil(row.inputPromptKind)
+        XCTAssertFalse(row.isAwaitingMenuInput, "a finished turn no longer needs you")
+
+        let stillWaiting = try AgentStatusStreamLine.decode(
+            #"{"seq":45,"event":"pane.turn_completed","data":{"pane":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"idle","input_pending":true,"input_prompt_kind":"select","focused":false},"turn":4,"turn_epoch":1}}"#)
+        let waiting = try XCTUnwrap(agents.applying(XCTUnwrap(stillWaiting.liveUpdate), receivedAt: Date())?.first)
+        XCTAssertEqual(waiting.inputPending, true, "a snapshot still waiting on input keeps the prompt")
+        XCTAssertEqual(waiting.inputPromptKind, "select")
+    }
+
     /// The race the ledger exists for: a status event arrives while a reload is in
     /// flight, and the reload's snapshot was taken before it.
     func testLedgerKeepsUpdatesAnOverlappingReloadPredates() throws {
