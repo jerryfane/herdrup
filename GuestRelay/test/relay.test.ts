@@ -1,5 +1,6 @@
 import { SELF, env, evictDurableObject, listDurableObjectIds, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invitePayload } from "../public/static/invite.js";
 
 // Everything here runs against the real Worker and Durable Object in workerd. Each test
 // uses its own host_id and client IPs, so storage and rate-limit state never collide.
@@ -18,6 +19,24 @@ function b64url(bytes: Uint8Array): string {
 
 const newHostId = () => b64url(crypto.getRandomValues(new Uint8Array(16)));
 const newSecret = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+const newInvitePayload = () =>
+  b64url(
+    utf8(
+      JSON.stringify({
+        v: 1,
+        relay: ORIGIN,
+        host_id: newHostId(),
+        host_pub: newSecret(),
+        invite_id: newHostId(),
+        secret: newSecret(),
+        machine_label: "llm-opt",
+        owner_name: "Jerry",
+        agent_name: "claude",
+        guest_name: "Luca",
+        expires_unix: 1_900_000_000,
+      }),
+    ),
+  );
 
 let ipCounter = 0;
 const freshIp = () => `2001:db8::${(++ipCounter).toString(16)}`;
@@ -154,7 +173,44 @@ describe("routing", () => {
     const css = await (await env.ASSETS.fetch(`${ORIGIN}/static/i.css`)).text();
     const refs = [...html.matchAll(/(?:src|href)="(\/[^"]+)"/g), ...css.matchAll(/url\((\/[^)]+)\)/g)].map((m) => m[1]);
     expect(refs).toEqual(expect.arrayContaining(["/static/i.js", "/static/i.css", "/fonts/Geist-Regular.woff2"]));
-    for (const ref of refs) expect([ref, (await env.ASSETS.fetch(`${ORIGIN}${ref}`)).status]).toEqual([ref, 200]);
+    const js = await (await env.ASSETS.fetch(`${ORIGIN}/static/i.js`)).text();
+    const imports = [...js.matchAll(/from "\.\/([^"]+)"/g)].map((m) => `/static/${m[1]}`);
+    expect(imports).toEqual(["/static/invite.js"]);
+    for (const ref of [...refs, ...imports]) {
+      expect([ref, (await env.ASSETS.fetch(`${ORIGIN}${ref}`)).status]).toEqual([ref, 200]);
+    }
+  });
+
+  it("serves the landing page for /i/<payload> with the /i headers", async () => {
+    const page = await (await env.ASSETS.fetch(`${ORIGIN}/i`)).text();
+    for (const payload of [newInvitePayload(), "A", "-_".repeat(2048)]) {
+      const response = await SELF.fetch(`${ORIGIN}/i/${payload}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toMatch(/^text\/html/);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      expect(await response.text()).toBe(page);
+    }
+  });
+
+  it("answers not_found for an /i/ path that is not a b64url payload", async () => {
+    const payload = newInvitePayload();
+    for (const path of [
+      "/i/",
+      `/i/${payload}/`,
+      `/i/${payload}/x`,
+      `/i/${payload}.html`,
+      `/i/${payload}+`,
+      `/i/${payload}=`,
+      `/i/${payload}%2F`,
+      `/i/<${payload}>`,
+      `/i/${"A".repeat(4097)}`,
+      `/x/${payload}`,
+    ]) {
+      await expectError(await SELF.fetch(`${ORIGIN}${path}`), 404, "not_found");
+    }
+    await expectError(await SELF.fetch(`${ORIGIN}/i/${payload}`, { method: "POST" }), 404, "not_found");
   });
 
   it("rejects unknown paths, malformed host ids and other methods with not_found", async () => {
@@ -466,6 +522,16 @@ describe("limits", () => {
   });
 });
 
+describe("landing page script", () => {
+  it("takes the payload from the /i/<payload> path, else from the older /i#<payload> fragment", () => {
+    expect(invitePayload("/i/eyJ2IjoxfQ", "")).toBe("eyJ2IjoxfQ");
+    expect(invitePayload("/i/eyJ2IjoxfQ", "#other")).toBe("eyJ2IjoxfQ");
+    expect(invitePayload("/i", "#eyJ2IjoxfQ")).toBe("eyJ2IjoxfQ");
+    expect(invitePayload("/i", "")).toBe("");
+    expect(invitePayload("/i/", "#eyJ2IjoxfQ")).toBe("eyJ2IjoxfQ");
+  });
+});
+
 describe("logging", () => {
   let lines: string[];
 
@@ -521,5 +587,15 @@ describe("logging", () => {
     );
     const all = lines.join("\n");
     for (const secretText of [hostId, secret, marker]) expect(all).not.toContain(secretText);
+  });
+
+  it("never logs an invite link's payload", async () => {
+    const payload = newInvitePayload();
+    await SELF.fetch(`${ORIGIN}/i/${payload}`);
+    await SELF.fetch(`${ORIGIN}/i/${payload}+`);
+    await SELF.fetch(`${ORIGIN}/i/${payload}`, { method: "POST" });
+    await SELF.fetch(`${ORIGIN}/v1/guest/${payload}`, { headers: { Upgrade: "websocket" } });
+    const all = lines.join("\n");
+    expect(all).not.toContain(payload.slice(0, 40));
   });
 });

@@ -1,15 +1,16 @@
-// Renders a guest invite from the URL fragment, which never reaches the server.
-// The payload is b64url(JSON) as defined in the guest access contract. Every field is
-// written with textContent, and only a b64url fragment is ever placed in the app link.
-"use strict";
+// Renders a guest invite from the URL: the path of /i/<payload>, or the fragment of older
+// /i#<payload> links. The payload is b64url(JSON) as defined in the guest access contract.
+// Every field is written with textContent, and only a b64url payload is ever placed in the
+// app link, which carries it in the fragment so it never leaves the device.
+import { invitePayload } from "./invite.js";
 
 (function () {
   var APP_LINK = "herdrup://guest-invite#";
   var B64URL = /^[A-Za-z0-9_-]+$/;
   var $ = function (id) { return document.getElementById(id); };
 
-  function decode(fragment) {
-    var base64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
+  function decode(payload) {
+    var base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
     var binary = atob(base64 + "===".slice((base64.length + 3) % 4));
     var bytes = new Uint8Array(binary.length);
     for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -40,26 +41,26 @@
     return "Works once · expires in " + Math.max(1, Math.floor(seconds / 60)) + " min";
   }
 
-  // Following another invite link while this page is open changes only the hash.
+  // Following an older /i#… invite link while this page is open changes only the hash.
   window.addEventListener("hashchange", function () { location.reload(); });
 
-  var fragment = location.hash.replace(/^#/, "");
-  if (fragment === "") {
+  var payload = invitePayload(location.pathname, location.hash);
+  if (payload === "") {
     problem("This page opens HerdrUp invites. The link you followed has no invite in it. Ask for the link again.");
     return;
   }
-  if (!B64URL.test(fragment)) {
+  if (!B64URL.test(payload)) {
     problem("This invite link is damaged. Ask for the link again, or paste the whole link into HerdrUp.");
     return;
   }
 
   var open = $("open");
-  open.href = APP_LINK + fragment;
+  open.href = APP_LINK + payload;
   open.hidden = false;
 
   var invite;
   try {
-    invite = decode(fragment);
+    invite = decode(payload);
   } catch (e) {
     invite = null;
   }

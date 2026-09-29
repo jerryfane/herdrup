@@ -19,19 +19,31 @@ The relay never holds a key that can read the traffic.
 
 - **Logs:** each log line is a JSON object with only `endpoint`, `outcome` and, for
   closes, `code`. The relay never logs payloads, the close reasons that peers send,
-  secrets, host ids or IP addresses. The `/i` landing page and its assets are served
-  before the Worker runs, so those requests are never logged.
+  secrets, host ids, IP addresses or request paths. The `/i` landing page and its assets
+  are served before the Worker runs. `/i/<payload>` reaches the Worker, which hands it the
+  same page from `ASSETS` without logging anything.
+- **Platform logs:** `wrangler.toml` turns off Workers Logs (including invocation logs,
+  which record every request URL), traces and Logpush, so Cloudflare keeps no record of
+  invite paths. `wrangler tail` still shows request URLs to whoever runs it, so don't tail
+  a production relay while invites are in use.
 - **Storage:** each host's Durable Object stores two things in SQLite: the SHA-256 of the
   host's relay secret, and the next session id.
-- **Invite links:** the invite lives in the URL fragment of `/i#…`, which browsers never
-  send to a server.
+- **Invite links:** the invite lives in the path of `/i/<payload>`, so it reaches the
+  Worker once, on the way to the landing page. Nothing stores or logs it, and the page is
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The "Open in HerdrUp"
+  button carries it in the fragment of `herdrup://guest-invite#<payload>`, which never
+  leaves the device.
+  - The earlier `/i#<payload>` form kept the invite away from the server, but iMessage
+    splits a link at `#` into two messages, so the recipient got a bare `/i` link and a
+    stray `#eyJ…` text. The page still reads the fragment, so old links keep working.
 
 ## Endpoints
 
 | Endpoint | Behaviour |
 | --- | --- |
 | `GET /v1/health` | 200 `{"ok":true,"version":"…"}` |
-| `GET /i` | The static invite landing page. Its script reads `location.hash`, shows who shared which agent, and links "Open in HerdrUp" to `herdrup://guest-invite#<fragment>`. It also links to the App Store. |
+| `GET /i/<payload>` | The invite landing page. `<payload>` is the b64url invite (`A-Z a-z 0-9 - _`, 1 to 4096 characters); anything else is 404 `not_found`. The page's script reads the payload from the path, shows who shared which agent, and links "Open in HerdrUp" to `herdrup://guest-invite#<payload>`. It also links to the App Store. |
+| `GET /i` | The same page for older `/i#<payload>` links: its script falls back to `location.hash`. |
 | `GET /v1/host/<host_id>` | The host's WebSocket. Needs `Authorization: Bearer <relay_secret>`. |
 | `GET /v1/guest/<host_id>` | A guest WebSocket. No auth here: Noise authenticates the guest. |
 
@@ -108,7 +120,7 @@ costs nothing while its object hibernates.
 | `HOSTS` | Durable Object `HostRelay` (SQLite, migration `v1`) | One object per `host_id` |
 | `GUEST_CONNECT_LIMIT` | Rate limit, 30 per 60 s | Guest connects, keyed by `CF-Connecting-IP` |
 | `HOST_CONNECT_LIMIT` | Rate limit, 10 per 60 s | Host connects, keyed by `CF-Connecting-IP` |
-| `ASSETS` | Static assets from `public/` | The `/i` page. The Worker never reads it; the tests fetch through it. |
+| `ASSETS` | Static assets from `public/` | The `/i` page. The Worker serves it for `/i/<payload>`, which matches no file. |
 
 The Worker needs no secrets.
 
