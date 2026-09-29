@@ -229,11 +229,18 @@ public struct GuestListing: Decodable, Sendable, Equatable {
 }
 
 /// Result of `guest.invite.create`: the stored invite plus both link forms. `url` is the
-/// `herdrup://guest-invite#…` app link (the QR code); `webURL` is the shareable https form.
+/// `herdrup://guest-invite#…` app link (the QR code); `webURL` is the https form.
 public struct GuestInviteCreated: Decodable, Sendable, Equatable {
     public let invite: GuestInviteRecord
     public let url: String
     public let webURL: String
+
+    /// The web link to copy or send. A daemon older than the path form returns
+    /// `…/i#<payload>`, which Messages splits in two at the `#`; the same payload
+    /// goes out as `…/i/<payload>` instead.
+    public var shareableWebURL: String {
+        GuestInvite.pathFormWebLink(webURL)
+    }
 
     public init(invite: GuestInviteRecord, url: String, webURL: String) {
         self.invite = invite
