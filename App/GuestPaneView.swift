@@ -296,7 +296,9 @@ struct GuestPaneView: View {
             text: reply,
             isFocused: replyFocused,
             hasAccessory: !attachments.isEmpty,
-            showsLeading: false,
+            // The standard reply bar's collapse button, while a software keyboard covers
+            // the pane: the view-only terminal has nothing else to tap it away with.
+            showsLeading: composerKeyboard.isVisible && !findFocused && replyFocused,
             isRecording: dictating
         ) { editorHeight in
             ComposerTextField(
@@ -333,7 +335,12 @@ struct GuestPaneView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
         } leading: {
-            EmptyView()
+            Button { replyFocused = false } label: {
+                ComposerActionIcon(image: Image("ComposerKeyboard"))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Collapse keyboard")
+            .accessibilityIdentifier("guest-keyboard-button")
         } actions: {
             HStack(spacing: 4) {
                 Button { showAttachSheet = true } label: {

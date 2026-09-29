@@ -70,6 +70,31 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertEqual(forbiddenCalls(app), "", "sending must go out as agent.prompt only")
     }
 
+    /// Reported on TestFlight 176: with the keyboard up, the guest composer (attach, mic,
+    /// send) had no way to put it away, and the view-only terminal takes no taps. It must
+    /// offer the standard composer's collapse button, and tapping it hides the keyboard.
+    func testKeyboardCanBeDismissedFromTheComposer() throws {
+        let app = launch("guestpane")
+        let input = app.textViews["guest-composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        let collapse = app.buttons["guest-keyboard-button"]
+        XCTAssertFalse(collapse.exists, "no collapse button while the keyboard is down")
+
+        input.tap()
+        let keyboard = app.keyboards.firstMatch
+        guard keyboard.waitForExistence(timeout: 5), keyboard.frame.height >= 150 else {
+            throw XCTSkip("no full software keyboard on this destination; nothing to dismiss")
+        }
+        XCTAssertTrue(collapse.waitForExistence(timeout: 5), "a visible software keyboard must be dismissible")
+        XCTAssertTrue(app.buttons["guest-attach-button"].exists, "the collapse button sits beside attach, not over it")
+        Thread.sleep(forTimeInterval: 0.6)
+        attachScreenshot(app, "guest-pane-keyboard")
+
+        collapse.tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "the collapse button puts the keyboard away")
+        XCTAssertTrue(collapse.waitForNonExistence(timeout: 5), "the button goes with the keyboard")
+    }
+
     /// With the agent out of the foreground the host refuses the guest: the pane says so and
     /// the composer can't be used.
     func testPausedAgentDisablesTheComposer() {
