@@ -231,6 +231,113 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(row.lastCompletedTurn?.completedUnixMs, 777)
     }
 
+    /// herdrup#334: the turn event's pane snapshot omits `input_pending` once the
+    /// prompt is answered; a row that was waiting on input must stop needing you.
+    func testTurnCompletedClearsAnAnsweredInputPrompt() throws {
+        let agents = try decodeAgents(
+            #"[{"pane_id":"w1:p1","agent_status":"blocked","input_pending":true,"input_prompt_kind":"confirm","turn":2,"turn_epoch":1}]"#)
+        XCTAssertTrue(agents[0].isAwaitingMenuInput)
+        let finished = try AgentStatusStreamLine.decode(
+            #"{"seq":44,"event":"pane.turn_completed","data":{"pane":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"done","focused":false},"turn":3,"turn_epoch":1,"outcome":"completed"}}"#)
+        let row = try XCTUnwrap(agents.applying(XCTUnwrap(finished.liveUpdate), receivedAt: Date())?.first)
+        XCTAssertEqual(row.agentStatus, "done")
+        XCTAssertNotEqual(row.inputPending, true)
+        XCTAssertNil(row.inputPromptKind)
+        XCTAssertFalse(row.isAwaitingMenuInput, "a finished turn no longer needs you")
+
+        let stillWaiting = try AgentStatusStreamLine.decode(
+            #"{"seq":45,"event":"pane.turn_completed","data":{"pane":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"idle","input_pending":true,"input_prompt_kind":"select","focused":false},"turn":4,"turn_epoch":1}}"#)
+        let waiting = try XCTUnwrap(agents.applying(XCTUnwrap(stillWaiting.liveUpdate), receivedAt: Date())?.first)
+        XCTAssertEqual(waiting.inputPending, true, "a snapshot still waiting on input keeps the prompt")
+        XCTAssertEqual(waiting.inputPromptKind, "select")
+    }
+
+    /// herdrup#333: a status or turn event for an agent pane the list has not loaded
+    /// yet must reload agent.list, not vanish.
+    func testEventForAnUnlistedAgentPaneAsksForAReload() throws {
+        let agents = try decodeAgents(#"[{"pane_id":"w1:p1","agent_status":"idle"}]"#)
+        let at = Date(timeIntervalSince1970: 50)
+        let unlistedStatus = try AgentStatusStreamLine.decode(
+            #"{"seq":1,"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"blocked","agent":"claude"}}"#)
+        let unlistedTurn = try AgentStatusStreamLine.decode(
+            #"{"seq":2,"event":"pane.turn_completed","data":{"pane":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent":"claude","agent_status":"done","focused":false},"turn":1,"turn_epoch":1}}"#)
+        XCTAssertEqual(agents.effect(of: unlistedStatus, receivedAt: at), .reloadForUnlistedPane("build/w9:p9"))
+        XCTAssertEqual(agents.effect(of: unlistedTurn, receivedAt: at), .reloadForUnlistedPane("build/w9:p9"))
+
+        let listed = AgentStatusStreamLine.statusChanged(AgentStatusChange(
+            seq: 3, paneID: "w1:p1", workspaceID: "w1", agentStatus: "working"))
+        guard case .patch(let rows) = agents.effect(of: listed, receivedAt: at) else {
+            return XCTFail("a listed pane is patched in place")
+        }
+        XCTAssertEqual(rows.first?.agentStatus, "working")
+        XCTAssertEqual(agents.effect(of: .paneClosed(paneID: "w1:p1", seq: 4), receivedAt: at), .reload)
+        XCTAssertEqual(agents.effect(of: .heartbeat(seq: 5), receivedAt: at), .ignore)
+    }
+
+    /// The all-panes stream also reports panes agent.list never lists: a plain
+    /// shell whose title changes, or a pane whose agent quit. Those must not
+    /// reload, and repeated events for one unlisted agent pane reload once per
+    /// published load, not once per event.
+    func testSteadyUnlistedPanesDoNotReloadRepeatedly() throws {
+        let agents = try decodeAgents(#"[{"pane_id":"w1:p1","agent_status":"idle"}]"#)
+        var gate = UnlistedPaneReloads()
+        let t0 = ContinuousClock.now
+        var reloads = 0
+        func receive(_ json: String, at offset: Int) throws {
+            let effect = agents.effect(of: try AgentStatusStreamLine.decode(json), receivedAt: Date())
+            switch effect {
+            case .reload: reloads += 1
+            case .reloadForUnlistedPane(let pane):
+                if gate.request(pane, at: t0 + .seconds(offset)) { reloads += 1 }
+            case .patch, .ignore: break
+            }
+        }
+
+        for i in 1...5 {   // a shell's title follows its cwd; no agent is present
+            try receive(#"{"seq":\#(i),"event":"pane.agent_status_changed","data":{"pane_id":"w1:p7","workspace_id":"w1","agent_status":"unknown","title":"~/src/\#(i)"}}"#,
+                        at: i)
+        }
+        XCTAssertEqual(reloads, 0, "a pane without an agent is never listed")
+
+        for i in 1...5 {   // a new remote agent the coordinator's directory lags on
+            try receive(#"{"seq":\#(10 + i),"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"working","agent":"codex","title":"t\#(i)"}}"#,
+                        at: 10 + i)
+        }
+        XCTAssertEqual(reloads, 1, "one reload until a load publishes")
+
+        let again = #"{"seq":20,"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"working","agent":"codex","title":"again"}}"#
+        gate.loadPublished(startedAt: t0 + .seconds(10))   // began before the request at 11
+        try receive(again, at: 16)
+        XCTAssertEqual(reloads, 1, "a load that began before the request does not answer it")
+
+        gate.loadPublished(startedAt: t0 + .seconds(12))   // answered it, still without the pane
+        try receive(again, at: 20)
+        XCTAssertEqual(reloads, 2, "once answered, the pane may ask one more time")
+    }
+
+    /// herdrup#333: while the stream is open the poll waits out the backstop only
+    /// after a load that published. A failed resync must not count as one.
+    func testFailedLoadLeavesTheBackstopDue() {
+        let interval = Duration.seconds(30)
+        let t0 = ContinuousClock.now
+        var backstop = AgentListBackstop()
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0),
+                      "nothing has loaded yet")
+
+        backstop.loadSucceeded(startedAt: t0)
+        XCTAssertFalse(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(5)))
+        XCTAssertTrue(backstop.isDue(streaming: false, interval: interval, now: t0 + .seconds(5)),
+                      "without the stream every tick polls")
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(30)))
+
+        backstop.loadFailed()   // e.g. the resync after `lagged` failed
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(10)),
+                      "a failed load is retried on the next tick")
+
+        backstop.loadSucceeded(startedAt: t0 + .seconds(10))
+        XCTAssertFalse(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(15)))
+    }
+
     /// The race the ledger exists for: a status event arrives while a reload is in
     /// flight, and the reload's snapshot was taken before it.
     func testLedgerKeepsUpdatesAnOverlappingReloadPredates() throws {

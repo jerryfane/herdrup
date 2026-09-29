@@ -92,6 +92,8 @@ public enum AgentStatusStreamLine: Sendable, Equatable {
             guard let p = payload(TurnPayload.self) else { return .unknown(raw: line) }
             return .turnCompleted(AgentTurnCompletion(
                 seq: probe.seq, paneID: p.pane.paneID, agentStatus: p.pane.agentStatus,
+                inputPending: p.pane.inputPending ?? false, inputPromptKind: p.pane.inputPromptKind,
+                agent: p.pane.agent,
                 turn: p.turn, turnEpoch: p.turnEpoch, outcome: p.outcome,
                 completedUnixMs: p.completedUnixMs))
         case "pane_created":
@@ -138,21 +140,31 @@ public struct AgentStatusChange: Sendable, Equatable {
     }
 }
 
-/// `pane.turn_completed`: the pane snapshot's status plus the finished turn.
+/// `pane.turn_completed`: the pane snapshot's status and input prompt plus the
+/// finished turn. The snapshot omits `input_pending` / `input_prompt_kind` when the
+/// pane is not waiting on input, so their absence means cleared.
 public struct AgentTurnCompletion: Sendable, Equatable {
     public let seq: UInt64?
     public let paneID: String
     public let agentStatus: String?
+    public let inputPending: Bool
+    public let inputPromptKind: String?
+    public let agent: String?
     public let turn: Int
     public let turnEpoch: UInt64
     public let outcome: String?
     public let completedUnixMs: Int64?
 
-    public init(seq: UInt64?, paneID: String, agentStatus: String?, turn: Int, turnEpoch: UInt64,
+    public init(seq: UInt64?, paneID: String, agentStatus: String?,
+                inputPending: Bool = false, inputPromptKind: String? = nil, agent: String? = nil,
+                turn: Int, turnEpoch: UInt64,
                 outcome: String? = nil, completedUnixMs: Int64? = nil) {
         self.seq = seq
         self.paneID = paneID
         self.agentStatus = agentStatus
+        self.inputPending = inputPending
+        self.inputPromptKind = inputPromptKind
+        self.agent = agent
         self.turn = turn
         self.turnEpoch = turnEpoch
         self.outcome = outcome
@@ -169,6 +181,15 @@ public enum AgentLiveUpdate: Sendable, Equatable {
         switch self {
         case .status(let change): return change.paneID
         case .turn(let completion): return completion.paneID
+        }
+    }
+
+    /// The agent the event reports on the pane: nil for a pane without one, such as
+    /// a plain shell, which `agent.list` never lists.
+    public var agent: String? {
+        switch self {
+        case .status(let change): return change.agent
+        case .turn(let completion): return completion.agent
         }
     }
 }
@@ -196,7 +217,13 @@ extension AgentInfo {
             if let turn = change.turn { next.turn = turn }
             if let epoch = change.turnEpoch { next.turnEpoch = epoch }
         case .turn(let completion):
-            if let status = completion.agentStatus { next.setStatus(status, at: receivedAt) }
+            if let status = completion.agentStatus {
+                // A snapshot with a status is the pane's whole state, input prompt
+                // included: a turn that finished `done` ends a `blocked` prompt.
+                next.setStatus(status, at: receivedAt)
+                next.inputPending = completion.inputPending
+                next.inputPromptKind = completion.inputPromptKind
+            }
             next.turn = completion.turn
             next.turnEpoch = completion.turnEpoch
             next.lastCompletedTurn = CompletedTurn(
@@ -222,6 +249,51 @@ extension Array where Element == AgentInfo {
         var next = self
         next[index] = self[index].applying(update, receivedAt: receivedAt)
         return next
+    }
+
+    /// What one stream line does to this list: patch a listed row, reload
+    /// `agent.list` (the panes changed), ask for a reload for an agent pane the list
+    /// has not seen yet, or ignore it. The all-panes stream also reports panes
+    /// without an agent (a plain shell's title changing, a pane whose agent quit);
+    /// `agent.list` never lists those, so they are ignored.
+    public func effect(of line: AgentStatusStreamLine, receivedAt: Date) -> AgentRosterStreamEffect {
+        guard let update = line.liveUpdate else { return line.requiresRosterReload ? .reload : .ignore }
+        if let patched = applying(update, receivedAt: receivedAt) { return .patch(patched) }
+        guard !update.paneID.isEmpty, update.agent != nil else { return .ignore }
+        return .reloadForUnlistedPane(update.paneID)
+    }
+}
+
+/// See `[AgentInfo].effect(of:receivedAt:)`.
+public enum AgentRosterStreamEffect: Sendable, Equatable {
+    case patch([AgentInfo])
+    case reload
+    /// Reload, subject to `UnlistedPaneReloads`.
+    case reloadForUnlistedPane(String)
+    case ignore
+}
+
+/// Reloads asked for by status or turn events naming an agent pane the list does
+/// not show. One request per pane until a load that started after it publishes,
+/// so a burst of events for one new pane, or a pane `agent.list` keeps leaving out
+/// (a federation peer's pane the coordinator's directory has not caught up with),
+/// costs a reload per published load rather than one per event.
+public struct UnlistedPaneReloads: Sendable, Equatable {
+    private var requested: [String: ContinuousClock.Instant] = [:]
+
+    public init() {}
+
+    /// Whether an event for unlisted `paneID` received at `now` should reload.
+    public mutating func request(_ paneID: String, at now: ContinuousClock.Instant) -> Bool {
+        guard requested[paneID] == nil else { return false }
+        requested[paneID] = now
+        return true
+    }
+
+    /// The load that started at `start` published: it answered every request made
+    /// before it started.
+    public mutating func loadPublished(startedAt start: ContinuousClock.Instant) {
+        requested = requested.filter { $0.value >= start }
     }
 }
 
@@ -295,6 +367,34 @@ public struct ReconnectBackoff: Sendable, Equatable {
     }
 
     public mutating func reset() { current = initial }
+}
+
+// MARK: - agent.list backstop
+
+/// When the home list's poll re-fetches `agent.list`. Without an open status stream
+/// every tick loads; with one, only once `interval` has passed since the last load
+/// that published. A failed load (an event-driven resync after `lagged` or a pane
+/// lifecycle event, say) leaves the list due, so the next tick retries it rather
+/// than treating the failure as a fresh backstop.
+public struct AgentListBackstop: Sendable, Equatable {
+    private var lastPublishedLoadStart: ContinuousClock.Instant?
+
+    public init() {}
+
+    /// The load that started at `start` published its snapshot.
+    public mutating func loadSucceeded(startedAt start: ContinuousClock.Instant) {
+        lastPublishedLoadStart = start
+    }
+
+    /// The newest load failed: the next tick loads again.
+    public mutating func loadFailed() {
+        lastPublishedLoadStart = nil
+    }
+
+    public func isDue(streaming: Bool, interval: Duration, now: ContinuousClock.Instant) -> Bool {
+        guard streaming, let last = lastPublishedLoadStart else { return true }
+        return now - last >= interval
+    }
 }
 
 // MARK: - Decoding helpers
@@ -380,9 +480,15 @@ private struct TurnPayload: Decodable {
     struct Pane: Decodable {
         let paneID: String
         let agentStatus: String?
+        let inputPending: Bool?
+        let inputPromptKind: String?
+        let agent: String?
         enum CodingKeys: String, CodingKey {
+            case agent
             case paneID = "pane_id"
             case agentStatus = "agent_status"
+            case inputPending = "input_pending"
+            case inputPromptKind = "input_prompt_kind"
         }
     }
 
