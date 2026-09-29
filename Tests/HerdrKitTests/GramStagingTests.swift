@@ -85,6 +85,24 @@ final class GramStagingTests: XCTestCase {
         XCTAssertEqual(leftovers, [], "a rejected pick left staging behind: \(leftovers)")
     }
 
+    /// A picked folder (or package) must be refused before any copy: its reported size
+    /// is the directory's own metadata, so a size check alone lets a large tree through
+    /// and the recursive copy fills temporary storage.
+    func testAPickedDirectoryIsRefusedWithoutCopying() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        try Data(repeating: 1, count: 6000).write(to: folder.appendingPathComponent("inside.bin"))
+
+        XCTAssertNil(
+            GramStaging.stageCopy(of: folder, named: "folder", in: session, maxBytes: 5000),
+            "a directory must never stage")
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: session, includingPropertiesForKeys: nil)
+        XCTAssertEqual(leftovers, [], "a refused directory was copied: \(leftovers)")
+    }
+
 
     /// The cap is INCLUSIVE, and that direction is the one worth pinning: a guard
     /// that refuses a file of exactly the allowed size fails silently — the pick just

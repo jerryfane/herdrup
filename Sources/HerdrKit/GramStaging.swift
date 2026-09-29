@@ -39,6 +39,11 @@ public enum GramStaging {
         in sessionDirectory: URL,
         maxBytes: Int
     ) -> StagedAttachment? {
+        // Only a regular file: a picked folder or package reports its own directory
+        // metadata as its size, so the size checks would pass while `copyItem`
+        // recursively copies an unbounded tree into temporary storage.
+        guard (try? source.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+        else { return nil }
         let dir = sessionDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
