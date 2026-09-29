@@ -93,6 +93,7 @@ public enum AgentStatusStreamLine: Sendable, Equatable {
             return .turnCompleted(AgentTurnCompletion(
                 seq: probe.seq, paneID: p.pane.paneID, agentStatus: p.pane.agentStatus,
                 inputPending: p.pane.inputPending ?? false, inputPromptKind: p.pane.inputPromptKind,
+                agent: p.pane.agent,
                 turn: p.turn, turnEpoch: p.turnEpoch, outcome: p.outcome,
                 completedUnixMs: p.completedUnixMs))
         case "pane_created":
@@ -148,13 +149,14 @@ public struct AgentTurnCompletion: Sendable, Equatable {
     public let agentStatus: String?
     public let inputPending: Bool
     public let inputPromptKind: String?
+    public let agent: String?
     public let turn: Int
     public let turnEpoch: UInt64
     public let outcome: String?
     public let completedUnixMs: Int64?
 
     public init(seq: UInt64?, paneID: String, agentStatus: String?,
-                inputPending: Bool = false, inputPromptKind: String? = nil,
+                inputPending: Bool = false, inputPromptKind: String? = nil, agent: String? = nil,
                 turn: Int, turnEpoch: UInt64,
                 outcome: String? = nil, completedUnixMs: Int64? = nil) {
         self.seq = seq
@@ -162,6 +164,7 @@ public struct AgentTurnCompletion: Sendable, Equatable {
         self.agentStatus = agentStatus
         self.inputPending = inputPending
         self.inputPromptKind = inputPromptKind
+        self.agent = agent
         self.turn = turn
         self.turnEpoch = turnEpoch
         self.outcome = outcome
@@ -178,6 +181,15 @@ public enum AgentLiveUpdate: Sendable, Equatable {
         switch self {
         case .status(let change): return change.paneID
         case .turn(let completion): return completion.paneID
+        }
+    }
+
+    /// The agent the event reports on the pane: nil for a pane without one, such as
+    /// a plain shell, which `agent.list` never lists.
+    public var agent: String? {
+        switch self {
+        case .status(let change): return change.agent
+        case .turn(let completion): return completion.agent
         }
     }
 }
@@ -240,12 +252,15 @@ extension Array where Element == AgentInfo {
     }
 
     /// What one stream line does to this list: patch a listed row, reload
-    /// `agent.list` (the panes changed, or a status/turn event names a pane the list
-    /// has not seen yet), or ignore it.
+    /// `agent.list` (the panes changed), ask for a reload for an agent pane the list
+    /// has not seen yet, or ignore it. The all-panes stream also reports panes
+    /// without an agent (a plain shell's title changing, a pane whose agent quit);
+    /// `agent.list` never lists those, so they are ignored.
     public func effect(of line: AgentStatusStreamLine, receivedAt: Date) -> AgentRosterStreamEffect {
         guard let update = line.liveUpdate else { return line.requiresRosterReload ? .reload : .ignore }
         if let patched = applying(update, receivedAt: receivedAt) { return .patch(patched) }
-        return update.paneID.isEmpty ? .ignore : .reload
+        guard !update.paneID.isEmpty, update.agent != nil else { return .ignore }
+        return .reloadForUnlistedPane(update.paneID)
     }
 }
 
@@ -253,7 +268,33 @@ extension Array where Element == AgentInfo {
 public enum AgentRosterStreamEffect: Sendable, Equatable {
     case patch([AgentInfo])
     case reload
+    /// Reload, subject to `UnlistedPaneReloads`.
+    case reloadForUnlistedPane(String)
     case ignore
+}
+
+/// Reloads asked for by status or turn events naming an agent pane the list does
+/// not show. One request per pane until a load that started after it publishes,
+/// so a burst of events for one new pane, or a pane `agent.list` keeps leaving out
+/// (a federation peer's pane the coordinator's directory has not caught up with),
+/// costs a reload per published load rather than one per event.
+public struct UnlistedPaneReloads: Sendable, Equatable {
+    private var requested: [String: ContinuousClock.Instant] = [:]
+
+    public init() {}
+
+    /// Whether an event for unlisted `paneID` received at `now` should reload.
+    public mutating func request(_ paneID: String, at now: ContinuousClock.Instant) -> Bool {
+        guard requested[paneID] == nil else { return false }
+        requested[paneID] = now
+        return true
+    }
+
+    /// The load that started at `start` published: it answered every request made
+    /// before it started.
+    public mutating func loadPublished(startedAt start: ContinuousClock.Instant) {
+        requested = requested.filter { $0.value >= start }
+    }
 }
 
 /// Keeps live updates that arrived while an `agent.list` load was in flight, so the
@@ -441,7 +482,9 @@ private struct TurnPayload: Decodable {
         let agentStatus: String?
         let inputPending: Bool?
         let inputPromptKind: String?
+        let agent: String?
         enum CodingKeys: String, CodingKey {
+            case agent
             case paneID = "pane_id"
             case agentStatus = "agent_status"
             case inputPending = "input_pending"

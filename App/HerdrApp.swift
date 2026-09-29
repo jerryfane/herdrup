@@ -1506,6 +1506,8 @@ private final class AgentRosterLiveEventsBuffer {
     var refused = false
     /// When the poll re-fetches while `streaming`: only loads that published count.
     var backstop = AgentListBackstop()
+    /// Reloads asked for by events naming an agent pane the list does not show.
+    var unlistedReloads = UnlistedPaneReloads()
     /// One coalesced event-driven reload at a time; `reloadAgain` queues exactly one more.
     var reloadTask: Task<Void, Never>?
     var reloadAgain = false
@@ -3976,6 +3978,7 @@ struct TerminalHomeView: View {
                 setLiveEventsSupported(origin.eventsV2)
             }
             liveEvents.backstop.loadSucceeded(startedAt: startedAt)
+            liveEvents.unlistedReloads.loadPublished(startedAt: startedAt)
             liveEvents.ledger.settle(through: liveMark)
             let fetched = liveEvents.ledger.replay(onto: listing.agents, after: liveMark)
 
@@ -4166,8 +4169,9 @@ struct TerminalHomeView: View {
     }
 
     /// Patches the listed row a status or turn event names; lifecycle events,
-    /// `lagged`, and status or turn events for a pane the list does not show yet
-    /// reload agent.list (coalesced by `requestRosterReload`).
+    /// `lagged`, and status or turn events for an agent pane the list does not show
+    /// yet reload agent.list (coalesced by `requestRosterReload`, and once per
+    /// unlisted pane until a later load publishes).
     @MainActor
     private func receiveLiveEvent(_ line: AgentStatusStreamLine) {
         let now = Date()
@@ -4180,6 +4184,8 @@ struct TerminalHomeView: View {
             receiveRoster(agents: patched, accounts: latest.accounts)
         case .reload:
             requestRosterReload()
+        case .reloadForUnlistedPane(let pane):
+            if liveEvents.unlistedReloads.request(pane, at: .now) { requestRosterReload() }
         case .ignore:
             break
         }

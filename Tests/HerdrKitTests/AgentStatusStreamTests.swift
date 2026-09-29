@@ -252,17 +252,17 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(waiting.inputPromptKind, "select")
     }
 
-    /// herdrup#333: a status or turn event for a pane the list has not loaded yet
-    /// must reload agent.list, not vanish.
-    func testEventForAnUnlistedPaneAsksForAReload() throws {
+    /// herdrup#333: a status or turn event for an agent pane the list has not loaded
+    /// yet must reload agent.list, not vanish.
+    func testEventForAnUnlistedAgentPaneAsksForAReload() throws {
         let agents = try decodeAgents(#"[{"pane_id":"w1:p1","agent_status":"idle"}]"#)
         let at = Date(timeIntervalSince1970: 50)
-        let unlistedStatus = AgentStatusStreamLine.statusChanged(AgentStatusChange(
-            seq: 1, paneID: "build/w9:p9", workspaceID: nil, agentStatus: "blocked"))
-        let unlistedTurn = AgentStatusStreamLine.turnCompleted(AgentTurnCompletion(
-            seq: 2, paneID: "build/w9:p9", agentStatus: "done", turn: 1, turnEpoch: 1))
-        XCTAssertEqual(agents.effect(of: unlistedStatus, receivedAt: at), .reload)
-        XCTAssertEqual(agents.effect(of: unlistedTurn, receivedAt: at), .reload)
+        let unlistedStatus = try AgentStatusStreamLine.decode(
+            #"{"seq":1,"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"blocked","agent":"claude"}}"#)
+        let unlistedTurn = try AgentStatusStreamLine.decode(
+            #"{"seq":2,"event":"pane.turn_completed","data":{"pane":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent":"claude","agent_status":"done","focused":false},"turn":1,"turn_epoch":1}}"#)
+        XCTAssertEqual(agents.effect(of: unlistedStatus, receivedAt: at), .reloadForUnlistedPane("build/w9:p9"))
+        XCTAssertEqual(agents.effect(of: unlistedTurn, receivedAt: at), .reloadForUnlistedPane("build/w9:p9"))
 
         let listed = AgentStatusStreamLine.statusChanged(AgentStatusChange(
             seq: 3, paneID: "w1:p1", workspaceID: "w1", agentStatus: "working"))
@@ -272,6 +272,47 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(rows.first?.agentStatus, "working")
         XCTAssertEqual(agents.effect(of: .paneClosed(paneID: "w1:p1", seq: 4), receivedAt: at), .reload)
         XCTAssertEqual(agents.effect(of: .heartbeat(seq: 5), receivedAt: at), .ignore)
+    }
+
+    /// The all-panes stream also reports panes agent.list never lists: a plain
+    /// shell whose title changes, or a pane whose agent quit. Those must not
+    /// reload, and repeated events for one unlisted agent pane reload once per
+    /// published load, not once per event.
+    func testSteadyUnlistedPanesDoNotReloadRepeatedly() throws {
+        let agents = try decodeAgents(#"[{"pane_id":"w1:p1","agent_status":"idle"}]"#)
+        var gate = UnlistedPaneReloads()
+        let t0 = ContinuousClock.now
+        var reloads = 0
+        func receive(_ json: String, at offset: Int) throws {
+            let effect = agents.effect(of: try AgentStatusStreamLine.decode(json), receivedAt: Date())
+            switch effect {
+            case .reload: reloads += 1
+            case .reloadForUnlistedPane(let pane):
+                if gate.request(pane, at: t0 + .seconds(offset)) { reloads += 1 }
+            case .patch, .ignore: break
+            }
+        }
+
+        for i in 1...5 {   // a shell's title follows its cwd; no agent is present
+            try receive(#"{"seq":\#(i),"event":"pane.agent_status_changed","data":{"pane_id":"w1:p7","workspace_id":"w1","agent_status":"unknown","title":"~/src/\#(i)"}}"#,
+                        at: i)
+        }
+        XCTAssertEqual(reloads, 0, "a pane without an agent is never listed")
+
+        for i in 1...5 {   // a new remote agent the coordinator's directory lags on
+            try receive(#"{"seq":\#(10 + i),"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"working","agent":"codex","title":"t\#(i)"}}"#,
+                        at: 10 + i)
+        }
+        XCTAssertEqual(reloads, 1, "one reload until a load publishes")
+
+        let again = #"{"seq":20,"event":"pane.agent_status_changed","data":{"pane_id":"build/w9:p9","workspace_id":"build/w9","agent_status":"working","agent":"codex","title":"again"}}"#
+        gate.loadPublished(startedAt: t0 + .seconds(10))   // began before the request at 11
+        try receive(again, at: 16)
+        XCTAssertEqual(reloads, 1, "a load that began before the request does not answer it")
+
+        gate.loadPublished(startedAt: t0 + .seconds(12))   // answered it, still without the pane
+        try receive(again, at: 20)
+        XCTAssertEqual(reloads, 2, "once answered, the pane may ask one more time")
     }
 
     /// herdrup#333: while the stream is open the poll waits out the backstop only
