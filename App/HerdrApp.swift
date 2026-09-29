@@ -4468,6 +4468,9 @@ struct TerminalPaneContent: View {
     /// The ••• "Share with someone" sheet and the guests who hold this agent (the header chip).
     @StateObject private var guestShare = GuestSharePaneModel()
     @State private var loadingReplyAttachment = false
+    /// The paperclip's attach sheet (`composerAttachPicker`), the third way in beside
+    /// paste and drag-and-drop.
+    @State private var showReplyAttachSheet = false
     /// Progress belongs to an attachment identity, including while its gram is posting.
     @State private var replyUploadBytes: (sent: Int, total: Int)?
     @State private var replySendingAttachmentID: UUID?
@@ -5387,6 +5390,9 @@ struct TerminalPaneContent: View {
             .accessibilityLabel("Collapse keyboard")
         } actions: {
             HStack(spacing: 4) {
+                ComposerAttachButton(busy: loadingReplyAttachment) { openReplyAttachSheet() }
+                    .disabled(sending || autoDelivering || loadingReplyAttachment)
+                    .accessibilityIdentifier("terminal-attach-button")
                 MicButton(text: $reply,
                           isActive: isForeground && !autoDelivering, recording: $replyDictating,
                           onStart: { ctrlArmed = false })
@@ -5423,6 +5429,19 @@ struct TerminalPaneContent: View {
         // named-agent guard are shared rather than re-stated.
         .onDrop(of: [.item], isTargeted: $replyDropTargeted) { providers in
             acceptDroppedFiles(providers)
+        }
+        // THE PAPERCLIP, the same sheet and pickers as the Gram page and the guest pane.
+        // Picks land in the same chip strip and send through the same
+        // `sendPromptWithAttachments` as a paste or a drop.
+        .composerAttachPicker(
+            isPresented: $showReplyAttachSheet, loading: $loadingReplyAttachment,
+            room: { GramView.Staging.maxAttachments - replyAttachments.count }
+        ) { outcome in
+            replyAttachments += outcome.files.map {
+                PromptAttachment(id: UUID(), name: $0.name, mime: $0.mime, isImage: $0.isImage,
+                                 size: $0.staged.size, staged: $0.staged, uploadID: nil, gramMessageID: nil)
+            }
+            actionNote = outcome.note
         }
         .overlay {
             if replyDropTargeted {
@@ -5475,17 +5494,7 @@ struct TerminalPaneContent: View {
     /// restriction was in the type filter alone.
     @discardableResult
     private func pasteReplyAttachment(_ provider: NSItemProvider) -> Bool {
-        guard !sending, !loadingReplyAttachment else { return false }
-        guard replyAttachments.count < GramView.Staging.maxAttachments else {
-            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
-            return false
-        }
-        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
-              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        else {
-            actionNote = "Attachments need a named agent with a ready prompt."
-            return false
-        }
+        guard !sending, !loadingReplyAttachment, replyTakesAttachment() else { return false }
         let types = provider.registeredTypeIdentifiers.lazy.compactMap { UTType($0) }
         // A FILE URL WINS when the item carries one. A Finder copy of a document vends
         // the file url AND the document's ICON (com.apple.icns, which conforms to
@@ -5599,6 +5608,29 @@ struct TerminalPaneContent: View {
             }
         }
         return true
+    }
+
+    /// Whether the reply can take one more attachment, the gate every way in shares:
+    /// under the count cap, and a pane whose agent has a name and an intent prompt (the
+    /// only destination `sendPromptWithAttachments` can deliver to). Says why when not.
+    private func replyTakesAttachment() -> Bool {
+        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            return false
+        }
+        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
+              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            actionNote = "Attachments need a named agent with a ready prompt."
+            return false
+        }
+        return true
+    }
+
+    private func openReplyAttachSheet() {
+        guard !sending, !loadingReplyAttachment, replyTakesAttachment() else { return }
+        ctrlArmed = false
+        showReplyAttachSheet = true
     }
 
     private func finishReplyAttachmentPaste(_ attachment: PromptAttachment?) {
