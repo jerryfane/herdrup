@@ -95,6 +95,36 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(collapse.waitForNonExistence(timeout: 5), "the button goes with the keyboard")
     }
 
+    /// A guest scrolls back past what streamed in since connecting: like the owner's pane, the
+    /// guest's backfills the agent's scrollback with `agent.read`, and a swipe down on the
+    /// terminal brings those older rows into view. The mock's stream paints only the current
+    /// screen, so an `earlier NNN` row at the top can only have come from the backfill.
+    func testSwipeRevealsScrollbackFromBeforeTheGuestConnected() {
+        let app = launch("guestpane")
+
+        let terminal = app.descendants(matching: .any)["guest-terminal"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        let topRow = app.descendants(matching: .any)["terminal-top-row-probe"]
+        XCTAssertTrue(topRow.waitForExistence(timeout: 10),
+                      "the DEBUG top-row probe should publish once the stream seeds")
+        // Let the backfill, the seed and the fit-to-width settle.
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertFalse(topRow.label.contains("earlier"),
+                       "the pane should open on the live screen, not in history: \(topRow.label)")
+
+        let high = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let low = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        for _ in 0..<3 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(app, "guest-scrollback")
+        XCTAssertTrue(topRow.label.contains("earlier"),
+                      "a swipe down should reveal the backfilled scrollback: \(topRow.label)")
+        XCTAssertEqual(forbiddenCalls(app), "", "the backfill is an allowed agent.read")
+    }
+
     /// With the agent out of the foreground the host refuses the guest: the pane says so and
     /// the composer can't be used.
     func testPausedAgentDisablesTheComposer() {
