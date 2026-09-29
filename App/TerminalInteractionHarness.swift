@@ -23,8 +23,10 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             var rows: Int?
             var text: String?
             var lock: Bool?
+            var dataBase64: String?
             enum CodingKeys: String, CodingKey {
                 case paneID = "pane_id"
+                case dataBase64 = "data_base64"
                 case cols, rows, text, lock
             }
         }
@@ -55,6 +57,12 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private var receivedHex = ""
     private var scenario = Scenario.quiet
     private var kitty = false
+    /// What reached the host on the attachment path — uploaded bytes, gram posts and
+    /// prompts — so a receipt can prove a send delivered, not just that its chip left.
+    private var uploadedBytes = 0
+    private var gramPosts = 0
+    private var prompts = 0
+    private var lastPrompt = ""
     private let paneID: String
     private let control: Bool
     private let history = ["first-known-command", "second-known-command"]
@@ -101,6 +109,17 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                 "pane_id": paneID, "text": "", "truncated": false,
                 "source": "recent", "format": "ansi"]]])
         default:
+            locked {
+                switch request.method {
+                case "gram.upload_chunk":
+                    uploadedBytes += Data(base64Encoded: request.params?.dataBase64 ?? "")?.count ?? 0
+                case "gram.post": gramPosts += 1
+                case "agent.prompt":
+                    prompts += 1
+                    lastPrompt = request.params?.text ?? ""
+                default: break
+                }
+            }
             // Existing canned replies retain their contracts. Only PTY-specific
             // methods above are intercepted, by decoded method rather than substring.
             return try await MockTransport().roundTrip(line)
@@ -292,6 +311,13 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         }
     }
 
+    /// The attachment-path receipt. Kept on the ROOT driver: gram and prompt calls
+    /// carry no `pane_id`, so they never reach a pane's child driver.
+    func hostReceipt() -> [String: Any] {
+        locked { ["uploadedBytes": uploadedBytes, "gramPosts": gramPosts,
+                  "prompts": prompts, "lastPrompt": lastPrompt] }
+    }
+
     func snapshot() -> [String: Any] {
         locked { ["effectiveCols": cols, "effectiveRows": rows, "opens": opens,
                   "requests": requests, "failures": failures, "appended": appended,
@@ -354,6 +380,17 @@ final class TerminalInteractionHarness: ObservableObject {
         surfaces.first(where: { $0.value.isForeground() })?.key ?? "ix:a"
     }
     static var enabled: Bool { ScreenshotMock.mode == .resize || ScreenshotMock.mode == .control }
+
+    /// The file the composer's attach sheet "picks" under this harness, in place of the
+    /// out-of-process document picker XCUITest cannot drive. nil outside the harness,
+    /// where the real picker opens.
+    static func pickedFiles() -> [URL]? {
+        guard enabled else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("picked-notes.txt")
+        guard (try? Data("picked through the paperclip".utf8).write(to: url, options: .atomic)) != nil
+        else { return nil }
+        return [url]
+    }
 
     static func register(paneID: String, view: TerminalView,
                          requestFit: @escaping (Int, Int) -> Void, isCovered: @escaping () -> Bool,
@@ -622,6 +659,7 @@ final class TerminalInteractionHarness: ObservableObject {
         value["naturalFit"] = naturalPanes.contains(id)
         value["fixtureFit"] = fits[id].map { "\($0.0)x\($0.1)" } ?? ""
         value.merge(journalProbe()) { _, rhs in rhs }
+        value.merge(Self.driver.hostReceipt()) { _, rhs in rhs }
         return TerminalInteractionDriver.json(value)
     }
     func tick() { revision += 1 }
