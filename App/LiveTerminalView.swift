@@ -2120,8 +2120,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// can never stall the live seed. Runs concurrently with the stream; the FIRST reset
         /// awaits this at the single point where the bytes must land above the seed.
         private func startBackfill() {
-            // View-only (a guest) may not call `agent.read`; the stream's reset is the seed.
-            guard !viewOnly, Self.backfillLines > 0 else { backfillTask = nil; return }
+            // View-only (a guest) backfills too: the host lets a guest `agent.read` the granted
+            // agent. An older host refuses with `guest_forbidden`; the read then yields nil
+            // like any failure, and the stream's reset alone is the seed.
+            guard Self.backfillLines > 0 else { backfillTask = nil; return }
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
                 // Race the read against the timeout and take whichever finishes FIRST, ABANDONING

@@ -44,7 +44,8 @@ struct GuestMockTransport: HerdrTransport {
     static var forbiddenCalls: [String] { recorder.calls }
 
     static let allowlist: Set<String> = [
-        "ping", "agent.list", "agent.get", "pane.stream", "agent.prompt", "gram.upload_chunk", "gram.post",
+        "ping", "agent.list", "agent.get", "agent.read", "pane.stream", "agent.prompt",
+        "gram.upload_chunk", "gram.post",
     ]
 
     private static let recorder = CallRecorder()
@@ -63,6 +64,11 @@ struct GuestMockTransport: HerdrTransport {
             return #"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(sharedAgentJSON),\#(Self.otherAgentJSON)]}}"#
         case "agent.get":
             return #"{"id":"\#(id)","result":{"type":"agent_info","agent":\#(sharedAgentJSON)}}"#
+        case "agent.read":
+            if scenario == .paused {
+                return Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")
+            }
+            return Self.readLine(id: id, text: Self.history + transcript)
         case "agent.prompt", "gram.upload_chunk", "gram.post":
             // Everything that reaches the agent is refused while it isn't running.
             if scenario == .paused {
@@ -101,7 +107,6 @@ struct GuestMockTransport: HerdrTransport {
                 continuation.finish()
             }
         }
-        let transcript = scenario == .blocked ? Self.blockedTranscript : Self.runningTranscript
         let ack = #"{"id":"\#(id)","result":{"type":"stream_started","pane_id":"w1-3","epoch":3,"cols":\#(Self.cols),"rows":\#(Self.rows),"base_seq":0,"resync":true}}"#
         let reset = #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":3,"cols":\#(Self.cols),"rows":\#(Self.rows),"data_b64":"\#(Data(transcript.utf8).base64EncodedString())"}"#
         // A live stream never ends on its own (an end is a drop the view reconnects from),
@@ -184,7 +189,36 @@ struct GuestMockTransport: HerdrTransport {
             + body + "    No" + reset + hideCursor
     }
 
+    private var transcript: String {
+        scenario == .blocked ? Self.blockedTranscript : Self.runningTranscript
+    }
+
+    /// Rows in `history`, the scrollback from before the guest connected.
+    static let historyRows = 200
+
+    /// What `agent.read` (source recent) returns above the current screen: numbered rows,
+    /// so a test can tell backfilled scrollback from anything the stream painted.
+    private static var history: String {
+        (1...historyRows).map { row in
+            faint + "earlier " + String(format: "%03d", row) + body + "  warm-up bench pass" + reset + "\r\n"
+        }.joined()
+    }
+
     // MARK: - Wire helpers
+
+    /// The host's guest projection of an `agent.read` reply: the rendered text and the
+    /// fields HerdrKit decodes, nothing about the owner's workspace.
+    private static func readLine(id: String, text: String) -> String {
+        let reply: [String: Any] = ["id": id, "result": [
+            "type": "pane_read",
+            "read": ["pane_id": access.agentTarget, "source": "recent", "format": "ansi",
+                     "text": text, "truncated": false],
+        ]]
+        guard let data = try? JSONSerialization.data(withJSONObject: reply) else {
+            return errorLine(id: id, code: "internal_error", message: "mock read")
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
 
     private static func errorLine(id: String, code: String, message: String) -> String {
         #"{"id":"\#(id)","error":{"code":"\#(code)","message":"\#(message)"}}"#
