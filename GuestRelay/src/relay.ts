@@ -1,7 +1,8 @@
 // herdrup-guest: the relay between a guest's HerdrUp app and the host daemon that runs
 // the shared agent (herdrup#309). One Durable Object per host_id pipes Noise_IK
 // ciphertext between the host socket and its guest sockets, so it never sees plaintext.
-// Log lines carry only endpoint, outcome and close code: never payloads, secrets or host ids.
+// Log lines carry only endpoint, outcome and close code: never payloads, secrets, host ids
+// or request paths (an invite link carries its secret in the path of /i/<payload>).
 
 export const VERSION = "1.0.0";
 
@@ -9,6 +10,7 @@ export interface Env {
   HOSTS: DurableObjectNamespace;
   GUEST_CONNECT_LIMIT?: RateLimit;
   HOST_CONNECT_LIMIT?: RateLimit;
+  ASSETS: Fetcher;
 }
 
 export type Endpoint = "/v1/host" | "/v1/guest";
@@ -27,11 +29,19 @@ export function log(line: LogLine): void {
 const SOCKET_PATH = /^\/v1\/(host|guest)\/[A-Za-z0-9_-]{22}$/;
 // relay_secret is b64url of 32 bytes: 43 characters.
 export const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
+// An invite link: b64url of the invite JSON. A typical invite is under 1 KB; the cap leaves
+// room for four 128-character labels in any script.
+const INVITE_PATH = /^\/i\/[A-Za-z0-9_-]{1,4096}$/;
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
   if (request.method === "GET" && pathname === "/v1/health") {
     return json(200, { ok: true, version: VERSION });
+  }
+  if (request.method === "GET" && INVITE_PATH.test(pathname)) {
+    // The same page as /i; its script reads the payload from the path. The asset request
+    // carries neither the path nor the original headers, and nothing here logs.
+    return env.ASSETS.fetch(new URL("/i", request.url));
   }
   const match = request.method === "GET" ? SOCKET_PATH.exec(pathname) : null;
   if (match === null) return errorResponse(404, "not_found");
