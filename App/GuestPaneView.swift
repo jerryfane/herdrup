@@ -1,7 +1,5 @@
 import HerdrKit
-import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// A guest's view of the one agent shared with them: the live terminal, view only, and a
 /// composer whose messages and files reach the agent under the guest's name.
@@ -37,8 +35,6 @@ struct GuestPaneView: View {
         var isImage: Bool { mime.hasPrefix("image/") }
     }
 
-    private enum PendingPicker { case photos, file }
-
     /// The host caps a prompt at 32 KiB (`invalid_params` beyond it).
     static let maxPromptBytes = 32 * 1024
     private static let pollNanoseconds: UInt64 = 5_000_000_000
@@ -58,10 +54,6 @@ struct GuestPaneView: View {
     @State private var uploadBytes: (sent: Int, total: Int)?
     @State private var loadingAttachment = false
     @State private var showAttachSheet = false
-    @State private var pendingPicker: PendingPicker?
-    @State private var showPhotoPicker = false
-    @State private var photoItems: [PhotosPickerItem] = []
-    @State private var showFileImporter = false
     @State private var findOpen = false
     @State private var findTerm = ""
     @State private var findGeneration = 0
@@ -84,24 +76,15 @@ struct GuestPaneView: View {
         .ignoresSafeArea(.container, edges: .bottom)
         .overlay { EdgeSwipeBack { onClose() } }
         .task { await pollLoop() }
-        .sheet(isPresented: $showAttachSheet, onDismiss: presentPendingPicker) {
-            attachSheet
-                .presentationDetents([.height(190)])
-                .presentationDragIndicator(.visible)
+        .composerAttachPicker(
+            isPresented: $showAttachSheet, loading: $loadingAttachment,
+            room: { GramView.Staging.maxAttachments - attachments.count }
+        ) { outcome in
+            attachments += outcome.files.map {
+                Attachment(name: $0.name, mime: $0.mime, staged: $0.staged)
+            }
+            note = outcome.note
         }
-        .photosPicker(
-            isPresented: $showPhotoPicker,
-            selection: $photoItems,
-            maxSelectionCount: GramView.Staging.maxAttachments,
-            matching: .any(of: [.images, .videos])
-        )
-        .onChange(of: photoItems) { _, items in
-            guard !items.isEmpty else { return }
-            photoItems = []
-            Task { await loadPickedPhotos(items) }
-        }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item],
-                      allowsMultipleSelection: true) { handlePickedFiles($0) }
         #if DEBUG
         .overlay(alignment: .topLeading) { forbiddenCallsProbe }
         #endif
@@ -336,14 +319,9 @@ struct GuestPaneView: View {
             EmptyView()
         } actions: {
             HStack(spacing: 4) {
-                Button { showAttachSheet = true } label: {
-                    ComposerActionIcon(image: Image(systemName: "paperclip"), tint: Palette.textDim,
-                                       busy: loadingAttachment)
-                }
-                .disabled(!canCompose || sending || loadingAttachment)
-                .fixedSize()
-                .accessibilityLabel("Attach file")
-                .accessibilityIdentifier("guest-attach-button")
+                ComposerAttachButton(busy: loadingAttachment) { showAttachSheet = true }
+                    .disabled(!canCompose || sending || loadingAttachment)
+                    .accessibilityIdentifier("guest-attach-button")
                 MicButton(text: $reply, recording: $dictating)
                     .fixedSize()
                     .disabled(!canCompose || sending)
@@ -383,43 +361,6 @@ struct GuestPaneView: View {
             try? FileManager.default.removeItem(at: file.staged.dir)
             attachments.removeAll { $0.id == file.id }
         }
-    }
-
-    private var attachSheet: some View {
-        VStack(spacing: 18) {
-            Text("Attach")
-                .font(Typography.app(14, .semibold)).foregroundStyle(Palette.textDim)
-                .padding(.top, 16)
-            HStack(spacing: 20) {
-                attachOption(icon: "photo.on.rectangle.angled", label: "Photo & Video") {
-                    pendingPicker = .photos
-                    showAttachSheet = false
-                }
-                attachOption(icon: "doc", label: "File") {
-                    pendingPicker = .file
-                    showAttachSheet = false
-                }
-            }
-            .padding(.horizontal, 24)
-            Spacer(minLength: 8)
-        }
-        .frame(maxWidth: .infinity)
-        .background(Palette.ground.ignoresSafeArea())
-    }
-
-    private func attachOption(icon: String, label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 24, weight: .semibold)).foregroundStyle(Palette.text)
-                    .frame(width: 64, height: 64)
-                    .background(Circle().fill(Palette.surface))
-                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
-                Text(label).font(Typography.app(13, .medium)).foregroundStyle(Palette.textDim)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Find
@@ -582,82 +523,6 @@ struct GuestPaneView: View {
             return "\(access.ownerName)'s machine refused the message: \(api.message)"
         }
         return "Couldn't send: \(error.localizedDescription)"
-    }
-
-    // MARK: - Picking files
-
-    private func presentPendingPicker() {
-        switch pendingPicker {
-        case .photos: showPhotoPicker = true
-        case .file: showFileImporter = true
-        case nil: break
-        }
-        pendingPicker = nil
-    }
-
-    private func handlePickedFiles(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result else { return }
-        var skipped: [String] = []
-        for url in urls {
-            guard attachments.count < GramView.Staging.maxAttachments else {
-                skipped.append(url.lastPathComponent)
-                continue
-            }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                  size > 0, size <= GramView.Staging.maxFileBytes,
-                  let staged = GramView.Staging.copy(of: url, named: url.lastPathComponent)
-            else {
-                skipped.append(url.lastPathComponent)
-                continue
-            }
-            attachments.append(Attachment(name: url.lastPathComponent, mime: Self.mimeType(for: url),
-                                          staged: staged))
-        }
-        note = skipped.isEmpty ? nil : "Not attached (too large, unreadable or over the limit): "
-            + skipped.joined(separator: ", ")
-    }
-
-    private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
-        loadingAttachment = true
-        defer { loadingAttachment = false }
-        var skipped = 0
-        for item in items {
-            guard attachments.count < GramView.Staging.maxAttachments,
-                  let media = try? await item.loadTransferable(type: PickedMedia.self),
-                  let staged = media.staged
-            else {
-                skipped += 1
-                continue
-            }
-            let type = item.supportedContentTypes.first
-            let ext = type?.preferredFilenameExtension ?? "jpg"
-            let base = type?.conforms(to: .movie) == true ? "video" : "image"
-            let name = "\(base)-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
-            attachments.append(Attachment(name: name, mime: type?.preferredMIMEType ?? "image/jpeg",
-                                          staged: staged))
-        }
-        note = skipped == 0 ? nil : "\(skipped) item\(skipped == 1 ? "" : "s") too large or unreadable"
-    }
-
-    /// A library pick copied into staging inside the export callback, since PhotosUI deletes
-    /// its temp file when the callback returns. nil = over the size cap or uncopyable.
-    private struct PickedMedia: Transferable {
-        let staged: StagedAttachment?
-        static var transferRepresentation: some TransferRepresentation {
-            FileRepresentation(importedContentType: .item) { received in
-                guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                      size > 0, size <= GramView.Staging.maxFileBytes
-                else { return PickedMedia(staged: nil) }
-                return PickedMedia(staged: GramView.Staging.copy(
-                    of: received.file, named: received.file.lastPathComponent))
-            }
-        }
-    }
-
-    private static func mimeType(for url: URL) -> String {
-        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
     }
 
     // MARK: - Debug probe

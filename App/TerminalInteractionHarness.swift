@@ -355,6 +355,17 @@ final class TerminalInteractionHarness: ObservableObject {
     }
     static var enabled: Bool { ScreenshotMock.mode == .resize || ScreenshotMock.mode == .control }
 
+    /// The file the composer's attach sheet "picks" under this harness, in place of the
+    /// out-of-process document picker XCUITest cannot drive. nil outside the harness,
+    /// where the real picker opens.
+    static func pickedFiles() -> [URL]? {
+        guard enabled else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("picked-notes.txt")
+        guard (try? Data("picked through the paperclip".utf8).write(to: url, options: .atomic)) != nil
+        else { return nil }
+        return [url]
+    }
+
     static func register(paneID: String, view: TerminalView,
                          requestFit: @escaping (Int, Int) -> Void, isCovered: @escaping () -> Bool,
                          coverInstalls: @escaping () -> Int,

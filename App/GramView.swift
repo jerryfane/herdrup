@@ -1,10 +1,7 @@
-import CoreTransferable
 import HerdrKit
-import PhotosUI
 import QuickLook
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
 /// The unread-gram count, lifted out of `GramView` so the tab bar can badge it
 /// even while the Gram tab is off-screen. Owned by the session-scoped home view;
@@ -143,18 +140,8 @@ struct GramView: View {
     /// time), empty when none are staged. Several can be staged at once; each sends as
     /// its own gram message (the wire is one-file-per-message).
     @State private var attachedFiles: [PickedAttachment] = []
-    @State private var showFileImporter = false
-    /// The paperclip opens a Telegram-style attach sheet first, so we know which
-    /// system picker to present: the photo library (images/videos) or the document
-    /// picker (any file). `pendingPicker` remembers the choice so the picker is opened
-    /// AFTER the sheet finishes dismissing (presenting one sheet while another is
-    /// dismissing drops the second on iOS).
+    /// The paperclip's attach sheet (`composerAttachPicker`).
     @State private var showAttachSheet = false
-    private enum PendingPicker { case photos, file }
-    @State private var pendingPicker: PendingPicker?
-    @State private var showPhotoPicker = false
-    /// Items chosen from the photo library (multi-select), loaded into `attachedFiles`.
-    @State private var photoItems: [PhotosPickerItem] = []
     /// True while a photo-library batch is loading (iCloud items can take a moment).
     /// Gates Send and the paperclip so a text-only send can't race the load and a
     /// second pick can't start concurrently.
@@ -347,33 +334,17 @@ struct GramView: View {
         // just-selected section with "No matches", which reads as a bug. `showingSaved` is the
         // host's binding, so this fires for both the phone toggle and the sidebar rows.
         .onChange(of: showingSaved) { _, _ in search = "" }
-        // Paperclip → a Telegram-style attach sheet picks the source, so we open the
-        // RIGHT system picker. The picker is opened in the sheet's onDismiss (via
-        // `pendingPicker`), not inline — presenting a sheet while another dismisses
-        // drops the second on iOS.
-        .sheet(isPresented: $showAttachSheet, onDismiss: presentPendingPicker) {
-            attachSheet
-                .presentationDetents([.height(190)])
-                .presentationDragIndicator(.visible)
-        }
-        .photosPicker(
-            isPresented: $showPhotoPicker,
-            selection: $photoItems,
-            maxSelectionCount: Staging.maxAttachments,
-            matching: .any(of: [.images, .videos])
-        )
-        .onChange(of: photoItems) { _, newItems in
-            guard !newItems.isEmpty else { return }
-            let items = newItems
-            photoItems = []  // reset now so re-picking the same items fires onChange again
-            Task { await loadPickedPhotos(items) }
-        }
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: true
-        ) { result in
-            handlePickedFiles(result)
+        // Paperclip → the shared attach sheet and pickers; picks stage straight into
+        // `attachedFiles` under the shared size and count limits.
+        .composerAttachPicker(
+            isPresented: $showAttachSheet, loading: $loadingPhoto,
+            room: { Staging.maxAttachments - attachedFiles.count }
+        ) { outcome in
+            attachedFiles += outcome.files.map {
+                PickedAttachment(name: $0.name, mime: $0.mime, url: $0.staged.url,
+                                 dir: $0.staged.dir, size: $0.staged.size)
+            }
+            sendError = outcome.note
         }
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
@@ -1051,14 +1022,8 @@ struct GramView: View {
                 }
                 .disabled(sending)
                 Spacer(minLength: 0)
-                Button {
-                    showAttachSheet = true
-                } label: {
-                    ComposerActionIcon(image: Image(systemName: "paperclip"), busy: loadingPhoto)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Attach file")
-                .disabled(sending || loadingPhoto)
+                ComposerAttachButton(busy: loadingPhoto) { showAttachSheet = true }
+                    .disabled(sending || loadingPhoto)
             }
             AdaptiveComposer(
                 text: draft,
@@ -1169,57 +1134,6 @@ struct GramView: View {
             return .uploading(sent: upload.sent, total: upload.total)
         }
         return .sending
-    }
-
-    /// A Telegram-style attach sheet: two large iconned choices instead of the old
-    /// action-sheet list. Photo & Video opens the multi-select library; File opens the
-    /// document picker. Each records `pendingPicker` and dismisses; the real picker is
-    /// presented in the sheet's onDismiss.
-    private var attachSheet: some View {
-        VStack(spacing: 18) {
-            Text("Attach")
-                .font(Typography.app(14, .semibold)).foregroundStyle(Palette.textDim)
-                .padding(.top, 16)
-            HStack(spacing: 20) {
-                attachOption(icon: "photo.on.rectangle.angled", label: "Photo & Video") {
-                    pendingPicker = .photos
-                    showAttachSheet = false
-                }
-                attachOption(icon: "doc", label: "File") {
-                    pendingPicker = .file
-                    showAttachSheet = false
-                }
-            }
-            .padding(.horizontal, 24)
-            Spacer(minLength: 8)
-        }
-        .frame(maxWidth: .infinity)
-        .background(Palette.ground.ignoresSafeArea())
-    }
-
-    private func attachOption(icon: String, label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 24, weight: .semibold)).foregroundStyle(Palette.text)
-                    .frame(width: 64, height: 64)
-                    .background(Circle().fill(Palette.surface))
-                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
-                Text(label).font(Typography.app(13, .medium)).foregroundStyle(Palette.textDim)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Opens the picker the attach sheet selected, once the sheet has fully dismissed.
-    private func presentPendingPicker() {
-        switch pendingPicker {
-        case .photos: showPhotoPicker = true
-        case .file: showFileImporter = true
-        case nil: break
-        }
-        pendingPicker = nil
     }
 
     // MARK: - Actions
@@ -1626,161 +1540,6 @@ struct GramView: View {
         throw GramError.invalidFileData
     }
 
-    /// One combined skip note for a batch pick. `bad` (already phrased) covers picks
-    /// that were too large or unreadable; `capped` counts picks dropped for exceeding
-    /// the maxAttachments limit — reported distinctly so a cap hit isn't mislabeled as
-    /// "too large". nil when nothing was skipped.
-    private func attachmentSkipNote(bad: String?, capped: Int) -> String? {
-        var parts: [String] = []
-        if let bad { parts.append(bad) }
-        if capped > 0 { parts.append("\(capped) over the \(Staging.maxAttachments)-file limit") }
-        guard !parts.isEmpty else { return nil }
-        return "Skipped: " + parts.joined(separator: "; ") + "."
-    }
-
-    /// Stage picked files as COPIES ON DISK (each bounded by the server's size cap),
-    /// so the send streams from a file rather than holding it in memory. File URLs
-    /// from the importer are security-scoped, so the copy must happen inside the
-    /// access window below — the URL is unreadable after it.
-    /// Over-cap / unreadable / uncopyable picks are COLLECTED into one summary rather
-    /// than dropped silently, so picking several where one is bad still stages the
-    /// good ones.
-    private func handlePickedFiles(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result else { return }
-        var badNames: [String] = []
-        var capped = 0
-        for url in urls {
-            guard attachedFiles.count < Staging.maxAttachments else {
-                capped += 1
-                continue
-            }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            // Require a KNOWN size within the cap BEFORE copying. An unstat-able URL
-            // (size lookup returns nil) is treated as over-cap and skipped, never
-            // staged — otherwise a multi-gigabyte pick with no reported size would
-            // fall through to an unbounded copy and fill the device. `size > 0` also
-            // replaces the old non-empty check. Mirrors PickedMedia's guard so
-            // neither the document nor the photo path can stage blind.
-            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                size > 0, size <= Staging.maxFileBytes
-            else {
-                badNames.append(url.lastPathComponent)
-                continue
-            }
-            guard let staged = Staging.copy(of: url, named: url.lastPathComponent) else {
-                badNames.append(url.lastPathComponent)
-                continue
-            }
-            attachedFiles.append(PickedAttachment(
-                name: url.lastPathComponent, mime: Self.mimeType(for: url),
-                url: staged.url, dir: staged.dir, size: staged.size))
-        }
-        let bad = badNames.isEmpty ? nil : "too large or unreadable: \(badNames.joined(separator: ", "))"
-        sendError = attachmentSkipNote(bad: bad, capped: capped)
-    }
-
-    // A staged pick is `HerdrKit.StagedAttachment` (url + per-item dir + size).
-
-    /// A photo-library pick copied into app-owned staging. PhotosUI exports the item
-    /// to a temp file and DELETES it when the closure returns, so the copy has to
-    /// happen inside `FileRepresentation`; the importer stats that export and rejects
-    /// an over-cap (or unstat-able) pick THERE — `staged == nil` — before any copy,
-    /// mirroring the document path's "reject before staging" guard.
-    ///
-    /// Rejection is signalled as a VALUE (`staged == nil`), NOT a thrown error, on
-    /// purpose: `loadTransferable` routes through NSItemProvider's Obj-C error bridge,
-    /// across which a thrown Swift error type may not survive — so a `nil` payload is
-    /// the only reliable way to carry "rejected" back and still show the right message.
-    private struct PickedMedia: Transferable {
-        /// Non-nil only for an in-cap pick that was copied into staging; nil =
-        /// rejected (over-cap, size unknown — treated as over-cap — or uncopyable).
-        let staged: StagedAttachment?
-        static var transferRepresentation: some TransferRepresentation {
-            FileRepresentation(importedContentType: .item) { received in
-                // Unknown size is treated as OVER-cap (reject), never under-cap — an
-                // unstat-able export must not fall through to an unbounded copy.
-                guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                    size > 0, size <= GramView.Staging.maxFileBytes
-                else {
-                    return PickedMedia(staged: nil)
-                }
-                // Inside the closure: `received.file` is gone once it returns.
-                return PickedMedia(
-                    staged: GramView.Staging.copy(
-                        of: received.file, named: received.file.lastPathComponent))
-            }
-        }
-    }
-
-    /// Load a batch of photo-library picks into `attachedFiles`. Each routes through
-    /// `PickedMedia` so the size cap is enforced on the exported file's size before it
-    /// is copied — the same invariant the document path holds. Loads SERIALLY (not
-    /// concurrently) to bound disk pressure and keep the staged order stable — the
-    /// send loop posts in this order and the caption rides on message 0 — and COLLECTS
-    /// skips into one summary so picking five where one is oversized doesn't silently
-    /// eat the other four's outcome.
-    private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
-        loadingPhoto = true
-        defer { loadingPhoto = false }
-        var bad = 0
-        var capped = 0
-        for item in items {
-            guard attachedFiles.count < Staging.maxAttachments else {
-                capped += 1
-                continue
-            }
-            do {
-                // A nil transferable = couldn't produce a file; a non-nil transferable
-                // with a nil `staged` = rejected by the size guard, or the copy failed.
-                guard let media = try await item.loadTransferable(type: PickedMedia.self),
-                    let staged = media.staged
-                else {
-                    bad += 1
-                    continue
-                }
-                let (name, mime) = Self.photoNameAndMime(for: item)
-                attachedFiles.append(PickedAttachment(
-                    name: name, mime: mime, url: staged.url, dir: staged.dir, size: staged.size))
-            } catch {
-                bad += 1
-            }
-        }
-        let badNote = bad == 0 ? nil
-            : bad == 1 ? "1 item too large or unreadable"
-            : "\(bad) items too large or unreadable"
-        sendError = attachmentSkipNote(bad: badNote, capped: capped)
-    }
-
-    /// Derive a filename + MIME for a library pick from its concrete content type
-    /// (HEIC, JPEG, MOV, …). The name carries a short unique discriminator so three
-    /// photos don't all arrive as "image.heic" — identical chips for the owner and a
-    /// name collision for any receiving agent that stores attachments by name.
-    private static func photoNameAndMime(for item: PhotosPickerItem) -> (String, String) {
-        let disc = UUID().uuidString.prefix(8).lowercased()
-        if let type = item.supportedContentTypes.first,
-            let ext = type.preferredFilenameExtension,
-            let mime = type.preferredMIMEType
-        {
-            let base = type.conforms(to: .movie) ? "video" : "image"
-            return ("\(base)-\(disc).\(ext)", mime)
-        }
-        // The type reported no extension/MIME — still make a movie-aware, unique name.
-        if let type = item.supportedContentTypes.first, type.conforms(to: .movie) {
-            return ("video-\(disc).mov", "video/quicktime")
-        }
-        return ("image-\(disc).jpg", "image/jpeg")
-    }
-
-    private static func mimeType(for url: URL) -> String {
-        if let type = UTType(filenameExtension: url.pathExtension),
-            let mime = type.preferredMIMEType
-        {
-            return mime
-        }
-        return "application/octet-stream"
-    }
-
     /// Open a message's file, downloading it only the FIRST time.
     ///
     /// A gram message is immutable, so its id names one set of bytes forever. Before
@@ -2016,7 +1775,7 @@ struct GramView: View {
     /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
     ///
     /// `View` is `@MainActor`, so everything on `GramView` inherits that isolation —
-    /// but `PickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
+    /// but `ComposerPickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
     /// closure, so calling a main-actor static from it is a cross-actor call (a hard
     /// error for a method). A nested type does NOT inherit the enclosing isolation,
     /// which is what is wanted here twice over: the importer can call it directly,
