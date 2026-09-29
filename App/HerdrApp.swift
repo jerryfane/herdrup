@@ -29,7 +29,7 @@ struct HerdrApp: App {
         WindowGroup {
             RootView()
                 .onOpenURL { url in
-                    // A guest invite (herdrup://guest-invite#…, or the relay's https /i# page)
+                    // A guest invite (herdrup://guest-invite#…, or the relay's https /i/… page)
                     // opens the Accept screen; everything else is the agent deep link.
                     if GuestInviteRouter.isInviteLink(url) {
                         GuestInviteRouter.shared.open(url.absoluteString)

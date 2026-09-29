@@ -363,14 +363,15 @@ struct GuestInviteView: View {
                 }
                 HStack(spacing: 10) {
                     Button {
-                        UIPasteboard.general.string = created.webURL
+                        UIPasteboard.general.string = created.shareableWebURL
                         copied = true   // stays: the link on the clipboard does not expire
                     } label: {
                         Text(copied ? "Copied" : "Copy link")
                     }
                     .buttonStyle(GuestPillButtonStyle(primary: false))
                     .accessibilityIdentifier("guest-invite-copy")
-                    if let url = URL(string: created.webURL) {
+                    // One URL item in the path form: Messages splits a '#' link in two.
+                    if let url = URL(string: created.shareableWebURL) {
                         ShareLink(item: url,
                                   message: Text("Join \(agentName) on HerdrUp")) {
                             Text("Send…")
