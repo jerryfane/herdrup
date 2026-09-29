@@ -29,6 +29,10 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   the card. Terminal quick keys stay above the card. In a terminal the composer grows
   over the terminal's bottom rows instead of shrinking it, so typing never resizes the
   agent's screen.
+- **Guest access** — share one agent with someone outside your machines from its ••• menu. They
+  get a one-use invite (QR code or link), watch the live terminal and message the agent through
+  a relay, end to end encrypted, with every message labelled `<name> (via HerdrUp):`. Settings →
+  Shared access lists who has access on each machine, revokes it, and shows the activity log.
 
 ## Requirements
 
