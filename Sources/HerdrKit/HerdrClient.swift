@@ -69,7 +69,15 @@ public actor HerdrClient {
     /// Every agent the server knows about, with the `revision` /
     /// `stateChangeSeq` counters that drive refresh decisions.
     public func agentList() async throws -> [AgentInfo] {
-        try await call("agent.list", EmptyParams(), as: AgentListResult.self).agents
+        try await agentListing().agents
+    }
+
+    /// `agent.list` with the answering daemon's own capabilities, so a caller that
+    /// polls the list learns about `events_v2` (or a daemon upgrade) without an
+    /// extra `ping`.
+    public func agentListing() async throws -> AgentListing {
+        let result = try await call("agent.list", EmptyParams(), as: AgentListResult.self)
+        return AgentListing(agents: result.agents, originCapabilities: result.originCapabilities)
     }
 
     private struct MachineStatusResult: Decodable {
@@ -1222,6 +1230,77 @@ public actor HerdrClient {
             return .event(kind: kind, paneID: obj["pane_id"] as? String, raw: line)
         }
         return .other(raw: line)
+    }
+
+    // MARK: - All-panes status stream
+
+    /// The entries `subscribeAgentStatus` sends: status and turn changes for every
+    /// pane (no `pane_id`, `events_v2` daemons only), plus the lifecycle events that
+    /// mean the listed set of panes or agents changed.
+    public static let agentStatusSubscriptions: [Subscription] = [
+        Subscription(.paneAgentStatusChanged),
+        Subscription(.paneTurnCompleted),
+        Subscription(.paneCreated),
+        Subscription(.paneClosed),
+        Subscription(.paneExited),
+        Subscription(.paneAgentDetected),
+    ]
+
+    /// One long-lived `events.subscribe` with `events_v2: true` that reports status
+    /// changes for every pane the daemon knows, including alias-qualified remote
+    /// panes a federation coordinator relays. Call it only when the daemon
+    /// advertises `ServerCapabilities.eventsV2`: an older daemon rejects the entries
+    /// without `pane_id`, which surfaces here as a thrown `APIError`.
+    ///
+    /// The stream holds its own transport stream (a dedicated SSH connection on
+    /// `CitadelTransport`). Ending iteration or cancelling the consuming task closes
+    /// it. It finishes normally when the daemon closes the connection, and throws
+    /// `AgentStatusStreamError.silent` when no line (event or heartbeat, which the
+    /// daemon writes every 15 s) arrives within `silenceTimeout`, so a half-open
+    /// connection is noticed rather than waited on forever.
+    public nonisolated func subscribeAgentStatus(
+        silenceTimeout: Duration = .seconds(45)
+    ) -> AsyncThrowingStream<AgentStatusStreamLine, Error> {
+        let env = RequestEnvelope(
+            id: "herdrkit:events.subscribe:agent-status",
+            method: "events.subscribe",
+            params: SubscribeParams(subscriptions: Self.agentStatusSubscriptions, eventsV2: true)
+        )
+        guard let data = try? JSONEncoder().encode(env) else {
+            return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
+        }
+        let raw = transport.stream(String(decoding: data, as: UTF8.self))
+
+        return AsyncThrowingStream { continuation in
+            let activity = StreamActivity()
+            let reader = Task {
+                do {
+                    for try await line in raw {
+                        await activity.touch()
+                        continuation.yield(try AgentStatusStreamLine.decode(line))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            let watchdog = Task {
+                while !Task.isCancelled {
+                    let remaining = await activity.remaining(of: silenceTimeout)
+                    if remaining <= .zero {
+                        continuation.finish(throwing: AgentStatusStreamError.silent(silenceTimeout))
+                        return
+                    }
+                    try? await Task.sleep(for: remaining)
+                }
+            }
+            // Finishing from either side lands here: the reader stops iterating,
+            // which terminates the transport stream and closes its connection.
+            continuation.onTermination = { _ in
+                reader.cancel()
+                watchdog.cancel()
+            }
+        }
     }
 
     // MARK: - Live terminal stream
