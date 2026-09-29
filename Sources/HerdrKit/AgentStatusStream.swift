@@ -238,6 +238,22 @@ extension Array where Element == AgentInfo {
         next[index] = self[index].applying(update, receivedAt: receivedAt)
         return next
     }
+
+    /// What one stream line does to this list: patch a listed row, reload
+    /// `agent.list` (the panes changed, or a status/turn event names a pane the list
+    /// has not seen yet), or ignore it.
+    public func effect(of line: AgentStatusStreamLine, receivedAt: Date) -> AgentRosterStreamEffect {
+        guard let update = line.liveUpdate else { return line.requiresRosterReload ? .reload : .ignore }
+        if let patched = applying(update, receivedAt: receivedAt) { return .patch(patched) }
+        return update.paneID.isEmpty ? .ignore : .reload
+    }
+}
+
+/// See `[AgentInfo].effect(of:receivedAt:)`.
+public enum AgentRosterStreamEffect: Sendable, Equatable {
+    case patch([AgentInfo])
+    case reload
+    case ignore
 }
 
 /// Keeps live updates that arrived while an `agent.list` load was in flight, so the
@@ -310,6 +326,34 @@ public struct ReconnectBackoff: Sendable, Equatable {
     }
 
     public mutating func reset() { current = initial }
+}
+
+// MARK: - agent.list backstop
+
+/// When the home list's poll re-fetches `agent.list`. Without an open status stream
+/// every tick loads; with one, only once `interval` has passed since the last load
+/// that published. A failed load (an event-driven resync after `lagged` or a pane
+/// lifecycle event, say) leaves the list due, so the next tick retries it rather
+/// than treating the failure as a fresh backstop.
+public struct AgentListBackstop: Sendable, Equatable {
+    private var lastPublishedLoadStart: ContinuousClock.Instant?
+
+    public init() {}
+
+    /// The load that started at `start` published its snapshot.
+    public mutating func loadSucceeded(startedAt start: ContinuousClock.Instant) {
+        lastPublishedLoadStart = start
+    }
+
+    /// The newest load failed: the next tick loads again.
+    public mutating func loadFailed() {
+        lastPublishedLoadStart = nil
+    }
+
+    public func isDue(streaming: Bool, interval: Duration, now: ContinuousClock.Instant) -> Bool {
+        guard streaming, let last = lastPublishedLoadStart else { return true }
+        return now - last >= interval
+    }
 }
 
 // MARK: - Decoding helpers

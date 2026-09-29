@@ -252,6 +252,51 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(waiting.inputPromptKind, "select")
     }
 
+    /// herdrup#333: a status or turn event for a pane the list has not loaded yet
+    /// must reload agent.list, not vanish.
+    func testEventForAnUnlistedPaneAsksForAReload() throws {
+        let agents = try decodeAgents(#"[{"pane_id":"w1:p1","agent_status":"idle"}]"#)
+        let at = Date(timeIntervalSince1970: 50)
+        let unlistedStatus = AgentStatusStreamLine.statusChanged(AgentStatusChange(
+            seq: 1, paneID: "build/w9:p9", workspaceID: nil, agentStatus: "blocked"))
+        let unlistedTurn = AgentStatusStreamLine.turnCompleted(AgentTurnCompletion(
+            seq: 2, paneID: "build/w9:p9", agentStatus: "done", turn: 1, turnEpoch: 1))
+        XCTAssertEqual(agents.effect(of: unlistedStatus, receivedAt: at), .reload)
+        XCTAssertEqual(agents.effect(of: unlistedTurn, receivedAt: at), .reload)
+
+        let listed = AgentStatusStreamLine.statusChanged(AgentStatusChange(
+            seq: 3, paneID: "w1:p1", workspaceID: "w1", agentStatus: "working"))
+        guard case .patch(let rows) = agents.effect(of: listed, receivedAt: at) else {
+            return XCTFail("a listed pane is patched in place")
+        }
+        XCTAssertEqual(rows.first?.agentStatus, "working")
+        XCTAssertEqual(agents.effect(of: .paneClosed(paneID: "w1:p1", seq: 4), receivedAt: at), .reload)
+        XCTAssertEqual(agents.effect(of: .heartbeat(seq: 5), receivedAt: at), .ignore)
+    }
+
+    /// herdrup#333: while the stream is open the poll waits out the backstop only
+    /// after a load that published. A failed resync must not count as one.
+    func testFailedLoadLeavesTheBackstopDue() {
+        let interval = Duration.seconds(30)
+        let t0 = ContinuousClock.now
+        var backstop = AgentListBackstop()
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0),
+                      "nothing has loaded yet")
+
+        backstop.loadSucceeded(startedAt: t0)
+        XCTAssertFalse(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(5)))
+        XCTAssertTrue(backstop.isDue(streaming: false, interval: interval, now: t0 + .seconds(5)),
+                      "without the stream every tick polls")
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(30)))
+
+        backstop.loadFailed()   // e.g. the resync after `lagged` failed
+        XCTAssertTrue(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(10)),
+                      "a failed load is retried on the next tick")
+
+        backstop.loadSucceeded(startedAt: t0 + .seconds(10))
+        XCTAssertFalse(backstop.isDue(streaming: true, interval: interval, now: t0 + .seconds(15)))
+    }
+
     /// The race the ledger exists for: a status event arrives while a reload is in
     /// flight, and the reload's snapshot was taken before it.
     func testLedgerKeepsUpdatesAnOverlappingReloadPredates() throws {

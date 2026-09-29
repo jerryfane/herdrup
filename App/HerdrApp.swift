@@ -1504,8 +1504,8 @@ private final class AgentRosterLiveEventsBuffer {
     /// The daemon refused the all-panes request despite advertising `events_v2`.
     /// Sticky for this connection so a later `agent.list` cannot re-enable it.
     var refused = false
-    /// When the most recent `agent.list` load started, for the backstop.
-    var lastLoadStart = ContinuousClock.now
+    /// When the poll re-fetches while `streaming`: only loads that published count.
+    var backstop = AgentListBackstop()
     /// One coalesced event-driven reload at a time; `reloadAgain` queues exactly one more.
     var reloadTask: Task<Void, Never>?
     var reloadAgain = false
@@ -2775,7 +2775,8 @@ struct TerminalHomeView: View {
         //
         // While the live status stream below is open, rows update from its events and
         // this loop only re-fetches once the backstop interval has passed since the
-        // last load (event-driven reloads count). The tick itself stays at the poll
+        // last load that published (event-driven reloads count; a failed load does
+        // not, so the next tick retries it). The tick itself stays at the poll
         // interval, so a dropped stream falls back to the 5 s cadence on the next tick
         // rather than after a full backstop. Without the stream this is the plain
         // 5 s poll it always was.
@@ -2783,9 +2784,10 @@ struct TerminalHomeView: View {
             await load()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: agentListPollIntervalNanoseconds)
-                if !liveEvents.streaming
-                    || ContinuousClock.now - liveEvents.lastLoadStart
-                        >= .nanoseconds(Int64(agentListBackstopIntervalNanoseconds)) {
+                if liveEvents.backstop.isDue(
+                    streaming: liveEvents.streaming,
+                    interval: .nanoseconds(Int64(agentListBackstopIntervalNanoseconds)),
+                    now: .now) {
                     await load()
                 }
                 // EVERY POLL, not only on a change. Recovery after the reader swipes
@@ -3959,7 +3961,7 @@ struct TerminalHomeView: View {
         // Live updates received from here on may postdate this load's snapshot; they
         // are replayed onto it below so a slower reload cannot undo them.
         let liveMark = liveEvents.ledger.mark
-        liveEvents.lastLoadStart = .now
+        let startedAt = ContinuousClock.now
         // Spinner ONLY when there is nothing to show yet (genuine first load, or after a
         // reconnect cleared `agents` via `.id(session)`). A re-entry with a populated list
         // refreshes silently — stale-while-revalidate — instead of blanking to a spinner.
@@ -3973,6 +3975,7 @@ struct TerminalHomeView: View {
             if let origin = listing.originCapabilities {
                 setLiveEventsSupported(origin.eventsV2)
             }
+            liveEvents.backstop.loadSucceeded(startedAt: startedAt)
             liveEvents.ledger.settle(through: liveMark)
             let fetched = liveEvents.ledger.replay(onto: listing.agents, after: liveMark)
 
@@ -4058,6 +4061,7 @@ struct TerminalHomeView: View {
             // A stale failure must not replace a newer success, clear its deep link,
             // or turn a recovered connection back into an error screen.
             guard rosterLoadGate.accepts(loadToken) else { return }
+            liveEvents.backstop.loadFailed()
             let rejected: String?
             var notInstalled = false
             var incompatibleBuild = false
@@ -4161,20 +4165,23 @@ struct TerminalHomeView: View {
         }
     }
 
-    /// Patches the listed row a status or turn event names; lifecycle events and
-    /// `lagged` reload agent.list. Events for panes the list does not show (a plain
-    /// shell, or a pane the next reload will bring) change nothing visible.
+    /// Patches the listed row a status or turn event names; lifecycle events,
+    /// `lagged`, and status or turn events for a pane the list does not show yet
+    /// reload agent.list (coalesced by `requestRosterReload`).
     @MainActor
     private func receiveLiveEvent(_ line: AgentStatusStreamLine) {
+        let now = Date()
         if let update = line.liveUpdate {
-            let now = Date()
             liveEvents.ledger.record(update, receivedAt: now)
-            let latest = rosterRefreshState().latest
-            if let patched = latest.agents.applying(update, receivedAt: now) {
-                receiveRoster(agents: patched, accounts: latest.accounts)
-            }
-        } else if line.requiresRosterReload {
+        }
+        let latest = rosterRefreshState().latest
+        switch latest.agents.effect(of: line, receivedAt: now) {
+        case .patch(let patched):
+            receiveRoster(agents: patched, accounts: latest.accounts)
+        case .reload:
             requestRosterReload()
+        case .ignore:
+            break
         }
     }
 
