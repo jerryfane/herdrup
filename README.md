@@ -16,6 +16,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
 
 - **Status board** — every agent grouped by what it needs: *needs you* (amber), *working*, *done*,
   *stopped*. Colour is meaning, not decoration — the one signal that matters reads instantly.
+  On a herdr that advertises `events_v2`, rows change as status events arrive, including agents on
+  federated machines the coordinator relays; the list is re-fetched every 30 s as a backstop and
+  after a stream reconnect. An older herdr is polled every 5 s.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
   Resizing preserves the logical history position; live followers stay at the tail. The on-screen
@@ -96,6 +99,7 @@ App/                     the SwiftUI app (terminal, status board, Gram, Settings
 Sources/HerdrKit/        pure-Swift transport + typed API — Linux-testable, no UI framework
   CitadelTransport.swift   pure-Swift SSH transport: execs `herdr api-bridge` per channel
   HerdrClient.swift        typed API: agentList, read, prompt, sendKeys, gram, subscribe
+  AgentStatusStream.swift  all-pane status stream lines (events v2) and row patching
   AgentList.swift          agent-list model with fail-open-visible unknown statuses
   HostKeyPinning.swift     TOFU host-key policy + the nio-ssh validator bridge
   SessionRecovery.swift    reconnect/resync policy: attempt identity, the subscription ledger
@@ -112,7 +116,7 @@ These were established against a running server, not read off the source, and th
 |---|---|
 | The command socket is **single-shot** — one request per connection | every command needs its own SSH channel |
 | `events.subscribe` is **persistent** | one long-lived event channel + N short-lived request channels |
-| Subscriptions are **pane-scoped**, no wildcard | watching N panes means N entries + re-subscribe on pane creation |
+| Subscriptions are **pane-scoped**, no wildcard, before events v2 | watching N panes means N entries + re-subscribe on pane creation; an `events_v2` daemon accepts all-pane status and turn entries, so the status board holds one stream |
 | `agent.read --format ansi` returns real styling | faithful rendering needs no new transport |
 | `agent.list` carries `revision` + `state_change_seq` | refresh can be revision-gated instead of blind |
 

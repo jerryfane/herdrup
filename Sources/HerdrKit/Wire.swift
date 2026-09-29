@@ -264,17 +264,21 @@ public struct AgentSessionTransferInfo: Decodable, Equatable, Sendable, Identifi
     }
 }
 
+/// The fields a live status event rewrites (`agentStatus`, `inputPending`,
+/// `inputPromptKind`, `statusSinceUnixMs` and the turn counters) are settable inside
+/// HerdrKit only, so `AgentInfo.applying(_:)` can patch a listed row between
+/// `agent.list` reloads. Everything else stays exactly what the daemon sent.
 public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     public let agent: String?
-    public let agentStatus: String?
+    public internal(set) var agentStatus: String?
     /// Set when the agent is showing an interactive prompt/menu that needs an
     /// on-screen choice (a plan-approval or an AskUserQuestion) rather than a chat
     /// prompt. `agent.prompt` is REJECTED while this is true (or `agentStatus ==
     /// "blocked"`), so the app must drive the pane with raw keys / `pane.send_text`
     /// instead. `inputPromptKind` is the menu kind ("select" / "confirm"). Decoded
     /// leniently — absent on an older server.
-    public let inputPending: Bool?
-    public let inputPromptKind: String?
+    public internal(set) var inputPending: Bool?
+    public internal(set) var inputPromptKind: String?
     public let name: String?
     public let paneID: String
     public let tabID: String?
@@ -292,10 +296,10 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// Wall-clock ms when the agent entered its CURRENT status (daemon #173). `nil`
     /// until the first transition / on an older server. The card derives a compact
     /// "5m/2h/3d" time-in-state badge from `now - this`.
-    public let statusSinceUnixMs: UInt64?
-    public let turn: Int?
-    public let turnEpoch: UInt64?
-    public let lastCompletedTurn: CompletedTurn?
+    public internal(set) var statusSinceUnixMs: UInt64?
+    public internal(set) var turn: Int?
+    public internal(set) var turnEpoch: UInt64?
+    public internal(set) var lastCompletedTurn: CompletedTurn?
     /// Federation (daemon W3+): for a remote agent, the owning peer's alias
     /// (`machineID`, also carried as the `<alias>/…` prefix on `name`/`paneID`),
     /// the peer's reachability as of the home's last poll, and the agent's
@@ -440,6 +444,27 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
 
 struct AgentListResult: Decodable {
     let agents: [AgentInfo]
+    /// The answering daemon's own `ping` capabilities. Absent on daemons that
+    /// predate the field.
+    let originCapabilities: ServerCapabilities?
+
+    enum CodingKeys: String, CodingKey {
+        case agents
+        case originCapabilities = "origin_capabilities"
+    }
+}
+
+/// `agent.list` with the answering daemon's capabilities (`origin_capabilities`).
+/// `originCapabilities` is nil on a daemon that predates the field; `ping` is the
+/// fallback there.
+public struct AgentListing: Sendable, Equatable {
+    public let agents: [AgentInfo]
+    public let originCapabilities: ServerCapabilities?
+
+    public init(agents: [AgentInfo], originCapabilities: ServerCapabilities?) {
+        self.agents = agents
+        self.originCapabilities = originCapabilities
+    }
 }
 
 // MARK: - Accounts (credential subscriptions)
@@ -652,6 +677,7 @@ public enum PromptRejection: Equatable, Sendable {
 /// PTY bytes themselves rather than an invalidation tick — see the "Live terminal
 /// stream" section below. `events.subscribe` stays the coarse status channel.
 public enum SubscriptionType: String, Codable, Sendable {
+    case paneCreated = "pane.created"
     case paneUpdated = "pane.updated"
     case paneFocused = "pane.focused"
     case paneClosed = "pane.closed"
@@ -665,8 +691,10 @@ public enum SubscriptionType: String, Codable, Sendable {
 }
 
 /// A single subscription entry. Pane-scoped kinds require `paneID`; the server
-/// rejects them with "missing field pane_id" otherwise, and offers no wildcard,
-/// so watching N panes means N entries plus a re-subscribe when panes appear.
+/// rejects them with "missing field pane_id" otherwise. The one exception is a
+/// daemon advertising `events_v2`: there `pane.agent_status_changed` and
+/// `pane.turn_completed` accept no `paneID` and watch every pane, including
+/// alias-qualified remote panes on a federation coordinator.
 public struct Subscription: Encodable, Sendable {
     public let type: SubscriptionType
     public let paneID: String?
@@ -684,6 +712,14 @@ public struct Subscription: Encodable, Sendable {
 
 struct SubscribeParams: Encodable {
     let subscriptions: [Subscription]
+    /// Opts into `lagged` / `heartbeat` control lines and per-entry rejection.
+    /// Nil is omitted from the request, which is the pre-v2 wire shape.
+    var eventsV2: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case subscriptions
+        case eventsV2 = "events_v2"
+    }
 }
 
 /// A line arriving on the event stream: either the opening acknowledgement or an event.
@@ -947,6 +983,10 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// the legacy Claude/Codex pair. An explicit list, including an empty or
     /// future-only one, must not be replaced with that fallback.
     public let agentSessionTransferHarnesses: [AgentSessionTransferHarness]?
+    /// `events.subscribe` accepts `events_v2: true` (control lines, `seq`,
+    /// per-entry rejection) and all-pane status / turn entries without a `pane_id`.
+    /// On a federation coordinator those entries also carry relayed remote panes.
+    public let eventsV2: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -955,6 +995,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case gramUploadStream = "gram_upload_stream"
         case agentSessionTransfer = "agent_session_transfer"
         case agentSessionTransferHarnesses = "agent_session_transfer_harnesses"
+        case eventsV2 = "events_v2"
     }
 
     public init(from decoder: Decoder) throws {
@@ -968,6 +1009,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
             [AgentSessionTransferHarness].self,
             forKey: .agentSessionTransferHarnesses
         )
+        eventsV2 = try c.decodeIfPresent(Bool.self, forKey: .eventsV2) ?? false
     }
 }
 

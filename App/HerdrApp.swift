@@ -406,6 +406,11 @@ struct RootView: View {
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
+        case .liveEvents, .liveEventsLegacy:
+            // The live status stream receipt: `liveevents` is an events_v2 daemon whose
+            // rows change only through streamed events, `liveevents-legacy` an older
+            // daemon that must keep the 5 s agent.list poll.
+            LiveEventsHarness(driver: LiveEventsDriver.shared)
         case .rosterStress:
             // Many rows move between sections while the UI test continuously scrolls.
             // The short poll interval is DEBUG-only and turns several production poll
@@ -1488,6 +1493,26 @@ private final class AgentRosterScrollBuffer {
     deinit { recoveryTask?.cancel() }
 }
 
+/// Non-observable bookkeeping for the home list's live status stream. Events arrive
+/// several times a second across a fleet; none of this may invalidate SwiftUI by
+/// itself. Only a patched roster, published through `receiveRoster`, redraws.
+private final class AgentRosterLiveEventsBuffer {
+    /// Updates received while loads were in flight, replayed onto their snapshots.
+    var ledger = AgentLiveUpdateLedger()
+    /// An acknowledged stream is open; the 5 s poll relaxes to the backstop.
+    var streaming = false
+    /// The daemon refused the all-panes request despite advertising `events_v2`.
+    /// Sticky for this connection so a later `agent.list` cannot re-enable it.
+    var refused = false
+    /// When the most recent `agent.list` load started, for the backstop.
+    var lastLoadStart = ContinuousClock.now
+    /// One coalesced event-driven reload at a time; `reloadAgain` queues exactly one more.
+    var reloadTask: Task<Void, Never>?
+    var reloadAgain = false
+
+    deinit { reloadTask?.cancel() }
+}
+
 /// Cross-version scroll-phase observation. The probe sits inside the SwiftUI
 /// ScrollView content, finds its UIKit ancestor, and samples UIKit's authoritative
 /// tracking/deceleration flags on the display link. This is the same path on iOS 17,
@@ -1630,10 +1655,15 @@ struct TerminalHomeView: View {
     var livePaneIDs: Set<String>? = nil
 
     /// How often the connected agent list is re-fetched to stay live. Five seconds is
-    /// the production default. The DEBUG scroll-stress harness injects a shorter value
-    /// so one UI test crosses many refresh boundaries without becoming a minute-long
-    /// wall-clock test.
+    /// the production default, and the cadence whenever no live status stream is open
+    /// (an older daemon, or between reconnects). The DEBUG scroll-stress harness
+    /// injects a shorter value so one UI test crosses many refresh boundaries without
+    /// becoming a minute-long wall-clock test.
     var agentListPollIntervalNanoseconds: UInt64 = 5_000_000_000
+    /// While an acknowledged `events_v2` status stream is open, rows update from its
+    /// events and the list is re-fetched only this often, as a backstop for anything
+    /// the stream cannot express.
+    var agentListBackstopIntervalNanoseconds: UInt64 = 30_000_000_000
     /// DEBUG stress receipt: exercise the eager Mac stack on the iOS simulator.
     var forceEagerAgentRosterStack = false
     /// DEBUG stress-receipt hook. Normal callers leave it nil.
@@ -1652,6 +1682,11 @@ struct TerminalHomeView: View {
     @State private var pendingRoster = AgentRosterPendingBuffer()
     @State private var rosterLoadGate = AgentRosterLoadGateBuffer()
     @State private var rosterScroll = AgentRosterScrollBuffer()
+    @State private var liveEvents = AgentRosterLiveEventsBuffer()
+    /// The daemon advertises `events_v2` (from `agent.list` `origin_capabilities`, or
+    /// `ping` on a daemon without that field). Observable because it keys the stream
+    /// task; it changes at most once or twice per connection.
+    @State private var liveEventsSupported = false
     /// One shared time source for every status-age badge. It updates at most once
     /// per production poll interval, never once per row.
     @State private var rosterNow = Date()
@@ -2737,11 +2772,22 @@ struct TerminalHomeView: View {
         // failed refresh keeps the last-good list rather than blanking it, and the
         // spinner shows only while the list is empty. Still one .task, .id(session)-
         // scoped, so tab switches never restart or duplicate it.
+        //
+        // While the live status stream below is open, rows update from its events and
+        // this loop only re-fetches once the backstop interval has passed since the
+        // last load (event-driven reloads count). The tick itself stays at the poll
+        // interval, so a dropped stream falls back to the 5 s cadence on the next tick
+        // rather than after a full backstop. Without the stream this is the plain
+        // 5 s poll it always was.
         .task {
             await load()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: agentListPollIntervalNanoseconds)
-                await load()
+                if !liveEvents.streaming
+                    || ContinuousClock.now - liveEvents.lastLoadStart
+                        >= .nanoseconds(Int64(agentListBackstopIntervalNanoseconds)) {
+                    await load()
+                }
                 // EVERY POLL, not only on a change. Recovery after the reader swipes
                 // the banner away cannot hang off `.onChange(of: fullList)` below: that
                 // fires when the roster MOVES, which is exactly what a blocked agent
@@ -2752,6 +2798,14 @@ struct TerminalHomeView: View {
                     LiveActivityController.state(from: fullList)
                 )
             }
+        }
+        // The live status stream (herdr events v2): one all-panes `events.subscribe`
+        // held while the app is not backgrounded and the daemon advertises
+        // `events_v2`. Keyed on both, so backgrounding cancels the task, which closes
+        // the SSH channel, and returning reopens it; leaving the view cancels it too.
+        .task(id: liveEventsSupported && scenePhase != .background) {
+            guard liveEventsSupported, scenePhase != .background else { return }
+            await runLiveEvents()
         }
         // Ambient unread-gram poll for the tab badge, running ONLY while the Gram
         // tab is not showing — GramView keeps its own 6s poll while visible and
@@ -3902,6 +3956,10 @@ struct TerminalHomeView: View {
         // Main-actor isolation prevents simultaneous mutation, not out-of-order
         // completion across awaits. Only the most recently STARTED load may publish.
         let loadToken = rosterLoadGate.begin()
+        // Live updates received from here on may postdate this load's snapshot; they
+        // are replayed onto it below so a slower reload cannot undo them.
+        let liveMark = liveEvents.ledger.mark
+        liveEvents.lastLoadStart = .now
         // Spinner ONLY when there is nothing to show yet (genuine first load, or after a
         // reconnect cleared `agents` via `.id(session)`). A re-entry with a populated list
         // refreshes silently — stale-while-revalidate — instead of blanking to a spinner.
@@ -3910,8 +3968,13 @@ struct TerminalHomeView: View {
             if rosterLoadGate.accepts(loadToken), loading { loading = false }
         }
         do {
-            let fetched = try await client.agentList()
+            let listing = try await client.agentListing()
             guard rosterLoadGate.accepts(loadToken) else { return }
+            if let origin = listing.originCapabilities {
+                setLiveEventsSupported(origin.eventsV2)
+            }
+            liveEvents.ledger.settle(through: liveMark)
+            let fetched = liveEvents.ledger.replay(onto: listing.agents, after: liveMark)
 
             // Agent state is the latency-sensitive payload. Publish it immediately
             // with the freshest account roster already in memory; never make visible
@@ -3937,18 +4000,24 @@ struct TerminalHomeView: View {
             // either the visible or pending snapshot after a newer load completes.
             if let fetchedAccounts = try? await client.accountsList() {
                 guard rosterLoadGate.accepts(loadToken) else { return }
-                receiveRoster(agents: fetched, accounts: fetchedAccounts)
+                // Replayed again: live updates may have landed during this await.
+                receiveRoster(agents: liveEvents.ledger.replay(onto: listing.agents, after: liveMark),
+                              accounts: fetchedAccounts)
             } else {
                 guard rosterLoadGate.accepts(loadToken) else { return }
             }
 
             // Ping once per connected HomeView to feature-detect the transactional
-            // transfer API. Missing capabilities on an older daemon are a successful
-            // negative result; a transport error is retried on the next load.
+            // transfer API, and `events_v2` on a daemon whose agent.list predates
+            // `origin_capabilities`. Missing capabilities on an older daemon are a
+            // successful negative result; a transport error is retried on the next load.
             if !checkedSessionTransferCapability {
                 do {
                     let capabilities = try await client.serverCapabilities()
                     guard rosterLoadGate.accepts(loadToken) else { return }
+                    if listing.originCapabilities == nil {
+                        setLiveEventsSupported(capabilities?.eventsV2 == true)
+                    }
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
                     // PARSED HERE, IN THE SAME BLOCK THAT MARKS THE CHECK DONE.
                     //
@@ -4035,6 +4104,95 @@ struct TerminalHomeView: View {
             // but popping the Gram cover on some much-later successful load is a
             // surprise; drop it for the same reason and consistency.
             push.pendingGram = false
+        }
+    }
+
+    // MARK: Live status stream
+
+    /// Records the daemon's `events_v2` advertisement. Writes the observable flag
+    /// only on a change, and never re-enables a request the daemon already refused.
+    @MainActor
+    private func setLiveEventsSupported(_ advertised: Bool) {
+        let supported = advertised && !liveEvents.refused
+        if supported != liveEventsSupported { liveEventsSupported = supported }
+    }
+
+    /// Holds the all-panes status subscription until the task is cancelled
+    /// (background, capability loss, or the view going away), reconnecting with
+    /// backoff whenever the stream ends: the SSH channel dropped, the daemon
+    /// restarted, or the silence watchdog gave up on a half-open connection.
+    @MainActor
+    private func runLiveEvents() async {
+        var backoff = ReconnectBackoff()
+        defer { liveEvents.streaming = false }
+        while !Task.isCancelled {
+            var acknowledged = false
+            do {
+                for try await line in client.subscribeAgentStatus() {
+                    if case .started = line {
+                        acknowledged = true
+                        liveEvents.streaming = true
+                        // Anything that changed while no stream was open (first
+                        // connect, or the gap before this reconnect) is only in
+                        // agent.list.
+                        requestRosterReload()
+                    } else {
+                        // Only a stream that delivers something counts as healthy,
+                        // so a daemon that acknowledges and hangs up at once still
+                        // backs off instead of reconnecting every second.
+                        backoff.reset()
+                        receiveLiveEvent(line)
+                    }
+                }
+            } catch is APIError where !acknowledged {
+                // The daemon refused the request itself (it advertised events_v2 but
+                // rejects entries without pane_id). Retrying cannot help; the 5 s
+                // poll carries on for this connection.
+                liveEvents.streaming = false
+                liveEvents.refused = true
+                liveEventsSupported = false
+                return
+            } catch {
+                // A dropped or silent stream: reconnect below.
+            }
+            liveEvents.streaming = false
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: backoff.next())
+        }
+    }
+
+    /// Patches the listed row a status or turn event names; lifecycle events and
+    /// `lagged` reload agent.list. Events for panes the list does not show (a plain
+    /// shell, or a pane the next reload will bring) change nothing visible.
+    @MainActor
+    private func receiveLiveEvent(_ line: AgentStatusStreamLine) {
+        if let update = line.liveUpdate {
+            let now = Date()
+            liveEvents.ledger.record(update, receivedAt: now)
+            let latest = rosterRefreshState().latest
+            if let patched = latest.agents.applying(update, receivedAt: now) {
+                receiveRoster(agents: patched, accounts: latest.accounts)
+            }
+        } else if line.requiresRosterReload {
+            requestRosterReload()
+        }
+    }
+
+    /// Coalesces event-driven reloads: a burst of pane lifecycle events costs one
+    /// load in flight plus at most one queued behind it.
+    @MainActor
+    private func requestRosterReload() {
+        guard liveEvents.reloadTask == nil else {
+            liveEvents.reloadAgain = true
+            return
+        }
+        let buffer = liveEvents
+        buffer.reloadTask = Task { @MainActor in
+            repeat {
+                buffer.reloadAgain = false
+                await load()
+            } while buffer.reloadAgain && !Task.isCancelled
+            buffer.reloadTask = nil
         }
     }
 }
@@ -8394,6 +8552,8 @@ enum ScreenshotMock {
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestSettings
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
+    // The home list's live status stream: an events_v2 daemon, and an older one.
+    case liveEvents, liveEventsLegacy
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -8405,6 +8565,8 @@ enum ScreenshotMock {
         case "onboarding": return .onboarding
         case "pairing-guidance": return .pairingGuidance
         case "rosterstress": return .rosterStress
+        case "liveevents": return .liveEvents
+        case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings
         case "share": return .share
@@ -8477,10 +8639,17 @@ struct MockTransport: HerdrTransport {
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
     var interactionDriver: TerminalInteractionDriver?
+    /// Stateful daemon for the live status stream receipt (ping, agent.list and
+    /// the all-panes events.subscribe); other requests fall through to the canned
+    /// answers below.
+    var liveEventsDriver: LiveEventsDriver?
 
     func roundTrip(_ requestLine: String) async throws -> String {
         if let interactionDriver {
             return try await interactionDriver.roundTrip(requestLine)
+        }
+        if let liveEventsDriver, let answer = await liveEventsDriver.answer(requestLine) {
+            return answer
         }
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
@@ -8506,6 +8675,9 @@ struct MockTransport: HerdrTransport {
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         if let interactionDriver { return interactionDriver.stream(requestLine) }
+        if let liveEventsDriver, requestLine.contains("events.subscribe") {
+            return liveEventsDriver.stream()
+        }
         // `pane.stream` (the live terminal): reply with the stream_started ack, then a reset
         // seed, then STAY OPEN — so the DEBUG pane shows a rendered SwiftTerm terminal, not an
         // empty one. The scrollback seed (UI test) feeds 200 lines so there is real history to
