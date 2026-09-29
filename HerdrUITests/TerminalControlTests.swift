@@ -426,6 +426,49 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertEqual(icons.count, 0, "and no icon should be staged beside it")
     }
 
+    /// THE PAPERCLIP (TestFlight 176 feedback). The owner's terminal composer offers the
+    /// guest composer's attach button, beside the mic in the one-row composer. A file
+    /// picked through its sheet stages a chip and sends exactly as a paste does: its
+    /// bytes uploaded, one gram posted, and one prompt naming it.
+    func testAttachButtonPicksAFileThatUploadsAndPrompts() {
+        launch("control")
+        let paperclip = app.buttons["terminal-attach-button"]
+        XCTAssertTrue(paperclip.waitForExistence(timeout: 10),
+                      "the terminal composer should offer the paperclip")
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(abs(paperclip.frame.midY - reply.frame.midY), 4,
+                                 "at rest the paperclip sits in the composer's one row, beside the text")
+        attach("terminal-composer-attach-rest")
+
+        paperclip.tap()
+        let file = app.buttons["composer-attach-file"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "the paperclip should open the attach sheet")
+        XCTAssertTrue(app.buttons["composer-attach-photos"].exists,
+                      "the sheet should offer the photo library as well as files")
+        attach("terminal-composer-attach-sheet")
+        file.tap()
+
+        let chip = app.staticTexts["picked-notes.txt"]
+        let note = app.staticTexts["terminal-action-note"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10),
+                      "the picked file should stage a chip — note=\(note.exists ? note.label : "none")")
+        attach("terminal-composer-attach-chip")
+
+        let send = app.buttons["terminal-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5), "a picked file should be sendable without text")
+        send.tap()
+        let delivered = wait {
+            ($0["prompts"] as? Int) == 1 && ($0["gramPosts"] as? Int) == 1
+        }
+        XCTAssertEqual(delivered["uploadedBytes"] as? Int, "picked through the paperclip".utf8.count,
+                       "the picked file's bytes should be uploaded")
+        XCTAssertTrue((delivered["lastPrompt"] as? String ?? "").contains("File picked-notes.txt attached"),
+                      "the prompt should name the picked file: \(delivered["lastPrompt"] ?? "")")
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 15), .completed,
+                       "the chip should clear once the prompt is delivered")
+    }
+
     /// The staged-attachment chip. A container, so it is matched across element types
     /// rather than assumed to be an `otherElement`.
     private var replyAttachmentChip: XCUIElement {
