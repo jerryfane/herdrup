@@ -83,10 +83,8 @@ final class GuestInviteRouter: ObservableObject {
         }
     }
 
-    /// Whether a URL is an invite link in either form.
+    /// Whether a URL is an invite link in any form.
     static func isInviteLink(_ url: URL) -> Bool {
-        let text = url.absoluteString
-        if text.hasPrefix(GuestInvite.appLinkPrefix) { return true }
-        return url.scheme == "https" && url.path == "/i" && url.fragment?.isEmpty == false
+        GuestInvite.isInviteLink(url.absoluteString)
     }
 }

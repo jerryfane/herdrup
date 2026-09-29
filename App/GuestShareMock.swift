@@ -170,6 +170,7 @@ final class GuestShareMockStore: @unchecked Sendable {
             let invite = Self.invite(id: "inv-\(inviteSeq)", name: name, createdMs: Self.ms(Date()))
             machine.invites.append(invite)
             let payload = Base64URLMock.encode(#"{"v":1,"invite_id":"inv-\#(inviteSeq)","guest_name":"\#(name)","agent_name":"llm-opt"}"#)
+            // An older daemon's '#' web link, which the invite sheet shares in the path form.
             return ["type": "guest_invite", "invite": invite,
                     "url": "herdrup://guest-invite#\(payload)",
                     "web_url": "https://guest.herdrup.themartian.app/i#\(payload)"]

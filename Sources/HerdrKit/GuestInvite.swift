@@ -2,9 +2,12 @@ import Foundation
 
 /// A one-time invite to reach one agent on someone else's machine.
 ///
-/// The payload is JSON, base64url-encoded without padding, and travels in a URL
-/// fragment so it never reaches a web server. Two link forms carry it:
-/// `herdrup://guest-invite#<payload>` and `https://<relay>/i#<payload>`.
+/// The payload is JSON, base64url-encoded without padding. Three link forms carry it:
+/// the app link `herdrup://guest-invite#<payload>` (the QR code), the web link
+/// `https://<relay>/i/<payload>` that owners share, and the older web link
+/// `https://<relay>/i#<payload>`. Messages splits a link at the `#`, so the shared web
+/// link carries the payload in its path; the relay's landing page passes it through
+/// without storing or logging it. A web link only counts on its own invite's relay.
 public struct GuestInvite: Equatable, Sendable {
     public static let appLinkPrefix = "herdrup://guest-invite#"
     /// The longest label the app will display from an invite.
@@ -63,9 +66,10 @@ public struct GuestInvite: Equatable, Sendable {
         let candidates = [trimmed] + trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         var damaged: Failure?
         for candidate in candidates {
-            guard let payload = payload(inLink: candidate) else { continue }
+            guard let link = Link(candidate) else { continue }
             do {
-                let invite = try decode(payload: payload)
+                let invite = try decode(payload: link.payload)
+                if let web = link.web, !web.isOnRelay(invite.relay) { throw Failure.notAnInvite }
                 if invite.isExpired(now: now) { throw Failure.expired }
                 return invite
             } catch let failure as Failure {
@@ -75,18 +79,86 @@ public struct GuestInvite: Equatable, Sendable {
         throw damaged ?? Failure.notAnInvite
     }
 
-    /// The fragment of an app or web invite link, or nil for any other text.
-    static func payload(inLink text: String) -> String? {
-        if text.hasPrefix(appLinkPrefix) {
-            return String(text.dropFirst(appLinkPrefix.count))
+    /// Whether `text` has the shape of an invite link in any form. The payload and the
+    /// relay are only checked by `parse`.
+    public static func isInviteLink(_ text: String) -> Bool {
+        Link(text) != nil
+    }
+
+    /// `text` with an older `…/i#<payload>` web link rewritten to the `…/i/<payload>`
+    /// form that survives Messages; any other text comes back unchanged.
+    public static func pathFormWebLink(_ text: String) -> String {
+        guard let link = Link(text), let web = link.web, web.fragmentForm, let base = web.base.string
+        else { return text }
+        return "\(base)/i/\(link.payload)"
+    }
+
+    /// An invite link split into its payload and, for a web link, where it points.
+    struct Link {
+        let payload: String
+        let web: Web?
+
+        /// A web link's origin and the path before `/i`, which must be its relay's.
+        struct Web {
+            /// Scheme, host, port and relay path; no query or fragment.
+            let base: URLComponents
+            /// `/i#<payload>` rather than `/i/<payload>`.
+            let fragmentForm: Bool
+
+            func isOnRelay(_ relay: URL) -> Bool {
+                guard let relay = URLComponents(url: relay, resolvingAgainstBaseURL: false) else { return false }
+                var relayPath = relay.percentEncodedPath
+                while relayPath.hasSuffix("/") { relayPath.removeLast() }
+                return relay.scheme == base.scheme
+                    && relay.host?.lowercased() == base.host?.lowercased()
+                    && relay.port == base.port
+                    && relayPath == base.percentEncodedPath
+            }
         }
-        guard let components = URLComponents(string: text),
-              components.scheme == "https",
-              components.host?.isEmpty == false,
-              components.path == "/i",
-              let fragment = components.percentEncodedFragment
-        else { return nil }
-        return fragment
+
+        /// Exactly `herdrup://guest-invite#<payload>`, `https://<host>[/<path>]/i/<payload>`
+        /// or `https://<host>[/<path>]/i#<payload>`; nil for anything else.
+        init?(_ text: String) {
+            if text.hasPrefix(GuestInvite.appLinkPrefix) {
+                let payload = String(text.dropFirst(GuestInvite.appLinkPrefix.count))
+                guard !payload.isEmpty else { return nil }
+                self.init(payload: payload, web: nil)
+                return
+            }
+            guard let components = URLComponents(string: text),
+                  components.scheme == "https",
+                  components.host?.isEmpty == false,
+                  components.user == nil, components.password == nil,
+                  components.percentEncodedQuery == nil
+            else { return nil }
+            let path = components.percentEncodedPath
+            let payload: String
+            let basePath: Substring
+            let fragmentForm: Bool
+            if let fragment = components.percentEncodedFragment {
+                guard path.hasSuffix("/i"), !fragment.isEmpty else { return nil }
+                payload = fragment
+                basePath = path.dropLast(2)
+                fragmentForm = true
+            } else {
+                guard let marker = path.range(of: "/i/", options: .backwards) else { return nil }
+                payload = String(path[marker.upperBound...])
+                basePath = path[..<marker.lowerBound]
+                guard !payload.isEmpty, !payload.contains("/") else { return nil }
+                fragmentForm = false
+            }
+            var base = URLComponents()
+            base.scheme = components.scheme
+            base.percentEncodedHost = components.percentEncodedHost
+            base.port = components.port
+            base.percentEncodedPath = String(basePath)
+            self.init(payload: payload, web: Web(base: base, fragmentForm: fragmentForm))
+        }
+
+        private init(payload: String, web: Web?) {
+            self.payload = payload
+            self.web = web
+        }
     }
 
     private struct Wire: Codable {
@@ -176,7 +248,7 @@ public struct GuestInvite: Equatable, Sendable {
         now >= expires
     }
 
-    /// The base64url payload both link forms carry.
+    /// The base64url payload every link form carries.
     public var payload: String {
         let wire = Wire(
             v: 1, relay: relay.absoluteString, hostID: hostID, hostPub: Base64URL.encode(hostPublicKey),
@@ -192,10 +264,11 @@ public struct GuestInvite: Equatable, Sendable {
         URL(string: Self.appLinkPrefix + payload)!
     }
 
+    /// The shareable web link, in the path form the daemon hands out.
     public var webLink: URL {
         var base = relay.absoluteString
         while base.hasSuffix("/") { base.removeLast() }
-        return URL(string: "\(base)/i#\(payload)")!
+        return URL(string: "\(base)/i/\(payload)")!
     }
 }
 
