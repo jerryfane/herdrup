@@ -1896,6 +1896,29 @@ struct LiveTerminalView: UIViewRepresentable {
             #endif
         }
 
+        /// DEBUG-only receipt for the guest scrollback test: the text of the grid's top row
+        /// (`yDisp`, which a scroll moves) in a view-only pane, so a swipe can be shown to
+        /// reveal backfilled history. Same gating as `publishSelectionProbe`: compiled out of
+        /// Release, inert without `HERDR_SCREENSHOT_MOCK`, and only ever fed canned mock output.
+        fileprivate func publishTopRowProbe() {
+            #if DEBUG
+            guard viewOnly, ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
+                  let view else { return }
+            let probe: UIView
+            if let existing = topRowProbe {
+                probe = existing
+            } else {
+                probe = UIView(frame: .zero)
+                probe.isAccessibilityElement = true
+                probe.accessibilityIdentifier = "terminal-top-row-probe"
+                view.addSubview(probe)
+                topRowProbe = probe
+            }
+            probe.accessibilityLabel =
+                view.getTerminal().getLine(row: 0)?.translateToString(trimRight: true) ?? ""
+            #endif
+        }
+
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
             #if DEBUG
@@ -2120,8 +2143,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// can never stall the live seed. Runs concurrently with the stream; the FIRST reset
         /// awaits this at the single point where the bytes must land above the seed.
         private func startBackfill() {
-            // View-only (a guest) may not call `agent.read`; the stream's reset is the seed.
-            guard !viewOnly, Self.backfillLines > 0 else { backfillTask = nil; return }
+            // View-only (a guest) backfills too: the host lets a guest `agent.read` the granted
+            // agent. An older host refuses with `guest_forbidden`; the read then yields nil
+            // like any failure, and the stream's reset alone is the seed.
+            guard Self.backfillLines > 0 else { backfillTask = nil; return }
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
                 // Race the read against the timeout and take whichever finishes FIRST, ABANDONING
@@ -2318,6 +2343,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     view.feed(byteArray: Self.clearSequence[...])
                     if !data.isEmpty { feedFiltered(data, into: view) }
                     noteStreamData()
+                    publishTopRowProbe()
                 case .data(_, _, let data):
                     noteStreamData()
                     if !data.isEmpty { feedFiltered(data, into: view) }
@@ -3056,6 +3082,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     // WHEN THE CONTENT LAST MOVED UNDER A FINGER, which is the signal the focus-tap
                     // guard uses. See `handleFocusTap` for why a timestamp rather than a live flag.
                     if userDriven { self.lastContentMotion = CACurrentMediaTime() }
+                    self.publishTopRowProbe()
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
@@ -3087,6 +3114,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// outside a UI-test run. The property itself is left ungated because nothing assigns it
         /// outside that block; an unused optional costs a word and one `#if` less to get wrong.
         private var selectionProbe: UIView?
+        /// DEBUG-only, like `selectionProbe`: the top visible row of a view-only pane (see
+        /// `publishTopRowProbe`).
+        private var topRowProbe: UIView?
         /// Monotonic publish counter for the probe, so a reading can be told apart from a stale one.
         /// How recently the terminal's content must have moved for a tap to be read as
         /// "stop scrolling" rather than "give me the keyboard". Covers the gap between the last
