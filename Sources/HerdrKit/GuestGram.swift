@@ -147,3 +147,32 @@ public struct GuestPushRoute: Equatable, Sendable {
         }
     }
 }
+
+/// What a tapped notification opens. A payload that carries `herdr_guest` at all is a guest
+/// push, and its classification ends there: a well-formed one opens its share, a malformed
+/// one opens nothing. Its other keys (`gram`, `pane_id`) are never read, so no guest push,
+/// malformed or mixed, can open an owner screen.
+public enum PushTapTarget: Equatable, Sendable {
+    /// A guest push naming its host: open that share, if the phone holds it.
+    case guest(GuestPushRoute)
+    /// A guest push without a usable host: drop the tap.
+    case droppedGuest
+    /// The owner's Gram page.
+    case ownerGram
+    /// The owner's pane.
+    case ownerPane(String)
+    /// Nothing to open.
+    case none
+
+    public init(userInfo: [AnyHashable: Any]) {
+        if userInfo["herdr_guest"] != nil {
+            self = GuestPushRoute(userInfo: userInfo).map(PushTapTarget.guest) ?? .droppedGuest
+        } else if userInfo["gram"] as? Bool == true {
+            self = .ownerGram
+        } else if let paneID = userInfo["pane_id"] as? String, !paneID.isEmpty {
+            self = .ownerPane(paneID)
+        } else {
+            self = .none
+        }
+    }
+}

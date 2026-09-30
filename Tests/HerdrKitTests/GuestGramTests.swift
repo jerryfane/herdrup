@@ -204,6 +204,30 @@ final class GuestGramTests: XCTestCase {
         XCTAssertNil(GuestPushRoute(userInfo: ["herdr_guest": ["host_id": "", "kind": "gram"]]))
     }
 
+    /// Review P1: a guest push whose `herdr_guest` is malformed, or that also carries the
+    /// owner's keys, must never open the owner's Gram or a pane.
+    func testAnyGuestPushIsClassifiedAsGuestAndNeverOpensAnOwnerScreen() {
+        let malformed: [[AnyHashable: Any]] = [
+            ["herdr_guest": ["guest_id": "g1", "kind": "gram"], "gram": true, "pane_id": ""],
+            ["herdr_guest": ["host_id": "", "kind": "status"], "pane_id": "w1:p1"],
+            ["herdr_guest": ["host_id": 42], "gram": true],
+            ["herdr_guest": "HOST", "pane_id": "w1:p1"],
+            ["herdr_guest": NSNull(), "gram": true],
+        ]
+        for userInfo in malformed {
+            XCTAssertEqual(PushTapTarget(userInfo: userInfo), .droppedGuest, "\(userInfo)")
+        }
+        let mixed: [AnyHashable: Any] = ["herdr_guest": ["host_id": "HOST", "kind": "status"],
+                                         "gram": true, "pane_id": "w1:p1"]
+        XCTAssertEqual(PushTapTarget(userInfo: mixed),
+                       .guest(GuestPushRoute(hostID: "HOST", guestID: nil, kind: .status)),
+                       "the owner's keys on a guest push are ignored")
+
+        XCTAssertEqual(PushTapTarget(userInfo: ["gram": true, "pane_id": ""]), .ownerGram)
+        XCTAssertEqual(PushTapTarget(userInfo: ["pane_id": "w1:p1"]), .ownerPane("w1:p1"))
+        XCTAssertEqual(PushTapTarget(userInfo: ["pane_id": ""]), PushTapTarget.none)
+    }
+
     func testAPushOpensOnlyTheShareItNames() {
         let other = GuestAccess(
             guestID: "g2", guestName: "plotarmordev", machineLabel: "Mac Studio", ownerName: "Jerry",

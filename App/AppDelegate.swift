@@ -99,11 +99,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return [.banner, .list, .sound]
     }
 
-    // A tap on the notification → deep-link. A push for an agent someone shared with this phone
-    // carries `herdr_guest` and goes to that share's screens, never an owner screen, so it is
-    // checked first. A gram alert carries `gram: true` and an empty `pane_id`, so it MUST be
-    // checked before the pane branch (an empty pane id is a non-nil String that would otherwise
-    // deep-link to a nonexistent pane).
+    // A tap on the notification → deep-link. `PushTapTarget` decides: anything carrying
+    // `herdr_guest` goes to that share's screens or nowhere, never an owner screen; a gram alert
+    // (`gram: true`, empty `pane_id`) is checked before the pane branch.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
         let userInfo = response.notification.request.content.userInfo
@@ -112,12 +110,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     /// Where a tapped notification leads, for `PushCenter` to hold until a view can open it.
     static func routeTap(userInfo: [AnyHashable: Any]) {
-        if let route = GuestPushRoute(userInfo: userInfo) {
-            PushCenter.shared.tappedGuest(route)
-        } else if userInfo["gram"] as? Bool == true {
-            PushCenter.shared.tappedGram()
-        } else if let paneID = userInfo["pane_id"] as? String, !paneID.isEmpty {
-            PushCenter.shared.tapped(paneID: paneID)
+        switch PushTapTarget(userInfo: userInfo) {
+        case .guest(let route): PushCenter.shared.tappedGuest(route)
+        case .ownerGram: PushCenter.shared.tappedGram()
+        case .ownerPane(let paneID): PushCenter.shared.tapped(paneID: paneID)
+        case .droppedGuest, .none: break
         }
     }
 }
