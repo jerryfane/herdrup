@@ -7,86 +7,52 @@ import UIKit
 enum GuestPaneTab: Hashable { case terminal, gram }
 
 /// A guest's Gram for the shared agent (herdrup#338): the agent's Grams since the grant and
-/// the guest's own posts, newest first, with the guest's own read marks.
+/// the guest's own posts, newest first, with the guest's own read marks. The state and its
+/// ordering rules live in HerdrKit's `GuestGramFeed`; this republishes it for SwiftUI.
 @MainActor
 final class GuestGramModel: ObservableObject {
-    static let pageSize = 100
-
     @Published private(set) var messages: [GuestGramMessage] = []
     @Published private(set) var loaded = false
     @Published private(set) var failure: String?
     @Published private(set) var hasMore = false
-    @Published private(set) var loadingMore = false
-    /// What `gram.mark_read` may send: never an id already in flight, and a refused id only
-    /// after its backoff, so the rollback below can't retrigger an immediate resend.
-    private var marks = GuestGramReadMarks()
+
+    private let feed = GuestGramFeed()
+    private var access: GuestAccess?
+
+    init() {
+        feed.onChange = { [weak self] in self?.publish() }
+    }
 
     var unreadCount: Int { messages.filter(\.isUnread).count }
 
-    /// Reloads the newest page, keeping older pages already scrolled in.
+    /// Reloads the newest page; an overtaken refresh applies nothing.
     func refresh(client: HerdrClient, access: GuestAccess) async {
-        do {
-            let page = try await client.guestGramList(limit: Self.pageSize)
-            let head = page.messages.map { message -> GuestGramMessage in
-                var message = message
-                if marks.isMarking(message.id) { message.read = true }
-                return message
-            }
-            let headIDs = Set(head.map(\.id))
-            let oldest = head.last?.createdUnixMs ?? .max
-            let older = page.hasMore
-                ? messages.filter { !headIDs.contains($0.id) && $0.createdUnixMs < oldest } : []
-            messages = head + older
-            if older.isEmpty { hasMore = page.hasMore }
-            failure = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            failure = describe(error, access: access)
-        }
-        loaded = true
+        self.access = access
+        await feed.refresh(client: client)
     }
 
     func loadMore(client: HerdrClient, access: GuestAccess) async {
-        guard hasMore, !loadingMore, let last = messages.last else { return }
-        loadingMore = true
-        defer { loadingMore = false }
-        do {
-            let page = try await client.guestGramList(limit: Self.pageSize, beforeID: last.id)
-            let known = Set(messages.map(\.id))
-            messages += page.messages.filter { !known.contains($0.id) }
-            hasMore = page.hasMore
-        } catch {
-            failure = describe(error, access: access)
-        }
+        self.access = access
+        await feed.loadMore(client: client)
     }
 
-    /// The guest is looking at the list: every unread Gram in it is now read, for this guest
-    /// only. Flipped at once; restored if the host refuses, and then not re-sent until its
-    /// backoff has passed.
     func markAllRead(client: HerdrClient) async {
-        let ids = marks.begin(unread: messages.filter(\.isUnread).map(\.id), now: Date())
-        guard !ids.isEmpty else { return }
-        setRead(ids, true)
-        do {
-            try await client.guestGramMarkRead(ids: ids)
-            marks.succeeded(ids)
-        } catch {
-            marks.failed(ids, now: Date())
-            setRead(ids, false)
-        }
+        await feed.markAllRead(client: client)
     }
 
-    private func setRead(_ ids: [String], _ read: Bool) {
-        let set = Set(ids)
-        for index in messages.indices where set.contains(messages[index].id) {
-            messages[index].read = read
-        }
+    private func publish() {
+        if messages != feed.messages { messages = feed.messages }
+        if loaded != feed.loaded { loaded = feed.loaded }
+        if hasMore != feed.hasMore { hasMore = feed.hasMore }
+        let described = feed.lastError.map(describe)
+        if failure != described { failure = described }
     }
 
-    private func describe(_ error: Error, access: GuestAccess) -> String {
+    private func describe(_ error: Error) -> String {
+        let owner = access?.ownerName ?? "The owner"
+        let agent = access?.agentName ?? "this agent"
         switch GuestError.classify(error) {
-        case .forbidden?: return "\(access.ownerName) doesn't share \(access.agentName)'s Gram with you."
+        case .forbidden?: return "\(owner) doesn't share \(agent)'s Gram with you."
         case let guest?: return guest.description
         case nil: return "Couldn't load Gram: \(error.localizedDescription)"
         }

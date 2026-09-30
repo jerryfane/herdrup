@@ -221,3 +221,113 @@ public enum PushTapTarget: Equatable, Sendable {
         }
     }
 }
+
+/// The guest's Gram list and the calls that change it: newest page, older pages, read marks.
+///
+/// Refreshes start from many places (the host's features arriving, a tab change, a push, a
+/// pull) and each runs over its own relay session, so they can finish out of order. Every
+/// fetch takes a token from `AgentRosterLoadGate` and applies only while it is still the
+/// newest, so an older answer can never hide a Gram a newer one showed. `onChange` fires
+/// after every change of state, for a view model to republish.
+@MainActor
+public final class GuestGramFeed {
+    public static let pageSize = 100
+
+    public private(set) var messages: [GuestGramMessage] = []
+    public private(set) var hasMore = false
+    /// A list answer (or failure) has been applied at least once.
+    public private(set) var loaded = false
+    /// Why the newest fetch failed; nil after one succeeds.
+    public private(set) var lastError: Error?
+    public var onChange: (() -> Void)?
+
+    private var gate = AgentRosterLoadGate()
+    /// Bumped whenever a refresh replaces the list, so an older page fetched before it is dropped.
+    private var listVersion = 0
+    private var loadingMore = false
+    private var marks = GuestGramReadMarks()
+
+    public init() {}
+
+    public var unreadCount: Int { messages.filter(\.isUnread).count }
+
+    /// Reloads the newest page, keeping older pages already scrolled in. Returns false when a
+    /// newer refresh overtook this one, which then applied nothing.
+    @discardableResult
+    public func refresh(client: HerdrClient) async -> Bool {
+        let token = gate.begin()
+        let result: Result<GuestGramPage, Error>
+        do {
+            result = .success(try await client.guestGramList(limit: Self.pageSize))
+        } catch is CancellationError {
+            return false
+        } catch {
+            result = .failure(error)
+        }
+        guard gate.accepts(token) else { return false }
+        switch result {
+        case .success(let page):
+            let head = page.messages.map { message -> GuestGramMessage in
+                var message = message
+                if marks.isMarking(message.id) { message.read = true }
+                return message
+            }
+            let headIDs = Set(head.map(\.id))
+            let oldest = head.last?.createdUnixMs ?? .max
+            let older = page.hasMore
+                ? messages.filter { !headIDs.contains($0.id) && $0.createdUnixMs < oldest } : []
+            messages = head + older
+            if older.isEmpty { hasMore = page.hasMore }
+            listVersion += 1
+            lastError = nil
+        case .failure(let error):
+            lastError = error
+        }
+        loaded = true
+        onChange?()
+        return true
+    }
+
+    /// The next older page. Dropped if a refresh replaced the list meanwhile.
+    public func loadMore(client: HerdrClient) async {
+        guard hasMore, !loadingMore, let last = messages.last else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        let version = listVersion
+        do {
+            let page = try await client.guestGramList(limit: Self.pageSize, beforeID: last.id)
+            guard listVersion == version else { return }
+            let known = Set(messages.map(\.id))
+            messages += page.messages.filter { !known.contains($0.id) }
+            hasMore = page.hasMore
+        } catch {
+            guard listVersion == version, !(error is CancellationError) else { return }
+            lastError = error
+        }
+        onChange?()
+    }
+
+    /// The guest is looking at the list: every unread Gram in it is now read, for this guest
+    /// only. Flipped at once; restored if the host refuses, and then not re-sent until its
+    /// backoff (`GuestGramReadMarks`) has passed.
+    public func markAllRead(client: HerdrClient, now: Date = Date()) async {
+        let ids = marks.begin(unread: messages.filter(\.isUnread).map(\.id), now: now)
+        guard !ids.isEmpty else { return }
+        setRead(ids, true)
+        do {
+            try await client.guestGramMarkRead(ids: ids)
+            marks.succeeded(ids)
+        } catch {
+            marks.failed(ids, now: Date())
+            setRead(ids, false)
+        }
+    }
+
+    private func setRead(_ ids: [String], _ read: Bool) {
+        let set = Set(ids)
+        for index in messages.indices where set.contains(messages[index].id) {
+            messages[index].read = read
+        }
+        onChange?()
+    }
+}
