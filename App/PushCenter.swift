@@ -32,6 +32,13 @@ final class PushCenter: ObservableObject {
     /// opens the Gram page then clears it. Held here so a cold-launch tap (app was closed) survives
     /// until the view can act, exactly like `pendingPaneID`.
     @Published var pendingGram: Bool = false
+    /// A tapped push for an agent someone shared with this phone (`herdr_guest` in the payload).
+    /// The root view opens that share and its home opens the Gram tab or the terminal, then
+    /// clears it. Never routed to an owner screen.
+    @Published var pendingGuest: GuestPushRoute?
+    /// A guest Gram push arrived (tapped or shown in the foreground): an open guest Gram tab
+    /// for that host refreshes.
+    @Published private(set) var guestGramArrival: (hostID: String, seq: Int)?
 
     private static let tokenKey = "push.deviceToken"
 
@@ -56,6 +63,17 @@ final class PushCenter: ObservableObject {
     /// A gram push was tapped — open the Gram page when the view is ready.
     func tappedGram() {
         pendingGram = true
+    }
+
+    /// A push for a shared agent was tapped — open that share when the view is ready.
+    func tappedGuest(_ route: GuestPushRoute) {
+        pendingGuest = route
+        if route.kind == .gram { guestGramArrived(hostID: route.hostID) }
+    }
+
+    /// A shared agent sent a Gram: the share's Gram tab reloads if it is showing.
+    func guestGramArrived(hostID: String) {
+        guestGramArrival = (hostID, (guestGramArrival?.seq ?? 0) + 1)
     }
 
     /// The user's per-category push preferences (the existing Settings toggles), sent to the server

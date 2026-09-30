@@ -1,0 +1,125 @@
+import Foundation
+import XCTest
+@testable import HerdrKit
+
+/// Review P2 (herdrup#339): guest Gram refreshes run over separate relay sessions and can
+/// finish out of order; only the newest may shape the list.
+@MainActor
+final class GuestGramFeedTests: XCTestCase {
+
+    /// A host that answers each call with the next scripted reply, but holds the replies of
+    /// the calls listed in `held` until the test releases them.
+    private final class OutOfOrderHost: HerdrTransport, @unchecked Sendable {
+        private let lock = NSLock()
+        private let replies: [String]
+        private let held: Set<Int>
+        private var calls = 0
+        private var waiting: [Int: CheckedContinuation<Void, Never>] = [:]
+        private var released: Set<Int> = []
+
+        init(replies: [String], held: Set<Int>) {
+            self.replies = replies
+            self.held = held
+        }
+
+        var started: Int { lock.withLock { calls } }
+
+        func release(_ call: Int) {
+            let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                released.insert(call)
+                return waiting.removeValue(forKey: call)
+            }
+            continuation?.resume()
+        }
+
+        func roundTrip(_ requestLine: String) async throws -> String {
+            let index = lock.withLock { () -> Int in calls += 1; return calls - 1 }
+            if held.contains(index) {
+                await withCheckedContinuation { continuation in
+                    let ready = lock.withLock { () -> Bool in
+                        if released.contains(index) { return true }
+                        waiting[index] = continuation
+                        return false
+                    }
+                    if ready { continuation.resume() }
+                }
+            }
+            let object = try JSONSerialization.jsonObject(with: Data(requestLine.utf8)) as? [String: Any]
+            return replies[index].replacingOccurrences(of: "$ID", with: object?["id"] as? String ?? "x")
+        }
+
+        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { $0.finish() }
+        }
+    }
+
+    private static func page(_ ids: [String], hasMore: Bool = false) -> String {
+        let messages = ids.enumerated().map { index, id in
+            #"{"id":"\#(id)","direction":"agent_to_owner","from":"llm-opt","text":"\#(id)","created_unix_ms":\#(2_000 - index),"read":false}"#
+        }
+        return #"{"id":"$ID","result":{"type":"guest_gram_list","has_more":\#(hasMore),"messages":[\#(messages.joined(separator: ","))]}}"#
+    }
+
+    private func waitUntil(_ host: OutOfOrderHost, started count: Int) async {
+        for _ in 0..<500 where host.started < count {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertEqual(host.started, count)
+    }
+
+    /// The first refresh (before a push) answers after the second (for the push): the push's
+    /// Gram must stay in the list.
+    func testAnOlderRefreshThatAnswersLastDoesNotHideANewerGram() async {
+        let host = OutOfOrderHost(replies: [Self.page(["m1"]), Self.page(["m2", "m1"])], held: [0])
+        let client = HerdrClient(transport: host)
+        let feed = GuestGramFeed()
+
+        let older = Task { await feed.refresh(client: client) }
+        await waitUntil(host, started: 1)
+        let newerApplied = await feed.refresh(client: client)
+        XCTAssertTrue(newerApplied)
+        XCTAssertEqual(feed.messages.map(\.id), ["m2", "m1"])
+
+        host.release(0)
+        let olderApplied = await older.value
+        XCTAssertFalse(olderApplied, "an overtaken refresh applies nothing")
+        XCTAssertEqual(feed.messages.map(\.id), ["m2", "m1"], "the newer Gram stays")
+        XCTAssertEqual(feed.unreadCount, 2)
+    }
+
+    /// An older failure that lands after a newer success must not show an error either.
+    func testAnOlderFailureThatAnswersLastLeavesTheNewerList() async {
+        let failure = #"{"id":"$ID","error":{"code":"host_busy","message":"busy"}}"#
+        let host = OutOfOrderHost(replies: [failure, Self.page(["m2"])], held: [0])
+        let client = HerdrClient(transport: host)
+        let feed = GuestGramFeed()
+
+        let older = Task { await feed.refresh(client: client) }
+        await waitUntil(host, started: 1)
+        await feed.refresh(client: client)
+        host.release(0)
+        _ = await older.value
+        XCTAssertNil(feed.lastError, "the newest answer succeeded")
+        XCTAssertEqual(feed.messages.map(\.id), ["m2"])
+    }
+
+    /// An older page fetched before a refresh replaced the list is dropped rather than
+    /// appended to the new one.
+    func testAnOlderPageFetchedBeforeARefreshIsDropped() async {
+        let host = OutOfOrderHost(
+            replies: [Self.page(["m3", "m2"], hasMore: true), Self.page(["m1"]), Self.page(["m9", "m3"], hasMore: false)],
+            held: [1])
+        let client = HerdrClient(transport: host)
+        let feed = GuestGramFeed()
+        await feed.refresh(client: client)
+        XCTAssertTrue(feed.hasMore)
+
+        let more = Task { await feed.loadMore(client: client) }
+        await waitUntil(host, started: 2)
+        await feed.refresh(client: client)
+        host.release(1)
+        await more.value
+        XCTAssertEqual(feed.messages.map(\.id), ["m9", "m3"])
+        XCTAssertFalse(feed.hasMore)
+    }
+}

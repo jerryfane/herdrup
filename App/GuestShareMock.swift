@@ -137,10 +137,10 @@ final class GuestShareMockStore: @unchecked Sendable {
         return e
     }
 
-    private static func invite(id: String, name: String, createdMs: UInt64) -> [String: Any] {
+    private static func invite(id: String, name: String, createdMs: UInt64, shareGram: Bool = false) -> [String: Any] {
         ["invite_id": id, "name": name, "grant": grant, "owner_name": "Jerry",
          "machine_label": GuestShareMock.machineLabel, "created_ms": createdMs,
-         "expires_ms": createdMs + 24 * 3600 * 1000, "used_by": NSNull()]
+         "expires_ms": createdMs + 24 * 3600 * 1000, "used_by": NSNull(), "share_gram": shareGram]
     }
 
     func answer(method: String, params: [String: Any]) -> [String: Any] {
@@ -167,13 +167,22 @@ final class GuestShareMockStore: @unchecked Sendable {
                 return ["error": ["code": "guest_invalid_name", "message": "invalid guest name"]]
             }
             inviteSeq += 1
-            let invite = Self.invite(id: "inv-\(inviteSeq)", name: name, createdMs: Self.ms(Date()))
+            let invite = Self.invite(id: "inv-\(inviteSeq)", name: name, createdMs: Self.ms(Date()),
+                                     shareGram: params["share_gram"] as? Bool ?? false)
             machine.invites.append(invite)
             let payload = Base64URLMock.encode(#"{"v":1,"invite_id":"inv-\#(inviteSeq)","guest_name":"\#(name)","agent_name":"llm-opt"}"#)
             // An older daemon's '#' web link, which the invite sheet shares in the path form.
             return ["type": "guest_invite", "invite": invite,
                     "url": "herdrup://guest-invite#\(payload)",
                     "web_url": "https://guest.herdrup.themartian.app/i#\(payload)"]
+        case "guest.update":
+            guard let id = params["guest_id"] as? String,
+                  let index = machine.guests.firstIndex(where: { $0["guest_id"] as? String == id }),
+                  let share = params["share_gram"] as? Bool else {
+                return ["error": ["code": "guest_not_found", "message": "no such guest"]]
+            }
+            machine.guests[index]["share_gram"] = share
+            return ["type": "ok"]
         case "guest.revoke":
             if let id = params["guest_id"] as? String,
                let index = machine.guests.firstIndex(where: { $0["guest_id"] as? String == id }) {

@@ -123,6 +123,8 @@ struct GuestShareSheet: View {
     @State private var creating = false
     @State private var failure: String?
     @State private var created: GuestInviteCreated?
+    /// "Share Gram": the guest also sees what this agent sends the owner. Off by default.
+    @State private var shareGram = false
     @FocusState private var nameFocused: Bool
 
     private var route: GuestRoute { GuestRoute(agent: agent) }
@@ -146,7 +148,8 @@ struct GuestShareSheet: View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             if let created {
-                GuestInviteView(created: created, agentName: agentName, machineLabel: machineLabel)
+                GuestInviteView(created: created, agentName: agentName, machineLabel: machineLabel,
+                                requestedShareGram: shareGram)
                     .transition(.opacity)
             } else {
                 form
@@ -273,6 +276,8 @@ struct GuestShareSheet: View {
             accessRow("Send messages and files", detail: "Through the composer, always labeled", on: true)
             GuestStyle.divider
             accessRow("Type into the terminal", detail: "Off: keystrokes can't carry a name", on: false)
+            GuestStyle.divider
+            shareGramRow
         }
     }
 
@@ -303,6 +308,23 @@ struct GuestShareSheet: View {
         .accessibilityAddTraits(.isStaticText)
     }
 
+    /// The one choice the owner makes: whether the guest also sees this agent's Gram. With it
+    /// on, everything the agent sends the owner from now on (files included) reaches the guest
+    /// too, and the guest is notified of it.
+    private var shareGramRow: some View {
+        Toggle(isOn: $shareGram) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Share Gram").font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                Text("They also see what \(agentName) sends you from now on, files included, and get notified")
+                    .font(Typography.app(12.5)).foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .tint(Palette.brand)
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .accessibilityIdentifier("guest-share-gram")
+    }
+
     private func create() async {
         let owner: String
         if askOwnerName == true {
@@ -318,7 +340,7 @@ struct GuestShareSheet: View {
         do {
             created = try await client.guestInviteCreate(
                 target: route.target, name: trimmedGuestName, ownerName: owner,
-                machineLabel: machineLabel, machine: route.machine)
+                machineLabel: machineLabel, machine: route.machine, shareGram: shareGram)
         } catch {
             failure = GuestAdminError.message(error, agentName: agentName)
         }
@@ -333,8 +355,16 @@ struct GuestInviteView: View {
     let created: GuestInviteCreated
     let agentName: String
     let machineLabel: String
+    /// Whether the owner switched Share Gram on for this invite.
+    var requestedShareGram = false
 
     @State private var copied = false
+
+    /// What the daemon stored. Asked for but not stored means a Herdr older than Gram sharing.
+    private var gramState: String {
+        if created.invite.shareGram { return "Shared" }
+        return requestedShareGram ? "Not shared · update Herdr to share Gram" : "Not shared"
+    }
 
     private var validity: String {
         guard let start = created.invite.createdMs, let expires = created.invite.expiresMs,
@@ -360,6 +390,8 @@ struct GuestInviteView: View {
                     row("Machine", machineLabel)
                     GuestStyle.divider
                     row("Shown as", "\(created.invite.name) (via HerdrUp)", mono: true, tint: GuestStyle.label)
+                    GuestStyle.divider
+                    row("Gram", gramState).accessibilityIdentifier("guest-invite-gram")
                 }
                 HStack(spacing: 10) {
                     Button {

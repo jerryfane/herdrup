@@ -78,12 +78,15 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
     public let expiresMs: UInt64?
     /// The guest id that accepted this invite; nil while it is unused.
     public let usedBy: String?
+    /// The guest it makes will see the agent's Grams (`share_gram`). False on a daemon
+    /// that predates Gram sharing.
+    public let shareGram: Bool
 
     public var id: String { inviteID }
 
     public init(inviteID: String, name: String, grant: GuestGrant?, ownerName: String? = nil,
                 machineLabel: String? = nil, createdMs: UInt64? = nil, expiresMs: UInt64? = nil,
-                usedBy: String? = nil) {
+                usedBy: String? = nil, shareGram: Bool = false) {
         self.inviteID = inviteID
         self.name = name
         self.grant = grant
@@ -92,6 +95,7 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
         self.createdMs = createdMs
         self.expiresMs = expiresMs
         self.usedBy = usedBy
+        self.shareGram = shareGram
     }
 
     enum CodingKeys: String, CodingKey {
@@ -102,6 +106,20 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
         case createdMs = "created_ms"
         case expiresMs = "expires_ms"
         case usedBy = "used_by"
+        case shareGram = "share_gram"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        inviteID = try c.decode(String.self, forKey: .inviteID)
+        name = try c.decode(String.self, forKey: .name)
+        grant = try c.decodeIfPresent(GuestGrant.self, forKey: .grant)
+        ownerName = try c.decodeIfPresent(String.self, forKey: .ownerName)
+        machineLabel = try c.decodeIfPresent(String.self, forKey: .machineLabel)
+        createdMs = try c.decodeIfPresent(UInt64.self, forKey: .createdMs)
+        expiresMs = try c.decodeIfPresent(UInt64.self, forKey: .expiresMs)
+        usedBy = try c.decodeIfPresent(String.self, forKey: .usedBy)
+        shareGram = try c.decodeIfPresent(Bool.self, forKey: .shareGram) ?? false
     }
 
     /// Still redeemable: nobody used it and it has not expired.
@@ -124,12 +142,14 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
     public let createdMs: UInt64?
     public let lastSeenMs: UInt64?
     public let revoked: Bool
+    /// The guest sees the agent's Grams and gets pushed for new ones (`share_gram`).
+    public let shareGram: Bool
 
     public var id: String { guestID }
 
     public init(guestID: String, name: String, fingerprint: String? = nil, device: String? = nil,
                 grant: GuestGrant?, createdMs: UInt64? = nil, lastSeenMs: UInt64? = nil,
-                revoked: Bool = false) {
+                revoked: Bool = false, shareGram: Bool = false) {
         self.guestID = guestID
         self.name = name
         self.fingerprint = fingerprint
@@ -138,6 +158,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         self.createdMs = createdMs
         self.lastSeenMs = lastSeenMs
         self.revoked = revoked
+        self.shareGram = shareGram
     }
 
     enum CodingKeys: String, CodingKey {
@@ -145,6 +166,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         case guestID = "guest_id"
         case createdMs = "created_ms"
         case lastSeenMs = "last_seen_ms"
+        case shareGram = "share_gram"
     }
 
     public init(from decoder: Decoder) throws {
@@ -157,6 +179,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         createdMs = try c.decodeIfPresent(UInt64.self, forKey: .createdMs)
         lastSeenMs = try c.decodeIfPresent(UInt64.self, forKey: .lastSeenMs)
         revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
+        shareGram = try c.decodeIfPresent(Bool.self, forKey: .shareGram) ?? false
     }
 }
 
@@ -378,12 +401,14 @@ struct GuestInviteCreateParams: Encodable {
     let machineLabel: String
     let ttlSecs: UInt64?
     let machine: String?
+    let shareGram: Bool
 
     enum CodingKeys: String, CodingKey {
         case target, name, machine
         case ownerName = "owner_name"
         case machineLabel = "machine_label"
         case ttlSecs = "ttl_secs"
+        case shareGram = "share_gram"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -393,6 +418,27 @@ struct GuestInviteCreateParams: Encodable {
         try c.encode(ownerName, forKey: .ownerName)
         try c.encode(machineLabel, forKey: .machineLabel)
         try c.encodeIfPresent(ttlSecs, forKey: .ttlSecs)
+        try c.encodeIfPresent(machine, forKey: .machine)
+        try c.encode(shareGram, forKey: .shareGram)
+    }
+}
+
+/// `guest.update`: change an accepted guest's grant options.
+struct GuestUpdateParams: Encodable {
+    let guestID: String
+    let shareGram: Bool
+    let machine: String?
+
+    enum CodingKeys: String, CodingKey {
+        case machine
+        case guestID = "guest_id"
+        case shareGram = "share_gram"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(guestID, forKey: .guestID)
+        try c.encode(shareGram, forKey: .shareGram)
         try c.encodeIfPresent(machine, forKey: .machine)
     }
 }
@@ -454,4 +500,51 @@ struct GuestAuditParams: Encodable {
 
 struct GuestAuditResult: Decodable {
     let entries: [GuestAuditEntry]
+}
+
+/// Sends a setting that the owner can flip faster than the daemon answers (Share Gram per
+/// guest), so the daemon always ends on the owner's last choice. One request per key is in
+/// flight at a time; flips made meanwhile collapse into the newest value, which is sent when
+/// the running request finishes, unless it is already what was sent. Only the call that
+/// started the run gets `.finished`, once, after the final value went out; the calls it
+/// absorbed get `.queued`.
+@MainActor
+public final class LatestValueSender<Key: Hashable, Value: Equatable> {
+    public enum Outcome: Equatable {
+        /// A running request for this key will send the value.
+        case queued
+        /// The last value went out; `failed` says whether the daemon refused it.
+        case finished(failed: Bool)
+    }
+
+    private var desired: [Key: Value] = [:]
+    private var running: Set<Key> = []
+
+    public init() {}
+
+    /// The value the owner last chose for `key` while it is still being sent; nil when idle.
+    public func pending(_ key: Key) -> Value? { desired[key] }
+
+    public func submit(_ value: Value, for key: Key,
+                       send: @escaping @MainActor (Value) async throws -> Void) async -> Outcome {
+        desired[key] = value
+        guard !running.contains(key) else { return .queued }
+        running.insert(key)
+        defer {
+            running.remove(key)
+            desired[key] = nil
+        }
+        var sent: Value?
+        var failed = false
+        while let next = desired[key], next != sent {
+            sent = next
+            do {
+                try await send(next)
+                failed = false
+            } catch {
+                failed = true
+            }
+        }
+        return .finished(failed: failed)
+    }
 }

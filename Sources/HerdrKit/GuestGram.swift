@@ -1,0 +1,333 @@
+import Foundation
+
+// A guest's view of the shared agent's Gram (herdrup#338), over the guest relay. The host
+// decides what is visible: the granted agent's own Grams to the owner since the grant, plus
+// the guest's own posts to it. The owner's read, claim and origin fields never reach a
+// guest; `read` is the guest's own mark.
+
+/// A file on a Gram a guest can see. `mime` and `sha256` may be absent on the wire.
+public struct GuestGramFile: Decodable, Sendable, Equatable {
+    public let name: String
+    public let size: UInt64
+    public let mime: String
+    public let sha256: String?
+
+    public init(name: String, size: UInt64, mime: String = "", sha256: String? = nil) {
+        self.name = name
+        self.size = size
+        self.mime = mime
+        self.sha256 = sha256
+    }
+
+    enum CodingKeys: String, CodingKey { case name, size, mime, sha256 }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        size = try c.decode(UInt64.self, forKey: .size)
+        mime = try c.decodeIfPresent(String.self, forKey: .mime) ?? ""
+        sha256 = try c.decodeIfPresent(String.self, forKey: .sha256)
+    }
+
+    public var displaySize: String { GramFile.displaySize(of: size) }
+}
+
+/// One Gram in the guest's list.
+public struct GuestGramMessage: Decodable, Identifiable, Sendable, Equatable {
+    public let id: String
+    public let direction: GramDirection
+    /// The agent for its Grams; the guest's own name on the guest's posts.
+    public let from: String
+    public let text: String
+    public let createdUnixMs: UInt64
+    public let file: GuestGramFile?
+    /// The guest has seen it. `var` for the optimistic flip after `gram.mark_read`.
+    public var read: Bool
+
+    public init(id: String, direction: GramDirection, from: String, text: String,
+                createdUnixMs: UInt64, file: GuestGramFile? = nil, read: Bool) {
+        self.id = id
+        self.direction = direction
+        self.from = from
+        self.text = text
+        self.createdUnixMs = createdUnixMs
+        self.file = file
+        self.read = read
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, direction, from, text, file, read
+        case createdUnixMs = "created_unix_ms"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        direction = try c.decode(GramDirection.self, forKey: .direction)
+        from = try c.decode(String.self, forKey: .from)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        createdUnixMs = try c.decode(UInt64.self, forKey: .createdUnixMs)
+        file = try c.decodeIfPresent(GuestGramFile.self, forKey: .file)
+        read = try c.decodeIfPresent(Bool.self, forKey: .read) ?? false
+    }
+
+    /// The agent sent it (as opposed to the guest's own post).
+    public var isFromAgent: Bool { direction == .agentToOwner }
+    /// Only the agent's Grams can be unread; the guest wrote their own.
+    public var isUnread: Bool { isFromAgent && !read }
+    public var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000.0) }
+}
+
+/// One page of the guest's `gram.list`, newest first.
+public struct GuestGramPage: Decodable, Sendable, Equatable {
+    public let messages: [GuestGramMessage]
+    /// Older messages remain; absent reads as "this is everything".
+    public let hasMore: Bool
+
+    public init(messages: [GuestGramMessage], hasMore: Bool = false) {
+        self.messages = messages
+        self.hasMore = hasMore
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case messages
+        case hasMore = "has_more"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        messages = try c.decodeIfPresent([GuestGramMessage].self, forKey: .messages) ?? []
+        hasMore = try c.decodeIfPresent(Bool.self, forKey: .hasMore) ?? false
+    }
+
+    /// Unread Grams from the agent on this page.
+    public var unreadCount: Int { messages.filter(\.isUnread).count }
+}
+
+/// Which of the guest's unread Grams to send in `gram.mark_read`, so marking read can't loop.
+/// The list flips a mark optimistically and flips it back when the host refuses; a view that
+/// marks on every list change would then re-send at once, forever. An id already in flight is
+/// never sent twice, and an id the host refused waits out a backoff that doubles on each
+/// failure (5 s up to 5 min) before it is sent again.
+public struct GuestGramReadMarks: Sendable {
+    public static let initialBackoff: TimeInterval = 5
+    public static let maxBackoff: TimeInterval = 300
+
+    private var inFlight: Set<String> = []
+    private var retryAt: [String: Date] = [:]
+    private var backoff: [String: TimeInterval] = [:]
+
+    public init() {}
+
+    /// The ids of `unread` to send now, which are then in flight until `succeeded` or `failed`.
+    public mutating func begin(unread: [String], now: Date) -> [String] {
+        let ready = unread.filter { id in
+            !inFlight.contains(id) && (retryAt[id].map { $0 <= now } ?? true)
+        }
+        inFlight.formUnion(ready)
+        return ready
+    }
+
+    public mutating func succeeded(_ ids: [String]) {
+        for id in ids {
+            inFlight.remove(id)
+            retryAt[id] = nil
+            backoff[id] = nil
+        }
+    }
+
+    public mutating func failed(_ ids: [String], now: Date) {
+        for id in ids {
+            inFlight.remove(id)
+            let wait = backoff[id].map { min($0 * 2, Self.maxBackoff) } ?? Self.initialBackoff
+            backoff[id] = wait
+            retryAt[id] = now.addingTimeInterval(wait)
+        }
+    }
+
+    /// A mark is on its way to the host: a list fetched meanwhile still shows it read.
+    public func isMarking(_ id: String) -> Bool { inFlight.contains(id) }
+}
+
+/// Where a tapped push for a shared agent goes. Guest pushes carry a `herdr_guest` object
+/// naming the invite's host and the guest, so the app opens that share's own screens and
+/// never an owner screen, whatever other keys the payload also carries.
+public struct GuestPushRoute: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        /// A new Gram: the share's Gram tab.
+        case gram
+        /// A status change (needs you, finished, died), or a kind this build doesn't know:
+        /// the share's terminal.
+        case status
+    }
+
+    public let hostID: String
+    public let guestID: String?
+    public let kind: Kind
+    public let gramID: String?
+
+    public init(hostID: String, guestID: String?, kind: Kind, gramID: String? = nil) {
+        self.hostID = hostID
+        self.guestID = guestID
+        self.kind = kind
+        self.gramID = gramID
+    }
+
+    /// Nil when the payload is not a guest push (no `herdr_guest.host_id`).
+    public init?(userInfo: [AnyHashable: Any]) {
+        guard let guest = userInfo["herdr_guest"] as? [String: Any],
+              let hostID = guest["host_id"] as? String, !hostID.isEmpty
+        else { return nil }
+        let guestID = (guest["guest_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let gramID = (guest["gram_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        self.init(hostID: hostID, guestID: guestID,
+                  kind: guest["kind"] as? String == "gram" ? .gram : .status, gramID: gramID)
+    }
+
+    /// The share this push is for: the one on its host held as its guest. Nil when the
+    /// phone no longer holds it (left, or another install's guest).
+    public func access(in shares: [GuestAccess]) -> GuestAccess? {
+        shares.first { share in
+            share.endpoint.hostID == hostID && (guestID == nil || share.guestID == guestID)
+        }
+    }
+}
+
+/// What a tapped notification opens. A payload that carries `herdr_guest` at all is a guest
+/// push, and its classification ends there: a well-formed one opens its share, a malformed
+/// one opens nothing. Its other keys (`gram`, `pane_id`) are never read, so no guest push,
+/// malformed or mixed, can open an owner screen.
+public enum PushTapTarget: Equatable, Sendable {
+    /// A guest push naming its host: open that share, if the phone holds it.
+    case guest(GuestPushRoute)
+    /// A guest push without a usable host: drop the tap.
+    case droppedGuest
+    /// The owner's Gram page.
+    case ownerGram
+    /// The owner's pane.
+    case ownerPane(String)
+    /// Nothing to open.
+    case none
+
+    public init(userInfo: [AnyHashable: Any]) {
+        if userInfo["herdr_guest"] != nil {
+            self = GuestPushRoute(userInfo: userInfo).map(PushTapTarget.guest) ?? .droppedGuest
+        } else if userInfo["gram"] as? Bool == true {
+            self = .ownerGram
+        } else if let paneID = userInfo["pane_id"] as? String, !paneID.isEmpty {
+            self = .ownerPane(paneID)
+        } else {
+            self = .none
+        }
+    }
+}
+
+/// The guest's Gram list and the calls that change it: newest page, older pages, read marks.
+///
+/// Refreshes start from many places (the host's features arriving, a tab change, a push, a
+/// pull) and each runs over its own relay session, so they can finish out of order. Every
+/// fetch takes a token from `AgentRosterLoadGate` and applies only while it is still the
+/// newest, so an older answer can never hide a Gram a newer one showed. `onChange` fires
+/// after every change of state, for a view model to republish.
+@MainActor
+public final class GuestGramFeed {
+    public static let pageSize = 100
+
+    public private(set) var messages: [GuestGramMessage] = []
+    public private(set) var hasMore = false
+    /// A list answer (or failure) has been applied at least once.
+    public private(set) var loaded = false
+    /// Why the newest fetch failed; nil after one succeeds.
+    public private(set) var lastError: Error?
+    public var onChange: (() -> Void)?
+
+    private var gate = AgentRosterLoadGate()
+    /// Bumped whenever a refresh replaces the list, so an older page fetched before it is dropped.
+    private var listVersion = 0
+    private var loadingMore = false
+    private var marks = GuestGramReadMarks()
+
+    public init() {}
+
+    public var unreadCount: Int { messages.filter(\.isUnread).count }
+
+    /// Reloads the newest page, keeping older pages already scrolled in. Returns false when a
+    /// newer refresh overtook this one, which then applied nothing.
+    @discardableResult
+    public func refresh(client: HerdrClient) async -> Bool {
+        let token = gate.begin()
+        let result: Result<GuestGramPage, Error>
+        do {
+            result = .success(try await client.guestGramList(limit: Self.pageSize))
+        } catch is CancellationError {
+            return false
+        } catch {
+            result = .failure(error)
+        }
+        guard gate.accepts(token) else { return false }
+        switch result {
+        case .success(let page):
+            let head = page.messages.map { message -> GuestGramMessage in
+                var message = message
+                if marks.isMarking(message.id) { message.read = true }
+                return message
+            }
+            let headIDs = Set(head.map(\.id))
+            let oldest = head.last?.createdUnixMs ?? .max
+            let older = page.hasMore
+                ? messages.filter { !headIDs.contains($0.id) && $0.createdUnixMs < oldest } : []
+            messages = head + older
+            if older.isEmpty { hasMore = page.hasMore }
+            listVersion += 1
+            lastError = nil
+        case .failure(let error):
+            lastError = error
+        }
+        loaded = true
+        onChange?()
+        return true
+    }
+
+    /// The next older page. Dropped if a refresh replaced the list meanwhile.
+    public func loadMore(client: HerdrClient) async {
+        guard hasMore, !loadingMore, let last = messages.last else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        let version = listVersion
+        do {
+            let page = try await client.guestGramList(limit: Self.pageSize, beforeID: last.id)
+            guard listVersion == version else { return }
+            let known = Set(messages.map(\.id))
+            messages += page.messages.filter { !known.contains($0.id) }
+            hasMore = page.hasMore
+        } catch {
+            guard listVersion == version, !(error is CancellationError) else { return }
+            lastError = error
+        }
+        onChange?()
+    }
+
+    /// The guest is looking at the list: every unread Gram in it is now read, for this guest
+    /// only. Flipped at once; restored if the host refuses, and then not re-sent until its
+    /// backoff (`GuestGramReadMarks`) has passed.
+    public func markAllRead(client: HerdrClient, now: Date = Date()) async {
+        let ids = marks.begin(unread: messages.filter(\.isUnread).map(\.id), now: now)
+        guard !ids.isEmpty else { return }
+        setRead(ids, true)
+        do {
+            try await client.guestGramMarkRead(ids: ids)
+            marks.succeeded(ids)
+        } catch {
+            marks.failed(ids, now: Date())
+            setRead(ids, false)
+        }
+    }
+
+    private func setRead(_ ids: [String], _ read: Bool) {
+        let set = Set(ids)
+        for index in messages.indices where set.contains(messages[index].id) {
+            messages[index].read = read
+        }
+        onChange?()
+    }
+}

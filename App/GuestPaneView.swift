@@ -2,15 +2,21 @@ import HerdrKit
 import SwiftUI
 
 /// A guest's view of the one agent shared with them: the live terminal, view only, and a
-/// composer whose messages and files reach the agent under the guest's name.
+/// composer whose messages and files reach the agent under the guest's name. When the owner
+/// shares the agent's Gram, a second tab lists it.
 struct GuestPaneView: View {
     let client: HerdrClient
     let access: GuestAccess
+    @ObservedObject var features: GuestFeaturesModel
+    @Binding var tab: GuestPaneTab
     let onClose: () -> Void
 
-    init(client: HerdrClient, access: GuestAccess, onClose: @escaping () -> Void) {
+    init(client: HerdrClient, access: GuestAccess, features: GuestFeaturesModel,
+         tab: Binding<GuestPaneTab>, onClose: @escaping () -> Void) {
         self.client = client
         self.access = access
+        self.features = features
+        _tab = tab
         self.onClose = onClose
     }
 
@@ -66,21 +72,75 @@ struct GuestPaneView: View {
     /// The host refused guest resizing (an older host): for the rest of this session the
     /// terminal fits the agent's grid to the width and the size controls are gone.
     @State private var resizeRefused = false
+    @StateObject private var gram = GuestGramModel()
+    @ObservedObject private var guestPush = GuestPushCenter.shared
     #if DEBUG
     @State private var forbiddenProbe = ""
+    @State private var hostCallsProbe = ""
     #endif
+
+    /// The owner shares this agent's Gram with the guest (the host's hello says so).
+    private var showsGram: Bool { features.current?.gram == true }
+    private var showingGram: Bool { showsGram && tab == .gram }
 
     var body: some View {
         VStack(spacing: 0) {
             navBar
             statusRow
-            terminalArea
+            if showsGram { tabStrip }
+            ZStack(alignment: .bottom) {
+                // The terminal stays mounted under the Gram tab, so its stream and scrollback
+                // survive a look at Gram.
+                terminalArea
+                    .opacity(showingGram ? 0 : 1)
+                    .allowsHitTesting(!showingGram)
+                    .accessibilityHidden(showingGram)
+                if showingGram {
+                    GuestGramList(client: client, access: access, model: gram)
+                        .background(Palette.ground)
+                }
+                if guestPush.asking == access.id, let current = features.current {
+                    GuestPushPrompt(
+                        agentName: access.agentName, ownerName: access.ownerName, gram: current.gram,
+                        onEnable: {
+                            Task { await guestPush.enable(access, client: client, features: current) }
+                        },
+                        onDecline: { guestPush.decline(access) })
+                    .padding(.horizontal, 12).padding(.bottom, 10)
+                    .transition(.opacity)
+                }
+            }
             bottomBlock
         }
         .background(Palette.groundMachine.ignoresSafeArea())
         .ignoresSafeArea(.container, edges: .bottom)
         .overlay { EdgeSwipeBack { onClose() } }
         .task { await pollLoop() }
+        // Once the host's features are known: offer push (first open only) and load Gram, so
+        // the unread count shows before the guest opens the tab.
+        .task(id: features.current) {
+            guard let current = features.current else { return }
+            await guestPush.paneOpened(access, client: client, features: current)
+            if current.gram { await gram.refresh(client: client, access: access) }
+        }
+        .onChange(of: tab) { _, _ in
+            guard showingGram else { return }
+            if findOpen { toggleFind() }
+            Task {
+                await gram.refresh(client: client, access: access)
+                await gram.markAllRead(client: client)
+            }
+        }
+        // Viewed is read: whatever lands in the list while it shows is marked read.
+        .onChange(of: gram.messages) { _, _ in
+            guard showingGram else { return }
+            Task { await gram.markAllRead(client: client) }
+        }
+        // A Gram push from this share's host: reload.
+        .onReceive(PushCenter.shared.$guestGramArrival) { arrival in
+            guard let arrival, arrival.hostID == access.endpoint.hostID, showsGram else { return }
+            Task { await gram.refresh(client: client, access: access) }
+        }
         .composerAttachPicker(
             isPresented: $showAttachSheet, loading: $loadingAttachment,
             room: { GramView.Staging.maxAttachments - attachments.count }
@@ -91,8 +151,52 @@ struct GuestPaneView: View {
             note = outcome.note
         }
         #if DEBUG
-        .overlay(alignment: .topLeading) { forbiddenCallsProbe }
+        .overlay(alignment: .topLeading) { debugProbes }
         #endif
+    }
+
+    // MARK: - Tabs
+
+    private var tabStrip: some View {
+        HStack(spacing: 4) {
+            tabButton("Terminal", systemImage: "terminal", tab: .terminal, id: "guest-tab-terminal")
+            tabButton("Gram", systemImage: "paperplane", tab: .gram, id: "guest-tab-gram",
+                      badge: gram.unreadCount)
+        }
+        .padding(3)
+        .background(Capsule().fill(Palette.surface))
+        .overlay(Capsule().stroke(Palette.hairlineQuiet, lineWidth: 1))
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(Palette.ground)
+    }
+
+    private func tabButton(_ title: String, systemImage: String, tab value: GuestPaneTab, id: String,
+                           badge: Int = 0) -> some View {
+        let selected = tab == value
+        return Button {
+            tab = value
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage).font(.system(size: 12, weight: .semibold))
+                Text(title).font(Typography.app(14, .semibold))
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(Typography.machine(11, .bold)).foregroundStyle(Palette.ground)
+                        .padding(.horizontal, 6).frame(minWidth: 18, minHeight: 18)
+                        .background(Capsule().fill(Palette.waiting))
+                        .accessibilityIdentifier("guest-gram-unread")
+                }
+            }
+            .foregroundStyle(selected ? Palette.text : Palette.textDim)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background(Capsule().fill(selected ? Palette.surfaceRaised : Color.clear))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(badge > 0 ? "\(title), \(badge) unread" : title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(id)
     }
 
     // MARK: - Header
@@ -123,13 +227,15 @@ struct GuestPaneView: View {
                     .foregroundStyle(Palette.text).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button { toggleFind() } label: {
-                Image(systemName: findOpen ? "xmark" : "magnifyingglass")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Palette.text).frame(width: 28, height: 44)
+            if !showingGram {
+                Button { toggleFind() } label: {
+                    Image(systemName: findOpen ? "xmark" : "magnifyingglass")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Palette.text).frame(width: 28, height: 44)
+                }
+                .accessibilityLabel(findOpen ? "Close search" : "Search")
+                .accessibilityIdentifier("guest-find")
             }
-            .accessibilityLabel(findOpen ? "Close search" : "Search")
-            .accessibilityIdentifier("guest-find")
         }
         .padding(.leading, 14).padding(.trailing, 12)
         .frame(height: 52)
@@ -141,7 +247,7 @@ struct GuestPaneView: View {
             statusPill
             SharedByChip(owner: access.ownerName)
             Spacer(minLength: 0)
-            if !resizeRefused && (availability == .running || availability == .connecting) {
+            if !showingGram && !resizeRefused && (availability == .running || availability == .connecting) {
                 textSizeControls
             }
         }
@@ -515,6 +621,8 @@ struct GuestPaneView: View {
                 let sentIDs = Set(batch.map(\.id))
                 attachments.removeAll { sentIDs.contains($0.id) }
                 if reply.trimmingCharacters(in: .whitespacesAndNewlines) == text { reply = "" }
+                // Attachments are the guest's own Grams: show them in the Gram tab.
+                if !batch.isEmpty, showsGram { await gram.refresh(client: client, access: access) }
             } catch {
                 note = failureNote(error)
             }
@@ -571,22 +679,31 @@ struct GuestPaneView: View {
         return "Couldn't send: \(error.localizedDescription)"
     }
 
-    // MARK: - Debug probe
+    // MARK: - Debug probes
 
     #if DEBUG
-    /// Methods the mock host refused as not allowed for guests, for the UI tests.
-    private var forbiddenCallsProbe: some View {
-        Color.clear
-            .frame(width: 1, height: 1)
-            .accessibilityElement()
-            .accessibilityIdentifier("guest-forbidden-calls")
-            .accessibilityLabel(forbiddenProbe)
-            .task {
-                while !Task.isCancelled {
-                    forbiddenProbe = GuestMockTransport.forbiddenCalls.joined(separator: ",")
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
+    /// For the UI tests: methods the mock host refused as not allowed for guests
+    /// (`guest-forbidden-calls`), and the Gram and push calls it answered, with their
+    /// arguments (`guest-host-calls`).
+    private var debugProbes: some View {
+        ZStack {
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("guest-forbidden-calls")
+                .accessibilityLabel(forbiddenProbe)
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("guest-host-calls")
+                .accessibilityLabel(hostCallsProbe)
+        }
+        .frame(width: 1, height: 1)
+        .task {
+            while !Task.isCancelled {
+                forbiddenProbe = GuestMockTransport.forbiddenCalls.joined(separator: ",")
+                hostCallsProbe = GuestMockTransport.hostCalls.joined(separator: ";")
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
+        }
     }
     #endif
 }

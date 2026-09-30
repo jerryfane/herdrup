@@ -392,6 +392,18 @@ public actor HerdrClient {
                            as: JSONNull.self)
     }
 
+    struct UnregisterDeviceParams: Encodable {
+        let deviceToken: String
+        enum CodingKeys: String, CodingKey { case deviceToken = "device_token" }
+    }
+
+    /// Stop pushing to this device token. A guest calls it when it removes a share, so the
+    /// host drops the guest's registration rather than pushing to a phone that left.
+    public func unregisterDevice(token: String) async throws {
+        _ = try await call("notifications.unregister_device",
+                           UnregisterDeviceParams(deviceToken: token), as: JSONNull.self)
+    }
+
     /// Whether this daemon can deliver push at all, and how (`notifications.status`). THROWS the
     /// server's `APIError` on a daemon too old to know the method.
     public func notificationsStatus() async throws -> NotificationsStatus {
@@ -832,6 +844,89 @@ public actor HerdrClient {
             throw GramError.invalidFileData
         }
         return (result.name, result.mime, data)
+    }
+
+    struct GramGetFileChunkParams: Encodable {
+        let id: String
+        let offset: UInt64
+    }
+
+    /// The host's ceilings: at most 512 KiB of file per `gram.get_file_chunk` reply, and at
+    /// most 100 MiB per attachment.
+    public static let gramMaxChunkBytes = 512 * 1024
+    public static let gramMaxFileBytes = 100 * 1024 * 1024
+
+    /// Downloads a message's file in bounded `gram.get_file_chunk` pieces, so a large file
+    /// never has to fit in one relay reply. `expectedSize` is the size the message listed;
+    /// every piece must name that same size, start at the bytes held so far, carry at most
+    /// `gramMaxChunkBytes`, and never run past the end, all checked before anything is
+    /// appended. A size over `gramMaxFileBytes`, a piece that makes no progress, or a total
+    /// that differs is an error rather than a file. `onProgress` reports file bytes received
+    /// against the size after each piece.
+    public func gramGetFileChunked(
+        id: String, expectedSize: UInt64, onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> (name: String, mime: String, data: Data) {
+        guard let total = Int(exactly: expectedSize), total <= Self.gramMaxFileBytes else {
+            throw GramError.invalidFileData
+        }
+        // The base64 of a full piece, plus padding.
+        let maxEncoded = (Self.gramMaxChunkBytes + 2) / 3 * 4
+        var data = Data()
+        data.reserveCapacity(total)
+        var name = ""
+        var mime = ""
+        repeat {
+            let chunk = try await call("gram.get_file_chunk",
+                                       GramGetFileChunkParams(id: id, offset: UInt64(data.count)),
+                                       as: GramFileChunkResult.self)
+            guard chunk.size == expectedSize, chunk.offset == UInt64(data.count),
+                  chunk.dataBase64.utf8.count <= maxEncoded,
+                  let bytes = Data(base64Encoded: chunk.dataBase64),
+                  !bytes.isEmpty || total == 0,
+                  bytes.count <= Self.gramMaxChunkBytes,
+                  bytes.count <= total - data.count
+            else { throw GramError.invalidFileData }
+            name = chunk.name
+            mime = chunk.mime
+            data.append(bytes)
+            onProgress?(data.count, total)
+        } while data.count < total
+        return (name, mime, data)
+    }
+
+    // MARK: - Gram (guest)
+
+    struct GuestGramListParams: Encodable {
+        /// The host's cap on one page.
+        static let maxLimit = 500
+        let limit: Int?
+        let beforeID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case limit
+            case beforeID = "before_id"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encodeIfPresent(limit.map { min(max($0, 1), Self.maxLimit) }, forKey: .limit)
+            try c.encodeIfPresent(beforeID, forKey: .beforeID)
+        }
+    }
+
+    /// A guest's Gram for the shared agent (`gram.list` over the guest relay), newest first.
+    /// `beforeID` pages back from a message id. `guest_forbidden` when the owner doesn't
+    /// share Gram with this guest.
+    public func guestGramList(limit: Int? = nil, beforeID: String? = nil) async throws -> GuestGramPage {
+        try await call("gram.list", GuestGramListParams(limit: limit, beforeID: beforeID),
+                       as: GuestGramPage.self)
+    }
+
+    struct GuestGramMarkReadParams: Encodable { let ids: [String] }
+
+    /// Marks Grams read for this guest only; the owner's read state is untouched.
+    public func guestGramMarkRead(ids: [String]) async throws {
+        _ = try await call("gram.mark_read", GuestGramMarkReadParams(ids: ids), as: JSONNull.self)
     }
 
     struct SendKeysParams: Encodable {
@@ -1445,13 +1540,21 @@ public actor HerdrClient {
     /// Windows daemon answers `unsupported`.
     public func guestInviteCreate(
         target: String, name: String, ownerName: String, machineLabel: String,
-        ttlSecs: UInt64? = nil, machine: String? = nil
+        ttlSecs: UInt64? = nil, machine: String? = nil, shareGram: Bool = false
     ) async throws -> GuestInviteCreated {
         try await call("guest.invite.create",
                        GuestInviteCreateParams(target: target, name: name, ownerName: ownerName,
                                                machineLabel: machineLabel, ttlSecs: ttlSecs,
-                                               machine: machine),
+                                               machine: machine, shareGram: shareGram),
                        as: GuestInviteCreated.self)
+    }
+
+    /// Turn Gram sharing on or off for an accepted guest (`guest.update`). Takes effect on the
+    /// guest's next call; turning it off also stops their Gram pushes.
+    public func guestUpdate(guestID: String, shareGram: Bool, machine: String? = nil) async throws {
+        _ = try await call("guest.update",
+                           GuestUpdateParams(guestID: guestID, shareGram: shareGram, machine: machine),
+                           as: JSONNull.self)
     }
 
     /// Guests, invites and the relay link state of one machine (`guest.list`). Fingerprints only.

@@ -1,3 +1,4 @@
+import HerdrKit
 import UIKit
 import UserNotifications
 
@@ -21,6 +22,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // permission PROMPT is deferred to `connect()` (see requestAuthorizationIfWanted), because
         // asking before the user has even connected is poor UX.
         Self.refreshTokenIfAuthorized()
+        #if DEBUG
+        // UI tests can't tap a real notification: `HERDR_MOCK_PUSH_TAP` carries a payload's JSON,
+        // routed exactly as a tap on it would be.
+        if ScreenshotMock.mode != nil,
+           let json = ProcessInfo.processInfo.environment["HERDR_MOCK_PUSH_TAP"],
+           let userInfo = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] {
+            Self.routeTap(userInfo: userInfo)
+        }
+        #endif
         return true
     }
 
@@ -82,19 +92,29 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     // the agent transition to tap later.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        // A shared agent's new Gram refreshes that share's Gram tab if it is open.
+        if let route = GuestPushRoute(userInfo: notification.request.content.userInfo), route.kind == .gram {
+            await MainActor.run { PushCenter.shared.guestGramArrived(hostID: route.hostID) }
+        }
+        return [.banner, .list, .sound]
     }
 
-    // A tap on the notification → deep-link. A gram alert carries `gram: true` and an
-    // empty `pane_id`, so it MUST be checked before the pane branch (an empty pane id
-    // is a non-nil String that would otherwise deep-link to a nonexistent pane).
+    // A tap on the notification → deep-link. `PushTapTarget` decides: anything carrying
+    // `herdr_guest` goes to that share's screens or nowhere, never an owner screen; a gram alert
+    // (`gram: true`, empty `pane_id`) is checked before the pane branch.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
         let userInfo = response.notification.request.content.userInfo
-        if userInfo["gram"] as? Bool == true {
-            await MainActor.run { PushCenter.shared.tappedGram() }
-        } else if let paneID = userInfo["pane_id"] as? String, !paneID.isEmpty {
-            await MainActor.run { PushCenter.shared.tapped(paneID: paneID) }
+        await MainActor.run { Self.routeTap(userInfo: userInfo) }
+    }
+
+    /// Where a tapped notification leads, for `PushCenter` to hold until a view can open it.
+    static func routeTap(userInfo: [AnyHashable: Any]) {
+        switch PushTapTarget(userInfo: userInfo) {
+        case .guest(let route): PushCenter.shared.tappedGuest(route)
+        case .ownerGram: PushCenter.shared.tappedGram()
+        case .ownerPane(let paneID): PushCenter.shared.tapped(paneID: paneID)
+        case .droppedGuest, .none: break
         }
     }
 }

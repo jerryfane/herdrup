@@ -151,19 +151,29 @@ public struct RelayTransport: HerdrTransport {
     public let endpoint: RelayEndpoint
     let identity: GuestIdentity
     let connector: RelaySocketConnector
+    /// Hears each session's hello `features`, before the session's request is answered.
+    let onFeatures: (@Sendable (GuestFeatures) -> Void)?
 
     /// A returning guest's message-1 payload.
     static let returningHello = Data(#"{"v":1}"#.utf8)
 
-    public init(endpoint: RelayEndpoint, identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector()) {
+    public init(endpoint: RelayEndpoint, identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
+                onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil) {
         self.endpoint = endpoint
         self.identity = identity
         self.connector = connector
+        self.onFeatures = onFeatures
+    }
+
+    private func open() async throws -> RelaySession {
+        let session = try await RelaySession.open(
+            endpoint: endpoint, identity: identity, hello: Self.returningHello, connector: connector)
+        onFeatures?(GuestFeatures(helloReply: session.reply))
+        return session
     }
 
     public func roundTrip(_ requestLine: String) async throws -> String {
-        let session = try await RelaySession.open(
-            endpoint: endpoint, identity: identity, hello: Self.returningHello, connector: connector)
+        let session = try await open()
         defer { session.close() }
         try await session.sendLine(requestLine)
         var lines = LineAccumulator()
@@ -179,8 +189,7 @@ public struct RelayTransport: HerdrTransport {
             let holder = SessionHolder()
             let task = Task {
                 do {
-                    let session = try await RelaySession.open(
-                        endpoint: endpoint, identity: identity, hello: Self.returningHello, connector: connector)
+                    let session = try await open()
                     guard holder.adopt(session) else { continuation.finish(); return }
                     try await session.sendLine(requestLine)
                     var lines = LineAccumulator()

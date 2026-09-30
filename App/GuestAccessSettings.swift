@@ -167,6 +167,11 @@ struct GuestAccessSection: View {
     @AppStorage(GuestOwnerName.storageKey) private var ownerName = ""
     @State private var revoking: GuestAccessModel.Person?
     @State private var actionError: String?
+    /// Share Gram flipped here and not yet confirmed by a reload, by person id, so the switch
+    /// shows the owner's latest choice while `guest.update` is in flight.
+    @State private var shareGramPending: [String: Bool] = [:]
+    /// One `guest.update` per guest at a time; quick flips collapse into the last choice.
+    @State private var shareGramSender = LatestValueSender<String, Bool>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -231,35 +236,81 @@ struct GuestAccessSection: View {
     private func personRow(_ person: GuestAccessModel.Person) -> some View {
         let guest = person.guest
         let state = GuestPresence(lastSeenMs: guest.lastSeenMs)
-        return HStack(alignment: .center, spacing: 12) {
-            Text(String(guest.name.prefix(1)).uppercased())
-                .font(Typography.app(16, .bold)).foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(RoundedRectangle(cornerRadius: 9).fill(GuestStyle.avatar))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(guest.name).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
-                Text("\(guest.grant?.agentName ?? "An agent") on \(person.machine.label)")
-                    .font(Typography.app(13)).foregroundStyle(Palette.textFaint).lineLimit(1)
-                HStack(spacing: 6) {
-                    Circle().fill(state.color).frame(width: 8, height: 8)
-                    Text(state.text).font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(String(guest.name.prefix(1)).uppercased())
+                    .font(Typography.app(16, .bold)).foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(GuestStyle.avatar))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(guest.name).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
+                    Text("\(guest.grant?.agentName ?? "An agent") on \(person.machine.label)"
+                         + (sharesGram(person) ? " · Gram shared" : ""))
+                        .font(Typography.app(13)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Circle().fill(state.color).frame(width: 8, height: 8)
+                        Text(state.text).font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                    }
+                    .padding(.top, 4)
+                    if let fingerprint = guest.fingerprint {
+                        Text([fingerprint, guest.device.flatMap { $0.isEmpty ? nil : $0 }]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(Typography.machine(11.5)).foregroundStyle(Palette.textFaint)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
                 }
-                .padding(.top, 4)
-                if let fingerprint = guest.fingerprint {
-                    Text([fingerprint, guest.device.flatMap { $0.isEmpty ? nil : $0 }]
-                        .compactMap { $0 }.joined(separator: " · "))
-                        .font(Typography.machine(11.5)).foregroundStyle(Palette.textFaint)
-                        .lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                Button("Revoke") { revoking = person }
+                    .buttonStyle(GuestDangerButtonStyle())
+                    .accessibilityLabel("Revoke \(guest.name)")
+                    .accessibilityIdentifier("guest-revoke-\(guest.name)")
+            }
+            Toggle(isOn: Binding(
+                get: { sharesGram(person) },
+                set: { on in Task { await setShareGram(on, for: person) } }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Share Gram").font(Typography.app(14, .semibold)).foregroundStyle(Palette.text)
+                    Text("\(guest.name) sees what \(guest.grant?.agentName ?? "the agent") sends you, and is notified")
+                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
-            Button("Revoke") { revoking = person }
-                .buttonStyle(GuestDangerButtonStyle())
-                .accessibilityLabel("Revoke \(guest.name)")
-                .accessibilityIdentifier("guest-revoke-\(guest.name)")
+            .tint(Palette.brand)
+            .padding(.leading, 48)
+            .accessibilityIdentifier("guest-share-gram-\(guest.name)")
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
+    }
+
+    private func sharesGram(_ person: GuestAccessModel.Person) -> Bool {
+        shareGramPending[person.id] ?? person.guest.shareGram
+    }
+
+    /// `guest.update` for one guest, on the machine that holds them. Flips made while one is in
+    /// flight are sent after it, as the latest choice only, so the daemon ends on the owner's
+    /// last choice; the run that sends them reloads and reports once, at the end.
+    private func setShareGram(_ on: Bool, for person: GuestAccessModel.Person) async {
+        shareGramPending[person.id] = on
+        var failure: String?
+        let outcome = await shareGramSender.submit(on, for: person.id) { value in
+            do {
+                try await client.guestUpdate(guestID: person.guest.guestID, shareGram: value,
+                                             machine: person.machine.alias)
+                failure = nil
+            } catch let api as APIError where api.code == "invalid_request" && api.message.contains("unknown variant") {
+                failure = "Update Herdr on \(person.machine.label) to share Gram."
+                throw api
+            } catch {
+                failure = GuestAdminError.message(error)
+                throw error
+            }
+        }
+        guard case .finished(let failed) = outcome else { return }
+        await reload()
+        shareGramPending[person.id] = nil
+        if failed, let failure { actionError = failure }
     }
 
     // MARK: Invites
@@ -290,7 +341,7 @@ struct GuestAccessSection: View {
 
     private func inviteDetail(_ item: GuestAccessModel.Invite) -> String {
         let agent = item.invite.grant?.agentName ?? "An agent"
-        var text = "\(agent) on \(item.machine.label)"
+        var text = "\(agent) on \(item.machine.label)" + (item.invite.shareGram ? " · Gram shared" : "")
         if let expires = item.invite.expiresMs {
             let remaining = Double(expires) / 1000 - Date().timeIntervalSince1970
             text += " · " + GuestPresence.remaining(remaining)

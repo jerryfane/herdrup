@@ -264,6 +264,21 @@ struct RootView: View {
             Text(invites.failure ?? "")
         }
         .onAppear { autoOpenSharedMachine() }
+        // A tapped push for an agent shared with this phone opens that share (its home picks
+        // the Gram tab or the terminal), in place of whatever screen is showing. A share the
+        // phone no longer holds opens nothing.
+        .onReceive(push.$pendingGuest) { route in
+            guard let route else { return }
+            guard let share = route.access(in: sharedMachines.machines) else {
+                push.pendingGuest = nil
+                return
+            }
+            if openGuest?.id != share.id { openGuest = share }
+        }
+        // Shares with push on hold this phone's token too: a new one is registered with each.
+        .onChange(of: push.deviceToken) { _, _ in
+            GuestPushCenter.shared.deviceTokenChanged(shares: sharedMachines.machines)
+        }
         // Reclaim gram attachment staging left by a PREVIOUS session (a crash or a
         // jetsam kill runs no cleanup) here rather than on the Gram page: bytes from a
         // killed session — up to ten 100 MB attachments — would otherwise survive every
@@ -530,12 +545,9 @@ struct RootView: View {
                 ConnectView { _ in }
             }
         case .guestPane, .guestPaused, .guestBlocked, .guestOldHost:
-            GuestPaneView(
-                client: HerdrClient(transport: GuestMockTransport(
-                    scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked
-                        : mode == .guestOldHost ? .oldHost : .running)),
-                access: GuestMockTransport.access,
-                onClose: {})
+            GuestPaneMockHost(
+                scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked
+                    : mode == .guestOldHost ? .oldHost : .running)
         }
     }
 
@@ -545,8 +557,10 @@ struct RootView: View {
         GuestHomeView(
             access: access,
             connect: {
-                GuestConnection(client: HerdrClient(transport: GuestMockTransport(scenario: .running)),
-                                fingerprint: try GuestDevice.identity().fingerprint)
+                let features = GuestFeaturesModel()
+                return GuestConnection(
+                    client: HerdrClient(transport: GuestMockTransport(scenario: .running, onFeatures: features.sink())),
+                    fingerprint: try GuestDevice.identity().fingerprint, features: features)
             },
             initialTab: initialTab,
             onBack: nil,

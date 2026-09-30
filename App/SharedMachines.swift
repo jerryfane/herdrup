@@ -46,7 +46,9 @@ final class SharedMachinesStore: ObservableObject {
         persist()
     }
 
+    /// Removes a grant; its host stops pushing to this phone for it.
     func remove(_ access: GuestAccess) {
+        GuestPushCenter.shared.leaving(access)
         machines.removeAll { $0.id == access.id }
         persist()
     }

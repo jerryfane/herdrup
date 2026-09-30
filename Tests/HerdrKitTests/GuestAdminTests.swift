@@ -148,6 +148,46 @@ final class GuestAdminTests: XCTestCase {
         XCTAssertEqual(listing, GuestListing(link: GuestLinkStatus(state: .up)))
     }
 
+    // MARK: share_gram (herdrup#338)
+
+    func testInviteCreateSendsShareGramAndAnOrdinaryInviteSendsItOff() async throws {
+        let t = CapturingTransport(reply: Self.inviteReply)
+        let client = HerdrClient(transport: t)
+        _ = try await client.guestInviteCreate(
+            target: "w1:p1", name: "plotarmordev", ownerName: "Jerry", machineLabel: "Mac", shareGram: true)
+        XCTAssertEqual(try t.last().params["share_gram"] as? Bool, true)
+        _ = try await client.guestInviteCreate(
+            target: "w1:p1", name: "sam", ownerName: "Jerry", machineLabel: "Mac")
+        XCTAssertEqual(try t.last().params["share_gram"] as? Bool, false, "Gram is shared only when asked")
+    }
+
+    func testGuestUpdateTogglesShareGramForOneGuestOnItsMachine() async throws {
+        let t = CapturingTransport(reply: #"{"id":"x","result":{"type":"ok"}}"#)
+        try await HerdrClient(transport: t).guestUpdate(guestID: "g1", shareGram: true, machine: "2cc0ffe3")
+        var (method, params) = try t.last()
+        XCTAssertEqual(method, "guest.update")
+        XCTAssertEqual(params["guest_id"] as? String, "g1")
+        XCTAssertEqual(params["share_gram"] as? Bool, true)
+        XCTAssertEqual(params["machine"] as? String, "2cc0ffe3")
+
+        try await HerdrClient(transport: t).guestUpdate(guestID: "g1", shareGram: false)
+        (method, params) = try t.last()
+        XCTAssertEqual(params["share_gram"] as? Bool, false)
+        XCTAssertNil(params["machine"], "a local guest must not name a machine")
+    }
+
+    func testListReadsShareGramPerGuestAndInviteAndAnOlderDaemonMeansOff() async throws {
+        let reply = #"""
+        {"id":"x","result":{"type":"guest_list","guests":[
+          {"guest_id":"g1","name":"plotarmordev","share_gram":true},
+          {"guest_id":"g2","name":"sam"}],
+         "invites":[{"invite_id":"i1","name":"ana","share_gram":true},{"invite_id":"i2","name":"bo"}]}}
+        """#
+        let listing = try await HerdrClient(transport: CapturingTransport(reply: reply)).guestList()
+        XCTAssertEqual(listing.guests.map(\.shareGram), [true, false])
+        XCTAssertEqual(listing.invites.map(\.shareGram), [true, false])
+    }
+
     func testGrantMatchPrefersTerminalIDAndFallsBackToName() {
         let grant = GuestGrant(terminalID: "t7", agentName: "llm-opt")
         XCTAssertTrue(grant.matches(terminalID: "t7", agentName: "renamed"))
