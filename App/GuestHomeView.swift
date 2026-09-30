@@ -1,22 +1,34 @@
+import Combine
 import SwiftUI
 import HerdrKit
 
-/// One live connection to a shared machine: the relay client and this phone's key.
+/// One live connection to a shared machine: the relay client, this phone's key, and what
+/// the host offers this guest (learned from each call's hello).
 struct GuestConnection {
     let client: HerdrClient
     let fingerprint: String
+    let features: GuestFeaturesModel
+
+    init(client: HerdrClient, fingerprint: String, features: GuestFeaturesModel = GuestFeaturesModel()) {
+        self.client = client
+        self.fingerprint = fingerprint
+        self.features = features
+    }
 
     /// Connects over the relay with this install's device key. Constructing the
     /// transport does not dial; each call opens its own relay socket.
     static func open(_ access: GuestAccess) throws -> GuestConnection {
         let identity = try GuestDevice.identity()
-        return GuestConnection(client: HerdrClient(transport: access.transport(identity: identity)),
-                               fingerprint: identity.fingerprint)
+        let features = GuestFeaturesModel()
+        let transport = access.transport(identity: identity, onFeatures: features.sink())
+        return GuestConnection(client: HerdrClient(transport: transport),
+                               fingerprint: identity.fingerprint, features: features)
     }
 }
 
 /// Screen G2: a guest's home. One machine, only the shared agent, and two tabs
-/// (Agents, Settings); there is no Gram tab and nothing about the owner's fleet.
+/// (Agents, Settings); nothing about the owner's fleet. The shared agent's Gram, when the
+/// owner shares it, is a tab of the agent's own screen.
 struct GuestHomeView: View {
     let access: GuestAccess
     let connect: () throws -> GuestConnection
@@ -43,6 +55,8 @@ struct GuestHomeView: View {
     @State private var status: Status = .loading
     @State private var tab: Tab
     @State private var showingPane = false
+    /// The agent screen's tab; a tapped push picks it.
+    @State private var paneTab: GuestPaneTab = .terminal
     @State private var confirmingRemove = false
     /// Observed so a Text size change re-renders at the new `Typography.scale`.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
@@ -71,7 +85,8 @@ struct GuestHomeView: View {
             }
             .tint(Palette.text)
             if showingPane, let connection {
-                GuestPaneView(client: connection.client, access: access) {
+                GuestPaneView(client: connection.client, access: access, features: connection.features,
+                              tab: $paneTab) {
                     withAnimation(.easeOut(duration: 0.26)) { showingPane = false }
                 }
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -79,6 +94,21 @@ struct GuestHomeView: View {
             }
         }
         .task { await poll() }
+        // Each connection re-registers this phone's push token with the host once it learns
+        // the host's features, so the host holds the current token and Gram preference.
+        .onReceive(connection?.features.$current.eraseToAnyPublisher()
+                   ?? Empty().eraseToAnyPublisher()) { features in
+            guard let features, let client = connection?.client else { return }
+            Task { await GuestPushCenter.shared.connected(access, client: client, features: features) }
+        }
+        // A tapped push for this share: its Gram tab for a Gram, else the terminal.
+        .onReceive(PushCenter.shared.$pendingGuest) { route in
+            guard let route, route.access(in: [access]) != nil else { return }
+            PushCenter.shared.pendingGuest = nil
+            tab = .agents
+            paneTab = route.kind == .gram ? .gram : .terminal
+            showingPane = true
+        }
     }
 
     private var agentsTab: some View {

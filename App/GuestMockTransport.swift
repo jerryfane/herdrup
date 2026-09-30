@@ -1,20 +1,38 @@
 #if DEBUG
 import Foundation
 import HerdrKit
+import SwiftUI
 
 /// A stand-in for the guest-gated daemon behind the relay, for the guest screenshots and
 /// UI tests. It answers only the guest allowlist; every other method is recorded in
 /// `forbiddenCalls` and refused with `guest_forbidden`, exactly as the host would.
+///
+/// `HERDR_MOCK_GUEST_FEATURES` sets what the hello advertises: `gram,push`, `push`, `gram`
+/// or `none`; unset is a host older than the `features` object. Gram methods are allowed
+/// only with `gram`, push registration only with `push`, as on the host.
 struct GuestMockTransport: HerdrTransport {
     /// `oldHost` is a host older than guest resizing: it refuses `pane.set_pty_size`.
     enum Scenario: String { case running, paused, blocked, oldHost }
 
     let scenario: Scenario
+    /// Hears each call's hello features, like `RelayTransport`'s.
+    let onFeatures: (@Sendable (GuestFeatures) -> Void)?
 
-    init(scenario: Scenario) {
+    init(scenario: Scenario, onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil) {
         self.scenario = scenario
+        self.onFeatures = onFeatures
         _ = Self.freshGuestSettings
     }
+
+    /// What this launch's host advertises; nil for a host that predates `features`.
+    static let features: GuestFeatures? = {
+        guard let raw = ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_FEATURES"] else { return nil }
+        let parts = Set(raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+        return GuestFeatures(gram: parts.contains("gram"), push: parts.contains("push"))
+    }()
+
+    /// The APNs token the mock push system hands out once "permission" is granted.
+    static let deviceToken = "mock-apns-token-guest"
 
     /// Each launch starts from the guest's default text size, so one test's A+ can't leak
     /// into the next. Once per process: the view that builds this transport re-renders.
@@ -50,26 +68,76 @@ struct GuestMockTransport: HerdrTransport {
     /// Read by UI tests via GuestPaneView's DEBUG probe.
     static var forbiddenCalls: [String] { recorder.calls }
 
+    /// The Gram and push calls the host answered, with their arguments, in order (plus the
+    /// files the app opened, as `opened:<name>`). Read by UI tests via the same probe.
+    static var hostCalls: [String] { hostRecorder.calls }
+
     static let allowlist: Set<String> = [
         "ping", "agent.list", "agent.get", "agent.read", "pane.stream", "agent.prompt",
         "gram.upload_chunk", "gram.post", "pane.set_pty_size",
     ]
 
+    /// Allowed only where the host advertises the feature (herdrup#338).
+    static let gramMethods: Set<String> = ["gram.list", "gram.get_file_chunk", "gram.mark_read"]
+    static let pushMethods: Set<String> = ["notifications.register_device", "notifications.unregister_device"]
+
     private static let recorder = CallRecorder()
+    private static let hostRecorder = CallRecorder()
     /// The shared agent's PTY: one per process, like the host's, whichever transport value
     /// a re-rendered view built.
     private static let pty = MockPTY()
+    /// The guest's Gram and read marks: one per process, like the host's store.
+    private static let gram = MockGram()
 
     private func allows(_ method: String) -> Bool {
-        Self.allowlist.contains(method) && !(scenario == .oldHost && method == "pane.set_pty_size")
+        if Self.gramMethods.contains(method) { return Self.features?.gram == true }
+        if Self.pushMethods.contains(method) { return Self.features?.push == true }
+        return Self.allowlist.contains(method) && !(scenario == .oldHost && method == "pane.set_pty_size")
+    }
+
+    /// The app opened a downloaded Gram file (for the UI tests' probe).
+    static func noteOpened(_ name: String) {
+        hostRecorder.append("opened:\(name)")
     }
 
     func roundTrip(_ requestLine: String) async throws -> String {
+        onFeatures?(Self.features ?? .none)
         let method = Self.method(of: requestLine)
         let id = Self.requestID(of: requestLine)
         guard allows(method) else {
             Self.recorder.append(method)
             return Self.errorLine(id: id, code: "guest_forbidden", message: "guests can't call \(method)")
+        }
+        let params = Self.object(requestLine)?["params"] as? [String: Any] ?? [:]
+        switch method {
+        case "gram.list":
+            Self.hostRecorder.append("gram.list")
+            return Self.encode(id: id, result: ["type": "guest_gram_list", "messages": Self.gram.list(), "has_more": false])
+        case "gram.mark_read":
+            let ids = params["ids"] as? [String] ?? []
+            Self.hostRecorder.append("gram.mark_read:\(ids.sorted().joined(separator: ","))")
+            Self.gram.markRead(ids)
+            return #"{"id":"\#(id)","result":{"type":"ok"}}"#
+        case "gram.get_file_chunk":
+            let file = params["id"] as? String ?? ""
+            let offset = params["offset"] as? Int ?? 0
+            Self.hostRecorder.append("gram.get_file_chunk:\(file)@\(offset)")
+            guard let chunk = Self.gram.chunk(id: file, offset: offset) else {
+                return Self.errorLine(id: id, code: "guest_forbidden", message: "not a Gram you can see")
+            }
+            return Self.encode(id: id, result: chunk)
+        case "notifications.register_device":
+            let prefs = ["notify_needs_input", "notify_dies", "notify_finishes", "notify_gram"]
+                .map { "\($0)=\(params[$0] as? Bool ?? false)" }
+            Self.hostRecorder.append("notifications.register_device:"
+                + (["device_token=\(params["device_token"] as? String ?? "")",
+                    "platform=\(params["platform"] as? String ?? "")"] + prefs).joined(separator: ","))
+            return #"{"id":"\#(id)","result":{"type":"ok"}}"#
+        case "notifications.unregister_device":
+            Self.hostRecorder.append("notifications.unregister_device:\(params["device_token"] as? String ?? "")")
+            return #"{"id":"\#(id)","result":{"type":"ok"}}"#
+        default:
+            break
         }
         switch method {
         case "ping":
@@ -94,7 +162,11 @@ struct GuestMockTransport: HerdrTransport {
             case "gram.upload_chunk":
                 return #"{"id":"\#(id)","result":{"type":"ok"}}"#
             default:
-                return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"gg1","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
+                let text = params["text"] as? String ?? ""
+                let file = params["file"] as? [String: Any]
+                let posted = Self.gram.post(text: text, fileName: file?["name"] as? String,
+                                            mime: file?["mime"] as? String)
+                return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"\#(posted)","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
             }
         case "pane.set_pty_size":
             if scenario == .paused {
@@ -120,6 +192,7 @@ struct GuestMockTransport: HerdrTransport {
     }
 
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+        onFeatures?(Self.features ?? .none)
         let method = Self.method(of: requestLine)
         let id = Self.requestID(of: requestLine)
         guard allows(method) else {
@@ -168,11 +241,15 @@ struct GuestMockTransport: HerdrTransport {
     static let cols = 120
     static let rows = 30
 
+    /// `HERDR_MOCK_STILL=1`: the running agent reads idle. The WORKING pill and the home row's
+    /// spinner animate forever, which keeps XCUITest from ever seeing the app idle.
+    private static let still = ProcessInfo.processInfo.environment["HERDR_MOCK_STILL"] == "1"
+
     /// A guest sees a FIXED projection of an agent: exactly these keys, and name, agent and
     /// display_agent may be null. No cwd, titles, workspace, tab or session.
     private var sharedAgentJSON: String {
         let status = switch scenario {
-        case .running, .oldHost: "working"
+        case .running, .oldHost: Self.still ? "idle" : "working"
         case .paused: "idle"
         case .blocked: "blocked"
         }
@@ -257,6 +334,89 @@ struct GuestMockTransport: HerdrTransport {
 
     private static func errorLine(id: String, code: String, message: String) -> String {
         #"{"id":"\#(id)","error":{"code":"\#(code)","message":"\#(message)"}}"#
+    }
+
+    private static func encode(id: String, result: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["id": id, "result": result]) else {
+            return errorLine(id: id, code: "internal_error", message: "mock encode")
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The guest's projection of llm-opt's Gram since the grant: three of its Grams (one with
+    /// the results file, two unread) and the guest's own attachment post. Read marks are the
+    /// guest's own. Files are served in 1 KiB pieces, so a download takes several.
+    private final class MockGram: @unchecked Sendable {
+        static let chunkBytes = 1024
+        private let lock = NSLock()
+        private var messages: [[String: Any]]
+        private var files: [String: (name: String, mime: String, data: Data)]
+        private var postSeq = 0
+
+        init() {
+            let now = UInt64(Date().timeIntervalSince1970 * 1000)
+            let minute: UInt64 = 60_000
+            let table = Data(Self.resultsMarkdown.utf8)
+            files = ["gm-4": ("tensorfold-q5.md", "text/markdown", table)]
+            messages = [
+                ["id": "gm-4", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Here's the Q5 table: decode is up 36% over Q4, prefill flat.",
+                 "created_unix_ms": now - 2 * minute, "read": false,
+                 "file": ["name": "tensorfold-q5.md", "size": table.count, "mime": "text/markdown", "sha256": "5e1f"]],
+                ["id": "gm-3", "direction": "owner_to_agent", "from": "plotarmordev (via HerdrUp)",
+                 "text": "Attachment from plotarmordev.", "created_unix_ms": now - 9 * minute, "read": true,
+                 "file": ["name": "prompt-set-v2.jsonl", "size": 49_152, "mime": "application/jsonl", "sha256": "77aa"]],
+                ["id": "gm-2", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Bench started on the Q5 build, about ten minutes.",
+                 "created_unix_ms": now - 12 * minute, "read": false],
+                ["id": "gm-1", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Picked up plotarmordev's request for a TensorFold rerun.",
+                 "created_unix_ms": now - 14 * minute, "read": true],
+            ]
+        }
+
+        func list() -> [[String: Any]] { lock.withLock { messages } }
+
+        func markRead(_ ids: [String]) {
+            lock.withLock {
+                for index in messages.indices where ids.contains(messages[index]["id"] as? String ?? "") {
+                    messages[index]["read"] = true
+                }
+            }
+        }
+
+        func post(text: String, fileName: String?, mime: String?) -> String {
+            lock.withLock {
+                postSeq += 1
+                let id = "gp-\(postSeq)"
+                var message: [String: Any] = [
+                    "id": id, "direction": "owner_to_agent", "from": "plotarmordev (via HerdrUp)",
+                    "text": text, "created_unix_ms": UInt64(Date().timeIntervalSince1970 * 1000), "read": true,
+                ]
+                if let fileName { message["file"] = ["name": fileName, "size": 1, "mime": mime ?? ""] }
+                messages.insert(message, at: 0)
+                return id
+            }
+        }
+
+        /// One piece of a visible file, in the host's `gram_file_chunk` shape; nil for a
+        /// message the guest can't see or one without bytes here.
+        func chunk(id: String, offset: Int) -> [String: Any]? {
+            guard let file = lock.withLock({ files[id] }), offset >= 0, offset <= file.data.count else { return nil }
+            let end = min(offset + Self.chunkBytes, file.data.count)
+            return ["type": "gram_file_chunk", "name": file.name, "mime": file.mime, "size": file.data.count,
+                    "sha256": "5e1f", "offset": offset,
+                    "data_base64": file.data[offset..<end].base64EncodedString()]
+        }
+
+        private static var resultsMarkdown: String {
+            var rows = ["# TensorFold · Q5 build", "", "| pass | decode tok/s | prefill tok/s |", "|---|---|---|"]
+            for pass in 1...120 {
+                rows.append("| \(pass) | \(41 + pass % 3).\(pass % 10) | 1,1\(80 + pass % 9) |")
+            }
+            rows += ["", "Decode is up 36% over the Q4 build; prefill is flat."]
+            return rows.joined(separator: "\n")
+        }
     }
 
     private static func object(_ requestLine: String) -> [String: Any]? {
@@ -348,6 +508,20 @@ struct GuestMockTransport: HerdrTransport {
             continuation?.yield(#"{"stream":"pane.bytes","frame":"resize","seq":\#(resizeSeq),"epoch":3,"cols":\#(newCols),"rows":\#(newRows)}"#)
             continuation?.yield(#"{"stream":"pane.bytes","frame":"data","seq":\#(resizeSeq + 1),"epoch":3,"data_b64":"\#(repaint)"}"#)
         }
+    }
+}
+
+/// The guest pane over the mock host, holding what `GuestHomeView` holds for a live share:
+/// the features the host advertises and the pane's tab.
+struct GuestPaneMockHost: View {
+    let scenario: GuestMockTransport.Scenario
+    @StateObject private var features = GuestFeaturesModel()
+    @State private var tab: GuestPaneTab = .terminal
+
+    var body: some View {
+        GuestPaneView(
+            client: HerdrClient(transport: GuestMockTransport(scenario: scenario, onFeatures: features.sink())),
+            access: GuestMockTransport.access, features: features, tab: $tab, onClose: {})
     }
 }
 #endif

@@ -246,6 +246,48 @@ final class GuestShareTests: XCTestCase {
         XCTAssertTrue(element("guest-cancel-sam").exists, "invites still load")
         shoot("owner-7-audit-failed")
     }
+
+    // MARK: Share Gram (herdrup#338)
+
+    /// Taps a SwiftUI switch row on its switch (the right edge), until its value reads `on`.
+    private func setSwitch(_ id: String, on: Bool) {
+        let row = element(id)
+        XCTAssertTrue(row.waitForExistence(timeout: Self.actionTimeout), "\(id) is missing")
+        for _ in 0..<3 where !row.isHittable { app.swipeUp() }
+        let want = on ? "1" : "0"
+        for _ in 0..<3 where (row.value as? String) != want {
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
+            _ = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", want), object: row)], timeout: 3)
+        }
+        XCTAssertEqual(row.value as? String, want, "\(id) should be \(on ? "on" : "off")")
+    }
+
+    func testShareGramIsOffByDefaultAndGoesOutWithTheInvite() {
+        launch("share")
+        openShareSheet()
+        typeGuestName("plotarmordev\n")
+        let toggle = element("guest-share-gram")
+        XCTAssertTrue(toggle.waitForExistence(timeout: Self.actionTimeout), "the sheet should offer Share Gram")
+        XCTAssertEqual(toggle.value as? String, "0", "Gram is not shared unless the owner asks")
+        setSwitch("guest-share-gram", on: true)
+        shoot("guest-gram-owner-share-switch")
+        element("guest-share-create").tap()
+        let gram = element("guest-invite-gram")
+        XCTAssertTrue(gram.waitForExistence(timeout: Self.actionTimeout), "the invite should state its Gram sharing")
+        XCTAssertTrue(gram.label.contains("Shared") && !gram.label.contains("Not shared"),
+                      "the daemon stored share_gram: \(gram.label)")
+    }
+
+    func testSharedAccessTurnsShareGramOnForAnExistingGuest() {
+        launch("sharedaccess")
+        openSharedAccess()
+        XCTAssertEqual(element("guest-share-gram-plotarmordev").value as? String, "0")
+        setSwitch("guest-share-gram-plotarmordev", on: true)
+        XCTAssertTrue(text(containing: "llm-opt on Jerry's Mac Studio · Gram shared")
+            .waitForExistence(timeout: Self.actionTimeout), "the reloaded list shows the guest.update")
+        shoot("guest-gram-owner-guest-toggle")
+    }
 }
 
 private extension XCUIElement {

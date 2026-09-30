@@ -1763,7 +1763,7 @@ struct GramView: View {
 
     /// Reduce a server-supplied file name to a safe single path component for the
     /// temp directory: strip any directory parts and reject `.`/`..`.
-    private static func safeTempFileName(_ name: String) -> String {
+    static func safeTempFileName(_ name: String) -> String {
         let base = URL(fileURLWithPath: name).lastPathComponent
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "\\", with: "_")
@@ -1920,7 +1920,7 @@ struct GramView: View {
 
     /// A file we should render as formatted HTML (a markdown source), by extension
     /// or advisory mime.
-    private static func isMarkdown(name: String, mime: String) -> Bool {
+    static func isMarkdown(name: String, mime: String) -> Bool {
         let lower = name.lowercased()
         return lower.hasSuffix(".md") || lower.hasSuffix(".markdown")
             || mime.lowercased() == "text/markdown"
@@ -1928,7 +1928,7 @@ struct GramView: View {
 
     /// The markdown file's name without its `.md`/`.markdown` extension, for the
     /// preview title.
-    private static func displayTitle(_ name: String) -> String {
+    static func displayTitle(_ name: String) -> String {
         let base = safeTempFileName(name)
         for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
@@ -1938,13 +1938,13 @@ struct GramView: View {
 
     /// The temp file name for a rendered markdown preview — a `.html` extension so
     /// QuickLook renders it as a web page, not source.
-    private static func previewHTMLName(for name: String) -> String {
+    static func previewHTMLName(for name: String) -> String {
         displayTitle(name) + ".html"
     }
 
     /// A received web document that QuickLook would otherwise render as live,
     /// scriptable content — routed to the in-app `HtmlWebView` viewer instead.
-    private static func isWebDocument(name: String, mime: String) -> Bool {
+    static func isWebDocument(name: String, mime: String) -> Bool {
         let lower = name.lowercased()
         if lower.hasSuffix(".html") || lower.hasSuffix(".htm") || lower.hasSuffix(".xhtml")
             || lower.hasSuffix(".svg")
@@ -1956,7 +1956,7 @@ struct GramView: View {
     }
 
     /// The web file's name without its extension, for the preview title.
-    private static func webBaseName(_ name: String) -> String {
+    static func webBaseName(_ name: String) -> String {
         let base = safeTempFileName(name)
         for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
@@ -2113,7 +2113,7 @@ private struct FileExportPicker: UIViewControllerRepresentable {
     }
 }
 
-private struct GramRow: View {
+struct GramRow: View {
     let message: GramMessage
     var isDownloadingFile: Bool
     /// Reply bytes received against bytes expected for THIS row's download, when the
@@ -2311,7 +2311,7 @@ private struct GramRow: View {
 
 /// Picks an SF Symbol for a file from its MIME type. Shared by the composer's
 /// staged-attachment chip and a received message's file chip.
-private enum FileGlyph {
+enum FileGlyph {
     static func name(for mime: String, fileName: String) -> String {
         let mime = mime.lowercased()
         if mime.hasPrefix("image/") { return "photo" }
