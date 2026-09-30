@@ -126,6 +126,41 @@ final class GuestGramTests: XCTestCase {
         XCTAssertEqual(request.params["ids"] as? [String], ["m3", "m1"])
     }
 
+    /// Review P2: a refused mark is rolled back, and the rollback makes the ids unread again.
+    /// Asking again right away must send nothing; the ids go out once their backoff passes,
+    /// and the backoff doubles on each refusal up to its cap.
+    func testRefusedReadMarksWaitOutABackoffInsteadOfLooping() {
+        var marks = GuestGramReadMarks()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(marks.begin(unread: ["m1", "m2"], now: t0), ["m1", "m2"])
+        XCTAssertEqual(marks.begin(unread: ["m1", "m2", "m3"], now: t0), ["m3"], "in flight is never sent twice")
+        XCTAssertTrue(marks.isMarking("m1"))
+
+        marks.failed(["m1", "m2"], now: t0)
+        marks.succeeded(["m3"])
+        XCTAssertFalse(marks.isMarking("m1"))
+        for _ in 0..<100 {
+            XCTAssertEqual(marks.begin(unread: ["m1", "m2"], now: t0), [], "the rollback must not resend at once")
+        }
+        XCTAssertEqual(marks.begin(unread: ["m1"], now: t0 + GuestGramReadMarks.initialBackoff - 1), [])
+        let t1 = t0 + GuestGramReadMarks.initialBackoff
+        XCTAssertEqual(marks.begin(unread: ["m1"], now: t1), ["m1"], "sent again once the backoff passes")
+
+        marks.failed(["m1"], now: t1)
+        XCTAssertEqual(marks.begin(unread: ["m1"], now: t1 + GuestGramReadMarks.initialBackoff), [],
+                       "a second refusal waits longer")
+        XCTAssertEqual(marks.begin(unread: ["m1"], now: t1 + 2 * GuestGramReadMarks.initialBackoff), ["m1"])
+
+        var now = t1 + 2 * GuestGramReadMarks.initialBackoff
+        for _ in 0..<20 {
+            marks.failed(["m1"], now: now)
+            now += GuestGramReadMarks.maxBackoff
+            XCTAssertEqual(marks.begin(unread: ["m1"], now: now), ["m1"], "the backoff is capped")
+        }
+        marks.succeeded(["m1"])
+        XCTAssertEqual(marks.begin(unread: ["m1"], now: now), ["m1"], "success forgets the backoff")
+    }
+
     func testForbiddenGramSurfacesAsTheGuestError() async throws {
         let transport = ScriptedTransport { _, _ in
             #"{"id":"x","error":{"code":"guest_forbidden","message":"gram is not shared with you"}}"#

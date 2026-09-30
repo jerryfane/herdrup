@@ -104,6 +104,51 @@ public struct GuestGramPage: Decodable, Sendable, Equatable {
     public var unreadCount: Int { messages.filter(\.isUnread).count }
 }
 
+/// Which of the guest's unread Grams to send in `gram.mark_read`, so marking read can't loop.
+/// The list flips a mark optimistically and flips it back when the host refuses; a view that
+/// marks on every list change would then re-send at once, forever. An id already in flight is
+/// never sent twice, and an id the host refused waits out a backoff that doubles on each
+/// failure (5 s up to 5 min) before it is sent again.
+public struct GuestGramReadMarks: Sendable {
+    public static let initialBackoff: TimeInterval = 5
+    public static let maxBackoff: TimeInterval = 300
+
+    private var inFlight: Set<String> = []
+    private var retryAt: [String: Date] = [:]
+    private var backoff: [String: TimeInterval] = [:]
+
+    public init() {}
+
+    /// The ids of `unread` to send now, which are then in flight until `succeeded` or `failed`.
+    public mutating func begin(unread: [String], now: Date) -> [String] {
+        let ready = unread.filter { id in
+            !inFlight.contains(id) && (retryAt[id].map { $0 <= now } ?? true)
+        }
+        inFlight.formUnion(ready)
+        return ready
+    }
+
+    public mutating func succeeded(_ ids: [String]) {
+        for id in ids {
+            inFlight.remove(id)
+            retryAt[id] = nil
+            backoff[id] = nil
+        }
+    }
+
+    public mutating func failed(_ ids: [String], now: Date) {
+        for id in ids {
+            inFlight.remove(id)
+            let wait = backoff[id].map { min($0 * 2, Self.maxBackoff) } ?? Self.initialBackoff
+            backoff[id] = wait
+            retryAt[id] = now.addingTimeInterval(wait)
+        }
+    }
+
+    /// A mark is on its way to the host: a list fetched meanwhile still shows it read.
+    public func isMarking(_ id: String) -> Bool { inFlight.contains(id) }
+}
+
 /// Where a tapped push for a shared agent goes. Guest pushes carry a `herdr_guest` object
 /// naming the invite's host and the guest, so the app opens that share's own screens and
 /// never an owner screen, whatever other keys the payload also carries.

@@ -17,9 +17,9 @@ final class GuestGramModel: ObservableObject {
     @Published private(set) var failure: String?
     @Published private(set) var hasMore = false
     @Published private(set) var loadingMore = false
-    /// Ids marked read locally whose `gram.mark_read` is still in flight, so a refresh that
-    /// raced it can't bring the unread dot back.
-    private var marking: Set<String> = []
+    /// What `gram.mark_read` may send: never an id already in flight, and a refused id only
+    /// after its backoff, so the rollback below can't retrigger an immediate resend.
+    private var marks = GuestGramReadMarks()
 
     var unreadCount: Int { messages.filter(\.isUnread).count }
 
@@ -29,7 +29,7 @@ final class GuestGramModel: ObservableObject {
             let page = try await client.guestGramList(limit: Self.pageSize)
             let head = page.messages.map { message -> GuestGramMessage in
                 var message = message
-                if marking.contains(message.id) { message.read = true }
+                if marks.isMarking(message.id) { message.read = true }
                 return message
             }
             let headIDs = Set(head.map(\.id))
@@ -62,16 +62,17 @@ final class GuestGramModel: ObservableObject {
     }
 
     /// The guest is looking at the list: every unread Gram in it is now read, for this guest
-    /// only. Flipped at once; restored if the host refuses.
+    /// only. Flipped at once; restored if the host refuses, and then not re-sent until its
+    /// backoff has passed.
     func markAllRead(client: HerdrClient) async {
-        let ids = messages.filter(\.isUnread).map(\.id)
+        let ids = marks.begin(unread: messages.filter(\.isUnread).map(\.id), now: Date())
         guard !ids.isEmpty else { return }
         setRead(ids, true)
-        marking.formUnion(ids)
-        defer { marking.subtract(ids) }
         do {
             try await client.guestGramMarkRead(ids: ids)
+            marks.succeeded(ids)
         } catch {
+            marks.failed(ids, now: Date())
             setRead(ids, false)
         }
     }
