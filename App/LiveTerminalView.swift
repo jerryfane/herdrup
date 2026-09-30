@@ -90,8 +90,16 @@ struct LiveTerminalView: UIViewRepresentable {
     /// iPad software keyboards and iOS apps running on Apple Silicon Macs.
     /// Refreshed on every update.
     var wantsTerminalKeyFocus: Bool = false
-    /// Guest view-only: no input or focus, never sizes the PTY; the stream's cols fit the width.
+    /// Guest view-only: no input or focus and no bytes to the PTY. Geometry is separate: a
+    /// guest still proposes its own grid unless `fitsStreamWidth`.
     var viewOnly: Bool = false
+    /// Follow the stream's grid and fit its cols to the width instead of proposing a size. A
+    /// guest's session switches to this when the host refuses guest resizing.
+    var fitsStreamWidth: Bool = false
+    /// Called once when the host refuses this view's `pane.set_pty_size` for good
+    /// (`guest_forbidden`, a host older than guest resizing). The view has already fallen
+    /// back to fitting the stream to its width; the host keeps that for the session.
+    var onResizeRefused: () -> Void = {}
     /// Bumped by the reply bar's chevron to request a DELIBERATE collapse, as opposed to the many
     /// incidental body passes that also see `wantsTerminalKeyFocus == false`. Only a deliberate
     /// collapse may resign the responder while a selection is held: see the resign branch in
@@ -157,6 +165,8 @@ struct LiveTerminalView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalSurfaceView {
         // BEFORE attach, which starts the stream and the geometry drain.
         context.coordinator.viewOnly = viewOnly
+        context.coordinator.hostFitsStreamWidth = fitsStreamWidth
+        context.coordinator.onResizeRefused = onResizeRefused
         context.coordinator.paneFontSize =
             min(max(fontSize, Coordinator.minFontSize), Coordinator.maxFontSize)
         let view = ReadOnlyTerminalView(frame: .zero, font: context.coordinator.paneFont)
@@ -195,6 +205,8 @@ struct LiveTerminalView: UIViewRepresentable {
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
         context.coordinator.viewOnly = viewOnly
+        context.coordinator.hostFitsStreamWidth = fitsStreamWidth
+        context.coordinator.onResizeRefused = onResizeRefused
         context.coordinator.setForeground(isForeground)
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
@@ -272,8 +284,8 @@ struct LiveTerminalView: UIViewRepresentable {
                 context.coordinator.publishSelectionProbe(deliberateCollapse ? "collapseResign" : "passResign")
             }
         }
-        // View-only: the width fit owns the font, so the `fontSize` preference is ignored.
-        if viewOnly {
+        // Fitting the stream to the width owns the font, so `fontSize` is ignored.
+        if context.coordinator.fitsStreamWidth {
             context.coordinator.fitFontToStreamWidth()
         } else {
             context.coordinator.applyFont(size: fontSize)
@@ -886,10 +898,23 @@ struct LiveTerminalView: UIViewRepresentable {
         private var applyingControlModifier = false
         private var controlResetObserver: NSObjectProtocol?
         var directFocusIntended = false
-        /// View-only (guest): never sizes the PTY, sends no bytes, never takes focus.
+        /// View-only (guest): sends no bytes and never takes focus. Sizing is separate.
         var viewOnly = false {
             didSet { view?.allowsFocus = !viewOnly }
         }
+        /// The host asked this view to follow the stream's grid (see
+        /// `LiveTerminalView.fitsStreamWidth`). Refreshed every pass.
+        var hostFitsStreamWidth = false
+        /// Closed by the host's first `guest_forbidden` answer to a resize; see `PTYResizeGate`.
+        /// Every `set_pty_size` this view sends goes through it, including the teardown release.
+        private let resizeGate = PTYResizeGate()
+        /// Set once this view has reacted to the gate closing (`fallBackIfRefused`).
+        private var fellBack = false
+        /// See `LiveTerminalView.onResizeRefused`. Refreshed by `updateUIView`.
+        var onResizeRefused: (() -> Void)?
+        /// This view never sizes the PTY: the stream's grid is authoritative and its cols are
+        /// fitted to the width. Geometry guards read this, never `viewOnly`.
+        var fitsStreamWidth: Bool { hostFitsStreamWidth || resizeGate.isClosed }
         /// Set once the server sends an `exited` frame, so a normal stream end is
         /// distinguished from an unexpected EOF (which must surface, not freeze).
         private var sawExited = false
@@ -962,6 +987,11 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Lease-refresh cadence — comfortably under `leaseTTLMillis` so a single missed
         /// beat can't lapse the lease (2 min refresh vs 5 min TTL).
         private static let heartbeatIntervalNanos: UInt64 = 120_000_000_000  // 2 min
+        /// A guest's lease terms: the host clamps a guest's TTL far below the owner's.
+        private var leaseTTL: UInt64 { viewOnly ? GuestTerminalSize.leaseTTLMillis : Self.leaseTTLMillis }
+        private var heartbeatInterval: UInt64 {
+            viewOnly ? GuestTerminalSize.leaseRenewalNanos : Self.heartbeatIntervalNanos
+        }
 
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
@@ -1065,8 +1095,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// splits missing private-use glyphs into `HerdrupSymbols` runs for SwiftTerm to draw.
         static let minFontSize: CGFloat = 9
         static let maxFontSize: CGFloat = 24
-        /// View-only fits the stream's cols to the width, which can need a smaller font.
-        static let viewOnlyMinFontSize: CGFloat = 4
+        /// Fitting the stream's cols to the width can need a smaller font.
+        static let streamFitMinFontSize: CGFloat = 4
         static let defaultFontSize: CGFloat = 12.5
         /// Terminal font size in points, driven by the `terminal.fontSize` preference.
         /// Instance (not static) so it can change at runtime: setting `view.font` from
@@ -1158,23 +1188,24 @@ struct LiveTerminalView: UIViewRepresentable {
             paneFontSize = size
             beginResizePresentation(reason: .local)
             view?.font = paneFont
+            publishGridProbe()
         }
 
-        private var lastViewOnlyFit: (cols: Int, width: CGFloat, size: CGFloat)?
+        private var lastStreamWidthFit: (cols: Int, width: CGFloat, size: CGFloat)?
 
-        /// View-only: the font at which exactly the stream's `cols` fill the container's
+        /// `fitsStreamWidth`: the font at which exactly the stream's `cols` fill the container's
         /// width. Measures `"W"`'s advance like `cellPixels` (the advance scales linearly
         /// with point size) and targets SwiftTerm's pixel-snapped cell width, which rounds
         /// the advance UP to the screen scale, so `cols` cells never overflow. The grid is
         /// the stream's, untouched; a same-size commit reconciles scroller and cursor.
         func fitFontToStreamWidth() {
-            guard viewOnly, let view, let cols = streamAppliedGeometry?.cols else { return }
+            guard fitsStreamWidth, let view, let cols = streamAppliedGeometry?.cols else { return }
             let width = surface?.bounds.width ?? view.bounds.width
             guard width > 0, cols > 0 else { return }
             // `updateUIView` calls this on every body pass; only new inputs re-measure.
-            if let fit = lastViewOnlyFit, fit.cols == cols, fit.width == width,
+            if let fit = lastStreamWidthFit, fit.cols == cols, fit.width == width,
                fit.size == paneFontSize { return }
-            defer { lastViewOnlyFit = (cols: cols, width: width, size: paneFontSize) }
+            defer { lastStreamWidthFit = (cols: cols, width: width, size: paneFontSize) }
             let reference = Self.maxFontSize
             let advance = ("W" as NSString)
                 .size(withAttributes: [.font: Self.makePaneFont(size: reference)]).width
@@ -1183,7 +1214,7 @@ struct LiveTerminalView: UIViewRepresentable {
             guard advance > 0, cell > 0 else { return }
             // A hair under the pixel boundary, so float error cannot ceil to the next pixel.
             let fitted = reference * (cell - 0.01 / scale) / advance
-            let size = min(max(fitted, Self.viewOnlyMinFontSize), Self.maxFontSize)
+            let size = min(max(fitted, Self.streamFitMinFontSize), Self.maxFontSize)
             guard abs(size - paneFontSize) >= 0.01 else { return }
             setPaneFontSize(size)
             let terminal = view.getTerminal()
@@ -1231,8 +1262,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // Installed BEFORE the stream starts, so the very first layout pass cannot
             // reflow the emulator to a locally guessed size ahead of the daemon's.
             view.sizeChangeRequestHandler = { [weak self] cols, rows in
-                // View-only: the stream's grid is authoritative; local fits are never proposed.
-                guard self?.viewOnly == false else { return }
+                // Following the stream: its grid is authoritative; local fits are never proposed.
+                guard self?.fitsStreamWidth == false else { return }
                 // A live-anchored terminal is deliberately not the container's size, so
                 // its fit is not the one wanted: the container's is.
                 if let surface = self?.surface, surface.isLiveAnchored {
@@ -1242,7 +1273,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 self?.requestGeometry(cols: cols, rows: rows)
             }
             surface.onAnchoredFit = { [weak self] cols, rows in
-                guard self?.viewOnly == false else { return }
+                guard self?.fitsStreamWidth == false else { return }
                 self?.requestGeometry(cols: cols, rows: rows)
             }
             view.synchronizedOutputChangeHandler = { [weak self] active in
@@ -1262,8 +1293,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // The container tells us a frame change is imminent, while the current
             // rendering is still on screen and can be retained.
             surface.onGeometryWillChange = { [weak self] in
-                // View-only never requests geometry, so a local cover could only time out.
-                guard self?.viewOnly == false else { return }
+                // Following the stream never requests geometry, so a local cover could only time out.
+                guard self?.fitsStreamWidth == false else { return }
                 // The reason is the sweep's: a keyboard-driven relayout may retain a
                 // frame even though the send that dismissed the keyboard just dropped
                 // one. This fires only when the frame REALLY changes, so a keyboard
@@ -1916,8 +1947,37 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             probe.accessibilityLabel =
                 view.getTerminal().getLine(row: 0)?.translateToString(trimRight: true) ?? ""
+            publishGridProbe()
             #endif
         }
+
+        /// DEBUG-only receipt for the guest sizing tests: the grid the emulator is at, the font,
+        /// and how much of the width the grid fills (`fill=1.00` when fitted to the width).
+        /// Gated exactly like `publishTopRowProbe`.
+        fileprivate func publishGridProbe() {
+            #if DEBUG
+            guard viewOnly, ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil,
+                  let view, let surface else { return }
+            let probe: UIView
+            if let existing = gridProbe {
+                probe = existing
+            } else {
+                probe = UIView(frame: .zero)
+                probe.isAccessibilityElement = true
+                probe.accessibilityIdentifier = "terminal-grid-probe"
+                view.addSubview(probe)
+                gridProbe = probe
+            }
+            let terminal = view.getTerminal()
+            let width = surface.bounds.width
+            let fill = width > 0 ? CGFloat(terminal.cols) * view.cellSize.width / width : 0
+            probe.accessibilityLabel = "cols=\(terminal.cols) rows=\(terminal.rows) "
+                + String(format: "font=%.1f fill=%.2f", paneFontSize, fill)
+            #endif
+        }
+        #if DEBUG
+        private var gridProbe: UIView?
+        #endif
 
         func stop() {
             stopped = true                  // no new resize/scroll may start after this
@@ -2002,8 +2062,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // Leave any existing registry entry in place on this early bail (a pane that never
             // laid out): an older release may still be in flight, and its entry is the only handle
             // a future re-lock has to await it.
-            // View-only never held a lease, and must never send `set_pty_size`.
-            guard !viewOnly, let target, target.cols >= 4, target.rows >= 2 else { return }
+            // A view following the stream never held a lease, and must never send `set_pty_size`.
+            guard !fitsStreamWidth, let target, target.cols >= 4, target.rows >= 2 else { return }
             let cols = target.cols
             let rows = target.rows
             // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
@@ -2023,6 +2083,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // re-lock — which awaits only the newest entry — could send lock:true before that older
             // lock:false lands, leaving the visible pane unlocked.
             let previous = Self.geometryReleaseTask[pane]
+            let gate = self.resizeGate
             Self.geometryReleaseTask[pane] = Task.detached {
                 await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
@@ -2033,10 +2094,14 @@ struct LiveTerminalView: UIViewRepresentable {
                 // generation, `setForeground(true)` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
-                _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false, viewerID: viewerID)
+                // Through the gate, deciding NOW: the in-flight lock:true awaited above may have
+                // just been refused, and a refused host must not be asked again.
+                _ = try? await gate.send {
+                    try await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false, viewerID: viewerID)
+                }
                 // Best-effort: drop our own registry entry once settled (no newer show/hide/attach
-                // bumped the generation). This only runs when the release actually SENT; a release
-                // that bailed on the generation guard above leaves the entry for the newer owner
+                // bumped the generation). This only runs once past the generation guard (sent, or
+                // withheld by a closed gate); a release that bailed on that guard leaves the entry for the newer owner
                 // (which is correct — clearing it there could clobber a live newer release). So the
                 // map holds at most one entry per pane id, overwritten by the next release.
                 await MainActor.run {
@@ -2241,21 +2306,35 @@ struct LiveTerminalView: UIViewRepresentable {
             heartbeatTask?.cancel()
             heartbeatTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanos)
+                    try? await Task.sleep(nanoseconds: self?.heartbeatInterval ?? Self.heartbeatIntervalNanos)
                     guard let self, !self.stopped else { return }
                     // Nothing unsettled: no drain, no request in flight, no target waiting
                     // to be sent, and no resize on screen. A keepalive must never overtake
                     // or duplicate a real geometry change.
-                    guard !self.viewOnly, self.foreground, !self.relockPending, self.resizeTask == nil,
+                    // A target that was never confirmed (its drain gave up, e.g. the resize raced
+                    // the stream's open) is retried here rather than waiting for a relayout.
+                    if !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
+                       self.desiredTarget != nil, self.desiredTarget != self.confirmedTarget {
+                        self.resizeRetries = 0
+                        self.startGeometryDrain()
+                        continue
+                    }
+                    guard !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
                           self.inflightTarget == nil, !self.presentationActive,
                           let target = self.confirmedTarget, self.desiredTarget == target,
                           target.cols >= 4, target.rows >= 2 else { continue }
                     let task = Task { @MainActor [weak self] in
-                        guard let self, !self.stopped, !self.viewOnly, self.foreground else { return }
-                        _ = try? await self.client.setPTYSize(
-                            pane: self.paneID, cols: target.cols, rows: target.rows,
-                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
-                            lock: true, viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
+                        guard let self, !self.stopped, !self.fitsStreamWidth, self.foreground else { return }
+                        do {
+                            _ = try await self.resizeGate.send {
+                                try await self.client.setPTYSize(
+                                    pane: self.paneID, cols: target.cols, rows: target.rows,
+                                    cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                                    lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                            }
+                        } catch {
+                            self.fallBackIfRefused()
+                        }
                     }
                     self.keepaliveTask = task
                     await task.value
@@ -2299,6 +2378,12 @@ struct LiveTerminalView: UIViewRepresentable {
             case .started(let started):
                 // Align the emulator to the pane's real geometry the ack carries.
                 applyStreamGeometry(cols: started.cols, rows: started.rows, in: view)
+                // A resize that raced this stream's open (a guest's needs the stream registered)
+                // gave up unconfirmed; now that the stream exists, send it again.
+                if resizeTask == nil, desiredTarget != nil, desiredTarget != confirmedTarget {
+                    resizeRetries = 0
+                    startGeometryDrain()
+                }
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
@@ -2347,6 +2432,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 case .data(_, _, let data):
                     noteStreamData()
                     if !data.isEmpty { feedFiltered(data, into: view) }
+                    publishTopRowProbe()   // a repaint (after a resize, say) moves the top row too
                 case .resize(_, _, let cols, let rows):
                     applyStreamGeometry(cols: cols, rows: rows, in: view)
                 case .ping:
@@ -2434,7 +2520,8 @@ struct LiveTerminalView: UIViewRepresentable {
             // layout pass as this reflow.
             surface?.contentDidChange()
             streamAppliedGeometry = (cols: newCols, rows: newRows)
-            fitFontToStreamWidth()   // view-only: the stream's cols fill the width
+            fitFontToStreamWidth()   // following the stream: its cols fill the width
+            publishGridProbe()
             streamGeometryRevision += 1
             if let response = responseGeometry, response == (cols: newCols, rows: newRows) {
                 responseAwaitingMarker = false   // the request's marker has now landed
@@ -2484,8 +2571,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// shared PTY to the phone's fit; `releaseGeometryOwnership` hands ownership
         /// back with a `lock:false` on teardown.
         private func requestGeometry(cols: Int, rows: Int) {
-            // Teardown began — no new lock:true (review HIGH). View-only never sizes the PTY.
-            guard !stopped, !viewOnly else { return }
+            // Teardown began — no new lock:true (review HIGH). Following the stream never sizes the PTY.
+            guard !stopped, !fitsStreamWidth else { return }
             #if DEBUG
             let (cols, rows) = MainActor.assumeIsolated {
                 TerminalInteractionHarness.fit(paneID: paneID, cols: cols, rows: rows)
@@ -2613,14 +2700,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The single serialized drain. At most one `set_pty_size` in flight, and a
         /// target must stand still for `resizeSettleDuration` before it is sent.
         private func startGeometryDrain() {
-            guard !stopped, !viewOnly, foreground, !relockPending, resizeTask == nil else { return }
+            guard !stopped, !fitsStreamWidth, foreground, !relockPending, resizeTask == nil else { return }
             guard let first = desiredTarget, first != confirmedTarget else { return }
             resizeTask = Task { @MainActor [weak self] in
                 // A lease keepalive already on the wire finishes first, so the two never
                 // overlap: the keepalive is not a geometry change and must not be treated
                 // as one, but it still owns the single in-flight slot while it runs.
                 await self?.keepaliveTask?.value
-                while let self, !Task.isCancelled, !self.stopped, !self.viewOnly, self.foreground,
+                while let self, !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.foreground,
                       let target = self.desiredTarget, target != self.confirmedTarget {
                     // A TRUE quiet window, measured monotonically from the last change.
                     // Comparing two endpoint samples called a sweep that returned to an
@@ -2632,15 +2719,21 @@ struct LiveTerminalView: UIViewRepresentable {
                             continue   // re-read: a newer target may have arrived meanwhile
                         }
                     }
-                    guard !Task.isCancelled, !self.stopped, !self.viewOnly, self.foreground,
+                    guard !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.foreground,
                           self.desiredTarget == target else { continue }
                     self.inflightTarget = target
                     let generation = self.targetGeneration
                     do {
-                        let applied = try await self.client.setPTYSize(
-                            pane: self.paneID, cols: target.cols, rows: target.rows,
-                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
-                            lock: true, viewerID: self.viewerID, ttl: Self.leaseTTLMillis)
+                        guard let applied = try await self.resizeGate.send({
+                            try await self.client.setPTYSize(
+                                pane: self.paneID, cols: target.cols, rows: target.rows,
+                                cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                                lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                        }) else {
+                            self.inflightTarget = nil
+                            self.fallBackIfRefused()
+                            break
+                        }
                         self.inflightTarget = nil
                         self.confirmedTarget = target       // confirmed: OUR request is committed
                         self.responseGeometry = (cols: applied.cols, rows: applied.rows)
@@ -2652,6 +2745,8 @@ struct LiveTerminalView: UIViewRepresentable {
                     } catch {
                         self.inflightTarget = nil
                         if Task.isCancelled { break }
+                        // A host that refuses guest resizing will refuse every retry too.
+                        if self.fallBackIfRefused() { break }
                         // Retry only while this is still the target; a newer one restarts
                         // the loop with its own budget.
                         if self.desiredTarget == target {
@@ -2666,6 +2761,22 @@ struct LiveTerminalView: UIViewRepresentable {
                 // not stomp that newer task.
                 if !Task.isCancelled { self?.resizeTask = nil }
             }
+        }
+
+        /// Once the host has refused resizing for good (`PTYResizeGate` closed), this view stops
+        /// proposing and fits the stream to its width instead. Idempotent; returns whether the
+        /// gate is closed.
+        @discardableResult
+        private func fallBackIfRefused() -> Bool {
+            guard resizeGate.isClosed else { return false }
+            guard !fellBack else { return true }
+            fellBack = true
+            // The retained frame was waiting for a grid that will never be committed.
+            finishPresentation()
+            lastStreamWidthFit = nil
+            fitFontToStreamWidth()
+            onResizeRefused?()
+            return true
         }
 
         /// The daemon answered a request of ours. This records the effective geometry
@@ -2693,8 +2804,8 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         private func beginResizePresentation(reason: PresentationReason) {
-            // View-only only follows the stream: a local presentation would never settle.
-            guard !stopped, foreground, !viewOnly || reason == .server else { return }
+            // Following the stream: a local presentation would never settle.
+            guard !stopped, foreground, !fitsStreamWidth || reason == .server else { return }
             if presentationActive {
                 // A keyboard sweep is still OUR relayout, so it keeps the burst local
                 // for the settled test; only the server's own commit means .server.

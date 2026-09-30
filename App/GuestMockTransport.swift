@@ -6,13 +6,20 @@ import HerdrKit
 /// UI tests. It answers only the guest allowlist; every other method is recorded in
 /// `forbiddenCalls` and refused with `guest_forbidden`, exactly as the host would.
 struct GuestMockTransport: HerdrTransport {
-    enum Scenario: String { case running, paused, blocked }
+    /// `oldHost` is a host older than guest resizing: it refuses `pane.set_pty_size`.
+    enum Scenario: String { case running, paused, blocked, oldHost }
 
     let scenario: Scenario
 
     init(scenario: Scenario) {
         self.scenario = scenario
+        _ = Self.freshGuestSettings
     }
+
+    /// Each launch starts from the guest's default text size, so one test's A+ can't leak
+    /// into the next. Once per process: the view that builds this transport re-renders.
+    private static let freshGuestSettings: Void =
+        UserDefaults.standard.removeObject(forKey: GuestTerminalSize.storageKey)
 
     static let access = GuestAccess(
         guestID: "g-7f2c",
@@ -45,15 +52,22 @@ struct GuestMockTransport: HerdrTransport {
 
     static let allowlist: Set<String> = [
         "ping", "agent.list", "agent.get", "agent.read", "pane.stream", "agent.prompt",
-        "gram.upload_chunk", "gram.post",
+        "gram.upload_chunk", "gram.post", "pane.set_pty_size",
     ]
 
     private static let recorder = CallRecorder()
+    /// The shared agent's PTY: one per process, like the host's, whichever transport value
+    /// a re-rendered view built.
+    private static let pty = MockPTY()
+
+    private func allows(_ method: String) -> Bool {
+        Self.allowlist.contains(method) && !(scenario == .oldHost && method == "pane.set_pty_size")
+    }
 
     func roundTrip(_ requestLine: String) async throws -> String {
         let method = Self.method(of: requestLine)
         let id = Self.requestID(of: requestLine)
-        guard Self.allowlist.contains(method) else {
+        guard allows(method) else {
             Self.recorder.append(method)
             return Self.errorLine(id: id, code: "guest_forbidden", message: "guests can't call \(method)")
         }
@@ -82,6 +96,24 @@ struct GuestMockTransport: HerdrTransport {
             default:
                 return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"gg1","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
             }
+        case "pane.set_pty_size":
+            if scenario == .paused {
+                return Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")
+            }
+            // The host's guest bounds; a lock applies the size (a release changes nothing here)
+            // and needs the guest's stream open on the pane first.
+            let params = Self.object(requestLine)?["params"] as? [String: Any]
+            let lock = params?["lock"] as? Bool ?? false
+            if lock, !Self.pty.hasStream {
+                return Self.errorLine(id: id, code: "guest_no_stream",
+                                      message: "open the agent's stream before resizing it")
+            }
+            if lock, let cols = params?["cols"] as? Int, let rows = params?["rows"] as? Int {
+                Self.pty.resize(cols: min(max(cols, 20), 500), rows: min(max(rows, 5), 300),
+                                redraw: transcript)
+            }
+            let applied = Self.pty.geometry
+            return #"{"id":"\#(id)","result":{"type":"pane_pty_size","pane_id":"\#(Self.access.agentTarget)","cols":\#(applied.cols),"rows":\#(applied.rows),"locked":\#(lock)}}"#
         default:
             return #"{"id":"\#(id)","result":{}}"#
         }
@@ -90,7 +122,7 @@ struct GuestMockTransport: HerdrTransport {
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         let method = Self.method(of: requestLine)
         let id = Self.requestID(of: requestLine)
-        guard Self.allowlist.contains(method) else {
+        guard allows(method) else {
             Self.recorder.append(method)
             let refusal = Self.errorLine(id: id, code: "guest_forbidden", message: "guests can't call \(method)")
             return AsyncThrowingStream { continuation in
@@ -107,37 +139,40 @@ struct GuestMockTransport: HerdrTransport {
                 continuation.finish()
             }
         }
-        let ack = #"{"id":"\#(id)","result":{"type":"stream_started","pane_id":"w1-3","epoch":3,"cols":\#(Self.cols),"rows":\#(Self.rows),"base_seq":0,"resync":true}}"#
-        let reset = #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":3,"cols":\#(Self.cols),"rows":\#(Self.rows),"data_b64":"\#(Data(transcript.utf8).base64EncodedString())"}"#
         // A live stream never ends on its own (an end is a drop the view reconnects from),
         // so hold it open and ping like the daemon does.
+        let transcript = transcript
         return AsyncThrowingStream { continuation in
-            continuation.yield(ack)
-            continuation.yield(reset)
+            let token = UUID()
+            let grid = Self.pty.attach(continuation, token: token)
+            continuation.yield(#"{"id":"\#(id)","result":{"type":"stream_started","pane_id":"w1-3","epoch":3,"cols":\#(grid.cols),"rows":\#(grid.rows),"base_seq":0,"resync":true}}"#)
+            continuation.yield(#"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":3,"cols":\#(grid.cols),"rows":\#(grid.rows),"data_b64":"\#(Data(transcript.utf8).base64EncodedString())"}"#)
             let pings = Task {
-                var seq: UInt64 = 1
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 20_000_000_000)
                     guard !Task.isCancelled else { break }
-                    continuation.yield(#"{"stream":"pane.bytes","frame":"ping","seq":\#(seq),"epoch":3}"#)
-                    seq += 1
+                    continuation.yield(#"{"stream":"pane.bytes","frame":"ping","seq":\#(Self.pty.nextSeq()),"epoch":3}"#)
                 }
             }
-            continuation.onTermination = { _ in pings.cancel() }
+            continuation.onTermination = { _ in
+                pings.cancel()
+                Self.pty.detach(token: token)
+            }
         }
     }
 
     // MARK: - Fixtures
 
-    /// The stream's grid: narrower than the phone, so the view-only fit to width shows.
-    static let cols = 48
+    /// The pane's grid until a guest sizes it: a desktop-wide terminal, far wider than a phone
+    /// (the guest's report: fitted to the width, it was unreadable).
+    static let cols = 120
     static let rows = 30
 
     /// A guest sees a FIXED projection of an agent: exactly these keys, and name, agent and
     /// display_agent may be null. No cwd, titles, workspace, tab or session.
     private var sharedAgentJSON: String {
         let status = switch scenario {
-        case .running: "working"
+        case .running, .oldHost: "working"
         case .paused: "idle"
         case .blocked: "blocked"
         }
@@ -250,6 +285,68 @@ struct GuestMockTransport: HerdrTransport {
             lock.lock()
             stored.append(method)
             lock.unlock()
+        }
+    }
+
+    /// The shared agent's PTY and its one live stream. A locked resize changes the winsize
+    /// and, like the agent's TUI on SIGWINCH, redraws at it: the in-band `resize` frame, then
+    /// the repaint. An unchanged winsize sends nothing, as the host skips a no-op resize.
+    private final class MockPTY: @unchecked Sendable {
+        typealias Continuation = AsyncThrowingStream<String, Error>.Continuation
+        private let lock = NSLock()
+        private var cols = GuestMockTransport.cols
+        private var rows = GuestMockTransport.rows
+        private var seq: UInt64 = 1
+        private var live: (token: UUID, continuation: Continuation)?
+
+        var hasStream: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return live != nil
+        }
+
+        var geometry: (cols: Int, rows: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (cols, rows)
+        }
+
+        func attach(_ continuation: Continuation, token: UUID) -> (cols: Int, rows: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            live = (token, continuation)
+            return (cols, rows)
+        }
+
+        func detach(token: UUID) {
+            lock.lock()
+            if live?.token == token { live = nil }
+            lock.unlock()
+        }
+
+        func nextSeq() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            seq += 1
+            return seq
+        }
+
+        func resize(cols newCols: Int, rows newRows: Int, redraw: String) {
+            lock.lock()
+            guard newCols != cols || newRows != rows else {
+                lock.unlock()
+                return
+            }
+            cols = newCols
+            rows = newRows
+            let resizeSeq = seq + 1
+            seq += 2
+            let continuation = live?.continuation
+            lock.unlock()
+            // Yielded outside the lock: a terminating stream detaches under it.
+            let repaint = Data(("\u{1b}[H\u{1b}[2J" + redraw).utf8).base64EncodedString()
+            continuation?.yield(#"{"stream":"pane.bytes","frame":"resize","seq":\#(resizeSeq),"epoch":3,"cols":\#(newCols),"rows":\#(newRows)}"#)
+            continuation?.yield(#"{"stream":"pane.bytes","frame":"data","seq":\#(resizeSeq + 1),"epoch":3,"data_b64":"\#(repaint)"}"#)
         }
     }
 }
