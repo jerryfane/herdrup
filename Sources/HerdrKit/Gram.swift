@@ -160,3 +160,17 @@ struct GramFileContentResult: Decodable {
         case dataBase64 = "data_base64"
     }
 }
+
+/// `gram.get_file_chunk` result (`type: "gram_file_chunk"`): one bounded range of a file.
+/// `size` is the whole file's, so a downloader knows when it is done.
+struct GramFileChunkResult: Decodable {
+    let name: String
+    let mime: String
+    let size: UInt64
+    let offset: UInt64
+    let dataBase64: String
+    enum CodingKeys: String, CodingKey {
+        case name, mime, size, offset
+        case dataBase64 = "data_base64"
+    }
+}

@@ -33,8 +33,36 @@ public struct GuestAccess: Codable, Equatable, Hashable, Sendable, Identifiable 
     /// The composer placeholder: "Message <agent> as <name>".
     public var composerPlaceholder: String { "Message \(agentName) as \(guestName)" }
 
-    public func transport(identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector()) -> RelayTransport {
-        RelayTransport(endpoint: endpoint, identity: identity, connector: connector)
+    /// `onFeatures` hears what the host advertises in every session's hello reply, so a
+    /// share whose owner turned Gram on (or a host that learned guest push) shows it on
+    /// the next call without a new accept.
+    public func transport(
+        identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
+        onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil
+    ) -> RelayTransport {
+        RelayTransport(endpoint: endpoint, identity: identity, connector: connector, onFeatures: onFeatures)
+    }
+}
+
+/// What a host offers this guest beyond the terminal and composer, from the hello reply's
+/// `features` object. A host older than the object offers neither.
+public struct GuestFeatures: Equatable, Hashable, Sendable {
+    /// The owner shares the agent's Grams with this guest (`share_gram`).
+    public var gram: Bool
+    /// The host takes a guest device's push registration.
+    public var push: Bool
+
+    public static let none = GuestFeatures(gram: false, push: false)
+
+    public init(gram: Bool, push: Bool) {
+        self.gram = gram
+        self.push = push
+    }
+
+    /// Reads `features` from a decoded hello reply; anything missing or not a bool is off.
+    public init(helloReply: [String: Any]) {
+        let features = helloReply["features"] as? [String: Any]
+        self.init(gram: features?["gram"] as? Bool ?? false, push: features?["push"] as? Bool ?? false)
     }
 }
 

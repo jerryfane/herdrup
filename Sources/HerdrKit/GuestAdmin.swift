@@ -78,12 +78,15 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
     public let expiresMs: UInt64?
     /// The guest id that accepted this invite; nil while it is unused.
     public let usedBy: String?
+    /// The guest it makes will see the agent's Grams (`share_gram`). False on a daemon
+    /// that predates Gram sharing.
+    public let shareGram: Bool
 
     public var id: String { inviteID }
 
     public init(inviteID: String, name: String, grant: GuestGrant?, ownerName: String? = nil,
                 machineLabel: String? = nil, createdMs: UInt64? = nil, expiresMs: UInt64? = nil,
-                usedBy: String? = nil) {
+                usedBy: String? = nil, shareGram: Bool = false) {
         self.inviteID = inviteID
         self.name = name
         self.grant = grant
@@ -92,6 +95,7 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
         self.createdMs = createdMs
         self.expiresMs = expiresMs
         self.usedBy = usedBy
+        self.shareGram = shareGram
     }
 
     enum CodingKeys: String, CodingKey {
@@ -102,6 +106,20 @@ public struct GuestInviteRecord: Decodable, Sendable, Equatable, Identifiable {
         case createdMs = "created_ms"
         case expiresMs = "expires_ms"
         case usedBy = "used_by"
+        case shareGram = "share_gram"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        inviteID = try c.decode(String.self, forKey: .inviteID)
+        name = try c.decode(String.self, forKey: .name)
+        grant = try c.decodeIfPresent(GuestGrant.self, forKey: .grant)
+        ownerName = try c.decodeIfPresent(String.self, forKey: .ownerName)
+        machineLabel = try c.decodeIfPresent(String.self, forKey: .machineLabel)
+        createdMs = try c.decodeIfPresent(UInt64.self, forKey: .createdMs)
+        expiresMs = try c.decodeIfPresent(UInt64.self, forKey: .expiresMs)
+        usedBy = try c.decodeIfPresent(String.self, forKey: .usedBy)
+        shareGram = try c.decodeIfPresent(Bool.self, forKey: .shareGram) ?? false
     }
 
     /// Still redeemable: nobody used it and it has not expired.
@@ -124,12 +142,14 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
     public let createdMs: UInt64?
     public let lastSeenMs: UInt64?
     public let revoked: Bool
+    /// The guest sees the agent's Grams and gets pushed for new ones (`share_gram`).
+    public let shareGram: Bool
 
     public var id: String { guestID }
 
     public init(guestID: String, name: String, fingerprint: String? = nil, device: String? = nil,
                 grant: GuestGrant?, createdMs: UInt64? = nil, lastSeenMs: UInt64? = nil,
-                revoked: Bool = false) {
+                revoked: Bool = false, shareGram: Bool = false) {
         self.guestID = guestID
         self.name = name
         self.fingerprint = fingerprint
@@ -138,6 +158,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         self.createdMs = createdMs
         self.lastSeenMs = lastSeenMs
         self.revoked = revoked
+        self.shareGram = shareGram
     }
 
     enum CodingKeys: String, CodingKey {
@@ -145,6 +166,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         case guestID = "guest_id"
         case createdMs = "created_ms"
         case lastSeenMs = "last_seen_ms"
+        case shareGram = "share_gram"
     }
 
     public init(from decoder: Decoder) throws {
@@ -157,6 +179,7 @@ public struct GuestRecord: Decodable, Sendable, Equatable, Identifiable {
         createdMs = try c.decodeIfPresent(UInt64.self, forKey: .createdMs)
         lastSeenMs = try c.decodeIfPresent(UInt64.self, forKey: .lastSeenMs)
         revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
+        shareGram = try c.decodeIfPresent(Bool.self, forKey: .shareGram) ?? false
     }
 }
 
@@ -378,12 +401,14 @@ struct GuestInviteCreateParams: Encodable {
     let machineLabel: String
     let ttlSecs: UInt64?
     let machine: String?
+    let shareGram: Bool
 
     enum CodingKeys: String, CodingKey {
         case target, name, machine
         case ownerName = "owner_name"
         case machineLabel = "machine_label"
         case ttlSecs = "ttl_secs"
+        case shareGram = "share_gram"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -393,6 +418,27 @@ struct GuestInviteCreateParams: Encodable {
         try c.encode(ownerName, forKey: .ownerName)
         try c.encode(machineLabel, forKey: .machineLabel)
         try c.encodeIfPresent(ttlSecs, forKey: .ttlSecs)
+        try c.encodeIfPresent(machine, forKey: .machine)
+        try c.encode(shareGram, forKey: .shareGram)
+    }
+}
+
+/// `guest.update`: change an accepted guest's grant options.
+struct GuestUpdateParams: Encodable {
+    let guestID: String
+    let shareGram: Bool
+    let machine: String?
+
+    enum CodingKeys: String, CodingKey {
+        case machine
+        case guestID = "guest_id"
+        case shareGram = "share_gram"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(guestID, forKey: .guestID)
+        try c.encode(shareGram, forKey: .shareGram)
         try c.encodeIfPresent(machine, forKey: .machine)
     }
 }
