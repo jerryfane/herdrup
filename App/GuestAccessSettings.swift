@@ -168,8 +168,10 @@ struct GuestAccessSection: View {
     @State private var revoking: GuestAccessModel.Person?
     @State private var actionError: String?
     /// Share Gram flipped here and not yet confirmed by a reload, by person id, so the switch
-    /// doesn't snap back while `guest.update` is in flight.
+    /// shows the owner's latest choice while `guest.update` is in flight.
     @State private var shareGramPending: [String: Bool] = [:]
+    /// One `guest.update` per guest at a time; quick flips collapse into the last choice.
+    @State private var shareGramSender = LatestValueSender<String, Bool>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -286,19 +288,29 @@ struct GuestAccessSection: View {
         shareGramPending[person.id] ?? person.guest.shareGram
     }
 
-    /// `guest.update` for one guest, on the machine that holds them.
+    /// `guest.update` for one guest, on the machine that holds them. Flips made while one is in
+    /// flight are sent after it, as the latest choice only, so the daemon ends on the owner's
+    /// last choice; the run that sends them reloads and reports once, at the end.
     private func setShareGram(_ on: Bool, for person: GuestAccessModel.Person) async {
         shareGramPending[person.id] = on
-        defer { shareGramPending[person.id] = nil }
-        do {
-            try await client.guestUpdate(guestID: person.guest.guestID, shareGram: on,
-                                         machine: person.machine.alias)
-        } catch let api as APIError where api.code == "invalid_request" && api.message.contains("unknown variant") {
-            actionError = "Update Herdr on \(person.machine.label) to share Gram."
-        } catch {
-            actionError = GuestAdminError.message(error)
+        var failure: String?
+        let outcome = await shareGramSender.submit(on, for: person.id) { value in
+            do {
+                try await client.guestUpdate(guestID: person.guest.guestID, shareGram: value,
+                                             machine: person.machine.alias)
+                failure = nil
+            } catch let api as APIError where api.code == "invalid_request" && api.message.contains("unknown variant") {
+                failure = "Update Herdr on \(person.machine.label) to share Gram."
+                throw api
+            } catch {
+                failure = GuestAdminError.message(error)
+                throw error
+            }
         }
+        guard case .finished(let failed) = outcome else { return }
         await reload()
+        shareGramPending[person.id] = nil
+        if failed, let failure { actionError = failure }
     }
 
     // MARK: Invites

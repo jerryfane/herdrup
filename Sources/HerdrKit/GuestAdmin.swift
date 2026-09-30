@@ -501,3 +501,50 @@ struct GuestAuditParams: Encodable {
 struct GuestAuditResult: Decodable {
     let entries: [GuestAuditEntry]
 }
+
+/// Sends a setting that the owner can flip faster than the daemon answers (Share Gram per
+/// guest), so the daemon always ends on the owner's last choice. One request per key is in
+/// flight at a time; flips made meanwhile collapse into the newest value, which is sent when
+/// the running request finishes, unless it is already what was sent. Only the call that
+/// started the run gets `.finished`, once, after the final value went out; the calls it
+/// absorbed get `.queued`.
+@MainActor
+public final class LatestValueSender<Key: Hashable, Value: Equatable> {
+    public enum Outcome: Equatable {
+        /// A running request for this key will send the value.
+        case queued
+        /// The last value went out; `failed` says whether the daemon refused it.
+        case finished(failed: Bool)
+    }
+
+    private var desired: [Key: Value] = [:]
+    private var running: Set<Key> = []
+
+    public init() {}
+
+    /// The value the owner last chose for `key` while it is still being sent; nil when idle.
+    public func pending(_ key: Key) -> Value? { desired[key] }
+
+    public func submit(_ value: Value, for key: Key,
+                       send: @escaping @MainActor (Value) async throws -> Void) async -> Outcome {
+        desired[key] = value
+        guard !running.contains(key) else { return .queued }
+        running.insert(key)
+        defer {
+            running.remove(key)
+            desired[key] = nil
+        }
+        var sent: Value?
+        var failed = false
+        while let next = desired[key], next != sent {
+            sent = next
+            do {
+                try await send(next)
+                failed = false
+            } catch {
+                failed = true
+            }
+        }
+        return .finished(failed: failed)
+    }
+}
