@@ -851,32 +851,47 @@ public actor HerdrClient {
         let offset: UInt64
     }
 
-    /// Downloads a message's file in bounded `gram.get_file_chunk` pieces (at most 512 KiB of
-    /// file per reply), so a large file never has to fit in one relay reply. `onProgress`
-    /// reports file bytes received against the file's size after each piece. A piece that
-    /// makes no progress before the end, or a total that differs from the size the host
-    /// named, is an error rather than a short file.
+    /// The host's ceilings: at most 512 KiB of file per `gram.get_file_chunk` reply, and at
+    /// most 100 MiB per attachment.
+    public static let gramMaxChunkBytes = 512 * 1024
+    public static let gramMaxFileBytes = 100 * 1024 * 1024
+
+    /// Downloads a message's file in bounded `gram.get_file_chunk` pieces, so a large file
+    /// never has to fit in one relay reply. `expectedSize` is the size the message listed;
+    /// every piece must name that same size, start at the bytes held so far, carry at most
+    /// `gramMaxChunkBytes`, and never run past the end, all checked before anything is
+    /// appended. A size over `gramMaxFileBytes`, a piece that makes no progress, or a total
+    /// that differs is an error rather than a file. `onProgress` reports file bytes received
+    /// against the size after each piece.
     public func gramGetFileChunked(
-        id: String, onProgress: (@Sendable (Int, Int) -> Void)? = nil
+        id: String, expectedSize: UInt64, onProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> (name: String, mime: String, data: Data) {
+        guard let total = Int(exactly: expectedSize), total <= Self.gramMaxFileBytes else {
+            throw GramError.invalidFileData
+        }
+        // The base64 of a full piece, plus padding.
+        let maxEncoded = (Self.gramMaxChunkBytes + 2) / 3 * 4
         var data = Data()
-        var first: GramFileChunkResult?
-        while true {
+        data.reserveCapacity(total)
+        var name = ""
+        var mime = ""
+        repeat {
             let chunk = try await call("gram.get_file_chunk",
                                        GramGetFileChunkParams(id: id, offset: UInt64(data.count)),
                                        as: GramFileChunkResult.self)
-            guard let bytes = Data(base64Encoded: chunk.dataBase64) else { throw GramError.invalidFileData }
-            if first == nil { first = chunk }
-            guard chunk.size == first?.size, chunk.offset == UInt64(data.count) else {
-                throw GramError.invalidFileData
-            }
+            guard chunk.size == expectedSize, chunk.offset == UInt64(data.count),
+                  chunk.dataBase64.utf8.count <= maxEncoded,
+                  let bytes = Data(base64Encoded: chunk.dataBase64),
+                  !bytes.isEmpty || total == 0,
+                  bytes.count <= Self.gramMaxChunkBytes,
+                  bytes.count <= total - data.count
+            else { throw GramError.invalidFileData }
+            name = chunk.name
+            mime = chunk.mime
             data.append(bytes)
-            onProgress?(data.count, Int(chunk.size))
-            if UInt64(data.count) >= chunk.size { break }
-            if bytes.isEmpty { throw GramError.invalidFileData }
-        }
-        guard let first, UInt64(data.count) == first.size else { throw GramError.invalidFileData }
-        return (first.name, first.mime, data)
+            onProgress?(data.count, total)
+        } while data.count < total
+        return (name, mime, data)
     }
 
     // MARK: - Gram (guest)

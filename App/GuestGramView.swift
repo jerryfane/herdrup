@@ -207,14 +207,15 @@ struct GuestGramList: View {
     /// the in-app viewer (script off unless allowed), anything else in QuickLook, whose share
     /// button saves or sends it.
     private func open(_ message: GuestGramMessage) {
-        guard downloadingID == nil, message.file != nil else { return }
+        guard downloadingID == nil, let file = message.file else { return }
         downloadingID = message.id
         progress = nil
         fileError = nil
         openTask = Task {
             defer { downloadingID = nil; progress = nil }
             do {
-                let (name, mime, data) = try await client.gramGetFileChunked(id: message.id) { received, total in
+                let (name, mime, data) = try await client.gramGetFileChunked(
+                    id: message.id, expectedSize: file.size) { received, total in
                     Task { @MainActor in progress = (received, total) }
                 }
                 if Task.isCancelled { return }

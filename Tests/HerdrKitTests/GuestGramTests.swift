@@ -152,7 +152,8 @@ final class GuestGramTests: XCTestCase {
             let bytes = file[min(offset, file.count)..<min(offset + piece, file.count)]
             return #"{"id":"x","result":{"type":"gram_file_chunk","name":"bench.bin","mime":"application/octet-stream","size":\#(file.count),"sha256":"x","offset":\#(offset),"data_base64":"\#(Data(bytes).base64EncodedString())"}}"#
         }
-        let (name, mime, data) = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m3")
+        let (name, mime, data) = try await HerdrClient(transport: transport)
+            .gramGetFileChunked(id: "m3", expectedSize: UInt64(file.count))
 
         XCTAssertEqual(name, "bench.bin")
         XCTAssertEqual(mime, "application/octet-stream")
@@ -167,11 +168,51 @@ final class GuestGramTests: XCTestCase {
             return #"{"id":"x","result":{"type":"gram_file_chunk","name":"a","mime":"","size":20,"sha256":"x","offset":\#(offset),"data_base64":"\#(bytes.base64EncodedString())"}}"#
         }
         do {
-            _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1")
+            _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1", expectedSize: 20)
             XCTFail("a truncated file must not open")
         } catch GramError.invalidFileData {
         }
         XCTAssertEqual(transport.requests.count, 2, "one empty piece before the end is enough to stop")
+    }
+
+    /// A host answering with a scripted piece at every offset.
+    private func chunkHost(size: String, piece: @escaping (Int) -> Data) -> ScriptedTransport {
+        ScriptedTransport { _, params in
+            let offset = params["offset"] as? Int ?? 0
+            return #"{"id":"x","result":{"type":"gram_file_chunk","name":"a","mime":"","size":\#(size),"sha256":"x","offset":\#(offset),"data_base64":"\#(piece(offset).base64EncodedString())"}}"#
+        }
+    }
+
+    private func assertRejected(_ transport: ScriptedTransport, expectedSize: UInt64, requests: Int,
+                                _ why: String, line: UInt = #line) async {
+        do {
+            _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1", expectedSize: expectedSize)
+            XCTFail("\(why): the file must not open", line: line)
+        } catch GramError.invalidFileData {
+        } catch {
+            XCTFail("\(why): unexpected \(error)", line: line)
+        }
+        XCTAssertEqual(transport.requests.count, requests, why, line: line)
+    }
+
+    /// Review P2: the download holds the host to the listed size and the host's ceilings,
+    /// before appending anything, and a huge size can't trap.
+    func testChunkedDownloadEnforcesTheListedSizeAndTheCeilings() async {
+        let maxFile = UInt64(HerdrClient.gramMaxFileBytes)
+        let maxPiece = HerdrClient.gramMaxChunkBytes
+
+        await assertRejected(chunkHost(size: "\(maxFile + 1)") { _ in Data([1]) },
+                             expectedSize: maxFile + 1, requests: 0, "a listed size over 100 MiB isn't fetched")
+        await assertRejected(chunkHost(size: "\(UInt64.max)") { _ in Data([1]) },
+                             expectedSize: UInt64.max, requests: 0, "an absurd size neither traps nor fetches")
+        await assertRejected(chunkHost(size: "\(UInt64.max)") { _ in Data([1]) },
+                             expectedSize: 10, requests: 1, "the host's size must be the listed one")
+        await assertRejected(chunkHost(size: "2000000") { _ in Data(repeating: 7, count: maxPiece + 1) },
+                             expectedSize: 2_000_000, requests: 1, "a piece over 512 KiB is refused")
+        await assertRejected(chunkHost(size: "10") { _ in Data(repeating: 7, count: 11) },
+                             expectedSize: 10, requests: 1, "a piece can't run past the end")
+        await assertRejected(chunkHost(size: "10") { offset in Data(repeating: 7, count: offset == 0 ? 6 : 5) },
+                             expectedSize: 10, requests: 2, "the second piece would overflow the file")
     }
 
     // MARK: Push routing
