@@ -906,7 +906,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// `LiveTerminalView.fitsStreamWidth`). Refreshed every pass.
         var hostFitsStreamWidth = false
         /// Closed by the host's first `guest_forbidden` answer to a resize; see `PTYResizeGate`.
-        private var resizeGate = PTYResizeGate()
+        /// Every `set_pty_size` this view sends goes through it, including the teardown release.
+        private let resizeGate = PTYResizeGate()
+        /// Set once this view has reacted to the gate closing (`fallBackIfRefused`).
+        private var fellBack = false
         /// See `LiveTerminalView.onResizeRefused`. Refreshed by `updateUIView`.
         var onResizeRefused: (() -> Void)?
         /// This view never sizes the PTY: the stream's grid is authoritative and its cols are
@@ -2080,6 +2083,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // re-lock — which awaits only the newest entry — could send lock:true before that older
             // lock:false lands, leaving the visible pane unlocked.
             let previous = Self.geometryReleaseTask[pane]
+            let gate = self.resizeGate
             Self.geometryReleaseTask[pane] = Task.detached {
                 await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
@@ -2090,10 +2094,14 @@ struct LiveTerminalView: UIViewRepresentable {
                 // generation, `setForeground(true)` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
-                _ = try? await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false, viewerID: viewerID)
+                // Through the gate, deciding NOW: the in-flight lock:true awaited above may have
+                // just been refused, and a refused host must not be asked again.
+                _ = try? await gate.send {
+                    try await client.setPTYSize(pane: pane, cols: cols, rows: rows, lock: false, viewerID: viewerID)
+                }
                 // Best-effort: drop our own registry entry once settled (no newer show/hide/attach
-                // bumped the generation). This only runs when the release actually SENT; a release
-                // that bailed on the generation guard above leaves the entry for the newer owner
+                // bumped the generation). This only runs once past the generation guard (sent, or
+                // withheld by a closed gate); a release that bailed on that guard leaves the entry for the newer owner
                 // (which is correct — clearing it there could clobber a live newer release). So the
                 // map holds at most one entry per pane id, overwritten by the next release.
                 await MainActor.run {
@@ -2303,6 +2311,14 @@ struct LiveTerminalView: UIViewRepresentable {
                     // Nothing unsettled: no drain, no request in flight, no target waiting
                     // to be sent, and no resize on screen. A keepalive must never overtake
                     // or duplicate a real geometry change.
+                    // A target that was never confirmed (its drain gave up, e.g. the resize raced
+                    // the stream's open) is retried here rather than waiting for a relayout.
+                    if !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
+                       self.desiredTarget != nil, self.desiredTarget != self.confirmedTarget {
+                        self.resizeRetries = 0
+                        self.startGeometryDrain()
+                        continue
+                    }
                     guard !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
                           self.inflightTarget == nil, !self.presentationActive,
                           let target = self.confirmedTarget, self.desiredTarget == target,
@@ -2310,12 +2326,14 @@ struct LiveTerminalView: UIViewRepresentable {
                     let task = Task { @MainActor [weak self] in
                         guard let self, !self.stopped, !self.fitsStreamWidth, self.foreground else { return }
                         do {
-                            _ = try await self.client.setPTYSize(
-                                pane: self.paneID, cols: target.cols, rows: target.rows,
-                                cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
-                                lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                            _ = try await self.resizeGate.send {
+                                try await self.client.setPTYSize(
+                                    pane: self.paneID, cols: target.cols, rows: target.rows,
+                                    cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                                    lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                            }
                         } catch {
-                            self.noteResizeFailure(error)
+                            self.fallBackIfRefused()
                         }
                     }
                     self.keepaliveTask = task
@@ -2360,6 +2378,12 @@ struct LiveTerminalView: UIViewRepresentable {
             case .started(let started):
                 // Align the emulator to the pane's real geometry the ack carries.
                 applyStreamGeometry(cols: started.cols, rows: started.rows, in: view)
+                // A resize that raced this stream's open (a guest's needs the stream registered)
+                // gave up unconfirmed; now that the stream exists, send it again.
+                if resizeTask == nil, desiredTarget != nil, desiredTarget != confirmedTarget {
+                    resizeRetries = 0
+                    startGeometryDrain()
+                }
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, _):
@@ -2700,10 +2724,16 @@ struct LiveTerminalView: UIViewRepresentable {
                     self.inflightTarget = target
                     let generation = self.targetGeneration
                     do {
-                        let applied = try await self.client.setPTYSize(
-                            pane: self.paneID, cols: target.cols, rows: target.rows,
-                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
-                            lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                        guard let applied = try await self.resizeGate.send({
+                            try await self.client.setPTYSize(
+                                pane: self.paneID, cols: target.cols, rows: target.rows,
+                                cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                                lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                        }) else {
+                            self.inflightTarget = nil
+                            self.fallBackIfRefused()
+                            break
+                        }
                         self.inflightTarget = nil
                         self.confirmedTarget = target       // confirmed: OUR request is committed
                         self.responseGeometry = (cols: applied.cols, rows: applied.rows)
@@ -2716,7 +2746,7 @@ struct LiveTerminalView: UIViewRepresentable {
                         self.inflightTarget = nil
                         if Task.isCancelled { break }
                         // A host that refuses guest resizing will refuse every retry too.
-                        if self.noteResizeFailure(error) { break }
+                        if self.fallBackIfRefused() { break }
                         // Retry only while this is still the target; a newer one restarts
                         // the loop with its own budget.
                         if self.desiredTarget == target {
@@ -2733,12 +2763,14 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
-        /// Records a failed resize. When it is the host's permanent refusal (`PTYResizeGate`),
-        /// this view stops proposing for good and fits the stream to its width instead.
-        /// Returns whether it was that refusal.
+        /// Once the host has refused resizing for good (`PTYResizeGate` closed), this view stops
+        /// proposing and fits the stream to its width instead. Idempotent; returns whether the
+        /// gate is closed.
         @discardableResult
-        private func noteResizeFailure(_ error: Error) -> Bool {
-            guard resizeGate.noteFailure(error) else { return false }
+        private func fallBackIfRefused() -> Bool {
+            guard resizeGate.isClosed else { return false }
+            guard !fellBack else { return true }
+            fellBack = true
             // The retained frame was waiting for a grid that will never be committed.
             finishPresentation()
             lastStreamWidthFit = nil

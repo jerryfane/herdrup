@@ -100,9 +100,14 @@ struct GuestMockTransport: HerdrTransport {
             if scenario == .paused {
                 return Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")
             }
-            // The host's guest bounds; a lock applies the size (a release changes nothing here).
+            // The host's guest bounds; a lock applies the size (a release changes nothing here)
+            // and needs the guest's stream open on the pane first.
             let params = Self.object(requestLine)?["params"] as? [String: Any]
             let lock = params?["lock"] as? Bool ?? false
+            if lock, !Self.pty.hasStream {
+                return Self.errorLine(id: id, code: "guest_no_stream",
+                                      message: "open the agent's stream before resizing it")
+            }
             if lock, let cols = params?["cols"] as? Int, let rows = params?["rows"] as? Int {
                 Self.pty.resize(cols: min(max(cols, 20), 500), rows: min(max(rows, 5), 300),
                                 redraw: transcript)
@@ -293,6 +298,12 @@ struct GuestMockTransport: HerdrTransport {
         private var rows = GuestMockTransport.rows
         private var seq: UInt64 = 1
         private var live: (token: UUID, continuation: Continuation)?
+
+        var hasStream: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return live != nil
+        }
 
         var geometry: (cols: Int, rows: Int) {
             lock.lock()
