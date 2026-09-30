@@ -61,6 +61,11 @@ struct GuestPaneView: View {
     @State private var findMatches: (Int, Int) = (0, 0)
     @FocusState private var findFocused: Bool
     @StateObject private var composerKeyboard = ComposerKeyboard()
+    /// The guest's own terminal text size (A− / A+), separate from the owner's setting.
+    @AppStorage(GuestTerminalSize.storageKey) private var terminalFontSize = GuestTerminalSize.defaultPoints
+    /// The host refused guest resizing (an older host): for the rest of this session the
+    /// terminal fits the agent's grid to the width and the size controls are gone.
+    @State private var resizeRefused = false
     #if DEBUG
     @State private var forbiddenProbe = ""
     #endif
@@ -136,6 +141,9 @@ struct GuestPaneView: View {
             statusPill
             SharedByChip(owner: access.ownerName)
             Spacer(minLength: 0)
+            if !resizeRefused && (availability == .running || availability == .connecting) {
+                textSizeControls
+            }
         }
         .padding(.horizontal, 16)
         .frame(height: 44)
@@ -169,6 +177,33 @@ struct GuestPaneView: View {
         availability == .running && AgentStatus(wire: agent?.agentStatus).isBlocked
     }
 
+    /// A− / A+: the guest's text size. The terminal proposes the grid that fits at that size,
+    /// so the agent's terminal is resized to it (for the owner's screens too).
+    private var textSizeControls: some View {
+        HStack(spacing: 2) {
+            textSizeButton("textformat.size.smaller", label: "Smaller text", id: "guest-font-decrease",
+                           enabled: terminalFontSize > GuestTerminalSize.range.lowerBound, taps: -1)
+            textSizeButton("textformat.size.larger", label: "Larger text", id: "guest-font-increase",
+                           enabled: terminalFontSize < GuestTerminalSize.range.upperBound, taps: 1)
+        }
+    }
+
+    private func textSizeButton(_ symbol: String, label: String, id: String, enabled: Bool,
+                                taps: Int) -> some View {
+        Button {
+            terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: taps)
+        } label: {
+            Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(enabled ? Palette.text : Palette.textFaint)
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+
     // MARK: - Terminal
 
     private var findRequest: FindRequest? {
@@ -183,7 +218,10 @@ struct GuestPaneView: View {
             if availability == .connecting || availability == .running {
                 LiveTerminalView(
                     client: client, paneID: access.agentTarget, viewOnly: true,
+                    fitsStreamWidth: resizeRefused,
+                    onResizeRefused: { resizeRefused = true },
                     onStreamEnded: streamEnded,
+                    fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
                     findRequest: findRequest,
                     onFindResult: { index, total in findMatches = (index, total) })
@@ -253,7 +291,8 @@ struct GuestPaneView: View {
                     .accessibilityIdentifier("guest-blocked-banner")
             } else if availability == .running || availability == .connecting {
                 Image(systemName: "eye").font(.system(size: 12, weight: .semibold))
-                Text("Terminal is view-only · send messages below")
+                Text(resizeRefused ? "View-only · this host doesn't support guest resizing"
+                                   : "Terminal is view-only · send messages below")
                     .accessibilityIdentifier("guest-view-only-note")
             }
         }

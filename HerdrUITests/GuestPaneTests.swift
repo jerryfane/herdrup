@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 /// The guest's pane, against GuestMockTransport (a host that refuses anything a guest may
@@ -5,6 +6,10 @@ import XCTest
 final class GuestPaneTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
+    override func tearDown() {
+        XCUIDevice.shared.orientation = .portrait
+        super.tearDown()
+    }
 
     private func launch(_ mock: String) -> XCUIApplication {
         let app = XCUIApplication()
@@ -26,8 +31,116 @@ final class GuestPaneTests: XCTestCase {
         add(attachment)
     }
 
+    /// The terminal's `terminal-grid-probe`: "cols=C rows=R font=F fill=X".
+    private func grid(_ app: XCUIApplication) -> (cols: Int, font: Double, fill: Double)? {
+        let probe = app.descendants(matching: .any)["terminal-grid-probe"]
+        guard probe.exists else { return nil }
+        var fields: [String: String] = [:]
+        for pair in probe.label.split(separator: " ") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 { fields[String(kv[0])] = String(kv[1]) }
+        }
+        guard let cols = fields["cols"].flatMap({ Int($0) }),
+              let font = fields["font"].flatMap({ Double($0) }),
+              let fill = fields["fill"].flatMap({ Double($0) }) else { return nil }
+        return (cols, font, fill)
+    }
+
+    /// Polls the grid probe until `condition` holds; fails with the last reading otherwise.
+    @discardableResult
+    private func waitForGrid(_ app: XCUIApplication, _ what: String, timeout: TimeInterval = 10,
+                             _ condition: ((cols: Int, font: Double, fill: Double)) -> Bool)
+        -> (cols: Int, font: Double, fill: Double) {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last = grid(app)
+        while Date() < deadline {
+            if let reading = last, condition(reading) { return reading }
+            Thread.sleep(forTimeInterval: 0.25)
+            last = grid(app)
+        }
+        XCTFail("\(what): last grid \(String(describing: last))")
+        return last ?? (0, 0, 0)
+    }
+
+    /// Reported by the guest: fitted to a desktop-wide terminal, the text was unreadable and
+    /// could not be changed. The guest's terminal now proposes the grid that fits its own text
+    /// size, and A+ makes that grid narrower; the agent's stream follows, still without the
+    /// terminal taking any input.
+    func testLargerTextResizesTheAgentsTerminal() {
+        let app = launch("guestpane")
+        let terminal = app.descendants(matching: .any)["guest-terminal"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        // The mock host's pane starts 120 columns wide; the guest's first proposal replaces it
+        // with the grid that fits the guest's screen at the default text size.
+        let before = waitForGrid(app, "the guest's fit should replace the desktop's 120 columns") {
+            $0.cols != 120 && $0.font == 12.5 && $0.fill <= 1.0
+        }
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(app, "guest-resize-before")
+
+        let larger = app.buttons["guest-font-increase"]
+        XCTAssertTrue(larger.waitForExistence(timeout: 5), "the guest pane should offer A+")
+        larger.tap()
+        let after = waitForGrid(app, "A+ should make the agent's grid narrower") {
+            $0.cols < before.cols && $0.font > before.font
+        }
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(app, "guest-resize-after")
+
+        app.buttons["guest-font-decrease"].tap()
+        waitForGrid(app, "A− should widen the agent's grid again") {
+            $0.cols > after.cols && $0.font < after.font
+        }
+        XCTAssertEqual(app.keyboards.count, 0, "resizing must not raise a keyboard")
+        XCTAssertEqual(forbiddenCalls(app), "", "resizing is a call a guest may make")
+    }
+
+    /// A guest on iPad re-proposes when the pane's width changes, as the owner's pane does.
+    func testRotationReproposesTheGuestsGrid() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("iPhone is portrait-only; rotation re-proposes on iPad")
+        }
+        let app = launch("guestpane")
+        let portrait = waitForGrid(app, "the guest's first fit") { $0.cols != 120 }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        waitForGrid(app, "landscape should propose a wider grid") { $0.cols > portrait.cols }
+        attachScreenshot(app, "guest-resize-landscape")
+    }
+
+    /// A host older than guest resizing refuses `pane.set_pty_size` with `guest_forbidden`. The
+    /// pane keeps today's fit-to-width view, drops the size controls, and never asks again:
+    /// not on a retry, not on a relayout.
+    func testOldHostKeepsTheFitToWidthViewAndStopsProposing() {
+        let app = launch("guestoldhost")
+        let terminal = app.descendants(matching: .any)["guest-terminal"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["View-only · this host doesn't support guest resizing"]
+            .waitForExistence(timeout: 10), "the pane should say why the size can't change")
+        XCTAssertFalse(app.buttons["guest-font-increase"].exists, "no size controls on an older host")
+        XCTAssertFalse(app.buttons["guest-font-decrease"].exists, "no size controls on an older host")
+        // Fitted: the widest whole-pixel cell that keeps all 120 columns inside the width.
+        let fitsWidth = { (reading: (cols: Int, font: Double, fill: Double)) -> Bool in
+            let slack = Double(reading.cols) / Double(UIScreen.main.scale * terminal.frame.width)
+            return reading.cols == 120 && reading.fill <= 1.0 && reading.fill > 1.0 - slack
+        }
+        waitForGrid(app, "the host's 120 columns should fill the width", fitsWidth)
+        // Anything that would re-propose: a rotation on iPad, a keyboard raising and dropping.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        Thread.sleep(forTimeInterval: 1.5)
+        XCUIDevice.shared.orientation = .portrait
+        let input = app.textViews["guest-composer-input"]
+        input.tap()
+        Thread.sleep(forTimeInterval: 1)
+        if app.buttons["guest-keyboard-button"].exists { app.buttons["guest-keyboard-button"].tap() }
+        Thread.sleep(forTimeInterval: 3)
+        waitForGrid(app, "the fallback should still fit the width", fitsWidth)
+        attachScreenshot(app, "guest-resize-old-host")
+        XCTAssertEqual(forbiddenCalls(app), "pane.set_pty_size",
+                       "one refusal, then no further set_pty_size calls")
+    }
+
     /// Watching never sends anything a guest may not send: no keyboard from the terminal, no
-    /// quick keys, no size proposals, and a sent message goes out as a prompt.
+    /// quick keys, and a sent message goes out as a prompt.
     func testTerminalIsViewOnly() {
         let app = launch("guestpane")
 

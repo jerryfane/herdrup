@@ -529,10 +529,11 @@ struct RootView: View {
             } else {
                 ConnectView { _ in }
             }
-        case .guestPane, .guestPaused, .guestBlocked:
+        case .guestPane, .guestPaused, .guestBlocked, .guestOldHost:
             GuestPaneView(
                 client: HerdrClient(transport: GuestMockTransport(
-                    scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked : .running)),
+                    scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked
+                        : mode == .guestOldHost ? .oldHost : .running)),
                 access: GuestMockTransport.access,
                 onClose: {})
         }
@@ -8594,7 +8595,7 @@ struct HtmlPreviewHarness: View {
 
 enum ScreenshotMock {
     case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
-    case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestSettings
+    case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost, guestSettings
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
     // The home list's live status stream: an events_v2 daemon, and an older one.
@@ -8656,6 +8657,8 @@ enum ScreenshotMock {
         case "guestpane": return .guestPane
         case "guestpaused": return .guestPaused
         case "guestblocked": return .guestBlocked
+        // A host older than guest resizing: it refuses the guest's `pane.set_pty_size`.
+        case "guestoldhost": return .guestOldHost
         case "guestsettings": return .guestSettings
         default: return .list
         }
