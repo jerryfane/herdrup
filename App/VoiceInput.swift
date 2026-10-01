@@ -170,17 +170,12 @@ final class SpeechDictator: ObservableObject {
         let gen = generation
         accumulator.begin(segment: gen)
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            // Read the result here, on the recognizer's queue: the clock reading is when it
-            // arrived (a pause shows up as the gap since the last change), and only plain
-            // values hop to the main actor.
-            let now = ProcessInfo.processInfo.systemUptime
+            // Read the result here, on the recognizer's queue, so only plain values hop to the
+            // main actor.
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
-            // On-device recognition marks the result that completes an utterance with
-            // metadata, then restarts `bestTranscription` for the next one.
-            let utteranceEnded = result?.speechRecognitionMetadata != nil
-            // Where the words sit in this task's audio: decides whether the result revises
-            // the text shown, covers it all, or follows it as a new utterance.
+            // Where the words sit in this task's audio: lets the accumulator tell a result
+            // that starts after the text shown from one that re-transcribes it.
             let audio = result.flatMap { r in
                 TranscriptAccumulator.audio(
                     ofSegments: r.bestTranscription.segments.map { ($0.timestamp, $0.duration) }
@@ -192,10 +187,7 @@ final class SpeechDictator: ObservableObject {
                 // Apply the result first: a callback can carry the last partial AND the error
                 // that ended the task.
                 if let text {
-                    self.accumulator.result(
-                        text, segment: gen, isFinal: isFinal, utteranceEnded: utteranceEnded,
-                        audio: audio, at: now
-                    )
+                    self.accumulator.result(text, segment: gen, isFinal: isFinal, audio: audio)
                 }
                 // A task that failed without a final keeps what it showed.
                 if failed { self.accumulator.end(segment: gen) }

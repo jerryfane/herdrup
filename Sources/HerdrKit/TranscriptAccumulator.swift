@@ -7,32 +7,24 @@ import Foundation
 /// every callback, and that string is not monotonic:
 /// - On-device (iOS 18+), after a pause the task starts a new utterance and
 ///   `bestTranscription` restarts from the new words, with no `isFinal` for the earlier
-///   ones; its final result then holds only the last utterance. Taking the latest string
-///   as the segment's text deletes everything said before the pause.
+///   ones; its final result then holds only the last utterance.
+/// - Otherwise, and in some finals, a result covers the whole task so far.
+/// - The recognizer revises recent words as it goes, and a settled result can rewrite or
+///   drop some of them.
 /// - The driver rolls each task over before the ~1-minute ceiling: the rolled task still
 ///   owes its final (the tail it recognised after the swap) while the next one runs.
-/// - Within an utterance the recognizer revises recent words; those revisions must
-///   REPLACE the earlier text, not repeat it.
+///
+/// One invariant covers all of these: shown words are replaced only by a result that
+/// demonstrably re-transcribes them; any other result is a new utterance and is appended.
+/// Losing words is never acceptable; a rare repeat is the lesser harm.
 ///
 /// The driver reports each recognition task as a segment (`begin`), every result for it
 /// (`result`), a task that died without a final (`end`) and the session's end
-/// (`finish`). Each segment keeps the utterances a restart superseded plus the current
-/// one; segments stay in dictation order, so a rolled segment's late final replaces its
-/// own provisional text in place.
-///
-/// Where a result's words sit in the task's audio decides what it replaces: it
-/// transcribes everything from its first word on, so utterances that ended before that
-/// stay and the rest give way to it. A cumulative result starts with the task's first
-/// word; a restarted one starts after the pause. Only when timing is missing or
-/// inconsistent do the words themselves decide (see `Words.startsNewUtterance`).
+/// (`finish`). Each segment holds its utterances in order; segments stay in dictation
+/// order, so a rolled segment's late final lands in place.
 ///
 /// Pure value type: no Speech/AVFoundation dependency, so it is unit-testable off-device.
 public struct TranscriptAccumulator: Equatable, Sendable {
-    /// Silence (seconds since the current utterance's text last changed) after which a
-    /// result that does not continue it is read as a new utterance rather than a revision.
-    /// The recognizer only restarts after a pause, while it revises as words arrive.
-    public static let pauseGap: TimeInterval = 1.0
-
     /// Text of segments that are finished, and of every segment before them.
     private var done = ""
     /// Live segments in dictation order: the active one last, rolled ones before it.
@@ -51,30 +43,21 @@ public struct TranscriptAccumulator: Equatable, Sendable {
         segments.append(Segment(id: id))
     }
 
-    /// A recognition result for segment `id`. `utteranceEnded` is true when the recognizer
-    /// marked this result as a complete utterance (it carries
-    /// `speechRecognitionMetadata`); `audio` is where the result's words sit in the task's
-    /// audio (see `audio(ofSegments:)`), nil when unknown; `time` is a monotonic clock
-    /// reading in seconds. Results for an unknown or finished segment are ignored.
+    /// A recognition result for segment `id`. `audio` is where the result's words sit in
+    /// the task's audio (see `audio(ofSegments:)`), nil when unknown. Results for an
+    /// unknown or finished segment are ignored.
     public mutating func result(
-        _ text: String, segment id: Int, isFinal: Bool, utteranceEnded: Bool,
-        audio: ClosedRange<TimeInterval>?, at time: TimeInterval
+        _ text: String, segment id: Int, isFinal: Bool, audio: ClosedRange<TimeInterval>?
     ) {
         guard let i = segments.firstIndex(where: { $0.id == id }), !segments[i].finished else { return }
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isFinal {
-            segments[i].settle(final: t, audio: audio)
-            close(at: i)
-        } else {
-            segments[i].observe(t, audio: audio, ended: utteranceEnded, at: time)
-        }
+        segments[i].take(text.trimmingCharacters(in: .whitespacesAndNewlines), audio: audio)
+        if isFinal { close(at: i) }
     }
 
     /// The stretch of a task's audio a transcription covers, from its words' timing
     /// (`SFTranscriptionSegment.timestamp` and `duration`, seconds from the task's start):
     /// the first word's start to the last word's end. Nil when there are no words or the
-    /// timing isn't real — the recognizer can leave it zeroed — so results without it fall
-    /// back to comparing words.
+    /// timing isn't real — the recognizer can leave it zeroed.
     public static func audio(
         ofSegments words: [(timestamp: TimeInterval, duration: TimeInterval)]
     ) -> ClosedRange<TimeInterval>? {
@@ -117,165 +100,146 @@ public struct TranscriptAccumulator: Equatable, Sendable {
         parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    /// One recognition task's text: utterances a restart superseded, then the current one.
+    /// One recognition task's utterances, in order.
     struct Segment: Equatable, Sendable {
         struct Utterance: Equatable, Sendable {
-            var text: String
-            var audio: ClosedRange<TimeInterval>?
+            let text: String
+            let words: [String]
+            let audio: ClosedRange<TimeInterval>?
         }
 
         let id: Int
         var utterances: [Utterance] = []
-        /// The current utterance's latest text, and where it sits in the task's audio.
-        var partial = ""
-        var partialAudio: ClosedRange<TimeInterval>?
-        /// When `partial` last changed.
-        var changedAt: TimeInterval = 0
-        /// The recognizer marked `partial` as a complete utterance.
-        var ended = false
         var finished = false
 
-        var text: String { TranscriptAccumulator.join(utterances.map(\.text) + [partial]) }
+        var text: String { TranscriptAccumulator.join(utterances.map(\.text)) }
 
-        mutating func observe(
-            _ t: String, audio: ClosedRange<TimeInterval>?, ended isEnd: Bool, at time: TimeInterval
-        ) {
-            if !t.isEmpty {
-                let gap = time - changedAt
-                if t != partial { changedAt = time }
-                if !place(t, audio: audio) {
-                    if Words.startsNewUtterance(after: partial, next: t, ended: ended, gap: gap) {
-                        utterances.append(Utterance(text: partial, audio: partialAudio))
-                    }
-                    partial = t
-                    partialAudio = audio
+        /// Take a result: it replaces the utterances it re-transcribes, or follows them.
+        mutating func take(_ text: String, audio: ClosedRange<TimeInterval>?) {
+            let words = Words.normalized(text)
+            // An empty result keeps the text it would otherwise erase.
+            guard !words.isEmpty else { return }
+            let from = retranscribed(by: words, audio: audio)
+            utterances.replaceSubrange(from..., with: [Utterance(text: text, words: words, audio: audio)])
+        }
+
+        /// The first of the utterances a result re-transcribes; `utterances.count` when it
+        /// re-transcribes none.
+        ///
+        /// A result always starts at an utterance's start, so the candidates are the runs
+        /// from each utterance to the last. A run is re-transcribed when the result starts
+        /// with the run's first word, brings back at least one of its words unchanged, and
+        /// in order re-transcribes at least 2/3 of its words (`Words.aligned`): a settled
+        /// result rewrites or drops a few. When timing shows the result starting with the
+        /// run's audio, half (and at least two words) is enough. The best-agreeing run is
+        /// replaced, the longer one on a tie.
+        ///
+        /// Timing only ever keeps words: a run whose first utterance ended before the
+        /// result's first word began is not re-transcribed by it, whatever its words.
+        func retranscribed(by result: [String], audio: ClosedRange<TimeInterval>?) -> Int {
+            var best = utterances.count
+            var bestAligned = 0, bestCount = 1
+            for k in utterances.indices {
+                var startsWithRun = false
+                if let audio, let first = utterances[k].audio {
+                    if first.upperBound <= audio.lowerBound { continue }
+                    startsWithRun = audio.lowerBound <= first.lowerBound
+                }
+                let run = utterances[k...].flatMap(\.words)
+                guard let aligned = Words.aligned(run, with: result) else { continue }
+                let agrees = aligned * 3 >= run.count * 2
+                    || (startsWithRun && aligned >= 2 && aligned * 2 >= run.count)
+                guard agrees else { continue }
+                if best == utterances.count || aligned * bestCount > bestAligned * run.count {
+                    best = k
+                    bestAligned = aligned
+                    bestCount = run.count
                 }
             }
-            // An empty result keeps the text it would otherwise erase.
-            if !partial.isEmpty { ended = isEnd }
-        }
-
-        mutating func settle(final f: String, audio: ClosedRange<TimeInterval>?) {
-            let fw = Words(f)
-            // An empty final keeps what was shown.
-            guard !fw.isEmpty else { return }
-            defer { ended = true }
-            if place(f, audio: audio) { return }
-            // Without timing: a cumulative final (the whole task's text, as before iOS 18)
-            // after a restart was taken for the earlier words: it supersedes them rather
-            // than repeating them. Only a final that is every kept utterance followed by the
-            // current one is one; a final holding just the last utterance leaves them be,
-            // even when that utterance starts with the same words.
-            let kept = Words(TranscriptAccumulator.join(utterances.map(\.text))).joined
-            let current = Words(partial).words.first ?? ""
-            if !kept.isEmpty, fw.joined.hasPrefix(kept),
-               case let rest = fw.joined.dropFirst(kept.count), !rest.isEmpty, rest.hasPrefix(current) {
-                utterances = []
-            } else if ended, Words.startsNewUtterance(after: partial, next: f, ended: true, gap: 0) {
-                // Otherwise the final is the settled text of the utterance on screen, however
-                // much it rewrote it, unless that utterance was already marked complete.
-                utterances.append(Utterance(text: partial, audio: partialAudio))
-            }
-            partial = f
-            partialAudio = audio
-        }
-
-        /// Place a result by where its audio STARTS: it transcribes everything from its first
-        /// word on, so it replaces the utterances that hadn't ended by then and keeps those
-        /// before — however early it ends, since a settled result can drop trailing words.
-        /// Returns false, deciding nothing, when the result or any utterance shown lacks
-        /// timing, or when the clock may have restarted: a result starting with all the audio
-        /// it would replace yet sharing none of its leading words is a new utterance timed
-        /// from zero as far as anyone can tell, so the words decide.
-        private mutating func place(_ t: String, audio: ClosedRange<TimeInterval>?) -> Bool {
-            guard let audio else { return false }
-            var shown = utterances
-            if !partial.isEmpty { shown.append(Utterance(text: partial, audio: partialAudio)) }
-            let spans = shown.compactMap(\.audio)
-            guard spans.count == shown.count else { return false }
-            let kept = spans.prefix(while: { $0.upperBound <= audio.lowerBound }).count
-            if kept < spans.count, audio.lowerBound <= spans[kept].lowerBound {
-                let replaced = Words(TranscriptAccumulator.join(shown[kept...].map(\.text)))
-                guard Words(t).rewrites(replaced) else { return false }
-            }
-            utterances = Array(shown.prefix(kept))
-            partial = t
-            partialAudio = audio
-            return true
+            return best
         }
     }
 }
 
-/// Normalized words for comparing recognizer results: case, punctuation and the
-/// recognizer's formatting changes don't count as different words.
-struct Words: Equatable {
-    let words: [String]
-    /// The words run together, so a result that extends a word or a script written
-    /// without spaces still reads as a continuation.
-    let joined: String
-
-    init(_ s: String) {
-        words = s.lowercased()
+/// Words compared across recognizer results: case, punctuation and formatting don't
+/// count, and a word the recognizer revised to a similar one still lines up.
+enum Words {
+    static func normalized(_ s: String) -> [String] {
+        s.lowercased()
             .split(whereSeparator: { $0.isWhitespace })
             .map { String($0.unicodeScalars.filter(CharacterSet.alphanumerics.contains).map(Character.init)) }
             .filter { !$0.isEmpty }
-        joined = words.joined()
     }
 
-    var count: Int { words.count }
-    var isEmpty: Bool { words.isEmpty }
-
-    func commonPrefix(with other: Words) -> Int {
-        zip(words, other.words).prefix(while: { $0 == $1 }).count
+    /// How many of `run`'s words `result` re-transcribes, in order, or nil when it doesn't
+    /// start with the run's first word, or when nothing but slips line up: a result
+    /// re-transcribes words only if at least one of them comes back as the same word.
+    static func aligned(_ run: [String], with result: [String]) -> Int? {
+        guard let a = run.first, let b = result.first, similar(a, b),
+              run.contains(where: { w in result.contains { same(w, $0) } }) else { return nil }
+        return 1 + commonSubsequence(run.dropFirst(), result.dropFirst())
     }
 
-    /// Whether `self` reads as a rewrite of `other` rather than different speech: it keeps
-    /// the first word, or one run-together text starts with the other (scripts without
-    /// spaces, where a whole phrase is one "word").
-    func rewrites(_ other: Words) -> Bool {
-        guard !isEmpty, !other.isEmpty else { return false }
-        return commonPrefix(with: other) >= 1 || joined.hasPrefix(other.joined) || other.joined.hasPrefix(joined)
-    }
-
-    /// Whether `next` starts a new utterance after `previous` (which must be kept) rather
-    /// than continuing or revising it (which replaces it).
-    static func startsNewUtterance(
-        after previous: String, next: String, ended: Bool, gap: TimeInterval
-    ) -> Bool {
-        let p = Words(previous), n = Words(next)
-        guard !p.isEmpty, !n.isEmpty else { return false }
-        // Same words, or more words after them: the same utterance going on.
-        if n.joined.hasPrefix(p.joined) { return false }
-        // The recognizer said the previous utterance was complete.
-        if ended { return true }
-        let c = n.commonPrefix(with: p)
-        // After a pause the recognizer only settles what it already has: it replaces the
-        // last word or drops a stray one, keeping at least two words ahead of the change.
-        // Anything else that doesn't continue the previous text is a new utterance — even
-        // one starting with the same words — and keeping it costs at most a repeat, where
-        // replacing would lose words.
-        if gap >= TranscriptAccumulator.pauseGap {
-            return !n.settlesTail(of: p, keeping: c)
+    /// Length of the longest common subsequence of similar words.
+    static func commonSubsequence(_ a: ArraySlice<String>, _ b: ArraySlice<String>) -> Int {
+        let b = Array(b)
+        guard !b.isEmpty else { return 0 }
+        var row = [Int](repeating: 0, count: b.count + 1)
+        for x in a {
+            var diagonal = 0
+            for j in b.indices {
+                let above = row[j + 1]
+                row[j + 1] = similar(x, b[j]) ? diagonal + 1 : max(above, row[j])
+                diagonal = above
+            }
         }
-        // While speaking, only a clean break reads as a restart: a different first word
-        // and either fewer words or none in common. A revision of the first word keeps
-        // the rest.
-        guard c == 0 else { return false }
-        return n.count < p.count || (p.count >= 2 && Set(n.words).isDisjoint(with: p.words))
+        return row[b.count]
     }
 
-    /// Whether `self` is `previous` with its tail settled: the first `kept` (≥ 2) words
-    /// unchanged, then either the last word replaced at the same length or some of the
-    /// tail's words dropped.
-    private func settlesTail(of previous: Words, keeping kept: Int) -> Bool {
-        guard kept >= 2, count <= previous.count else { return false }
-        let old = previous.words[kept...], new = words[kept...]
-        if count == previous.count, old.count == 1 { return true }
-        var rest = old[...]
-        for word in new {
-            guard let i = rest.firstIndex(of: word) else { return false }
-            rest = rest[(i + 1)...]
+    /// Whether the recognizer could have revised one word into the other: the same word
+    /// (see `same`) or a slip of a letter or two ("want"/"wont", "halo"/"hello").
+    static func similar(_ a: String, _ b: String) -> Bool {
+        if same(a, b) { return true }
+        let x = Array(a), y = Array(b)
+        let short = min(x.count, y.count), long = max(x.count, y.count)
+        let limit = short >= 4 ? 2 : long >= 3 ? 1 : 0
+        return long - short <= limit && distance(x, y) <= limit
+    }
+
+    /// The same word as the recognizer writes it: identical, a homophone, or one cut short
+    /// ("hel"/"hello"; a phrase in a script written without spaces is one word, so
+    /// "你好"/"你好吗").
+    static func same(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        if let group = homophones[a], group == homophones[b] { return true }
+        let (short, long) = a.count <= b.count ? (a, b) : (b, a)
+        return long.hasPrefix(short) && short.count >= (short.allSatisfy(\.isASCII) ? 3 : 1)
+    }
+
+    /// Words the recognizer swaps for one another as it settles.
+    private static let homophones: [String: Int] = {
+        let groups = [
+            ["i", "eye", "aye"], ["to", "too", "two"], ["for", "four"], ["there", "their", "theyre"],
+            ["your", "youre"], ["no", "know"], ["right", "write"], ["hear", "here"],
+            ["by", "buy", "bye"], ["one", "won"], ["new", "knew"], ["ate", "eight"],
+        ]
+        var map: [String: Int] = [:]
+        for (i, group) in groups.enumerated() { for word in group { map[word] = i } }
+        return map
+    }()
+
+    /// Levenshtein distance between two words' characters.
+    private static func distance(_ a: [Character], _ b: [Character]) -> Int {
+        var row = Array(0...b.count)
+        for (i, x) in a.enumerated() {
+            var diagonal = row[0]
+            row[0] = i + 1
+            for (j, y) in b.enumerated() {
+                let above = row[j + 1]
+                row[j + 1] = x == y ? diagonal : 1 + min(diagonal, above, row[j])
+                diagonal = above
+            }
         }
-        return true
+        return row[b.count]
     }
 }
