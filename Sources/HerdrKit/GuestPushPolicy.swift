@@ -74,3 +74,25 @@ public enum GuestPushPolicy {
         }
     }
 }
+
+/// The one button the guest's Notifications control offers.
+public enum GuestPushAction: Sendable, Equatable {
+    case turnOn
+    case turnOff
+    /// Only iOS Settings can allow notifications again.
+    case openSettings
+    /// Repeat what failed.
+    case retry
+}
+
+extension GuestPushPolicy.Status {
+    public var action: GuestPushAction? {
+        switch self {
+        case .unavailable: return nil
+        case .on: return .turnOff
+        case .off: return .turnOn
+        case .denied: return .openSettings
+        case .failed: return .retry
+        }
+    }
+}

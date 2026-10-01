@@ -119,12 +119,12 @@ struct GuestNotificationsControl: View {
                         .foregroundStyle(status == .on ? Palette.done : Palette.text)
                         .accessibilityIdentifier("guest-push-status")
                 }
-                if let action = action(status) {
+                if let action = status.action {
                     GuestShellStyle.divider
                     Button {
                         run(action)
                     } label: {
-                        Text(action.title)
+                        Text(title(action))
                             .font(Typography.app(15, .semibold))
                             .foregroundStyle(action == .turnOff ? Palette.textDim : Palette.text)
                             .frame(maxWidth: .infinity, minHeight: 46)
@@ -150,45 +150,24 @@ struct GuestNotificationsControl: View {
         }
     }
 
-    private enum Action {
-        case turnOn, turnOff, openSettings, retry
-
-        var title: String {
-            switch self {
-            case .turnOn: return "Turn on"
-            case .turnOff: return "Turn off"
-            case .openSettings: return "Open Settings"
-            case .retry: return "Try again"
-            }
-        }
-    }
-
-    private func action(_ status: GuestPushPolicy.Status) -> Action? {
-        switch status {
-        case .unavailable: return nil
-        case .on: return .turnOff
-        case .off: return .turnOn
-        case .denied: return .openSettings
-        case .failed: return .retry
-        }
-    }
-
-    private func run(_ action: Action) {
+    private func title(_ action: GuestPushAction) -> String {
         switch action {
-        case .openSettings:
+        case .turnOn: return "Turn on"
+        case .turnOff: return "Turn off"
+        case .openSettings: return "Open Settings"
+        case .retry: return "Try again"
+        }
+    }
+
+    private func run(_ action: GuestPushAction) {
+        guard action != .openSettings else {
             push.openSettings()
-        case .turnOn, .retry:
-            working = true
-            Task {
-                await push.turnOn(access, client: client)
-                working = false
-            }
-        case .turnOff:
-            working = true
-            Task {
-                await push.turnOff(access, client: client)
-                working = false
-            }
+            return
+        }
+        working = true
+        Task {
+            await push.perform(action, access, client: client)
+            working = false
         }
     }
 
