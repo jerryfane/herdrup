@@ -112,11 +112,11 @@ jobs:
 
   build-and-uitest:
     runs-on: macos-latest
-    # The per-suite first-run caps sum to 140 min (font 10, iPhone 50, iPad resize 25, iPad
+    # The per-suite first-run caps sum to 160 min (font 10, iPhone 70, iPad resize 25, iPad
     # controls 15, SwiftTerm build 10 + 2 x 15) before checkout, setup and the build. The job
     # limit must sit above that, or a slow run is killed before later suites run and receipts
     # upload.
-    timeout-minutes: 160
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -323,9 +323,10 @@ jobs:
             exit "$failed"
           fi
           # Whole iPhone UI suite: Scroll, Selection, Paging, and terminal interactions.
-          # 50m: with the composer, keyboard and push tests it spends ~31-35 min in tests alone
-          # on a hosted runner, which left 40m no room for launch overhead on a slow runner.
-          run_suite iPhone "$IPHONE_UDID" 50m -only-testing:HerdrUITests || failed=1
+          # 70m: the suite now spends ~45-50 min in tests alone on a hosted runner (guest
+          # Gram, push and attachment suites added 2026-10-01); 50m cut it off mid-run with
+          # every test passing. The job timeout above is sized to these caps.
+          run_suite iPhone "$IPHONE_UDID" 70m -only-testing:HerdrUITests || failed=1
 
           xcrun simctl boot "$IPAD_UDID" || true
           xcrun simctl bootstatus "$IPAD_UDID" -b
