@@ -135,6 +135,48 @@ final class GuestPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(status, .off)
     }
 
+    // MARK: Retry
+
+    /// A failed Turn off shows as a failure, and Try again retries the unregistration: it must
+    /// never turn notifications back on.
+    func testRetryingAFailedTurnOffUnregistersAgainAndStaysOff() async throws {
+        let phone = Phone()
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        let client = client(host)
+        await coordinator.connected(access, client: client, features: features)
+        XCTAssertFalse(host.registered.isEmpty)
+
+        host.fail("notifications.unregister_device")
+        await coordinator.turnOff(access, client: client)
+        let failed = await coordinator.state.status(for: access)
+        guard case .failed = failed else { return XCTFail("a refused Turn off should show: \(failed)") }
+        XCTAssertEqual(failed.action, .retry)
+
+        await coordinator.perform(.retry, access, client: client)
+        XCTAssertEqual(host.registered, [], "Try again should finish turning off: \(host.calls)")
+        XCTAssertEqual(host.calls.filter { $0 == "notifications.register_device" }.count, 1, "\(host.calls)")
+        let status = await coordinator.state.status(for: access)
+        XCTAssertEqual(status, .off)
+    }
+
+    /// A failed registration's Try again registers.
+    func testRetryingAFailedRegistrationRegisters() async throws {
+        let phone = Phone()
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        let client = client(host)
+        host.fail("notifications.register_device")
+        await coordinator.connected(access, client: client, features: features)
+        let failed = await coordinator.state.status(for: access)
+        guard case .failed = failed else { return XCTFail("a refused registration should show: \(failed)") }
+
+        await coordinator.perform(.retry, access, client: client)
+        XCTAssertFalse(host.registered.isEmpty, "\(host.calls)")
+        let status = await coordinator.state.status(for: access)
+        XCTAssertEqual(status, .on)
+    }
+
     /// Polls `condition` until it holds or `timeout` passes; returns whether it held.
     @discardableResult
     func waitUntil(timeout: TimeInterval, _ condition: () async -> Bool) async throws -> Bool {

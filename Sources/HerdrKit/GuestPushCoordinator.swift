@@ -32,6 +32,24 @@ public struct GuestPushSystem: Sendable {
     }
 }
 
+/// A guest push attempt that failed, and what Try again repeats.
+public struct GuestPushFailure: Sendable, Equatable {
+    public enum Operation: Sendable, Equatable {
+        /// Registering this phone (Turn on, a connection, a new token).
+        case register
+        /// Turn off's unregistration: retrying it must never turn notifications back on.
+        case unregister
+    }
+
+    public let operation: Operation
+    public let message: String
+
+    public init(_ operation: Operation, _ message: String) {
+        self.operation = operation
+        self.message = message
+    }
+}
+
 /// What the guest's screens show about push, per share by `GuestAccess.id`.
 public struct GuestPushState: Sendable, Equatable {
     /// iOS's notification permission, as last read.
@@ -40,8 +58,8 @@ public struct GuestPushState: Sendable, Equatable {
     public var choices: [String: GuestPushChoice] = [:]
     /// What each share's host last advertised.
     public var hostFeatures: [String: GuestFeatures] = [:]
-    /// Why the last attempt for a share failed.
-    public var failures: [String: String] = [:]
+    /// The last attempt for a share that failed, until one succeeds or the guest acts.
+    public var failures: [String: GuestPushFailure] = [:]
     /// The share whose "turn on notifications" explanation is showing.
     public var asking: String?
 
@@ -49,7 +67,7 @@ public struct GuestPushState: Sendable, Equatable {
 
     public func status(for access: GuestAccess) -> GuestPushPolicy.Status {
         GuestPushPolicy.status(hostTakesPush: hostFeatures[access.id]?.push, choice: choices[access.id],
-                               authorization: authorization, failure: failures[access.id])
+                               authorization: authorization, failure: failures[access.id]?.message)
     }
 }
 
@@ -118,8 +136,8 @@ public actor GuestPushCoordinator {
         defaults.set(state.hostFeatures.mapValues { [$0.gram, $0.push] }, forKey: Self.featuresKey)
     }
 
-    private func setFailure(_ message: String?, for access: GuestAccess) {
-        state.failures[access.id] = message
+    private func setFailure(_ failure: GuestPushFailure?, for access: GuestAccess) {
+        state.failures[access.id] = failure
     }
 
     private func setAsking(_ id: String?) {
@@ -168,18 +186,26 @@ public actor GuestPushCoordinator {
         }
     }
 
-    /// The Notifications control's button. `openSettings` is the app's to carry out.
+    /// The Notifications control's button. `openSettings` is the app's to carry out. Try
+    /// again repeats what failed: a refused Turn off is retried as Turn off, so the share
+    /// stays off.
     public func perform(_ action: GuestPushAction, _ access: GuestAccess, client: HerdrClient?) async {
         switch action {
-        case .turnOn, .retry: await turnOn(access, client: client)
+        case .turnOn: await turnOn(access, client: client)
         case .turnOff: await turnOff(access, client: client)
+        case .retry:
+            if state.failures[access.id]?.operation == .unregister {
+                await turnOff(access, client: client)
+            } else {
+                await turnOn(access, client: client)
+            }
         case .openSettings: break
         }
     }
 
-    /// Turn on, from the explanation or the Settings control (also its Retry): ask iOS when
-    /// it hasn't asked yet, then register. When the token arrives later (the first
-    /// registration with APNs), `deviceTokenChanged` registers it.
+    /// Turn on, from the explanation or the Settings control (also Try again after a failed
+    /// registration): ask iOS when it hasn't asked yet, then register. When the token
+    /// arrives later (the first registration with APNs), `deviceTokenChanged` registers it.
     public func turnOn(_ access: GuestAccess, client: HerdrClient?) async {
         let intent = newIntent(access)
         setAsking(nil)
@@ -192,7 +218,7 @@ public actor GuestPushCoordinator {
         guard state.authorization == .granted, let features = state.hostFeatures[access.id], features.push
         else { return }
         await serially(access) {
-            guard let client = await self.resolve(client, for: access) else { return }
+            guard let client = await self.resolve(client, for: access, .register) else { return }
             await self.register(access, client: client, features: features, again: true, intent: intent)
         }
     }
@@ -225,7 +251,7 @@ public actor GuestPushCoordinator {
                                                          authorization: authorization) else { continue }
             let intent = currentIntent(access)
             await serially(access) {
-                guard let client = await self.resolve(nil, for: access) else { return }
+                guard let client = await self.resolve(nil, for: access, .register) else { return }
                 await self.register(access, client: client, features: features, intent: intent)
             }
         }
@@ -272,12 +298,16 @@ public actor GuestPushCoordinator {
         await task.value
     }
 
-    private func resolve(_ client: HerdrClient?, for access: GuestAccess) async -> HerdrClient? {
+    /// The share's open connection, else a new one. A share that can't be reached fails
+    /// `operation`, so Try again repeats it.
+    private func resolve(_ client: HerdrClient?, for access: GuestAccess,
+                         _ operation: GuestPushFailure.Operation) async -> HerdrClient? {
         if let client { return client }
         do {
             return try await system.connect(access)
         } catch {
-            setFailure("Couldn't reach \(access.machineLabel): \(Self.describe(error))", for: access)
+            setFailure(GuestPushFailure(operation, "Couldn't reach \(access.machineLabel): \(Self.describe(error))"),
+                       for: access)
             return nil
         }
     }
@@ -292,7 +322,7 @@ public actor GuestPushCoordinator {
         guard let token = await system.deviceToken() else {
             await system.registerForRemoteNotifications()
             if let error = await system.tokenError(), !superseded(intent, access) {
-                setFailure("iOS couldn't set up notifications: \(error)", for: access)
+                setFailure(GuestPushFailure(.register, "iOS couldn't set up notifications: \(error)"), for: access)
             }
             return
         }
@@ -308,14 +338,15 @@ public actor GuestPushCoordinator {
             // The next connection, token or Retry tries again.
             sent[access.id] = nil
             guard !superseded(intent, access) else { return }
-            setFailure("Couldn't register with \(access.machineLabel): \(Self.describe(error))", for: access)
+            setFailure(GuestPushFailure(.register, "Couldn't register with \(access.machineLabel): \(Self.describe(error))"),
+                       for: access)
             return
         }
         guard !superseded(intent, access) else { return }
         // Without the push service's capability the host can push only with an APNs key of
         // its own, which most don't have.
         setFailure(capability == nil
-                   ? "\(access.machineLabel) has this phone, but the push service couldn't be reached, so notifications may not arrive."
+                   ? GuestPushFailure(.register, "\(access.machineLabel) has this phone, but the push service couldn't be reached, so notifications may not arrive.")
                    : nil, for: access)
     }
 
@@ -323,12 +354,13 @@ public actor GuestPushCoordinator {
     private func unregister(_ access: GuestAccess, client: HerdrClient?, intent: UInt64) async {
         sent[access.id] = nil
         guard let token = await system.deviceToken(),
-              let client = await resolve(client, for: access) else { return }
+              let client = await resolve(client, for: access, .unregister) else { return }
         do {
             try await client.unregisterDevice(token: token)
         } catch {
             guard !superseded(intent, access) else { return }
-            setFailure("Couldn't turn them off on \(access.machineLabel): \(Self.describe(error))", for: access)
+            setFailure(GuestPushFailure(.unregister, "Couldn't turn them off on \(access.machineLabel): \(Self.describe(error))"),
+                       for: access)
         }
     }
 
