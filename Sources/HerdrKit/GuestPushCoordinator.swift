@@ -71,6 +71,12 @@ public actor GuestPushCoordinator {
         let token: String
         let gram: Bool
     }
+    /// Per share: the guest's latest intent (Turn on, Turn off, Not now, leaving). An
+    /// operation started under an older one stops before it reaches the host.
+    private var intents: [String: UInt64] = [:]
+    /// Per share: the operation queued last. Each waits for the one before, so a share
+    /// never has a registration and an unregistration in flight together.
+    private var operations: [String: Task<Void, Never>] = [:]
 
     private let system: GuestPushSystem
     private let defaults: UserDefaults
@@ -151,8 +157,10 @@ public actor GuestPushCoordinator {
                                          authorization: authorization) {
         case .register:
             if state.asking == access.id { setAsking(nil) }
-            // Not the caller's task: leaving the screen mid-registration must not cancel it.
-            await Task { await self.register(access, client: client, features: features) }.value
+            let intent = currentIntent(access)
+            await serially(access) {
+                await self.register(access, client: client, features: features, intent: intent)
+            }
         case .explain:
             setAsking(access.id)
         case .none:
@@ -173,6 +181,7 @@ public actor GuestPushCoordinator {
     /// it hasn't asked yet, then register. When the token arrives later (the first
     /// registration with APNs), `deviceTokenChanged` registers it.
     public func turnOn(_ access: GuestAccess, client: HerdrClient?) async {
+        let intent = newIntent(access)
         setAsking(nil)
         setChoice(.on, for: access)
         setFailure(nil, for: access)
@@ -182,32 +191,27 @@ public actor GuestPushCoordinator {
         }
         guard state.authorization == .granted, let features = state.hostFeatures[access.id], features.push
         else { return }
-        let resolved: HerdrClient?
-        if let client { resolved = client } else { resolved = await self.client(for: access) }
-        guard let resolved else { return }
-        await register(access, client: resolved, features: features, again: true)
+        await serially(access) {
+            guard let client = await self.resolve(client, for: access) else { return }
+            await self.register(access, client: client, features: features, again: true, intent: intent)
+        }
     }
 
     /// "Not now" on the explanation: this share stays off until the guest turns it on.
     public func decline(_ access: GuestAccess) {
+        _ = newIntent(access)
         setAsking(nil)
         setChoice(.off, for: access)
     }
 
-    /// Turn off, from the Settings control: the host stops pushing to this phone.
+    /// Turn off, from the Settings control: the host stops pushing to this phone. Runs after
+    /// any registration already in flight, so Off is always the host's last word.
     public func turnOff(_ access: GuestAccess, client: HerdrClient?) async {
+        let intent = newIntent(access)
         setChoice(.off, for: access)
         setFailure(nil, for: access)
-        sent[access.id] = nil
-        guard let token = await system.deviceToken() else { return }
-        let resolved: HerdrClient?
-        if let client { resolved = client } else { resolved = await self.client(for: access) }
-        guard let resolved else { return }
-        do {
-            try await resolved.unregisterDevice(token: token)
-        } catch {
-            guard state.choices[access.id] == .off else { return }
-            setFailure("Couldn't turn them off on \(access.machineLabel): \(Self.describe(error))", for: access)
+        await serially(access) {
+            await self.unregister(access, client: client, intent: intent)
         }
     }
 
@@ -218,26 +222,58 @@ public actor GuestPushCoordinator {
             guard let features = state.hostFeatures[access.id],
                   GuestPushPolicy.registersOnTokenChange(hostTakesPush: features.push,
                                                          choice: state.choices[access.id],
-                                                         authorization: authorization),
-                  let client = await client(for: access) else { continue }
-            await register(access, client: client, features: features)
+                                                         authorization: authorization) else { continue }
+            let intent = currentIntent(access)
+            await serially(access) {
+                guard let client = await self.resolve(nil, for: access) else { return }
+                await self.register(access, client: client, features: features, intent: intent)
+            }
         }
     }
 
     /// The guest removed the share from this phone: the host stops pushing to it.
     public func leaving(_ access: GuestAccess) async {
+        _ = newIntent(access)
         let wasRegistered = sent[access.id] != nil || state.choices[access.id] == .on
         setChoice(nil, for: access)
         remember(nil, for: access)
-        sent[access.id] = nil
         setFailure(nil, for: access)
         if state.asking == access.id { setAsking(nil) }
-        guard wasRegistered || state.authorization == .granted, let token = await system.deviceToken(),
-              let client = try? await system.connect(access) else { return }
-        try? await client.unregisterDevice(token: token)
+        guard wasRegistered || state.authorization == .granted else { return }
+        await serially(access) {
+            await self.forget(access)
+        }
     }
 
-    private func client(for access: GuestAccess) async -> HerdrClient? {
+    // MARK: Operations
+
+    private func currentIntent(_ access: GuestAccess) -> UInt64 { intents[access.id] ?? 0 }
+
+    private func newIntent(_ access: GuestAccess) -> UInt64 {
+        let next = currentIntent(access) &+ 1
+        intents[access.id] = next
+        return next
+    }
+
+    /// Whether the guest has changed their mind since `intent`.
+    private func superseded(_ intent: UInt64, _ access: GuestAccess) -> Bool {
+        currentIntent(access) != intent
+    }
+
+    /// Runs `operation` once every earlier operation for the share has finished. Not the
+    /// caller's task: leaving a screen mid-registration must not cancel it.
+    private func serially(_ access: GuestAccess, _ operation: @escaping @Sendable () async -> Void) async {
+        let previous = operations[access.id]
+        let task = Task {
+            await previous?.value
+            await operation()
+        }
+        operations[access.id] = task
+        await task.value
+    }
+
+    private func resolve(_ client: HerdrClient?, for access: GuestAccess) async -> HerdrClient? {
+        if let client { return client }
         do {
             return try await system.connect(access)
         } catch {
@@ -248,34 +284,60 @@ public actor GuestPushCoordinator {
 
     /// Every status kind on; Gram pushes only where the owner shares Gram. Without a token
     /// yet, asks iOS for one; `deviceTokenChanged` registers it when it lands. `again`
-    /// re-sends what this connection already sent (Turn on, Retry).
+    /// re-sends what this connection already sent (Turn on, Retry). Stops wherever the
+    /// guest has since changed their mind, so a later Turn off always wins.
     private func register(_ access: GuestAccess, client: HerdrClient, features: GuestFeatures,
-                          again: Bool = false) async {
+                          again: Bool = false, intent: UInt64) async {
+        guard !superseded(intent, access), state.choices[access.id] != .off else { return }
         guard let token = await system.deviceToken() else {
             await system.registerForRemoteNotifications()
-            if let error = await system.tokenError() {
+            if let error = await system.tokenError(), !superseded(intent, access) {
                 setFailure("iOS couldn't set up notifications: \(error)", for: access)
             }
             return
         }
         let registration = Registration(client: ObjectIdentifier(client), token: token, gram: features.gram)
         guard again || sent[access.id] != registration else { return }
-        sent[access.id] = registration
         let capability = await system.relayCapability(token)
+        guard !superseded(intent, access), state.choices[access.id] != .off else { return }
+        sent[access.id] = registration
         do {
             try await client.registerDevice(token: token, needsInput: true, dies: true, finishes: true,
                                             gram: features.gram, mutedPanes: [], relayCapability: capability)
         } catch {
             // The next connection, token or Retry tries again.
-            if sent[access.id] == registration { sent[access.id] = nil }
+            sent[access.id] = nil
+            guard !superseded(intent, access) else { return }
             setFailure("Couldn't register with \(access.machineLabel): \(Self.describe(error))", for: access)
             return
         }
+        guard !superseded(intent, access) else { return }
         // Without the push service's capability the host can push only with an APNs key of
         // its own, which most don't have.
         setFailure(capability == nil
                    ? "\(access.machineLabel) has this phone, but the push service couldn't be reached, so notifications may not arrive."
                    : nil, for: access)
+    }
+
+    /// Turn off's host side: drop this phone's registration.
+    private func unregister(_ access: GuestAccess, client: HerdrClient?, intent: UInt64) async {
+        sent[access.id] = nil
+        guard let token = await system.deviceToken(),
+              let client = await resolve(client, for: access) else { return }
+        do {
+            try await client.unregisterDevice(token: token)
+        } catch {
+            guard !superseded(intent, access) else { return }
+            setFailure("Couldn't turn them off on \(access.machineLabel): \(Self.describe(error))", for: access)
+        }
+    }
+
+    /// Leaving's host side: best effort, since the share is gone from the phone.
+    private func forget(_ access: GuestAccess) async {
+        sent[access.id] = nil
+        guard let token = await system.deviceToken(),
+              let client = try? await system.connect(access) else { return }
+        try? await client.unregisterDevice(token: token)
     }
 
     private static func describe(_ error: Error) -> String {
