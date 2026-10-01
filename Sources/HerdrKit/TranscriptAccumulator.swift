@@ -183,15 +183,33 @@ struct Words: Equatable {
         // The recognizer said the previous utterance was complete.
         if ended { return true }
         let c = n.commonPrefix(with: p)
-        // After a pause, keeping less than half of the previous words is a new utterance; a
-        // late revision keeps most of them.
+        // After a pause the recognizer only settles what it already has: it replaces the
+        // last word or drops a stray one, keeping at least two words ahead of the change.
+        // Anything else that doesn't continue the previous text is a new utterance — even
+        // one starting with the same words — and keeping it costs at most a repeat, where
+        // replacing would lose words.
         if gap >= TranscriptAccumulator.pauseGap {
-            return Double(c) < max(1, Double(p.count) / 2)
+            return !n.settlesTail(of: p, keeping: c)
         }
         // While speaking, only a clean break reads as a restart: a different first word
         // and either fewer words or none in common. A revision of the first word keeps
         // the rest.
         guard c == 0 else { return false }
         return n.count < p.count || (p.count >= 2 && Set(n.words).isDisjoint(with: p.words))
+    }
+
+    /// Whether `self` is `previous` with its tail settled: the first `kept` (≥ 2) words
+    /// unchanged, then either the last word replaced at the same length or some of the
+    /// tail's words dropped.
+    private func settlesTail(of previous: Words, keeping kept: Int) -> Bool {
+        guard kept >= 2, count <= previous.count else { return false }
+        let old = previous.words[kept...], new = words[kept...]
+        if count == previous.count, old.count == 1 { return true }
+        var rest = old[...]
+        for word in new {
+            guard let i = rest.firstIndex(of: word) else { return false }
+            rest = rest[(i + 1)...]
+        }
+        return true
     }
 }

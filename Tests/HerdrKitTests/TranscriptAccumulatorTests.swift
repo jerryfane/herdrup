@@ -67,12 +67,36 @@ final class TranscriptAccumulatorTests: XCTestCase {
         XCTAssertEqual(acc.text, "I want to go to the store.")
     }
 
-    /// A rewrite arriving after a pause that keeps most of the words is a revision.
+    /// A rewrite arriving after a pause that drops a stuttered word is a revision.
     func testLateRevisionAfterSilenceReplaces() {
         acc.begin(segment: 1)
         partial("I want to to go", at: 0.0)
         partial("I want to go", at: 1.4)
         XCTAssertEqual(acc.text, "I want to go")
+    }
+
+    /// So is one that settles the last word, keeping the rest.
+    func testLateLastWordRevisionAfterSilenceReplaces() {
+        acc.begin(segment: 1)
+        partial("I saw it", at: 0.0)
+        partial("I saw that", at: 1.5)
+        XCTAssertEqual(acc.text, "I saw that")
+    }
+
+    /// After a pause, with no utterance-end flag, a result that starts like the previous
+    /// one but doesn't continue it is a new utterance, even keeping half its words.
+    func testPauseRestartSharingLeadingWordsKeepsEarlierUtterance() {
+        acc.begin(segment: 1)
+        partial("I want", at: 0.0)
+        partial("I ate", at: 2.0)
+        XCTAssertEqual(acc.text, "I want I ate")
+    }
+
+    func testPauseRestartSharingMostLeadingWordsKeepsEarlierUtterance() {
+        acc.begin(segment: 1)
+        partial("I want to go home", at: 0.0)
+        partial("I want to eat", at: 2.0)
+        XCTAssertEqual(acc.text, "I want to go home I want to eat")
     }
 
     /// Before iOS 18 a task's text keeps growing across pauses, even past a result flagged
