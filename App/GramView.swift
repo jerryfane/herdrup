@@ -247,6 +247,7 @@ struct GramView: View {
         return messages.filter { message in
             message.text.localizedCaseInsensitiveContains(search)
                 || message.from.localizedCaseInsensitiveContains(search)
+                || message.senderName.localizedCaseInsensitiveContains(search)
                 || (message.to ?? "").localizedCaseInsensitiveContains(search)
                 || (message.file?.name ?? "").localizedCaseInsensitiveContains(search)
         }
@@ -2256,11 +2257,11 @@ struct GramRow: View {
     @ViewBuilder
     private var avatar: some View {
         if message.isFromAgent {
-            Text(AgentIdentity.glyph(for: message.from))
+            Text(AgentIdentity.glyph(for: message.senderName))
                 .font(Typography.app(14, .bold))
                 .foregroundStyle(Palette.text)
                 .frame(width: 30, height: 30)
-                .background(AgentIdentity.gradient(for: message.from), in: RoundedRectangle(cornerRadius: 8))
+                .background(AgentIdentity.gradient(for: message.senderName), in: RoundedRectangle(cornerRadius: 8))
         } else {
             Image(systemName: "arrow.up.forward")
                 .font(.system(size: 13, weight: .bold))
@@ -2272,7 +2273,7 @@ struct GramRow: View {
 
     private var title: String {
         if message.isFromAgent {
-            return message.from
+            return message.senderName
         }
         if let to = message.to {
             return "You → \(to)"

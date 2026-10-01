@@ -2,11 +2,13 @@ import SwiftUI
 import HerdrKit
 
 /// A guest's Settings tab: what was shared, by whom, the name the guest's messages
-/// carry, this phone's key, and leaving. Nothing about the owner's fleet.
+/// carry, notifications, this phone's key, and leaving. Nothing about the owner's fleet.
 struct GuestSettingsView: View {
     let access: GuestAccess
     /// This phone's key fingerprint; nil while unreadable.
     let fingerprint: String?
+    /// The share's open connection; nil until the home connected.
+    let client: HerdrClient?
     /// Removes the share. The device key stays: it is this install's identity.
     let onLeave: () -> Void
 
@@ -37,6 +39,8 @@ struct GuestSettingsView: View {
                             GuestShellStyle.divider
                             GuestShellStyle.keyValue("You appear as") { mono(access.guestName, GuestShellStyle.label) }
                         }
+
+                        GuestNotificationsControl(access: access, client: client)
 
                         GuestShellStyle.section("This device").padding(.top, 26).padding(.bottom, 8)
                         GuestShellStyle.card {
@@ -89,5 +93,112 @@ struct GuestSettingsView: View {
 
     private func mono(_ text: String, _ color: Color) -> some View {
         Text(text).font(Typography.machine(13.5, .medium)).foregroundStyle(color)
+    }
+}
+
+/// The guest's Notifications control for one share (herdrup#343): what this phone does
+/// for the shared agent, why when it isn't working, and the one action that changes it.
+/// It also re-checks iOS's permission whenever it shows or the app returns, so turning
+/// notifications on in iOS Settings registers at once.
+struct GuestNotificationsControl: View {
+    let access: GuestAccess
+    let client: HerdrClient?
+
+    @ObservedObject private var push = GuestPushCenter.shared
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var working = false
+
+    var body: some View {
+        let status = push.status(for: access)
+        VStack(spacing: 0) {
+            GuestShellStyle.section("Notifications").padding(.top, 26).padding(.bottom, 8)
+            GuestShellStyle.card {
+                GuestShellStyle.keyValue("Notifications") {
+                    Text(label(status))
+                        .font(Typography.app(15, .semibold))
+                        .foregroundStyle(status == .on ? Palette.done : Palette.text)
+                        .accessibilityIdentifier("guest-push-status")
+                }
+                if let action = status.action {
+                    GuestShellStyle.divider
+                    Button {
+                        run(action)
+                    } label: {
+                        Text(title(action))
+                            .font(Typography.app(15, .semibold))
+                            .foregroundStyle(action == .turnOff ? Palette.textDim : Palette.text)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(working)
+                    .accessibilityIdentifier("guest-push-action")
+                }
+            }
+            Text(detail(status))
+                .font(Typography.app(13))
+                .foregroundStyle(isFailure(status) ? Palette.died : Palette.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 30).padding(.top, 8)
+                .accessibilityIdentifier("guest-push-detail")
+        }
+        .task(id: client.map { ObjectIdentifier($0) }) { await push.refresh(access, client: client) }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await push.refresh(access, client: client) }
+        }
+    }
+
+    private func title(_ action: GuestPushAction) -> String {
+        switch action {
+        case .turnOn: return "Turn on"
+        case .turnOff: return "Turn off"
+        case .openSettings: return "Open Settings"
+        case .retry: return "Try again"
+        }
+    }
+
+    private func run(_ action: GuestPushAction) {
+        guard action != .openSettings else {
+            push.openSettings()
+            return
+        }
+        working = true
+        Task {
+            await push.perform(action, access, client: client)
+            working = false
+        }
+    }
+
+    private func label(_ status: GuestPushPolicy.Status) -> String {
+        switch status {
+        case .unavailable: return push.hostFeatures[access.id] == nil ? "Checking…" : "Not available"
+        case .on: return "On"
+        case .off: return "Off"
+        case .denied: return "Off in iOS Settings"
+        case .failed: return "Not working"
+        }
+    }
+
+    private func detail(_ status: GuestPushPolicy.Status) -> String {
+        let gram = push.hostFeatures[access.id]?.gram == true
+        let kinds = gram ? "needs \(access.ownerName), finishes or stops, and when it sends a Gram"
+                         : "needs \(access.ownerName), finishes or stops"
+        switch status {
+        case .unavailable:
+            return push.hostFeatures[access.id] == nil
+                ? "Waiting for \(access.machineLabel)."
+                : "\(access.machineLabel) can't send notifications to guests yet."
+        case .on: return "You hear when \(access.agentName) \(kinds)."
+        case .off: return "Turn on to hear when \(access.agentName) \(kinds)."
+        case .denied: return "iOS doesn't let HerdrUp notify you. Turn on Allow Notifications in Settings."
+        case .failed(let reason): return reason
+        }
+    }
+
+    private func isFailure(_ status: GuestPushPolicy.Status) -> Bool {
+        if case .failed = status { return true }
+        return false
     }
 }

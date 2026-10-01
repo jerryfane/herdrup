@@ -103,7 +103,7 @@ struct GuestPaneView: View {
                     GuestPushPrompt(
                         agentName: access.agentName, ownerName: access.ownerName, gram: current.gram,
                         onEnable: {
-                            Task { await guestPush.enable(access, client: client, features: current) }
+                            Task { await guestPush.turnOn(access, client: client) }
                         },
                         onDecline: { guestPush.decline(access) })
                     .padding(.horizontal, 12).padding(.bottom, 10)
@@ -116,11 +116,12 @@ struct GuestPaneView: View {
         .ignoresSafeArea(.container, edges: .bottom)
         .overlay { EdgeSwipeBack { onClose() } }
         .task { await pollLoop() }
-        // Once the host's features are known: offer push (first open only) and load Gram, so
-        // the unread count shows before the guest opens the tab.
+        // Once the host's features are known: register for push (or explain it, when iOS
+        // hasn't asked yet) and load Gram, so the unread count shows before the guest opens
+        // the tab.
         .task(id: features.current) {
             guard let current = features.current else { return }
-            await guestPush.paneOpened(access, client: client, features: current)
+            await guestPush.connected(access, client: client, features: current)
             if current.gram { await gram.refresh(client: client, access: access) }
         }
         .onChange(of: tab) { _, _ in

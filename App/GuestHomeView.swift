@@ -79,7 +79,8 @@ struct GuestHomeView: View {
                 agentsTab
                     .tag(Tab.agents)
                     .tabItem { Label("Agents", systemImage: "square.grid.2x2.fill") }
-                GuestSettingsView(access: access, fingerprint: connection?.fingerprint, onLeave: leave)
+                GuestSettingsView(access: access, fingerprint: connection?.fingerprint,
+                                  client: connection?.client, onLeave: leave)
                     .tag(Tab.settings)
                     .tabItem { Label("Settings", systemImage: "gearshape") }
             }
@@ -94,8 +95,8 @@ struct GuestHomeView: View {
             }
         }
         .task { await poll() }
-        // Each connection re-registers this phone's push token with the host once it learns
-        // the host's features, so the host holds the current token and Gram preference.
+        // Each connection registers this phone's push token with the host once it learns the
+        // host's features, so the host holds the current token and Gram preference.
         .onReceive(connection?.features.$current.eraseToAnyPublisher()
                    ?? Empty().eraseToAnyPublisher()) { features in
             guard let features, let client = connection?.client else { return }

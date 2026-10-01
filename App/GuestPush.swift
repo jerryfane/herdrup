@@ -24,47 +24,35 @@ final class GuestFeaturesModel: ObservableObject, @unchecked Sendable {
     }
 }
 
-/// Push for the agents shared with this phone (herdrup#338). A guest's device registers its
-/// APNs token with each share's host over the guest relay, stored there under the guest,
-/// apart from the owner's devices. The host then pushes the shared agent's status changes
-/// and, when the owner shares Gram, its new Grams.
-///
-/// The guest is asked once per share, the first time they open the shared agent on a host
-/// that takes guest push, and only when iOS still has to ask for permission: a phone that
-/// already allows notifications turns them on without a second question.
+/// The app's side of guest push (herdrup#338, #343): `GuestPushCoordinator` (HerdrKit)
+/// decides and registers; this publishes its state to the guest's screens on the main
+/// thread and supplies the live iOS system, or a scripted one under the screenshot mocks
+/// so UI tests never show the system alert or reach APNs and the push relay.
 @MainActor
 final class GuestPushCenter: ObservableObject {
     static let shared = GuestPushCenter()
 
-    enum Authorization { case undetermined, granted, denied }
-
-    /// The system around push, swapped for a scripted one under the screenshot mocks so UI
-    /// tests never show the system alert or reach APNs and the push relay.
-    struct System {
-        var authorization: () async -> Authorization
-        var requestAuthorization: () async -> Bool
-        var registerForRemoteNotifications: () -> Void
-        var deviceToken: () -> String?
-        var relayCapability: (String) async -> String?
-        /// A client for a share, for calls made away from its screens (a token change,
-        /// leaving the share).
-        var connect: (GuestAccess) throws -> HerdrClient
-    }
+    @Published private(set) var state: GuestPushState
+    private let coordinator: GuestPushCoordinator
+    private let openSystemSettings: () -> Void
 
     /// The share whose "turn on notifications" explanation is showing, by `GuestAccess.id`.
-    @Published private(set) var asking: String?
+    var asking: String? { state.asking }
+    var hostFeatures: [String: GuestFeatures] { state.hostFeatures }
+    func status(for access: GuestAccess) -> GuestPushPolicy.Status { state.status(for: access) }
 
-    private let system: System
-    private let defaults: UserDefaults
-    /// Per share: true once the guest turned push on, false after "Not now".
-    private static let consentKey = "guest.push.consent.v1"
-    /// Per share: the features its host last advertised, so a token change can re-register
-    /// with the right `notify_gram` while the share isn't open.
-    private static let featuresKey = "guest.push.features.v1"
+    init(system: GuestPushSystem, openSettings: @escaping () -> Void, defaults: UserDefaults = .standard) {
+        let relay = StateRelay()
+        state = GuestPushCoordinator.storedState(defaults)
+        coordinator = GuestPushCoordinator(system: system, defaults: defaults) { state in
+            DispatchQueue.main.async { MainActor.assumeIsolated { relay.center?.state = state } }
+        }
+        openSystemSettings = openSettings
+        relay.center = self
+    }
 
-    init(system: System, defaults: UserDefaults = .standard) {
-        self.system = system
-        self.defaults = defaults
+    private final class StateRelay: @unchecked Sendable {
+        weak var center: GuestPushCenter?
     }
 
     private convenience init() {
@@ -72,118 +60,57 @@ final class GuestPushCenter: ObservableObject {
         if ScreenshotMock.mode != nil {
             let defaults = UserDefaults.standard
             // Each UI test launch starts undecided, like a fresh install.
-            defaults.removeObject(forKey: Self.consentKey)
-            defaults.removeObject(forKey: Self.featuresKey)
-            self.init(system: .mock, defaults: defaults)
+            defaults.removeObject(forKey: GuestPushCoordinator.consentKey)
+            defaults.removeObject(forKey: GuestPushCoordinator.featuresKey)
+            self.init(system: .mock, openSettings: {}, defaults: defaults)
             return
         }
         #endif
-        self.init(system: .live)
+        self.init(system: .live, openSettings: {
+            guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+            UIApplication.shared.open(url)
+        })
     }
 
-    // MARK: Consent
-
-    func consent(for access: GuestAccess) -> Bool? {
-        (defaults.dictionary(forKey: Self.consentKey) as? [String: Bool])?[access.id]
-    }
-
-    private func setConsent(_ value: Bool?, for access: GuestAccess) {
-        var all = (defaults.dictionary(forKey: Self.consentKey) as? [String: Bool]) ?? [:]
-        all[access.id] = value
-        defaults.set(all, forKey: Self.consentKey)
-    }
-
-    private func rememberedFeatures(for access: GuestAccess) -> GuestFeatures? {
-        guard let raw = (defaults.dictionary(forKey: Self.featuresKey) as? [String: [Bool]])?[access.id],
-              raw.count == 2 else { return nil }
-        return GuestFeatures(gram: raw[0], push: raw[1])
-    }
-
-    private func remember(_ features: GuestFeatures?, for access: GuestAccess) {
-        var all = (defaults.dictionary(forKey: Self.featuresKey) as? [String: [Bool]]) ?? [:]
-        all[access.id] = features.map { [$0.gram, $0.push] }
-        defaults.set(all, forKey: Self.featuresKey)
-    }
-
-    // MARK: Flow
-
-    /// The guest opened the shared agent. On a host that takes guest push, registers when
-    /// the guest already said yes, turns push on when iOS already allows it, and otherwise
-    /// asks once.
-    func paneOpened(_ access: GuestAccess, client: HerdrClient, features: GuestFeatures) async {
-        guard features.push else { return }
-        switch consent(for: access) {
-        case true?:
-            await register(access, client: client, features: features)
-        case false?:
-            return
-        case nil:
-            switch await system.authorization() {
-            case .granted:
-                setConsent(true, for: access)
-                await register(access, client: client, features: features)
-            case .undetermined:
-                asking = access.id
-            case .denied:
-                return
-            }
-        }
-    }
-
-    /// "Turn on" on the explanation: ask iOS, then register. When the token arrives later
-    /// (the first registration with APNs), `deviceTokenChanged` registers it.
-    func enable(_ access: GuestAccess, client: HerdrClient, features: GuestFeatures) async {
-        asking = nil
-        setConsent(true, for: access)
-        guard await system.requestAuthorization() else { return }
-        system.registerForRemoteNotifications()
-        await register(access, client: client, features: features)
-    }
-
-    /// "Not now": don't ask again for this share.
-    func decline(_ access: GuestAccess) {
-        asking = nil
-        setConsent(false, for: access)
-    }
-
-    /// A connection to the share learned (or re-learned) its host's features: re-register,
-    /// so the host always holds the current token and `notify_gram`.
     func connected(_ access: GuestAccess, client: HerdrClient, features: GuestFeatures) async {
-        remember(features, for: access)
-        guard features.push, consent(for: access) == true else { return }
-        await register(access, client: client, features: features)
+        await coordinator.connected(access, client: client, features: features)
     }
 
-    /// The APNs token changed: register it with every share that has push on.
+    func refresh(_ access: GuestAccess, client: HerdrClient?) async {
+        await coordinator.refresh(access, client: client)
+    }
+
+    func turnOn(_ access: GuestAccess, client: HerdrClient?) async {
+        await coordinator.turnOn(access, client: client)
+    }
+
+    /// The Notifications control's button, other than Open Settings.
+    func perform(_ action: GuestPushAction, _ access: GuestAccess, client: HerdrClient?) async {
+        await coordinator.perform(action, access, client: client)
+    }
+
+    func decline(_ access: GuestAccess) {
+        Task { await coordinator.decline(access) }
+    }
+
     func deviceTokenChanged(shares: [GuestAccess]) {
-        for access in shares where consent(for: access) == true {
-            guard let features = rememberedFeatures(for: access), features.push,
-                  let client = try? system.connect(access) else { continue }
-            Task { await register(access, client: client, features: features) }
-        }
+        Task { await coordinator.deviceTokenChanged(shares: shares) }
     }
 
-    /// The guest removed the share from this phone: the host stops pushing to it.
+    /// iOS refused a token: shares waiting for one show why.
+    func tokenFailed(_ reason: String) {
+        Task { await coordinator.tokenFailed(reason) }
+    }
+
     func leaving(_ access: GuestAccess) {
-        let wasOn = consent(for: access) == true
-        setConsent(nil, for: access)
-        remember(nil, for: access)
-        if asking == access.id { asking = nil }
-        guard wasOn, let token = system.deviceToken(), let client = try? system.connect(access) else { return }
-        Task { try? await client.unregisterDevice(token: token) }
+        Task { await coordinator.leaving(access) }
     }
 
-    /// Every status kind on; Gram pushes only where the owner shares Gram.
-    private func register(_ access: GuestAccess, client: HerdrClient, features: GuestFeatures) async {
-        guard let token = system.deviceToken() else { return }
-        let capability = await system.relayCapability(token)
-        try? await client.registerDevice(token: token, needsInput: true, dies: true, finishes: true,
-                                         gram: features.gram, mutedPanes: [], relayCapability: capability)
-    }
+    func openSettings() { openSystemSettings() }
 }
 
-extension GuestPushCenter.System {
-    static let live = GuestPushCenter.System(
+extension GuestPushSystem {
+    static let live = GuestPushSystem(
         authorization: {
             switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
             case .authorized, .provisional, .ephemeral: return .granted
@@ -195,27 +122,41 @@ extension GuestPushCenter.System {
         requestAuthorization: {
             (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
         },
-        registerForRemoteNotifications: { UIApplication.shared.registerForRemoteNotifications() },
-        deviceToken: { PushCenter.shared.deviceToken },
+        registerForRemoteNotifications: {
+            await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
+        },
+        deviceToken: { await MainActor.run { PushCenter.shared.deviceToken } },
         relayCapability: { await PushCenter.relay.capability(kind: .device, token: $0) },
-        connect: { try GuestConnection.open($0).client })
+        connect: { access in try await MainActor.run { try GuestConnection.open(access).client } })
 
     #if DEBUG
-    /// Permission is undecided until asked, then granted; the token is fixed; the relay is
-    /// never contacted; calls go to the mock host.
-    static var mock: GuestPushCenter.System {
-        let granted = MockFlag()
-        return GuestPushCenter.System(
-            authorization: { granted.value ? .granted : .undetermined },
-            requestAuthorization: { granted.value = true; return true },
+    /// `HERDR_MOCK_PUSH_AUTH` sets iOS's answer before any question: `granted`, `denied`,
+    /// or (by default) undecided, which turns granted once asked. A granted phone has a
+    /// fixed token; the relay is never contacted (its capability is canned); calls go to
+    /// the mock host.
+    static var mock: GuestPushSystem {
+        let authorization = MockAuthorization(ProcessInfo.processInfo.environment["HERDR_MOCK_PUSH_AUTH"])
+        return GuestPushSystem(
+            authorization: { authorization.value },
+            requestAuthorization: {
+                if authorization.value == .undetermined { authorization.value = .granted }
+                return authorization.value == .granted
+            },
             registerForRemoteNotifications: {},
-            deviceToken: { granted.value ? GuestMockTransport.deviceToken : nil },
-            relayCapability: { _ in nil },
+            deviceToken: { authorization.value == .granted ? GuestMockTransport.deviceToken : nil },
+            relayCapability: { _ in "hpr1.mock" },
             connect: { _ in HerdrClient(transport: GuestMockTransport(scenario: .running)) })
     }
 
-    private final class MockFlag: @unchecked Sendable {
-        var value = false
+    private final class MockAuthorization: @unchecked Sendable {
+        var value: PushAuthorization
+        init(_ raw: String?) {
+            switch raw {
+            case "granted": value = .granted
+            case "denied": value = .denied
+            default: value = .undetermined
+            }
+        }
     }
     #endif
 }
@@ -262,6 +203,7 @@ struct GuestPushPrompt: View {
     private var detail: String {
         let kinds = gram ? "needs \(ownerName), finishes or stops, and when it sends a Gram"
                          : "needs \(ownerName), finishes or stops"
-        return "HerdrUp can tell you when \(agentName) \(kinds), even while the app is closed."
+        return "HerdrUp can tell you when \(agentName) \(kinds), even while the app is closed. "
+            + "You can change this any time in Settings."
     }
 }

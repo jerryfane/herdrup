@@ -67,6 +67,10 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     public var readByOwner: Bool
     /// A file attached to this message, or nil. Fetch its bytes with `gramGetFile`.
     public let file: GramFile?
+    /// The label of the federated machine `from` is relayed from, when `from` is
+    /// `<alias>/<name>` and the daemon knows the alias's machine. Absent otherwise, and
+    /// from daemons predating it.
+    public let machineLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case id, direction, from, to, text, file
@@ -74,6 +78,14 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
         case grabbedUnixMs = "grabbed_unix_ms"
         case createdUnixMs = "created_unix_ms"
         case readByOwner = "read_by_owner"
+        case machineLabel = "machine_label"
+    }
+
+    /// The sender as people read it: a federated sender's machine label in place of its
+    /// alias (`<machine_label>/<name>`), like agent rows; otherwise `from` unchanged.
+    public var senderName: String {
+        guard let slash = from.firstIndex(of: "/") else { return from }
+        return FederatedName.display(from, machineID: String(from[..<slash]), machineLabel: machineLabel)
     }
 
     /// A message an agent sent the owner (vs one the owner posted).
