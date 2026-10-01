@@ -68,8 +68,8 @@ struct GuestMockTransport: HerdrTransport {
     /// Read by UI tests via GuestPaneView's DEBUG probe.
     static var forbiddenCalls: [String] { recorder.calls }
 
-    /// The Gram and push calls the host answered, with their arguments, in order (plus the
-    /// files the app opened, as `opened:<name>`). Read by UI tests via the same probe.
+    /// The Gram, push, upload and prompt calls the host answered, with their arguments, in
+    /// order (plus the files the app opened, as `opened:<name>`). Read by UI tests via the same probe.
     static var hostCalls: [String] { hostRecorder.calls }
 
     static let allowlist: Set<String> = [
@@ -158,15 +158,31 @@ struct GuestMockTransport: HerdrTransport {
             }
             switch method {
             case "agent.prompt":
+                Self.hostRecorder.append("agent.prompt:\(params["text"] as? String ?? "")")
                 return #"{"id":"\#(id)","result":{"type":"agent_prompted","delivery":"submitted"}}"#
             case "gram.upload_chunk":
+                let uploadID = params["upload_id"] as? String ?? ""
+                let offset = params["offset"] as? Int ?? 0
+                Self.hostRecorder.append("gram.upload_chunk:\(uploadID)@\(offset)")
+                let bytes = Data(base64Encoded: params["data_base64"] as? String ?? "")?.count ?? 0
+                Self.gram.stage(uploadID: uploadID, bytes: bytes)
                 return #"{"id":"\#(id)","result":{"type":"ok"}}"#
             default:
-                let text = params["text"] as? String ?? ""
-                let file = params["file"] as? [String: Any]
-                let posted = Self.gram.post(text: text, fileName: file?["name"] as? String,
-                                            mime: file?["mime"] as? String)
-                return #"{"id":"\#(id)","result":{"type":"gram_sent","message":{"id":"\#(posted)","direction":"owner_to_agent","from":"plotarmordev","text":"(sent)","created_unix_ms":1790000100000,"read_by_owner":true}}}"#
+                let file = (params["file"] as? [String: Any]).map {
+                    (uploadID: $0["upload_id"] as? String ?? "", name: $0["name"] as? String ?? "",
+                     mime: $0["mime"] as? String ?? "")
+                }
+                let call = "gram.post:" + (file.map { "\($0.name)@\($0.uploadID)" } ?? "")
+                guard let message = Self.gram.post(text: params["text"] as? String ?? "",
+                                                   to: params["to"] as? String ?? "", file: file) else {
+                    Self.hostRecorder.append(call + "=no_staged_upload")
+                    return Self.errorLine(id: id, code: "invalid_params",
+                                          message: "no staged upload with that id; upload the file chunks first")
+                }
+                Self.hostRecorder.append(call + "=\(message["id"] as? String ?? "")")
+                // The host's guest projection (`project_gram_sent`): no direction, claim or
+                // read fields, unlike the owner's `gram.post` reply.
+                return Self.encode(id: id, result: ["type": "gram_sent", "message": message])
             }
         case "pane.set_pty_size":
             if scenario == .paused {
@@ -352,6 +368,11 @@ struct GuestMockTransport: HerdrTransport {
         private var messages: [[String: Any]]
         private var files: [String: (name: String, mime: String, data: Data)]
         private var postSeq = 0
+        /// Bytes staged under each `upload_id` by `gram.upload_chunk`; a post consumes its upload.
+        private var staged: [String: Int] = [:]
+        /// `HERDR_MOCK_GUEST_STALE_UPLOAD`: the host has lost the first upload a post names, so
+        /// that post is refused as one is after an earlier post already used its upload.
+        private var loseNextUpload = ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_STALE_UPLOAD"] != nil
 
         init() {
             let now = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -385,17 +406,41 @@ struct GuestMockTransport: HerdrTransport {
             }
         }
 
-        func post(text: String, fileName: String?, mime: String?) -> String {
+        func stage(uploadID: String, bytes: Int) {
+            lock.withLock { staged[uploadID, default: 0] += bytes }
+        }
+
+        /// Stores the guest's post and returns the host's guest projection of it, or nil when
+        /// its file's upload isn't staged (the host's `invalid_params`).
+        func post(text: String, to: String,
+                  file: (uploadID: String, name: String, mime: String)?) -> [String: Any]? {
             lock.withLock {
+                var info: [String: Any]?
+                if let file {
+                    if loseNextUpload {
+                        loseNextUpload = false
+                        staged[file.uploadID] = nil
+                    }
+                    guard let size = staged.removeValue(forKey: file.uploadID) else { return nil }
+                    info = ["name": file.name, "size": size, "mime": file.mime, "sha256": "1b00"]
+                }
                 postSeq += 1
                 let id = "gp-\(postSeq)"
-                var message: [String: Any] = [
-                    "id": id, "direction": "owner_to_agent", "from": "plotarmordev (via HerdrUp)",
-                    "text": text, "created_unix_ms": UInt64(Date().timeIntervalSince1970 * 1000), "read": true,
+                let from = "plotarmordev (via HerdrUp)"
+                let created = UInt64(Date().timeIntervalSince1970 * 1000)
+                var stored: [String: Any] = [
+                    "id": id, "direction": "owner_to_agent", "from": from,
+                    "text": text, "created_unix_ms": created, "read": true,
                 ]
-                if let fileName { message["file"] = ["name": fileName, "size": 1, "mime": mime ?? ""] }
-                messages.insert(message, at: 0)
-                return id
+                var projected: [String: Any] = [
+                    "id": id, "from": from, "to": to, "text": text, "created_unix_ms": created,
+                ]
+                if let info {
+                    stored["file"] = info
+                    projected["file"] = info
+                }
+                messages.insert(stored, at: 0)
+                return projected
             }
         }
 

@@ -78,6 +78,35 @@ public struct GuestGramMessage: Decodable, Identifiable, Sendable, Equatable {
     public var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000.0) }
 }
 
+/// The host's answer to a guest's `gram.post`: its guest projection of the stored message
+/// (`project_gram_sent`), which carries none of the owner's direction, claim or read fields.
+/// Only `id` is required; the rest is informational.
+public struct GuestGramPostReceipt: Decodable, Sendable, Equatable {
+    public let id: String
+    public let from: String?
+    public let to: String?
+    public let text: String?
+    public let createdUnixMs: UInt64?
+    public let file: GuestGramFile?
+
+    enum CodingKeys: String, CodingKey {
+        case id, from, to, text, file
+        case createdUnixMs = "created_unix_ms"
+    }
+
+    /// The host has no staged upload under the posted `upload_id`: it was already consumed by
+    /// an earlier post, or never finished. The file must be uploaded again before posting.
+    public static func isStaleUpload(_ error: Error) -> Bool {
+        guard let api = error as? APIError else { return false }
+        return api.code == "invalid_params" && api.message.contains("no staged upload")
+    }
+}
+
+/// `gram.post` result as a guest sees it: only `message` is decoded.
+struct GuestGramPostResult: Decodable {
+    let message: GuestGramPostReceipt
+}
+
 /// One page of the guest's `gram.list`, newest first.
 public struct GuestGramPage: Decodable, Sendable, Equatable {
     public let messages: [GuestGramMessage]

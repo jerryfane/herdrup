@@ -383,9 +383,12 @@ final class TerminalInteractionHarness: ObservableObject {
 
     /// The file the composer's attach sheet "picks" under this harness, in place of the
     /// out-of-process document picker XCUITest cannot drive. nil outside the harness,
-    /// where the real picker opens.
+    /// where the real picker opens. `HERDR_MOCK_PICKED_FILE` opts any other mock (the
+    /// guest pane's) into the same pick.
     static func pickedFiles() -> [URL]? {
-        guard enabled else { return nil }
+        let optedIn = ScreenshotMock.mode != nil
+            && ProcessInfo.processInfo.environment["HERDR_MOCK_PICKED_FILE"] != nil
+        guard enabled || optedIn else { return nil }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("picked-notes.txt")
         guard (try? Data("picked through the paperclip".utf8).write(to: url, options: .atomic)) != nil
         else { return nil }

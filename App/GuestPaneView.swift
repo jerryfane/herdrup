@@ -639,17 +639,21 @@ struct GuestPaneView: View {
             sendingAttachmentID = file.id
             if file.messageID == nil {
                 if file.uploadID == nil {
-                    uploadBytes = (sent: 0, total: file.staged.size)
-                    file.uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
-                        uploadBytes = (sent: sent, total: total)
-                    }
-                    uploadBytes = nil
+                    file.uploadID = try await upload(file)
                     remember(file)
                 }
-                let posted = try await client.gramPost(
-                    text: "Attachment from \(access.guestName).", to: access.agentName,
-                    attachment: HerdrClient.GramFileAttachment(
-                        uploadID: file.uploadID ?? "", name: file.name, mime: file.mime))
+                let posted: GuestGramPostReceipt
+                do {
+                    posted = try await post(file)
+                } catch let error where GuestGramPostReceipt.isStaleUpload(error) {
+                    // The host holds nothing under that upload id (an earlier post used it
+                    // up): upload the file again and post once more.
+                    file.uploadID = nil
+                    remember(file)
+                    file.uploadID = try await upload(file)
+                    remember(file)
+                    posted = try await post(file)
+                }
                 file.messageID = posted.id
                 remember(file)
             }
@@ -657,6 +661,24 @@ struct GuestPaneView: View {
                 name: file.name, isImage: file.isImage, messageID: file.messageID ?? ""))
         }
         return delivered
+    }
+
+    /// Uploads a staged file's bytes and returns the host's `upload_id` for it.
+    private func upload(_ file: Attachment) async throws -> String {
+        uploadBytes = (sent: 0, total: file.staged.size)
+        let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
+            uploadBytes = (sent: sent, total: total)
+        }
+        uploadBytes = nil
+        return uploadID
+    }
+
+    /// Posts an uploaded file to the shared agent as the guest's Gram.
+    private func post(_ file: Attachment) async throws -> GuestGramPostReceipt {
+        try await client.guestGramPost(
+            text: "Attachment from \(access.guestName).", to: access.agentName,
+            attachment: HerdrClient.GramFileAttachment(
+                uploadID: file.uploadID ?? "", name: file.name, mime: file.mime))
     }
 
     private func remember(_ file: Attachment) {

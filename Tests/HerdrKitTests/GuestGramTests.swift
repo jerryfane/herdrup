@@ -126,6 +126,45 @@ final class GuestGramTests: XCTestCase {
         XCTAssertEqual(request.params["ids"] as? [String], ["m3", "m1"])
     }
 
+    /// herdrup#345: the live host's reply to a guest's attachment post, verbatim. It is the
+    /// guest projection (no `direction`, no `read_by_owner`), which the owner's `GramMessage`
+    /// cannot decode: the post landed, but the app saw a failure and posted the upload again.
+    static let liveGuestPostReply = #"{"id":"e2e:gram.post","result":{"type":"gram_sent","message":{"created_unix_ms":1790849045630,"file":{"mime":"text/markdown","name":"brief.md","sha256":"1b000f…","size":6009},"from":"upload-e2e (via HerdrUp)","id":"gram-1a0f6ebd47e-320048-d","text":"Attachment from upload-e2e.","to":"mac-studio"}}}"#
+
+    func testGuestPostDecodesTheHostsProjectedReply() async throws {
+        let transport = ScriptedTransport { _, _ in Self.liveGuestPostReply }
+        let receipt = try await HerdrClient(transport: transport).guestGramPost(
+            text: "Attachment from upload-e2e.", to: "mac-studio",
+            attachment: HerdrClient.GramFileAttachment(uploadID: "app-1", name: "brief.md", mime: "text/markdown"))
+        XCTAssertEqual(receipt.id, "gram-1a0f6ebd47e-320048-d")
+        XCTAssertEqual(receipt.to, "mac-studio")
+        XCTAssertEqual(receipt.createdUnixMs, 1_790_849_045_630)
+        XCTAssertEqual(receipt.file, GuestGramFile(name: "brief.md", size: 6009, mime: "text/markdown", sha256: "1b000f…"))
+
+        let request = try XCTUnwrap(transport.requests.last)
+        XCTAssertEqual(request.method, "gram.post")
+        XCTAssertEqual(request.params["to"] as? String, "mac-studio")
+        let file = try XCTUnwrap(request.params["file"] as? [String: Any])
+        XCTAssertEqual(file["upload_id"] as? String, "app-1")
+        XCTAssertEqual(file["name"] as? String, "brief.md")
+    }
+
+    func testOnlyTheMissingStagedUploadErrorAsksForAFreshUpload() async throws {
+        let stale = ScriptedTransport { _, _ in
+            #"{"id":"x","error":{"code":"invalid_params","message":"no staged upload with that id; upload the file chunks first"}}"#
+        }
+        do {
+            try await HerdrClient(transport: stale).guestGramPost(text: "", to: "llm-opt")
+            XCTFail("the post should be refused")
+        } catch {
+            XCTAssertTrue(GuestGramPostReceipt.isStaleUpload(error))
+        }
+        XCTAssertFalse(GuestGramPostReceipt.isStaleUpload(
+            APIError(code: "invalid_params", message: "text too long")))
+        XCTAssertFalse(GuestGramPostReceipt.isStaleUpload(
+            APIError(code: "gram_file_error", message: "no staged upload with that id")))
+    }
+
     /// Review P2: a refused mark is rolled back, and the rollback makes the ids unread again.
     /// Asking again right away must send nothing; the ids go out once their backoff passes,
     /// and the backoff doubles on each refusal up to its cap.
