@@ -86,7 +86,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // No token — no entitlement yet, Simulator, or airplane mode. Owner push stays inactive
         // with nothing to surface (the Settings screen already tells the user push is
         // best-effort); a guest's Notifications control shows why.
-        Task { @MainActor in PushCenter.shared.tokenFailed(error) }
+        let reason = error.localizedDescription
+        Task { @MainActor in GuestPushCenter.shared.tokenFailed(reason) }
     }
 
     // Show the banner + play the sound even while the app is foregrounded, and ALSO add it to

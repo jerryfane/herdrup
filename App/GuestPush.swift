@@ -97,6 +97,11 @@ final class GuestPushCenter: ObservableObject {
         Task { await coordinator.deviceTokenChanged(shares: shares) }
     }
 
+    /// iOS refused a token: shares waiting for one show why.
+    func tokenFailed(_ reason: String) {
+        Task { await coordinator.tokenFailed(reason) }
+    }
+
     func leaving(_ access: GuestAccess) {
         Task { await coordinator.leaving(access) }
     }
@@ -121,7 +126,6 @@ extension GuestPushSystem {
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
         },
         deviceToken: { await MainActor.run { PushCenter.shared.deviceToken } },
-        tokenError: { await MainActor.run { PushCenter.shared.tokenError } },
         relayCapability: { await PushCenter.relay.capability(kind: .device, token: $0) },
         connect: { access in try await MainActor.run { try GuestConnection.open(access).client } })
 
@@ -140,7 +144,6 @@ extension GuestPushSystem {
             },
             registerForRemoteNotifications: {},
             deviceToken: { authorization.value == .granted ? GuestMockTransport.deviceToken : nil },
-            tokenError: { nil },
             relayCapability: { _ in "hpr1.mock" },
             connect: { _ in HerdrClient(transport: GuestMockTransport(scenario: .running)) })
     }

@@ -100,7 +100,6 @@ final class GuestPushCoordinatorTests: XCTestCase {
                 requestAuthorization: { await phone.authorization == .granted },
                 registerForRemoteNotifications: {},
                 deviceToken: { await phone.token },
-                tokenError: { nil },
                 relayCapability: { _ in await phone.enroll() },
                 connect: { _ in HerdrClient(transport: HostTransport(host: host)) }),
             defaults: defaults)
@@ -201,6 +200,49 @@ final class GuestPushCoordinatorTests: XCTestCase {
         let client = client(host)
         for _ in 0..<3 { await coordinator.connected(access, client: client, features: features) }
         XCTAssertEqual(host.calls, ["notifications.register_device"])
+    }
+
+    // MARK: The token
+
+    /// iOS refuses a token after the share asked for one (no aps-environment, no network):
+    /// the control shows why as soon as iOS says so, and the token's later arrival clears it.
+    func testATokenFailureAfterTheRequestShowsInTheControl() async throws {
+        let phone = Phone()
+        await phone.set(token: nil)
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        await coordinator.connected(access, client: client(host), features: features)
+        XCTAssertEqual(host.calls, [], "no token, nothing to register yet")
+
+        await coordinator.tokenFailed("no valid aps-environment entitlement")
+        let failed = await coordinator.state.status(for: access)
+        XCTAssertEqual(failed, .failed("iOS couldn't set up notifications: no valid aps-environment entitlement"))
+
+        await phone.set(token: "ab12cd34ab12cd34ab12cd34ab12cd34")
+        await coordinator.deviceTokenChanged(shares: [access])
+        XCTAssertFalse(host.registered.isEmpty, "\(host.calls)")
+        let status = await coordinator.state.status(for: access)
+        XCTAssertEqual(status, .on)
+    }
+
+    /// A token failure is about the shares waiting for one: a share that is off, or already
+    /// registered, doesn't show it.
+    func testATokenFailureLeavesSharesNotWaitingForATokenAlone() async throws {
+        let phone = Phone()
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        await coordinator.connected(access, client: client(host), features: features)
+        await coordinator.tokenFailed("offline")
+        let registered = await coordinator.state.status(for: access)
+        XCTAssertEqual(registered, .on)
+
+        await phone.set(token: nil)
+        await coordinator.turnOff(access, client: client(host))
+        await coordinator.turnOn(access, client: client(host))
+        await coordinator.turnOff(access, client: client(host))
+        await coordinator.tokenFailed("offline")
+        let off = await coordinator.state.status(for: access)
+        XCTAssertEqual(off, .off)
     }
 
     /// Polls `condition` until it holds or `timeout` passes; returns whether it held.

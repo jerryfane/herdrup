@@ -5,11 +5,10 @@ import Foundation
 public struct GuestPushSystem: Sendable {
     public var authorization: @Sendable () async -> PushAuthorization
     public var requestAuthorization: @Sendable () async -> Bool
-    /// Asks iOS for an APNs token; it arrives later, through `deviceTokenChanged`.
+    /// Asks iOS for an APNs token; it arrives later, through `deviceTokenChanged`, or iOS
+    /// refuses, through `tokenFailed`.
     public var registerForRemoteNotifications: @Sendable () async -> Void
     public var deviceToken: @Sendable () async -> String?
-    /// Why iOS last failed to issue a token, while it has none.
-    public var tokenError: @Sendable () async -> String?
     public var relayCapability: @Sendable (String) async -> String?
     /// A client for a share, for calls made away from its screens (a token change, the
     /// Settings control before the home connected, leaving the share).
@@ -19,14 +18,12 @@ public struct GuestPushSystem: Sendable {
                 requestAuthorization: @escaping @Sendable () async -> Bool,
                 registerForRemoteNotifications: @escaping @Sendable () async -> Void,
                 deviceToken: @escaping @Sendable () async -> String?,
-                tokenError: @escaping @Sendable () async -> String?,
                 relayCapability: @escaping @Sendable (String) async -> String?,
                 connect: @escaping @Sendable (GuestAccess) async throws -> HerdrClient) {
         self.authorization = authorization
         self.requestAuthorization = requestAuthorization
         self.registerForRemoteNotifications = registerForRemoteNotifications
         self.deviceToken = deviceToken
-        self.tokenError = tokenError
         self.relayCapability = relayCapability
         self.connect = connect
     }
@@ -101,6 +98,8 @@ public actor GuestPushCoordinator {
     /// Per share: the operation queued last. Each waits for the one before, so a share
     /// never has a registration and an unregistration in flight together.
     private var operations: [String: Task<Void, Never>] = [:]
+    /// Per share: the intent under which it asked iOS for a token and is waiting for one.
+    private var awaitingToken: [String: UInt64] = [:]
 
     private let system: GuestPushSystem
     private let defaults: UserDefaults
@@ -267,6 +266,7 @@ public actor GuestPushCoordinator {
     public func leaving(_ access: GuestAccess) async {
         _ = newIntent(access)
         let wasRegistered = sent[access.id] != nil || state.choices[access.id] == .on
+        awaitingToken[access.id] = nil
         setChoice(nil, for: access)
         remember(nil, for: access)
         setFailure(nil, for: access)
@@ -274,6 +274,14 @@ public actor GuestPushCoordinator {
         guard wasRegistered || state.authorization == .granted else { return }
         await serially(access) {
             await self.forget(access)
+        }
+    }
+
+    /// iOS refused this app an APNs token (`didFailToRegisterForRemoteNotifications…`): every
+    /// share still waiting for one shows why, until a token arrives or the guest retries.
+    public func tokenFailed(_ reason: String) {
+        for (id, intent) in awaitingToken where intents[id] ?? 0 == intent && state.choices[id] != .off {
+            state.failures[id] = GuestPushFailure(.register, "iOS couldn't set up notifications: \(reason)")
         }
     }
 
@@ -326,12 +334,11 @@ public actor GuestPushCoordinator {
                           again: Bool = false, intent: UInt64) async {
         guard !superseded(intent, access), state.choices[access.id] != .off else { return }
         guard let token = await system.deviceToken() else {
+            awaitingToken[access.id] = intent
             await system.registerForRemoteNotifications()
-            if let error = await system.tokenError(), !superseded(intent, access) {
-                setFailure(GuestPushFailure(.register, "iOS couldn't set up notifications: \(error)"), for: access)
-            }
             return
         }
+        awaitingToken[access.id] = nil
         let registration = Registration(client: client, token: token, gram: features.gram)
         guard again || sent[access.id] != registration else { return }
         let capability = await system.relayCapability(token)
