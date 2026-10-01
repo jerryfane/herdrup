@@ -24,6 +24,9 @@ final class PushCenter: ObservableObject {
     /// The APNs device token (lowercase hex), set by the AppDelegate on registration. Persisted so
     /// a relaunch/reconnect can re-send it to the server before any new registration callback.
     @Published private(set) var deviceToken: String?
+    /// Why iOS last refused this app a token (`didFailToRegister…`), until it issues one. A
+    /// guest's Notifications control shows it; owner push ignores it.
+    private(set) var tokenError: String?
     /// A pane the user tapped a push for (the payload's `pane_id`). The home view consumes it once
     /// its agent list has loaded, then clears it. Held here so a cold-launch tap (app was closed)
     /// and a tap during a reconnect both survive until the view can act on it.
@@ -49,10 +52,15 @@ final class PushCenter: ObservableObject {
     /// Record a freshly-registered token (idempotent; persisted), and start its relay enrollment
     /// now so the capability is usually cached by the time a connection registers the token.
     func setToken(_ token: String) {
+        tokenError = nil
         guard token != deviceToken else { return }
         deviceToken = token
         UserDefaults.standard.set(token, forKey: Self.tokenKey)
         Task { _ = await Self.relay.capability(kind: .device, token: token) }
+    }
+
+    func tokenFailed(_ error: Error) {
+        tokenError = error.localizedDescription
     }
 
     /// A notification was tapped for `paneID` — deep-link to it when the view is ready.
