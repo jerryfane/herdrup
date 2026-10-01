@@ -192,4 +192,77 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(app.buttons["guest-tab-gram"].waitForExistence(timeout: 5))
         XCTAssertFalse(element(app, "guest-gram-list").exists, "a status push opens the terminal, not Gram")
     }
+
+    // MARK: Attachments
+
+    /// herdrup#345: the host answers a guest's `gram.post` with its guest projection (no
+    /// direction or read fields). The app took that for a failure after the post had landed, so
+    /// the agent was never prompted and the next Send re-posted an upload the host had used up.
+    func testAttachingAFileUploadsPostsAndPromptsTheAgent() {
+        let app = launch(features: nil, environment: ["HERDR_MOCK_PICKED_FILE": "1"])
+        let calls = sendWithAttachment(app, text: "summarise this")
+
+        XCTAssertEqual(calls.filter { $0.hasPrefix("gram.upload_chunk:") }.count, 1, "\(calls)")
+        let posts = calls.filter { $0.hasPrefix("gram.post:") }
+        XCTAssertEqual(posts.count, 1, "one post for the one file: \(calls)")
+        XCTAssertTrue(posts.first?.hasPrefix("gram.post:picked-notes.txt@") == true, "\(posts)")
+        XCTAssertTrue(posts.first?.hasSuffix("=gp-1") == true, "the post should land: \(posts)")
+        let prompt = calls.first { $0.hasPrefix("agent.prompt:") } ?? ""
+        XCTAssertTrue(prompt.hasPrefix("agent.prompt:summarise this"), prompt)
+        XCTAssertTrue(prompt.contains("File picked-notes.txt attached via Herdr Gram message gp-1"), prompt)
+        XCTAssertEqual(probe(app, "guest-forbidden-calls"), "")
+    }
+
+    /// A post the host refuses for want of a staged upload (an earlier post used it) uploads the
+    /// file again and posts once more, instead of failing the send on every retry.
+    func testAStaleUploadIsUploadedAgainAndPostedOnce() {
+        let app = launch(features: nil, environment: ["HERDR_MOCK_PICKED_FILE": "1",
+                                                      "HERDR_MOCK_GUEST_STALE_UPLOAD": "1"])
+        let calls = sendWithAttachment(app, text: "")
+
+        let uploads = calls.filter { $0.hasPrefix("gram.upload_chunk:") }
+        XCTAssertEqual(uploads.count, 2, "the refused upload is replaced: \(calls)")
+        XCTAssertNotEqual(uploads.first, uploads.last, "under a fresh upload id: \(uploads)")
+        let posts = calls.filter { $0.hasPrefix("gram.post:") }
+        XCTAssertEqual(posts.count, 2, "\(calls)")
+        XCTAssertTrue(posts.first?.hasSuffix("=no_staged_upload") == true, "\(posts)")
+        XCTAssertTrue(posts.last?.hasSuffix("=gp-1") == true, "\(posts)")
+        let prompt = calls.first { $0.hasPrefix("agent.prompt:") } ?? ""
+        XCTAssertTrue(prompt.contains("File picked-notes.txt attached via Herdr Gram message gp-1"), prompt)
+    }
+
+    /// Picks the harness's file through the paperclip, types `text` and sends. Waits for the
+    /// agent's prompt, checks the composer cleared without a note, and returns the host's calls.
+    private func sendWithAttachment(_ app: XCUIApplication, text: String) -> [String] {
+        let paperclip = app.buttons["guest-attach-button"]
+        XCTAssertTrue(paperclip.waitForExistence(timeout: 10))
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: paperclip)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed, "the composer should open")
+        paperclip.tap()
+        let file = app.buttons["composer-attach-file"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "the paperclip should open the attach sheet")
+        file.tap()
+        let chip = app.staticTexts["picked-notes.txt"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "the picked file should stage a chip")
+
+        if !text.isEmpty {
+            let input = app.textViews["guest-composer-input"]
+            input.tap()
+            input.typeText(text)
+        }
+        let send = app.buttons["guest-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5), "a staged file should be sendable")
+        send.tap()
+
+        let calls = waitForProbe(app, "guest-host-calls", "the agent should be prompted with the file",
+                                 timeout: 15) { $0.contains("agent.prompt:") }
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, "the chip should clear once delivered")
+        XCTAssertTrue(app.staticTexts["Message llm-opt as plotarmordev"].waitForExistence(timeout: 5),
+                      "a delivered message clears the composer")
+        let note = element(app, "guest-note")
+        XCTAssertFalse(note.exists, "the send should not fail: \(note.exists ? note.label : "")")
+        attachScreenshot(app, "guest-attachment-sent")
+        return calls.components(separatedBy: ";")
+    }
 }

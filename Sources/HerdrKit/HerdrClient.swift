@@ -929,6 +929,20 @@ public actor HerdrClient {
         _ = try await call("gram.mark_read", GuestGramMarkReadParams(ids: ids), as: JSONNull.self)
     }
 
+    /// A guest posts a Gram to the shared agent (`gram.post` over the guest relay), e.g. an
+    /// attachment uploaded with `gramUploadFile`. The host answers with its guest projection
+    /// of the stored message, which `GramMessage` (the owner's view) cannot decode.
+    @discardableResult
+    public func guestGramPost(
+        text: String, to: String, attachment: GramFileAttachment? = nil
+    ) async throws -> GuestGramPostReceipt {
+        let file = attachment.map {
+            GramFileUploadParams(uploadID: $0.uploadID, name: $0.name, mime: $0.mime)
+        }
+        return try await call("gram.post", GramPostParams(text: text, to: to, file: file),
+                              as: GuestGramPostResult.self).message
+    }
+
     struct SendKeysParams: Encodable {
         let target: String
         let keys: [String]
