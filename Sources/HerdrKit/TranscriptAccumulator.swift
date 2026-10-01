@@ -55,7 +55,7 @@ public struct TranscriptAccumulator: Equatable, Sendable {
         guard let i = segments.firstIndex(where: { $0.id == id }), !segments[i].finished else { return }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if isFinal {
-            segments[i].settle(final: t, at: time)
+            segments[i].settle(final: t)
             close(at: i)
         } else {
             segments[i].observe(t, ended: utteranceEnded, at: time)
@@ -120,20 +120,30 @@ public struct TranscriptAccumulator: Equatable, Sendable {
             if !partial.isEmpty { ended = isEnd }
         }
 
-        mutating func settle(final f: String, at time: TimeInterval) {
+        mutating func settle(final f: String) {
             let fw = Words(f)
             // An empty final keeps what was shown.
             guard !fw.isEmpty else { return }
             // A cumulative final (the whole task's text, as before iOS 18) after a restart
             // was taken for the earlier words: it supersedes them rather than repeating them.
-            let whole = Words(text)
-            if !utterances.isEmpty, fw.count > Words(partial).count,
-               fw.commonPrefix(with: whole) >= 1, fw.count * 4 >= whole.count * 3 {
+            // Only a final that is every kept utterance followed by the current one is one; a
+            // final holding just the last utterance leaves them be, even when that utterance
+            // starts with the same words.
+            let kept = Words(TranscriptAccumulator.join(utterances)).joined
+            let current = Words(partial).words.first ?? ""
+            if !kept.isEmpty, fw.joined.hasPrefix(kept),
+               case let rest = fw.joined.dropFirst(kept.count), !rest.isEmpty, rest.hasPrefix(current) {
                 utterances = []
                 partial = f
                 return
             }
-            observe(f, ended: true, at: time)
+            // Otherwise the final is the settled text of the utterance on screen, however much
+            // it rewrote it, unless that utterance was already marked complete.
+            if ended, Words.startsNewUtterance(after: partial, next: f, ended: true, gap: 0) {
+                utterances.append(partial)
+            }
+            partial = f
+            ended = true
         }
     }
 }

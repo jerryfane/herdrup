@@ -95,6 +95,35 @@ final class TranscriptAccumulatorTests: XCTestCase {
         XCTAssertEqual(acc.text, "Hello world how are you.")
     }
 
+    /// A final holding only the last utterance supersedes nothing, even when it shares the
+    /// kept utterance's first word and is about as long as everything shown.
+    func testLastUtteranceFinalSharingFirstWordKeepsEarlierUtterance() {
+        acc.begin(segment: 1)
+        partial("I saw", at: 0.0, ended: true)
+        partial("I ate", at: 2.0)
+        final("I ate a lot", at: 3.0)
+        XCTAssertEqual(acc.text, "I saw I ate a lot")
+    }
+
+    func testLastUtteranceFinalAfterFlaggedUtteranceKeepsIt() {
+        acc.begin(segment: 1)
+        partial("I", at: 0.0)
+        partial("I went", at: 0.3, ended: true)
+        partial("I walked", at: 2.0)
+        final("I walked home", at: 3.0)
+        XCTAssertEqual(acc.text, "I went I walked home")
+    }
+
+    /// The last utterance's final settles on the kept utterance's words: it still holds
+    /// only itself, so both stay.
+    func testLastUtteranceFinalRepeatingKeptWordsKeepsBoth() {
+        acc.begin(segment: 1)
+        partial("Hello", at: 0.0, ended: true)
+        partial("Halo there", at: 2.0)
+        final("Hello there.", at: 3.0)
+        XCTAssertEqual(acc.text, "Hello Hello there.")
+    }
+
     /// A task finalizes holding only its last utterance; dictation goes on in a new task.
     func testFinalThenNewUtterance() {
         acc.begin(segment: 1)
