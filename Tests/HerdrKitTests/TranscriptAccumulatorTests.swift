@@ -362,14 +362,40 @@ final class TranscriptAccumulatorTests: XCTestCase {
         expect("I won't go")
     }
 
+    /// A cumulative final that drops trailing words ends before the audio already shown,
+    /// but it starts with that audio and rewrites its words: it replaces everything shown.
+    func testShorterCumulativeFinalReplacesKept() {
+        acc.begin(segment: 1)
+        partial("Hello world", at: 0.9, audio: 0.0...0.8)
+        partial("How are you", at: 3.1, audio: 2.0...3.0)
+        final("Hello world who are", at: 4.0, audio: 0.0...2.6)
+        expect("Hello world who are")
+    }
+
+    /// A completed utterance the recognizer settles shorter is revised, not repeated.
+    func testShorterSettledUtteranceReplacesIt() {
+        acc.begin(segment: 1)
+        partial("I want to go", at: 1.1, audio: 0.0...1.0, ended: true)
+        final("I want to", at: 1.5, audio: 0.0...0.7)
+        expect("I want to")
+    }
+
     /// If the recognizer's clock restarted with the new utterance, its timing would claim
-    /// it covers the earlier one; a result ending before the audio already shown isn't
-    /// trusted, and the words keep the earlier utterance.
+    /// it covers the earlier one. A result starting with the audio it would replace but
+    /// sharing none of its words isn't trusted, and the words keep the earlier utterance.
     func testTimingRunningBackwardsKeepsEarlierUtterance() {
         acc.begin(segment: 1)
         partial("hello world", at: 0.9, audio: 0.0...0.8)
         partial("how are", at: 2.5, audio: 0.0...0.4)
         expect("hello world how are")
+    }
+
+    /// The same, when the restarted utterance runs past the audio already shown.
+    func testRestartedClockOutrunningShownAudioKeepsEarlierUtterance() {
+        acc.begin(segment: 1)
+        partial("hello world", at: 0.9, audio: 0.0...0.8)
+        partial("how are you doing today", at: 3.5, audio: 0.0...1.4)
+        expect("hello world how are you doing today")
     }
 
     // MARK: - Audio from word timing

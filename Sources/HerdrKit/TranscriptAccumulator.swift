@@ -180,20 +180,24 @@ public struct TranscriptAccumulator: Equatable, Sendable {
             partialAudio = audio
         }
 
-        /// Place a result by its audio: it transcribes everything from its first word on, so
-        /// it replaces the utterances that hadn't ended by then and keeps those before.
-        /// Returns false, deciding nothing, unless the result and every utterance shown have
-        /// timing and the result ends no earlier than the audio already shown: a result
-        /// ending earlier means a recognizer clock that restarted, or dropped trailing words,
-        /// which timing can't tell apart.
+        /// Place a result by where its audio STARTS: it transcribes everything from its first
+        /// word on, so it replaces the utterances that hadn't ended by then and keeps those
+        /// before — however early it ends, since a settled result can drop trailing words.
+        /// Returns false, deciding nothing, when the result or any utterance shown lacks
+        /// timing, or when the clock may have restarted: a result starting with all the audio
+        /// it would replace yet sharing none of its leading words is a new utterance timed
+        /// from zero as far as anyone can tell, so the words decide.
         private mutating func place(_ t: String, audio: ClosedRange<TimeInterval>?) -> Bool {
             guard let audio else { return false }
             var shown = utterances
             if !partial.isEmpty { shown.append(Utterance(text: partial, audio: partialAudio)) }
             let spans = shown.compactMap(\.audio)
             guard spans.count == shown.count else { return false }
-            if let last = spans.last, audio.upperBound < last.upperBound { return false }
             let kept = spans.prefix(while: { $0.upperBound <= audio.lowerBound }).count
+            if kept < spans.count, audio.lowerBound <= spans[kept].lowerBound {
+                let replaced = Words(TranscriptAccumulator.join(shown[kept...].map(\.text)))
+                guard Words(t).rewrites(replaced) else { return false }
+            }
             utterances = Array(shown.prefix(kept))
             partial = t
             partialAudio = audio
@@ -223,6 +227,14 @@ struct Words: Equatable {
 
     func commonPrefix(with other: Words) -> Int {
         zip(words, other.words).prefix(while: { $0 == $1 }).count
+    }
+
+    /// Whether `self` reads as a rewrite of `other` rather than different speech: it keeps
+    /// the first word, or one run-together text starts with the other (scripts without
+    /// spaces, where a whole phrase is one "word").
+    func rewrites(_ other: Words) -> Bool {
+        guard !isEmpty, !other.isEmpty else { return false }
+        return commonPrefix(with: other) >= 1 || joined.hasPrefix(other.joined) || other.joined.hasPrefix(joined)
     }
 
     /// Whether `next` starts a new utterance after `previous` (which must be kept) rather
