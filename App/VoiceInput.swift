@@ -39,10 +39,8 @@ final class SpeechDictator: ObservableObject {
     /// transcript that never loses dictated text: not when the recognizer restarts its
     /// transcription after a pause, not at a roll, not at stop.
     private var accumulator = TranscriptAccumulator()
-    /// Consecutive error-driven rolls with no successful result between them. Capped so a
-    /// PERSISTENT failure (asset evicted, dictation disabled mid-session) stops with a note
-    /// instead of churning new tasks forever.
-    private var errorRolls = 0
+    /// What to do after each callback, with the cap on consecutive error-driven rolls.
+    private var recovery = DictationRecovery()
     /// Rolls the recognition task over before `SFSpeechRecognizer`'s ~1-minute audio
     /// ceiling, so it never reaches the window where it would drop earlier text.
     private var rollTimer: Timer?
@@ -76,7 +74,7 @@ final class SpeechDictator: ObservableObject {
         // spawn a second recognition task.
         guard state != .requesting, state != .recording else { return }
         accumulator.reset()
-        errorRolls = 0
+        recovery = DictationRecovery()
         transcript = ""
         note = nil
         state = .requesting
@@ -184,30 +182,31 @@ final class SpeechDictator: ObservableObject {
             let failed = error != nil
             Task { @MainActor in
                 guard let self, self.state == .recording else { return }
-                let isActive = (gen == self.generation)
+                // Apply the result first: a callback can carry the last partial AND the error
+                // that ended the task.
                 if let text {
-                    self.errorRolls = 0          // a result means we're making progress
                     self.accumulator.result(
                         text, segment: gen, isFinal: isFinal, utteranceEnded: utteranceEnded, at: now
                     )
-                    self.transcript = self.accumulator.text
-                    // The active segment finalized on a natural pause: keep going (a pause
-                    // doesn't stop dictation).
-                    if isFinal, isActive { self.startSegment(recognizer: recognizer) }
-                } else if failed {
-                    // The task is over without a final: its segment keeps what it showed.
-                    self.accumulator.end(segment: gen)
-                    self.transcript = self.accumulator.text
-                    guard isActive else { return }
-                    // Roll on error (routinely the ceiling), but CAP consecutive error-rolls
-                    // so a persistent failure stops with feedback instead of churning forever.
-                    self.errorRolls += 1
-                    if self.errorRolls >= 3 {
-                        self.note = "Dictation stopped. Tap the mic to start again."
-                        self.stop()
-                    } else {
-                        self.rollSegment()
-                    }
+                }
+                // A task that failed without a final keeps what it showed.
+                if failed { self.accumulator.end(segment: gen) }
+                self.transcript = self.accumulator.text
+                switch self.recovery.after(
+                    activeSegment: gen == self.generation, hasResult: text != nil,
+                    isFinal: isFinal, failed: failed
+                ) {
+                case .keepListening:
+                    break
+                case .nextSegment:
+                    // Finalized on a natural pause: keep going (a pause doesn't stop dictation).
+                    self.startSegment(recognizer: recognizer)
+                case .roll:
+                    // Roll on error (routinely the ceiling).
+                    self.rollSegment()
+                case .stop:
+                    self.note = "Dictation stopped. Tap the mic to start again."
+                    self.stop()
                 }
             }
         }
