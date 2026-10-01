@@ -177,6 +177,32 @@ final class GuestPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(status, .on)
     }
 
+    // MARK: One registration per connection
+
+    /// Each new connection registers, even when the last one is gone and the new client
+    /// lands at the old one's address: the host may have dropped the phone since.
+    func testEveryNewConnectionRegisters() async throws {
+        let phone = Phone()
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        let connections = 40
+        for _ in 0..<connections {
+            // Each share screen opens its own client and drops it when it closes.
+            await coordinator.connected(access, client: client(host), features: features)
+        }
+        XCTAssertEqual(host.calls.filter { $0 == "notifications.register_device" }.count, connections)
+    }
+
+    /// One connection registers once, however often it reports the host's features.
+    func testOneConnectionRegistersOnce() async throws {
+        let phone = Phone()
+        let host = Host()
+        let coordinator = makeCoordinator(phone, host)
+        let client = client(host)
+        for _ in 0..<3 { await coordinator.connected(access, client: client, features: features) }
+        XCTAssertEqual(host.calls, ["notifications.register_device"])
+    }
+
     /// Polls `condition` until it holds or `timeout` passes; returns whether it held.
     @discardableResult
     func waitUntil(timeout: TimeInterval, _ condition: () async -> Bool) async throws -> Bool {

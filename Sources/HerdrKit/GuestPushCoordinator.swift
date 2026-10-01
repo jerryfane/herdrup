@@ -82,12 +82,18 @@ public actor GuestPushCoordinator {
     }
 
     /// Per share: the registration last sent, so one connection registers once and a new
-    /// token or Gram preference registers again.
+    /// connection, token or Gram preference registers again.
     private var sent: [String: Registration] = [:]
     private struct Registration: Equatable {
-        let client: ObjectIdentifier
+        /// Held, not just its address: a released client's address can come back as the
+        /// next connection's, which would then never register.
+        let client: HerdrClient
         let token: String
         let gram: Bool
+
+        static func == (lhs: Registration, rhs: Registration) -> Bool {
+            lhs.client === rhs.client && lhs.token == rhs.token && lhs.gram == rhs.gram
+        }
     }
     /// Per share: the guest's latest intent (Turn on, Turn off, Not now, leaving). An
     /// operation started under an older one stops before it reaches the host.
@@ -326,7 +332,7 @@ public actor GuestPushCoordinator {
             }
             return
         }
-        let registration = Registration(client: ObjectIdentifier(client), token: token, gram: features.gram)
+        let registration = Registration(client: client, token: token, gram: features.gram)
         guard again || sent[access.id] != registration else { return }
         let capability = await system.relayCapability(token)
         guard !superseded(intent, access), state.choices[access.id] != .off else { return }
