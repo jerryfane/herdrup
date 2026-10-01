@@ -179,6 +179,13 @@ final class SpeechDictator: ObservableObject {
             // On-device recognition marks the result that completes an utterance with
             // metadata, then restarts `bestTranscription` for the next one.
             let utteranceEnded = result?.speechRecognitionMetadata != nil
+            // Where the words sit in this task's audio: decides whether the result revises
+            // the text shown, covers it all, or follows it as a new utterance.
+            let audio = result.flatMap { r in
+                TranscriptAccumulator.audio(
+                    ofSegments: r.bestTranscription.segments.map { ($0.timestamp, $0.duration) }
+                )
+            }
             let failed = error != nil
             Task { @MainActor in
                 guard let self, self.state == .recording else { return }
@@ -186,7 +193,8 @@ final class SpeechDictator: ObservableObject {
                 // that ended the task.
                 if let text {
                     self.accumulator.result(
-                        text, segment: gen, isFinal: isFinal, utteranceEnded: utteranceEnded, at: now
+                        text, segment: gen, isFinal: isFinal, utteranceEnded: utteranceEnded,
+                        audio: audio, at: now
                     )
                 }
                 // A task that failed without a final keeps what it showed.
