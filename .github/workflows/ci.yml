@@ -323,9 +323,10 @@ jobs:
             exit "$failed"
           fi
           # Whole iPhone UI suite: Scroll, Selection, Paging, and terminal interactions.
-          # 50m: with the composer, keyboard and push tests it spends ~31-35 min in tests alone
-          # on a hosted runner, which left 40m no room for launch overhead on a slow runner.
-          run_suite iPhone "$IPHONE_UDID" 50m -only-testing:HerdrUITests || failed=1
+          # 70m: the suite now spends ~45-50 min in tests alone on a hosted runner (guest
+          # Gram, push and attachment suites added 2026-10-01); 50m cut it off mid-run with
+          # every test passing. The job's 160m timeout still bounds the whole run.
+          run_suite iPhone "$IPHONE_UDID" 70m -only-testing:HerdrUITests || failed=1
 
           xcrun simctl boot "$IPAD_UDID" || true
           xcrun simctl bootstatus "$IPAD_UDID" -b
