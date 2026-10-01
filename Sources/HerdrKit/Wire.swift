@@ -264,6 +264,25 @@ public struct AgentSessionTransferInfo: Decodable, Equatable, Sendable, Identifi
     }
 }
 
+/// A federated name as people read it. The daemon routes a remote machine's agents by
+/// prefixing their names with the machine's ALIAS. While aliases came from hand-written
+/// config they read as `pi-burj/voice`; since the daemon moved SSH federation onto saved
+/// machines the alias is the profile's immutable 32-hex id, so the same name reads
+/// `2cc0ffe3a0753cafcf28f46a7bb29351/voice`. When the daemon sends the machine's label,
+/// that one prefix is swapped for it.
+///
+/// Only the exact `<machineID>/` prefix is replaced: the remainder may itself contain
+/// slashes (`…/w1:pB` style ids), and a local name has no prefix to touch. An unlabelled
+/// machine keeps the raw name rather than inventing one.
+public enum FederatedName {
+    public static func display(_ raw: String, machineID: String?, machineLabel: String?) -> String {
+        guard let machineID, let machineLabel, !machineLabel.isEmpty else { return raw }
+        let prefix = "\(machineID)/"
+        guard raw.hasPrefix(prefix) else { return raw }
+        return "\(machineLabel)/\(raw.dropFirst(prefix.count))"
+    }
+}
+
 /// The fields a live status event rewrites (`agentStatus`, `inputPending`,
 /// `inputPromptKind`, `statusSinceUnixMs` and the turn counters) are settable inside
 /// HerdrKit only, so `AgentInfo.applying(_:)` can patch a listed row between
@@ -360,24 +379,11 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// This agent has been archived (its pane released, session preserved).
     public var isArchived: Bool { archived != nil }
 
-    /// Human label for a pane, preferring the agent's assigned name.
-    ///
-    /// A federated agent's `name` arrives prefixed with its peer's ALIAS, which is
-    /// the routing key, not a label. While aliases came from hand-written config
-    /// they read as `pi-burj/voice`; since the daemon moved SSH federation onto
-    /// saved machines the alias is the profile's immutable 32-hex id, so the same
-    /// row reads `2cc0ffe3a0753cafcf28f46a7bb29351/voice`. Swap that one prefix
-    /// for the peer's label when the daemon sends one.
-    ///
-    /// Only the exact `<machineID>/` prefix is replaced: the remainder may itself
-    /// contain slashes (`…/w1:pB` style ids), and a local agent has no prefix to
-    /// touch. An unlabelled peer keeps the raw name rather than inventing one.
+    /// Human label for a pane, preferring the agent's assigned name; a federated agent's
+    /// shows its machine's label rather than its id (`FederatedName`).
     public var displayName: String {
-        let raw = name ?? terminalTitleStripped ?? paneID
-        guard let machineID, let machineLabel, !machineLabel.isEmpty else { return raw }
-        let prefix = "\(machineID)/"
-        guard raw.hasPrefix(prefix) else { return raw }
-        return "\(machineLabel)/\(raw.dropFirst(prefix.count))"
+        FederatedName.display(name ?? terminalTitleStripped ?? paneID,
+                              machineID: machineID, machineLabel: machineLabel)
     }
 
     public var isWorking: Bool { agentStatus == "working" }

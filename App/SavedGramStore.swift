@@ -28,6 +28,7 @@ struct SavedGramFile: Codable, Hashable {
 struct SavedGram: Codable, Identifiable, Hashable {
     let id: String
     var text: String
+    /// The sender as shown when saved (a federated sender's machine label, not its alias).
     var from: String
     /// direction == .agentToOwner — so the saved copy can render the same avatar/side.
     var fromAgent: Bool
@@ -73,7 +74,7 @@ final class SavedGramStore: ObservableObject {
             let copy = SavedGram(
                 id: message.id,
                 text: message.text,
-                from: message.from,
+                from: message.senderName,
                 fromAgent: message.isFromAgent,
                 createdUnixMs: message.createdUnixMs,
                 file: message.file.map { SavedGramFile(name: $0.name, size: $0.size, mime: $0.mime) }
