@@ -3548,7 +3548,7 @@ struct TerminalHomeView: View {
         // (which SwiftUI evaluates eagerly for every row). `orderedSiblings` now filters
         // the cached roster list and performs no sorting.
         let siblings = orderedSiblings
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 0) {
             Button {
                 if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
             } label: {
@@ -3563,7 +3563,7 @@ struct TerminalHomeView: View {
                 }
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 10)
+            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 2)
 
             if !isCollapsed {
                 ForEach(rows) { row in
@@ -3701,18 +3701,66 @@ struct TerminalHomeView: View {
         }
     }
 
+    /// #352: a Messages-style row. Full width on the ground (no card), a 52 pt round avatar
+    /// with the status as a small badge on it, the amber needs-you dot left of the avatar
+    /// (like Messages' unread dot), the name over a two-line preview, and an inset divider.
+    /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
-                    .frame(width: 40, height: 40)
-                Text(AgentIdentity.glyph(for: row.info.agent))
-                    .font(Typography.app(18, .bold)).foregroundStyle(.white)
+        HStack(alignment: .top, spacing: 0) {
+            Circle().fill(row.group == .needsYou ? Palette.waiting : .clear)
+                .frame(width: 10, height: 10)
+                .padding(.top, 33)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            ZStack(alignment: .bottomTrailing) {
+                Circle().fill(AgentIdentity.gradient(for: row.info.agent))
+                    .frame(width: 52, height: 52)
+                    .overlay(Text(AgentIdentity.glyph(for: row.info.agent))
+                        .font(Typography.app(22, .bold)).foregroundStyle(.white))
+                Group {
+                    if row.info.isUnreachable {
+                        avatarBadge(.offline).accessibilityLabel(Text("offline"))
+                    } else {
+                        statusBadge(row.group)
+                    }
+                }
+                .offset(x: 4, y: 4)
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
+            .padding(.top, 12)
+            .padding(.trailing, 12)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(row.title).font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                    rowMarkers(row)
+                    Spacer(minLength: 6)
+                    // How long the agent has been in its current state ("5m/2h/3d"), derived
+                    // from the daemon's status_since (#173). Absent on an older server / before
+                    // the first transition — then nothing, never a wrong value. `rosterNow`
+                    // is one shared clock advanced by successful idle polls, rather than a
+                    // separate TimelineView and timer for every off-screen agent row.
+                    if let age = compactTimeInState(
+                        sinceUnixMs: row.info.statusSinceUnixMs,
+                        nowUnixMs: UInt64(rosterNow.timeIntervalSince1970 * 1000)
+                    ) {
+                        Text(age)
+                            .font(Typography.app(15))
+                            .foregroundStyle(Palette.textDim)
+                            .monospacedDigit()
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textFaint)
+                        .accessibilityHidden(true)
+                }
+                // The preview: what it is doing (folder · activity). A waiting agent's reads in
+                // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(Typography.machine(12)).foregroundStyle(Palette.textDim).lineLimit(1)
+                    .font(Typography.app(15))
+                    .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
                 // Which account this agent is actually on. Shown only when the daemon
                 // reports one, so an older server or a default-account agent renders
                 // exactly as before rather than gaining an empty line.
@@ -3726,21 +3774,19 @@ struct TerminalHomeView: View {
                         .lineLimit(1)
                 }
             }
-            Spacer(minLength: 8)
-            // How long the agent has been in its current state ("5m/2h/3d"), derived
-            // from the daemon's status_since (#173). Absent on an older server / before
-            // the first transition — then no badge, never a wrong one. `rosterNow`
-            // is one shared clock advanced by successful idle polls, rather than a
-            // separate TimelineView and timer for every off-screen agent row.
-            if let age = compactTimeInState(
-                sinceUnixMs: row.info.statusSinceUnixMs,
-                nowUnixMs: UInt64(rosterNow.timeIntervalSince1970 * 1000)
-            ) {
-                Text(age)
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                    .monospacedDigit()
+            .padding(.top, 13).padding(.bottom, 12).padding(.trailing, 16)
+            .frame(maxWidth: .infinity, minHeight: 76, alignment: .topLeading)
+            // The divider starts where the text starts, not under the avatar.
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5)
             }
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// The no-account and stale pills, after the name.
+    @ViewBuilder
+    private func rowMarkers(_ row: AgentRow) -> some View {
             // The recorded account is gone from the registry, so this agent REFUSES to
             // resume rather than come back on the default account and write to the wrong
             // transcript. A person has to re-register the account, so it is a pill with
@@ -3769,19 +3815,6 @@ struct TerminalHomeView: View {
                     .accessibilityIdentifier("agent-row-stale-marker")
                     .accessibilityLabel(Text("status not confirmed on the last poll"))
             }
-            // A remote agent whose machine is unreachable has a stale status, so
-            // it reads as offline rather than showing a misleading live badge.
-            if row.info.isUnreachable {
-                offlineBadge()
-            } else {
-                statusBadge(row.group)
-            }
-        }
-        .padding(12)
-        .background(Palette.card)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(edgeTint(row.group), lineWidth: 1))
-        .padding(.horizontal, 16).padding(.vertical, 4)
     }
 
     /// "folder · activity": folder is the last path component of `cwd`, activity
@@ -3799,65 +3832,53 @@ struct TerminalHomeView: View {
         }
     }
 
+    /// The status as a 22 pt badge on the avatar (#352), ringed with the ground colour.
+    /// Named for VoiceOver too: the status is colour + shape.
     private func statusBadge(_ group: AgentGroup) -> some View {
-        // The status is colour+shape; name it for VoiceOver too.
-        badgeContent(group).accessibilityLabel(Text(group.label))
+        avatarBadge(AvatarBadge(group)).accessibilityLabel(Text(group.label))
     }
 
-    /// A remote agent whose owning machine is unreachable: its live status is a
-    /// stale last-known value, so show a muted "offline" mark, never a live badge.
-    /// The stopped SQUARE shape (gone, not a live state) but in faint ink, not the
-    /// stopped red — offline is quiet, not an alarm.
-    private func offlineBadge() -> some View {
-        badgeSquare("wifi.slash", Palette.textDim).accessibilityLabel(Text("offline"))
-    }
-
-    @ViewBuilder
-    private func badgeContent(_ group: AgentGroup) -> some View {
-        switch group {
-        // Status is SHAPE + colour, never colour alone — desaturate the screen and it
-        // still sorts: ! in a circle waits, × in a SQUARE stopped, a turning ring works.
-        case .needsYou: badgeCircle("exclamationmark", group.color)
-        case .stopped: badgeSquare("xmark", group.color)
-        case .unrecognised: badgeCircle("questionmark", group.color)
-        // "now" is a non-temporal "active" marker, not an elapsed timer — there is no
-        // start timestamp in AgentInfo to count from — beside a turning ring for "live".
-        case .working:
-            HStack(spacing: 6) {
-                Text("now").font(Typography.machine(12)).foregroundStyle(group.color)
-                TurningRing(color: group.color)
+    private enum AvatarBadge {
+        case waiting, stopped, unrecognised, working, offline, none
+        init(_ group: AgentGroup) {
+            switch group {
+            case .needsYou: self = .waiting
+            case .stopped: self = .stopped
+            case .unrecognised: self = .unrecognised
+            case .working: self = .working
+            case .idle: self = .none
             }
-        case .idle:
-            // Not bare, not loud: a small hollow dot so an expanded idle row still
-            // has a right-edge anchor.
-            Circle().stroke(Palette.textFaint, lineWidth: 1.5).frame(width: 8, height: 8)
         }
     }
 
-    private func badgeCircle(_ system: String, _ color: Color) -> some View {
-        Image(systemName: system)
-            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
-            .frame(width: 26, height: 26)
-            .overlay(Circle().stroke(color.opacity(0.55), lineWidth: 1.5))
-    }
-
-    /// Stopped's badge is a SQUARE (rounded) — a shape distinct from the waiting/
-    /// unrecognised circles, so "gone" reads without relying on the red alone.
-    private func badgeSquare(_ system: String, _ color: Color) -> some View {
-        Image(systemName: system)
-            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
-            .frame(width: 26, height: 26)
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.55), lineWidth: 1.5))
-    }
-
-    /// The 1px edge tint the design gives ONLY the two states you must not miss —
-    /// needs-you (amber) and stopped (red); every other card stays edgeless.
-    private func edgeTint(_ group: AgentGroup) -> Color {
-        switch group {
-        case .needsYou, .unrecognised: return Palette.waiting.opacity(0.5)
-        case .stopped: return Palette.died.opacity(0.5)
-        default: return .clear
+    /// Status is SHAPE + colour, never colour alone — desaturate the screen and it still
+    /// sorts: ! in a circle waits, × in a rounded SQUARE stopped, a turning ring works. An
+    /// unreachable remote agent's status is a stale last-known value, so it shows a muted
+    /// offline square (gone, not live), never a live badge. Idle has no badge.
+    @ViewBuilder
+    private func avatarBadge(_ badge: AvatarBadge) -> some View {
+        switch badge {
+        case .waiting: badgeGlyph("exclamationmark", Palette.waiting, square: false)
+        case .unrecognised: badgeGlyph("questionmark", Palette.waiting, square: false)
+        case .stopped: badgeGlyph("xmark", Palette.died, square: true)
+        case .offline: badgeGlyph("wifi.slash", Palette.surfaceRaised, square: true, ink: Palette.textDim)
+        case .working:
+            TurningRing(color: Palette.working, diameter: 12, lineWidth: 2)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Palette.ground))
+                .overlay(Circle().stroke(Palette.ground, lineWidth: 2.5))
+        case .none:
+            EmptyView()
         }
+    }
+
+    private func badgeGlyph(_ system: String, _ fill: Color, square: Bool, ink: Color = Palette.ground) -> some View {
+        let shape = RoundedRectangle(cornerRadius: square ? 6 : 11)
+        return Image(systemName: system)
+            .font(.system(size: 10, weight: .heavy)).foregroundStyle(ink)
+            .frame(width: 22, height: 22)
+            .background(shape.fill(fill))
+            .overlay(shape.stroke(Palette.ground, lineWidth: 2.5))
     }
 
     // MARK: error / host-key recovery (functional, restyled to the tokens)
