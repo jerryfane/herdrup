@@ -1907,7 +1907,7 @@ struct TerminalHomeView: View {
 
     /// The bottom tabs. Terminal is deliberately absent — a terminal fronts a
     /// keep-mounted pane over the tabs rather than being one.
-    private enum HomeTab: Hashable { case agents, gram, settings, call }
+    private enum HomeTab: Hashable { case agents, gram, settings }
 
     /// The only remaining MODAL covers: the new-agent form and the first-run gestures
     /// tutorial. Gram and Settings became persistent tabs (#88).
@@ -2306,8 +2306,6 @@ struct TerminalHomeView: View {
                         canReconnect: rejectedFingerprint == nil,
                         onReconnect: onReconnect,
                         detail: settingsAnchor ?? .machines)
-                case .call:
-                    detailPlaceholder("Voice call is coming soon", "phone")
                 }
                 // Keep-mounted terminal container, hoisted ABOVE the `switch` so switching to
                 // Settings/Gram never removes it from the view tree. Previously it lived inside
@@ -2467,13 +2465,12 @@ struct TerminalHomeView: View {
         .hoverEffect(.highlight)
     }
 
-    /// The four top-level sections, a pill at the top of the iPad sidebar (the phone's tab bar,
-    /// rotated up here — same sections, so the future Call tab already has its slot).
+    /// The three top-level sections, a pill at the top of the iPad sidebar (the phone's tab
+    /// bar, rotated up here — same sections in the same order).
     private var sidebarSectionPicker: some View {
         HStack(spacing: 4) {
             sectionButton(.agents, "Agents", "square.grid.2x2.fill")
             sectionButton(.gram, "Gram", "bubble.left.and.bubble.right", badge: gramUnread.count)
-            sectionButton(.call, "Call", "phone")
             sectionButton(.settings, "Settings", "gearshape")
             sidebarToggleButton(
                 icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
@@ -2576,7 +2573,6 @@ struct TerminalHomeView: View {
             railSectionButton(.agents, "Agents", "square.grid.2x2.fill")
             railSectionButton(.gram, "Gram", "bubble.left.and.bubble.right",
                               badge: gramUnread.count)
-            railSectionButton(.call, "Call", "phone")
             railSectionButton(.settings, "Settings", "gearshape")
             // Gated on the same condition as the counts below it: a separator with
             // nothing on its far side is precisely the zero-value noise those counts
