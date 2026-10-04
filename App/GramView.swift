@@ -577,47 +577,66 @@ struct GramView: View {
 
     // MARK: - Header
 
+    /// #355: a large left-aligned title with the amber unread count, and today's controls in
+    /// one capsule on the right (search, Saved, Read all, Refresh, close). Same controls and
+    /// visibility rules as before. The search field opens as its own row under the title,
+    /// so the title never disappears while filtering.
     private var header: some View {
-        HStack(spacing: 10) {
-            if searchOpen {
-                // Replaces the title rather than adding a row, exactly as the terminal
-                // header does, so opening search never changes the header's height.
-                searchField
-            } else {
-                Text(showingSaved ? "Saved" : "Gram")
-                    .font(Typography.app(20, .semibold))
-                    .foregroundStyle(Palette.text)
-                if !showingSaved, unreadCount > 0 {
-                    Text("\(unreadCount)")
-                        .font(Typography.machine(11, .semibold))
-                        .foregroundStyle(Palette.ground)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Palette.waiting))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(showingSaved ? "Saved" : "Gram")
+                        .font(Typography.app(34, .bold))
+                        .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .accessibilityAddTraits(.isHeader)
+                    if !showingSaved, unreadCount > 0 {
+                        Text("\(unreadCount)")
+                            .font(Typography.machine(11, .semibold))
+                            .foregroundStyle(Palette.ground)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Palette.waiting))
+                            .accessibilityLabel("\(unreadCount) unread")
+                    }
                 }
-                Spacer()
+                Spacer(minLength: 0)
+                headerButtons
             }
+            if searchOpen {
+                searchField
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+    }
+
+    /// The header's controls in one capsule, each a 44 pt-tall target.
+    private var headerButtons: some View {
+        HStack(spacing: 0) {
             if canFilter {
                 InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search") { toggleSearch() }
+                    .frame(width: 40, height: 44)
             }
             // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { showingSaved.toggle() }
             } label: {
-                Image(systemName: showingSaved ? "bookmark.fill" : "bookmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(showingSaved ? Palette.brand : Palette.textDim)
+                headerGlyph(showingSaved ? "bookmark.fill" : "bookmark",
+                            color: showingSaved ? Palette.brand : Palette.text)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Saved")
             // Read all — only while the Inbox is showing (Saved has no unread concept) and
             // something is actually unread, so it never sits there as a no-op control.
             if !showingSaved, unreadCount > 0 {
                 Button {
                     Task { await markAllRead() }
                 } label: {
-                    Image(systemName: "envelope.open")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
+                    headerGlyph("envelope.open")
                 }
+                .buttonStyle(.plain)
                 .disabled(markingAllRead)
                 .accessibilityLabel("Read all")
             }
@@ -629,26 +648,31 @@ struct GramView: View {
                     // unchanged store changes nothing on screen.
                     if manualRefreshing {
                         ProgressView().controlSize(.small).tint(Palette.textDim)
+                            .frame(width: 40, height: 44)
                     } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Palette.textDim)
+                        headerGlyph("arrow.clockwise")
                     }
                 }
+                .buttonStyle(.plain)
                 .disabled(manualRefreshing)
                 .accessibilityLabel("Refresh")
             }
             if let onClose {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
-                .padding(.leading, 4)
+                Button(action: onClose) { headerGlyph("xmark") }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 2)
+        .background(Capsule().fill(Palette.surfaceRaised))
+    }
+
+    private func headerGlyph(_ name: String, color: Color = Palette.text) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(color)
+            .frame(width: 40, height: 44)
+            .contentShape(Rectangle())
     }
 
     /// The badge and the Read-all control read the WHOLE store's count, which the
