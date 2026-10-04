@@ -5130,8 +5130,8 @@ struct TerminalPaneContent: View {
                 if let chip = guestShare.chipText { GuestShareChip(text: chip) }
             }
             HStack(spacing: 0) {
-                InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find") { toggleFind() }
-                    .frame(width: 40, height: 44)
+                InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find",
+                                   target: CGSize(width: 40, height: 44)) { toggleFind() }
                 Button {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
@@ -5151,7 +5151,11 @@ struct TerminalPaneContent: View {
             .padding(.horizontal, 2)
             .background(Capsule().fill(Palette.surfaceRaised))
         }
-        .frame(height: 44)
+        // Fixed across find / status / no-status states, but scaled with the app's text
+        // size: at 140 % the title (16 pt) over the status line (11 pt) needs ~47 pt and
+        // would overflow a plain 44 pt bar. The height then changes only when the user
+        // changes Settings → Text size, a deliberate one-off, never while working.
+        .frame(height: max(44, (44 * Typography.scale).rounded()))
         // A keep-mounted BACKGROUND pane still renders its header, so without this every
         // loaded pane publishes its own "terminal-refresh"/"terminal-find"/"terminal-actions"
         // to the accessibility tree. VoiceOver could then land on a hidden pane's controls,
