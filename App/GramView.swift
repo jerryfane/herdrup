@@ -779,7 +779,7 @@ struct GramView: View {
             noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
-                LazyVStack(spacing: 10) {
+                LazyVStack(spacing: 14) {
                     ForEach(visibleSaved) { s in
                         SavedGramRow(
                             saved: s,
@@ -868,9 +868,14 @@ struct GramView: View {
                       loadedCount: messages.count, failure: pageError)
         case .loaded:
             ScrollView {
-                LazyVStack(spacing: 10) {
-                    if shouldShowSetupCard { setupCard }
-                    ForEach(visibleMessages) { message in
+                LazyVStack(spacing: 0) {
+                    if shouldShowSetupCard { setupCard.padding(.bottom, 10) }
+                    // #354: bubbles join into runs (same side, same peer). 3 pt inside a run,
+                    // 14 pt between runs.
+                    let rows = visibleMessages
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, message in
+                        let joinsAbove = index > 0 && GramRow.sameRun(rows[index - 1], message)
+                        let joinsBelow = index + 1 < rows.count && GramRow.sameRun(message, rows[index + 1])
                         GramRow(
                             message: message,
                             isDownloadingFile: downloadingFileFor == message.id,
@@ -879,8 +884,11 @@ struct GramView: View {
                             onOpenFile: { openFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
                             onSaveFile: { saveFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
                             onToggleSave: { savedGrams.toggle(message) },
-                            onDelete: { delete(message) }
+                            onDelete: { delete(message) },
+                            showsName: !joinsAbove,
+                            showsAvatar: !joinsBelow
                         )
+                        .padding(.top, index == 0 ? 0 : (joinsAbove ? 3 : 14))
                         .onAppear { markReadIfNeeded(message) }
                     }
                     // The sentinel. In a LazyVStack it is only built when the reader
@@ -2150,53 +2158,90 @@ struct GramRow: View {
     var onSaveFile: () -> Void
     var onToggleSave: () -> Void
     var onDelete: () -> Void
+    /// #354 joined runs: back-to-back posts from the same side and peer share one name
+    /// (on the top bubble) and one avatar + tail (on the bottom bubble).
+    var showsName = true
+    var showsAvatar = true
+
+    private var mine: Bool { !message.isFromAgent }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            avatar
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(title)
-                        .font(Typography.app(13, .semibold))
-                        .foregroundStyle(Palette.text)
-                    if message.isUnread {
-                        Circle().fill(Palette.waiting).frame(width: 7, height: 7)
-                    }
-                    Spacer(minLength: 0)
-                    Text(age)
-                        .font(Typography.machine(11))
-                        .foregroundStyle(Palette.textFaint)
-                    // Small save/unsave tap target (the same action is also in the long-press menu).
-                    Button(action: onToggleSave) {
-                        Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(isSaved ? Palette.brand : Palette.textFaint)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                if !message.text.isEmpty {
-                    Text(linkified(message.text))
-                        .font(Typography.app(14))
-                        .foregroundStyle(Palette.textDim)
-                        .tint(Palette.brand)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let file = message.file {
-                    fileChip(file)
-                }
-                if let status = statusLine {
-                    Text(status)
-                        .font(Typography.machine(11))
-                        .foregroundStyle(statusColor)
-                }
+        VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
+            metaLine
+                .padding(mine ? .trailing : .leading, GramBubble.avatarSlot)
+            HStack(alignment: .bottom, spacing: GramBubble.avatarGap) {
+                if mine { Spacer(minLength: GramBubble.oppositeInset) } else { avatarSlot }
+                bubble
+                if mine { avatarSlot } else { Spacer(minLength: GramBubble.oppositeInset) }
+            }
+            if let status = statusLine {
+                Text(status)
+                    .font(Typography.machine(11))
+                    .foregroundStyle(statusColor)
+                    .padding(.trailing, GramBubble.avatarSlot)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
+        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+    }
+
+    /// Name (top of a run only), unread dot, age and bookmark, as small text above the bubble.
+    private var metaLine: some View {
+        HStack(spacing: 6) {
+            if showsName {
+                Text(title)
+                    .font(Typography.app(12, .semibold))
+                    .foregroundStyle(Palette.textDim)
+            }
+            if message.isUnread {
+                Circle().fill(Palette.waiting).frame(width: 7, height: 7)
+            }
+            Text(age)
+                .font(Typography.machine(11))
+                .foregroundStyle(Palette.textFaint)
+            // Small save/unsave tap target (the same action is also in the long-press menu).
+            Button(action: onToggleSave) {
+                Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isSaved ? Palette.brand : Palette.textFaint)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
+    private var avatarSlot: some View {
+        if showsAvatar { avatar } else { Color.clear.frame(width: 30, height: 30) }
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.text.isEmpty {
+                Text(linkified(message.text, tint: mine ? .white : Palette.brand))
+                    .font(Typography.app(15))
+                    .foregroundStyle(mine ? Color.white : Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let file = message.file {
+                fileChip(file)
+            }
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
+            .fill(mine ? GramBubble.outFill : GramBubble.inFill))
+        .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
+            if showsAvatar {
+                BubbleTail()
+                    .fill(mine ? GramBubble.outFill : GramBubble.inFill)
+                    .frame(width: 24, height: 22)
+                    .scaleEffect(x: mine ? -1 : 1, y: 1)
+                    .offset(x: mine ? 6 : -6)
+                    .accessibilityHidden(true)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
         // Long-press for the message actions. Copy the text (when there is any) —
         // a file's bytes are reached via the chip's preview + system share sheet, so
         // we don't add a second, weaker file-copy path here. Delete is destructive,
@@ -2267,7 +2312,7 @@ struct GramRow: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surface))
+            .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
         }
         .buttonStyle(.plain)
         .disabled(isDownloadingFile)
@@ -2286,6 +2331,23 @@ struct GramRow: View {
                 .foregroundStyle(Palette.text)
                 .frame(width: 30, height: 30)
                 .background(AgentIdentity.gradient(for: message.senderName), in: RoundedRectangle(cornerRadius: 8))
+        } else if let to = message.to {
+            // Option B: your post shows WHO it went to, with a small "sent" arrow badge.
+            Text(AgentIdentity.glyph(for: to))
+                .font(Typography.app(14, .bold))
+                .foregroundStyle(Palette.text)
+                .frame(width: 30, height: 30)
+                .background(AgentIdentity.gradient(for: to), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 7, weight: .heavy))
+                        .foregroundStyle(Palette.text)
+                        .frame(width: 14, height: 14)
+                        .background(Circle().fill(GramBubble.outFill))
+                        .overlay(Circle().stroke(Palette.ground, lineWidth: 1.5))
+                        .offset(x: 4, y: 4)
+                }
+                .accessibilityHidden(true)
         } else {
             Image(systemName: "arrow.up.forward")
                 .font(.system(size: 13, weight: .bold))
@@ -2300,9 +2362,15 @@ struct GramRow: View {
             return message.senderName
         }
         if let to = message.to {
-            return "You → \(to)"
+            return "To \(to)"
         }
-        return "You → queue"
+        return "To queue"
+    }
+
+    /// Whether two neighbouring messages belong to one joined run: same side, same peer.
+    static func sameRun(_ a: GramMessage, _ b: GramMessage) -> Bool {
+        guard a.isFromAgent == b.isFromAgent else { return false }
+        return a.isFromAgent ? a.senderName == b.senderName : a.to == b.to
     }
 
     /// Claim state for the owner's queue posts.
@@ -2331,6 +2399,38 @@ struct GramRow: View {
         case ..<86400: return "\(Int(seconds / 3600))h"
         default: return "\(Int(seconds / 86400))d"
         }
+    }
+}
+
+/// Metrics for Gram's message bubbles (#354, layout C "iMessage, joined").
+enum GramBubble {
+    static let radius: CGFloat = 19
+    /// Agents' bubbles: surfaceRaised.
+    static let inFill = Palette.surfaceRaised
+    /// Your bubbles: the brand violet darkened so white text passes contrast.
+    static let outFill = Color(hex: 0x5A4ED6)
+    static let avatarGap: CGFloat = 12
+    /// Avatar (30) + gap: where the meta line and status line indent to line up with the bubble.
+    static let avatarSlot: CGFloat = 42
+    /// The minimum empty space on the side opposite the sender.
+    static let oppositeInset: CGFloat = 48
+}
+
+/// The bubble's tail: one smooth shape drawn BEHIND the bubble (no layered mask), curving
+/// out of the bottom corner. Drawn for the left side in a 24 x 22 box whose x = 6 is the
+/// bubble's edge; mirror it for the right.
+struct BubbleTail: Shape {
+    func path(in rect: CGRect) -> Path {
+        let sx = rect.width / 24, sy = rect.height / 22
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * sx, y: rect.minY + y * sy) }
+        var path = Path()
+        path.move(to: p(6, 0))
+        path.addLine(to: p(6, 12))
+        path.addCurve(to: p(0, 22), control1: p(6, 16.8), control2: p(3.8, 20.3))
+        path.addCurve(to: p(24, 22), control1: p(7, 22.7), control2: p(14, 22.3))
+        path.addLine(to: p(24, 0))
+        path.closeSubpath()
+        return path
     }
 }
 
