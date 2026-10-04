@@ -2602,14 +2602,12 @@ struct TerminalHomeView: View {
             // ROSTER's STRICT count (`AgentList.needsYouCount`), deliberately NOT
             // `activityContent.needsYouCount`: that one folds `.unrecognised` rows into
             // the total for the section-less Live Activity, so it would print a BIGGER
-            // number than the expanded header this rail stands in for
-            // (`headerSubtitle` -> `needsYouSummary` -> the strict count). One
-            // unrecognised agent and the two surfaces disagree one click apart.
+            // number than the expanded list's NEEDS YOU section this rail stands in for.
+            // One unrecognised agent and the two surfaces would disagree one click apart.
             //
-            // The same fold is why the wording spec hedges unrecognised agents as
-            // "N may need you": they are unconfirmed, not facts. A bare number cannot
-            // carry that hedge, so the rail shows only what IS confirmed and leaves the
-            // maybes to the header, which has room to say so.
+            // The same fold is why the wording spec (`AgentList.needsYouSummary`) hedges
+            // unrecognised agents as "N may need you": they are unconfirmed, not facts. A
+            // bare number cannot carry that hedge, so the rail shows only what IS confirmed.
             railCount(fullList.needsYouCount, tone: Palette.waiting, label: "need you")
             railCount(activity.workingCount, tone: Palette.working, label: "working")
             Spacer()
