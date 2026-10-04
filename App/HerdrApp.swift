@@ -2126,8 +2126,6 @@ struct TerminalHomeView: View {
                         // Spacer() here while GramView drew its own 260pt rail in the detail
                         // pane, which put two sidebars on screen — one of them blank.
                         gramSidebar
-                    default:
-                        Spacer()   // Call lives in the detail pane
                     }
                 }
             }
