@@ -2282,8 +2282,8 @@ struct TerminalHomeView: View {
     private var detailColumn: some View {
         ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
-                // Base layer: the switch renders Gram / Settings / Call and the agents
-                // placeholder. The terminal container is deliberately NOT in here — it is the
+                // Base layer: the switch renders Gram / Settings and the agents placeholder.
+                // The terminal container is deliberately NOT in here — it is the
                 // always-mounted overlay below.
                 switch selectedTab {
                 case .agents:
