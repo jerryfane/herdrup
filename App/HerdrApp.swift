@@ -5406,53 +5406,86 @@ struct TerminalPaneContent: View {
     // phone's width (esc/arrows/tab plus Shift+Tab, Ctrl, ^C, Return) without
     // collapsing each cap. Caps are intrinsic width (not maxWidth:.infinity, which
     // would expand infinitely inside a horizontal scroll view).
+    //
+    // #359: related keys share one group shape, a Space key follows esc, and Return is
+    // PINNED outside the scroll view so it is always one tap away on iPhone.
     private var controlBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                keyCap(label: "esc", key: "Escape")
-                keyCap(image: "ComposerKeyLeft", key: "Left")
-                keyCap(image: "ComposerKeyUp", key: "Up")
-                keyCap(image: "ComposerKeyDown", key: "Down")
-                keyCap(image: "ComposerKeyRight", key: "Right")
-                // End (end-of-line cursor) + the two scroll jumps for a mouse-mode agent
-                // like Claude Code: Ctrl+Home = jump to TOP, Ctrl+End = jump to BOTTOM
-                // (and re-enable auto-follow). ESC[1;5H / ESC[1;5F are the xterm Ctrl+Home
-                // / Ctrl+End sequences Claude Code's readline keymap honors (End alone is a
-                // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
-                keyCap(label: "end", key: "End")
-                rawCap(label: "Jump to top", image: "ComposerKeyTop", sequence: "\u{1b}[1;5H")
-                // Jump to the newest output. Routed through the pane rather than a raw
-                // byte sequence, so a plain shell scrolls its own scrollback while a
-                // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
-                // `sending || pendingPrefill` like the keycaps: this is local view
-                // navigation, not input to the agent.
-                Button { jumpToTailToken += 1 } label: {
-                    ComposerQuickKeyLabel(text: "Jump to latest output", imageName: "ComposerKeyLatest")
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    keyCap(label: "esc", key: "Escape")
+                    keyCap(label: "space", key: "Space", minWidth: 84)
+                    ComposerKeyGroup {
+                        keyCap(image: "ComposerKeyLeft", key: "Left", grouped: true)
+                        ComposerKeyDivider()
+                        keyCap(image: "ComposerKeyUp", key: "Up", grouped: true)
+                        ComposerKeyDivider()
+                        keyCap(image: "ComposerKeyDown", key: "Down", grouped: true)
+                        ComposerKeyDivider()
+                        keyCap(image: "ComposerKeyRight", key: "Right", grouped: true)
+                    }
+                    // End (end-of-line cursor) + the two scroll jumps for a mouse-mode agent
+                    // like Claude Code: Ctrl+Home = jump to TOP, Ctrl+End = jump to BOTTOM
+                    // (and re-enable auto-follow). ESC[1;5H / ESC[1;5F are the xterm Ctrl+Home
+                    // / Ctrl+End sequences Claude Code's readline keymap honors (End alone is a
+                    // cursor key there, not a scroll — hence the two Ctrl jumps for scrolling).
+                    ComposerKeyGroup {
+                        keyCap(label: "end", key: "End", grouped: true)
+                        ComposerKeyDivider()
+                        rawCap(label: "Jump to top", image: "ComposerKeyTop", sequence: "\u{1b}[1;5H", grouped: true)
+                        ComposerKeyDivider()
+                        // Jump to the newest output. Routed through the pane rather than a raw
+                        // byte sequence, so a plain shell scrolls its own scrollback while a
+                        // mouse-mode agent gets Ctrl+End. Deliberately NOT disabled on
+                        // `sending || pendingPrefill` like the keycaps: this is local view
+                        // navigation, not input to the agent.
+                        Button { jumpToTailToken += 1 } label: {
+                            ComposerQuickKeyLabel(text: "Jump to latest output", imageName: "ComposerKeyLatest",
+                                                  grouped: true)
+                        }
+                        .accessibilityLabel(Text("Jump to latest output"))
+                    }
+                    ComposerKeyGroup {
+                        keyCap(label: "tab", key: "Tab", grouped: true)
+                        ComposerKeyDivider()
+                        // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
+                        // raw escape sequence, not a named key: delivered verbatim to the PTY.
+                        rawCap(label: "S-Tab", sequence: "\u{1b}[Z", grouped: true)
+                    }
+                    ComposerKeyGroup {
+                        // Sticky Ctrl: arm, then the next typed char becomes its control byte.
+                        ctrlCap
+                        ComposerKeyDivider()
+                        // ^P (previous prompt/history) — a one-tap control sequence for
+                        // navigating OMP's prompt history without first arming Ctrl.
+                        rawCap(label: "^P", sequence: "\u{10}", grouped: true)
+                        ComposerKeyDivider()
+                        // ^C (interrupt) — the common one-tap case; a raw control byte.
+                        rawCap(label: "^C", sequence: "\u{03}", grouped: true)
+                    }
                 }
-                .accessibilityLabel(Text("Jump to latest output"))
-                keyCap(label: "tab", key: "Tab")
-                // Shift+Tab (CBT / back-tab, ESC[Z) — cycles Claude-Code modes. A
-                // raw escape sequence, not a named key: delivered verbatim to the PTY.
-                rawCap(label: "S-Tab", sequence: "\u{1b}[Z")
-                // Sticky Ctrl: arm, then the next typed char becomes its control byte.
-                ctrlCap
-                // ^P (previous prompt/history) — a one-tap control sequence for
-                // navigating OMP's prompt history without first arming Ctrl.
-                rawCap(label: "^P", sequence: "\u{10}")
-                // ^C (interrupt) — the common one-tap case; a raw control byte.
-                rawCap(label: "^C", sequence: "\u{03}")
-                // The submit affordance rawKeys needs — typing never submits, so
-                // Return is the deliberate second action. Highlighted, as the mockup
-                // shows it.
-                keyCap(image: "ComposerKeyEnter", key: "Enter", primary: true)
+                .padding(.leading, 24).padding(.trailing, 12).padding(.vertical, 8)
             }
-            .padding(.horizontal, 24).padding(.vertical, 8)
+            // Keys fade out just before the pinned Return instead of sliding under it.
+            .mask(
+                HStack(spacing: 0) {
+                    Rectangle()
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 16)
+                }
+            )
+            // The submit affordance rawKeys needs — typing never submits, so Return is the
+            // deliberate second action. Highlighted, and pinned so it never scrolls away.
+            keyCap(image: "ComposerKeyEnter", key: "Enter", primary: true)
+                .padding(.trailing, 16)
         }
     }
 
-    private func keyCap(label: String? = nil, image: String? = nil, key: String, primary: Bool = false) -> some View {
+    private func keyCap(label: String? = nil, image: String? = nil, key: String, primary: Bool = false,
+                        grouped: Bool = false, minWidth: CGFloat = 44) -> some View {
         Button { ctrlArmed = false; send(.key(key)) } label: {
-            ComposerQuickKeyLabel(text: label ?? key, imageName: image, primary: primary)
+            ComposerQuickKeyLabel(text: label ?? key, imageName: image, primary: primary,
+                                  grouped: grouped, minWidth: minWidth)
         }
         // Only a real prompt/attachment transaction or pending prefill blocks
         // keycaps; ordinary key writes are ordered without a cooldown.
@@ -5464,9 +5497,9 @@ struct TerminalPaneContent: View {
     /// straight to the PTY via `pane.send_text` — for keys herdr's named allow-list
     /// does not cover (Shift+Tab = `ESC[Z`, `^C` = `\u{03}`). Routed through the
     /// `.rawSequence` action so it is delivered verbatim, not newline-refused.
-    private func rawCap(label: String, image: String? = nil, sequence: String) -> some View {
+    private func rawCap(label: String, image: String? = nil, sequence: String, grouped: Bool = false) -> some View {
         Button { ctrlArmed = false; send(.rawSequence(sequence)) } label: {
-            ComposerQuickKeyLabel(text: label, imageName: image)
+            ComposerQuickKeyLabel(text: label, imageName: image, grouped: grouped)
         }
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(label))
@@ -5477,7 +5510,7 @@ struct TerminalPaneContent: View {
     /// Tapping twice cancels without sending input.
     private var ctrlCap: some View {
         Button { ctrlArmed.toggle() } label: {
-            ComposerQuickKeyLabel(text: "ctrl", armed: ctrlArmed)
+            ComposerQuickKeyLabel(text: "ctrl", armed: ctrlArmed, grouped: true)
         }
         .disabled(sending || pendingPrefill)
         .accessibilityLabel(Text(ctrlArmed ? "control armed" : "control"))
