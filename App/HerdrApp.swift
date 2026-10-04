@@ -2659,8 +2659,7 @@ struct TerminalHomeView: View {
         .accessibilityLabel(label)
     }
 
-    /// One activity count. Rendered only when non-zero: a rail of zeroes is noise, and
-    /// "nothing needs you" is already the expanded header's job.
+    /// One activity count. Rendered only when non-zero: a rail of zeroes is noise.
     @ViewBuilder
     private func railCount(_ count: Int, tone: Color, label: String) -> some View {
         if count > 0 {
@@ -3119,62 +3118,87 @@ struct TerminalHomeView: View {
 
     // MARK: chrome
 
+    /// #353: a round Back button, a large left-aligned "Agents" title, and New terminal / New
+    /// agent in one capsule. The old "N need you" subtitle is gone: the rows' amber marks and
+    /// the minimised rail's counts carry it.
     private var header: some View {
-        HStack {
+        HStack(alignment: .center, spacing: 10) {
             circleButton("chevron.left") { onDisconnect() }
-            Spacer()
-            VStack(spacing: 2) {
-                Text("Agents").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-                // The line is ALWAYS present (reserved height) so the title does
-                // not jump as it appears; its text is the one number or its
-                // restful inverse.
-                Text(headerSubtitle.text)
-                    .font(Typography.machine(12)).foregroundStyle(headerSubtitle.color)
-                    .frame(height: 15)
-            }
-            Spacer()
-            HStack(spacing: 8) {
+                .accessibilityLabel("Back")
+            Text("Agents")
+                .font(Typography.app(34, .bold))
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 0)
+            HStack(spacing: 0) {
                 // Open a plain shell terminal — a small icon so agents stay the priority
                 // (the re-entry guard in createTerminal absorbs an eager double-tap).
-                circleButton("terminal") { Task { await createTerminal() } }
-                circleButton("plus") { activeCover = .newAgent }
+                capsuleButton("terminal") { Task { await createTerminal() } }
+                    .accessibilityLabel("New terminal")
+                capsuleButton("plus") { activeCover = .newAgent }
+                    .accessibilityLabel("New agent")
             }
+            .padding(.horizontal, 2)
+            .background(Capsule().fill(Palette.surfaceRaised))
         }
-        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
     }
 
-    /// The one number leads in amber; when the model reports nothing blocked AND
-    /// nothing uninterpretable, the quiet state says so. A space holds the line
-    /// while loading/empty so nothing above it moves.
-    private var headerSubtitle: (text: String, color: Color) {
-        // Reads the shared wording spec rather than formatting its own string: this header
-        // is NOT co-located with the row, so unlike the card it cannot rely on the reader
-        // seeing the stale marker beside the count.
-        if let summary = fullList.needsYouSummary { return (summary, Palette.waiting) }
-        if fullList.isQuiet && !agents.isEmpty { return ("nothing needs you", Palette.textFaint) }
-        return (" ", Palette.textFaint)
-    }
-
+    /// A 44 pt round header control (Back, and the iPad Gram sidebar's actions).
     private func circleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Palette.textDim)
-                .frame(width: 36, height: 36)
-                .background(Palette.surface)
-                .clipShape(Circle())
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Palette.text)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Palette.surfaceRaised))
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
     }
 
+    /// One segment of a header capsule: a 40 x 44 glyph target.
+    private func capsuleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.text)
+                .frame(width: 40, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+    }
+
+    /// The native-style search field: magnifier, 36 pt, rounded.
     private var searchField: some View {
-        TextField("Search", text: $search)
-            .font(Typography.app(15)).foregroundStyle(Palette.text)
-            .textInputAutocapitalization(.never).autocorrectionDisabled()
-            .padding(.horizontal, 16).padding(.vertical, 11)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Palette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 4)
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.textDim)
+                .accessibilityHidden(true)
+            TextField("Search", text: $search)
+                .font(Typography.app(16)).foregroundStyle(Palette.text)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            if !search.isEmpty {
+                Button { search = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.textFaint)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16).padding(.bottom, 6)
     }
 
     // MARK: list
