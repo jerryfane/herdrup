@@ -113,13 +113,17 @@ struct SavedGramRow: View {
     var onSaveFile: () -> Void
     var onUnsave: () -> Void
 
+    /// #354: the same bubble as the inbox (`GramRow`), never joined (Saved is a list of
+    /// separate keepsakes). Your saved posts sit on the right with the sent-arrow avatar:
+    /// a saved copy does not record the recipient.
+    private var mine: Bool { !saved.fromAgent }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(saved.fromAgent ? saved.from : "You")
-                    .font(Typography.app(13, .semibold))
-                    .foregroundStyle(Palette.text)
-                Spacer(minLength: 0)
+                    .font(Typography.app(12, .semibold))
+                    .foregroundStyle(Palette.textDim)
                 Text(age)
                     .font(Typography.machine(11))
                     .foregroundStyle(Palette.textFaint)
@@ -132,11 +136,22 @@ struct SavedGramRow: View {
                 }
                 .buttonStyle(.plain)
             }
+            .padding(mine ? .trailing : .leading, GramBubble.avatarSlot)
+            HStack(alignment: .bottom, spacing: GramBubble.avatarGap) {
+                if mine { Spacer(minLength: GramBubble.oppositeInset) } else { avatar }
+                bubble
+                if mine { avatar } else { Spacer(minLength: GramBubble.oppositeInset) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if !saved.text.isEmpty {
-                Text(linkified(saved.text))
-                    .font(Typography.app(14))
-                    .foregroundStyle(Palette.textDim)
-                    .tint(Palette.brand)
+                Text(linkified(saved.text, tint: mine ? .white : Palette.brand))
+                    .font(Typography.app(15))
+                    .foregroundStyle(mine ? Color.white : Palette.text)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -144,10 +159,35 @@ struct SavedGramRow: View {
                 fileChip(file)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
+            .fill(mine ? GramBubble.outFill : GramBubble.inFill))
+        .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
+            BubbleTail()
+                .fill(mine ? GramBubble.outFill : GramBubble.inFill)
+                .frame(width: 24, height: 22)
+                .scaleEffect(x: mine ? -1 : 1, y: 1)
+                .offset(x: mine ? 6 : -6)
+                .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if saved.fromAgent {
+            Text(AgentIdentity.glyph(for: saved.from))
+                .font(Typography.app(14, .bold))
+                .foregroundStyle(Palette.text)
+                .frame(width: 30, height: 30)
+                .background(AgentIdentity.gradient(for: saved.from), in: RoundedRectangle(cornerRadius: 8))
+        } else {
+            Image(systemName: "arrow.up.forward")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Palette.textDim)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+        }
     }
 
     /// While downloading with a real byte count, the size line becomes progress. The
@@ -188,8 +228,7 @@ struct SavedGramRow: View {
                 Image(systemName: "arrow.down.circle").font(.system(size: 13)).foregroundStyle(Palette.textFaint)
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surfaceRaised))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Palette.hairline, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
         }
         .buttonStyle(.plain)
         .disabled(isDownloadingFile)

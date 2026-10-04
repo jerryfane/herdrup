@@ -755,7 +755,7 @@ struct GramView: View {
             noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
-                LazyVStack(spacing: 10) {
+                LazyVStack(spacing: 14) {
                     ForEach(visibleSaved) { s in
                         SavedGramRow(
                             saved: s,
