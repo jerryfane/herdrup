@@ -5049,72 +5049,88 @@ struct TerminalPaneContent: View {
 
     // MARK: header
 
+    /// One bar (#358): back, the title block (heading over status · live time), and one
+    /// capsule holding Find, Reconnect and the ⋯ actions. The bar is a FIXED 44 pt tall in
+    /// every state, so opening find, a pane with no agent status, or a status change can never
+    /// resize the terminal underneath (a height change resizes the PTY and reflows the buffer).
     private var header: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                Button { onClose() } label: {
-                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
-                if findOpen {
-                    findField
-                } else {
-                    Text(heading).font(Typography.app(16, .semibold))
-                        .foregroundStyle(Palette.text).lineLimit(1)
-                    Spacer()
-                }
+        HStack(spacing: 10) {
+            Button { onClose() } label: {
+                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.text)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Palette.surfaceRaised))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+            if findOpen {
+                findField
+            } else {
+                titleBlock
+                // The guest-share chip is taller than the status line, so it sits beside the
+                // title block (vertically centred) rather than inside the fixed-height bar's
+                // second line.
+                if let chip = guestShare.chipText { GuestShareChip(text: chip) }
+            }
+            HStack(spacing: 0) {
                 InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find") { toggleFind() }
+                    .frame(width: 40, height: 44)
                 Button {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
                 } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundStyle(Palette.textDim)
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Palette.text)
+                        .frame(width: 40, height: 44)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("terminal-refresh")
                 .accessibilityLabel("Reconnect and refresh")
+                // Per-agent actions (⋯), only for an agent pane — as before, where they lived
+                // on the status row that exists only when the pane has a status group.
+                if group != nil { agentActionsMenu }
             }
-            // A keep-mounted BACKGROUND pane still renders its header, so without this every
-            // loaded pane publishes its own "terminal-refresh"/"terminal-find" to the
-            // accessibility tree. VoiceOver could then land on a hidden pane's controls, and
-            // an automation query for one button legitimately matches several.
-            .accessibilityHidden(!isForeground)
+            .padding(.horizontal, 2)
+            .background(Capsule().fill(Palette.surfaceRaised))
+        }
+        .frame(height: 44)
+        // A keep-mounted BACKGROUND pane still renders its header, so without this every
+        // loaded pane publishes its own "terminal-refresh"/"terminal-find"/"terminal-actions"
+        // to the accessibility tree. VoiceOver could then land on a hidden pane's controls,
+        // and an automation query for one button legitimately matches several.
+        .accessibilityHidden(!isForeground)
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .background(Palette.groundMachine)
+        .modifier(GuestSharePresenter(model: guestShare, client: client, agent: agent,
+                                      fallbackTitle: title, isForeground: isForeground))
+    }
+
+    /// The heading, with the agent's status underneath: pulsing dot + status word and the
+    /// live time in that status.
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(heading).font(Typography.app(16, .semibold))
+                .foregroundStyle(Palette.text).lineLimit(1)
             if let group {
-                HStack(spacing: 8) {
-                    // Left: the pulsing status pill (dot + status word).
-                    HStack(spacing: 6) {
-                        PulsingDot(color: group.color, active: group == .working)
-                        Text(group.sectionTitle).font(Typography.microLabel).tracking(1)
-                            .foregroundStyle(group.color)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(group.color.opacity(0.12)).clipShape(Capsule())
-
-                    if let chip = guestShare.chipText { GuestShareChip(text: chip) }
-
-                    Spacer(minLength: 6)
-
-                    // Center: how long the agent has been in this status (live).
+                HStack(spacing: 6) {
+                    PulsingDot(color: group.color, active: group == .working)
+                    Text(group.sectionTitle).font(Typography.microLabel).tracking(1)
+                        .foregroundStyle(group.color)
                     if let sinceMs = statusSinceMs {
                         let start = Date(timeIntervalSince1970: Double(sinceMs) / 1000)
                         TimelineView(.periodic(from: .now, by: 1)) { ctx in
                             Text(elapsedLabel(ctx.date.timeIntervalSince(start)))
-                                .font(Typography.machine(12)).monospacedDigit()
+                                .font(Typography.machine(11)).monospacedDigit()
                                 .foregroundStyle(Palette.textFaint)
                         }
                     }
-
-                    Spacer(minLength: 6)
-
-                    // Right: per-agent actions (⋯) — mute lives here.
-                    agentActionsMenu
                 }
-                .frame(maxWidth: .infinity)
+                .lineLimit(1)
             }
         }
-        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
-        .background(Palette.surface)
-        .modifier(GuestSharePresenter(model: guestShare, client: client, agent: agent,
-                                      fallbackTitle: title, isForeground: isForeground))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// When the agent entered its current status — the SAME anchor the list card's
@@ -5204,9 +5220,9 @@ struct TerminalPaneContent: View {
             }
         } label: {
             Image(systemName: mute.isMuted(paneID) ? "bell.slash" : "ellipsis")
-                .font(.system(size: 13))
-                .foregroundStyle(mute.isMuted(paneID) ? Palette.waiting : Palette.textDim)
-                .frame(width: 26, height: 22)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(mute.isMuted(paneID) ? Palette.waiting : Palette.text)
+                .frame(width: 40, height: 44)
                 .contentShape(Rectangle())
         }
         .accessibilityIdentifier("terminal-actions")
