@@ -2393,29 +2393,35 @@ struct TerminalHomeView: View {
     /// reads as a binding, so the detail pane's content swaps in place with no navigation.
     private var gramSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Spacer()
-                VStack(spacing: 2) {
-                    Text("Gram").font(Typography.app(20, .bold)).foregroundStyle(Palette.text)
-                    // Reserved height so the title never jumps as the count appears, matching
-                    // the agents header's `headerSubtitle` treatment.
-                    Text(gramUnread.count > 0
-                         ? "\(gramUnread.count) unread"
-                         : "nothing unread")
-                        .font(Typography.machine(12))
-                        .foregroundStyle(gramUnread.count > 0 ? Palette.waiting : Palette.textFaint)
-                        .frame(height: 15)
+            // #355: the phone header's shape — a large left-aligned title with the amber unread
+            // count, and the actions in one capsule. No subtitle line: the count carries it.
+            HStack(alignment: .center, spacing: 8) {
+                Text("Gram").font(Typography.app(34, .bold)).foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                if gramUnread.count > 0 {
+                    Text("\(gramUnread.count)")
+                        .font(Typography.machine(11, .semibold))
+                        .foregroundStyle(Palette.ground)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Palette.waiting))
+                        .accessibilityLabel("\(gramUnread.count) unread")
                 }
-                Spacer()
-                // Read all, beside refresh. Gated exactly like the phone header's copy: only on
-                // the Inbox (Saved has no unread concept, so it would be a no-op control there)
-                // and only while something is unread. The count comes from the ambient poll this
-                // view already owns, so the button needs nothing from the page.
-                if !gramShowingSaved, gramUnread.count > 0 {
-                    circleButton("envelope.open") { gramReadAllToken += 1 }
-                        .accessibilityLabel("Read all")
+                Spacer(minLength: 0)
+                HStack(spacing: 0) {
+                    // Read all, beside refresh. Gated exactly like the phone header's copy: only
+                    // on the Inbox (Saved has no unread concept, so it would be a no-op control
+                    // there) and only while something is unread. The count comes from the ambient
+                    // poll this view already owns, so the button needs nothing from the page.
+                    if !gramShowingSaved, gramUnread.count > 0 {
+                        gramHeaderButton("envelope.open") { gramReadAllToken += 1 }
+                            .accessibilityLabel("Read all")
+                    }
+                    gramHeaderButton("arrow.clockwise") { gramRefreshToken += 1 }
+                        .accessibilityLabel("Refresh")
                 }
-                circleButton("arrow.clockwise") { gramRefreshToken += 1 }
+                .padding(.horizontal, 2)
+                .background(Capsule().fill(Palette.surfaceRaised))
             }
             .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
             Divider().overlay(Palette.hairlineQuiet)
@@ -2431,6 +2437,19 @@ struct TerminalHomeView: View {
             Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// One segment of the Gram sidebar header's capsule: a 40 x 44 glyph target.
+    private func gramHeaderButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Palette.text)
+                .frame(width: 40, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
     }
 
     /// One selectable row in the Gram sidebar. `badgeMuted` renders the count as a quiet pill
