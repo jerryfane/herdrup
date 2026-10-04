@@ -88,6 +88,10 @@ struct InlineSearchField: View {
 struct InlineSearchToggle: View {
     let isOpen: Bool
     let identifier: String
+    /// The tap target. A `.frame` applied OUTSIDE a Button lays it out larger but does not
+    /// widen what it hit-tests, so a toggle inside a header capsule passes its slot here.
+    /// nil keeps the bare glyph (the iPad search row and the pre-#358 terminal header).
+    var target: CGSize? = nil
     let action: () -> Void
 
     var body: some View {
@@ -95,7 +99,10 @@ struct InlineSearchToggle: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(isOpen ? Palette.text : Palette.textDim)
+                .frame(width: target?.width, height: target?.height)
+                .contentShape(Rectangle())
         }
+        .hoverEffect(.highlight)
         .accessibilityIdentifier(identifier)
         .accessibilityLabel(isOpen ? "Close search" : "Search")
     }
