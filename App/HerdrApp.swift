@@ -6951,7 +6951,6 @@ struct SettingsView: View {
             Palette.ground.ignoresSafeArea()
             VStack(spacing: 0) {
                 detailHeader(title, subtitle: subtitle, tint: subtitleTint, showBack: showBack)
-                Divider().overlay(Palette.hairlineQuiet)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         content()
@@ -6973,7 +6972,9 @@ struct SettingsView: View {
         HStack(spacing: 12) {
             if showBack { SettingsBackButton() }
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(Typography.app(20, .semibold)).foregroundStyle(Palette.text)
+                Text(title).font(Typography.app(34, .bold)).foregroundStyle(Palette.text)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                    .accessibilityAddTraits(.isHeader)
                 if !subtitle.isEmpty {
                     Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint).lineLimit(1)
                 }
@@ -7003,8 +7004,7 @@ struct SettingsView: View {
                     glanceUpdateRow
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
         }
     }
@@ -7084,8 +7084,7 @@ struct SettingsView: View {
                 rowDivider
                 manageRow(.sharedAccess, subtitle: "People you share an agent with") { manageSharedTrailing }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
         }
     }
@@ -7096,15 +7095,16 @@ struct SettingsView: View {
         NavigationLink(value: section) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(section.label).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
-                    Text(subtitle).font(Typography.app(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                    Text(section.label).font(Typography.app(17)).foregroundStyle(Palette.text)
+                    Text(subtitle).font(Typography.app(13)).foregroundStyle(Palette.textDim).lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 trailing()
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .frame(minHeight: 52)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -7218,8 +7218,9 @@ struct SettingsView: View {
     private var header: some View {
         HStack(spacing: 10) {
             Text("Settings")
-                .font(Typography.app(20, .semibold))
+                .font(Typography.app(34, .bold))
                 .foregroundStyle(Palette.text)
+                .accessibilityAddTraits(.isHeader)
             Spacer()
             // Only a modal presentation gets a close button; as a tab there is none.
             if let onClose {
@@ -7256,7 +7257,7 @@ struct SettingsView: View {
                         .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
                 }
             }
-            .rowShell()
+            .settingsRowShell()
             .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
             daemonUpdateCallout
         }
@@ -7300,7 +7301,7 @@ struct SettingsView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .rowShell()
+            .settingsRowShell()
             .padding(.horizontal, 16).padding(.top, 10)
         }
     }
@@ -7380,8 +7381,7 @@ struct SettingsView: View {
                         if index < extraPeers.count - 1 { rowDivider }
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .settingsGroup()
                 .padding(.horizontal, 16).padding(.top, 10)
             }
             richActionRow("How to add a machine", systemImage: "plus.circle",
@@ -7565,8 +7565,7 @@ struct SettingsView: View {
                         if index < accounts.count - 1 { rowDivider }
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .settingsGroup()
                 .padding(.horizontal, 16).padding(.top, 10)
             }
             richActionRow("Add account", systemImage: "plus.circle",
@@ -7790,28 +7789,33 @@ struct SettingsView: View {
                 rowDivider
                 pushMachineRow
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
         }
     }
 
+    /// Starts where the row text starts (#357), like an iOS inset group.
     private var rowDivider: some View {
-        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
+        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 18)
     }
 
-    /// A word-state toggle row (ON/OFF, differentiated by the word not colour, per the
-    /// kit) WITHOUT its own border — the card around the group supplies one border for
-    /// all of them.
+    /// A toggle row WITHOUT its own border — the group around it supplies one border for
+    /// all of them. #357: a standard switch (on-tint brand) replaces the ON/OFF word; the
+    /// whole row stays the tap target, so tapping the label still flips it.
     private func groupedToggleRow(_ label: String, _ value: Binding<Bool>) -> some View {
         Button { value.wrappedValue.toggle() } label: {
             HStack {
-                Text(label).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                Text(label).font(Typography.app(17)).foregroundStyle(Palette.text)
                 Spacer()
-                Text(value.wrappedValue ? "ON" : "OFF")
-                    .font(Typography.machine(13, .bold)).foregroundStyle(Palette.text)
+                Toggle("", isOn: .constant(value.wrappedValue))
+                    .labelsHidden()
+                    .tint(Palette.brand)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 18).padding(.vertical, 8)
+            .frame(minHeight: 52)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityValue(Text(value.wrappedValue ? "on" : "off"))
@@ -8010,8 +8014,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
         }
     }
@@ -8078,8 +8081,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+            .settingsGroup()
         }
         .padding(.horizontal, 16).padding(.top, 10)
     }
@@ -8155,8 +8157,7 @@ struct SettingsView: View {
                         if index < products.count - 1 { rowDivider }
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+                .settingsGroup()
                 .padding(.horizontal, 16).padding(.top, 10)
                 supportFeedback
             }
@@ -8257,19 +8258,18 @@ struct SettingsView: View {
         .padding(.top, 14)
     }
 
+    /// #357: today's uppercase labels as small spaced-out caps, without the trailing rule.
     private func sectionLabel(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            Text(text).font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-            Rectangle().fill(Palette.hairline).frame(height: 1)
-        }
-        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
+        Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 34).padding(.top, 22).padding(.bottom, 4)
     }
 
     private func actionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
         Button { if enabled { action() } } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(label).font(Typography.app(15)).foregroundStyle(enabled ? Palette.text : Palette.textFaint)
+                    Text(label).font(Typography.app(17)).foregroundStyle(enabled ? Palette.text : Palette.textFaint)
                     if !enabled, let note {
                         Text(note).font(Typography.app(11)).foregroundStyle(Palette.textFaint)
                     }
@@ -8277,7 +8277,7 @@ struct SettingsView: View {
                 Spacer()
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .rowShell()
+            .settingsRowShell()
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -8312,22 +8312,22 @@ struct SettingsView: View {
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
+                // #357: a plain 24 pt glyph in textDim, no tile.
                 leading()
                     .foregroundStyle(Palette.textDim)
-                    .frame(width: 30, height: 30)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                    .frame(width: 24, height: 24)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(label).font(Typography.app(15)).foregroundStyle(Palette.text)
+                    Text(label).font(Typography.app(17)).foregroundStyle(Palette.text)
                     if let subtitle {
-                        Text(subtitle).font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                        Text(subtitle).font(Typography.app(13)).foregroundStyle(Palette.textDim)
                     }
                 }
                 Spacer()
                 Image(systemName: trailingGlyph)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .rowShell()
+            .settingsRowShell()
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16).padding(.top, 10)
@@ -8502,6 +8502,24 @@ private extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// `rowShell` for a Settings row (#357): a single-row group, min 52 pt.
+    func settingsRowShell() -> some View {
+        self
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .settingsGroup()
+            .contentShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    /// One Settings group (#357 "HerdrUp voice"): a `surface` inset group, radius 18, with
+    /// a 1 pt `hairlineQuiet` outline.
+    func settingsGroup() -> some View {
+        self
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Palette.hairlineQuiet, lineWidth: 1))
     }
 
     /// Center + cap a column at a comfortable reading width on wide canvases;
