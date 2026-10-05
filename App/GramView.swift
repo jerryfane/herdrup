@@ -484,9 +484,13 @@ struct GramView: View {
                 .zIndex(1)
             content
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
+            // The banner and composer share the feed's capped column, so the field lines up
+            // under the messages instead of spanning the whole detail pane.
             bannerView
+                .readableColumn(GramBubble.columnCap)
             composer
                 .environment(\.composerEditorRoom, composerRoom)
+                .readableColumn(GramBubble.columnCap)
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
         }
     }
@@ -800,6 +804,9 @@ struct GramView: View {
                     }
                 }
                 .padding(16)
+                // iPad / Mac: a readable conversation column, centred, so a bubble never
+                // stretches across the whole detail pane. Inert on iPhone.
+                .readableColumn(GramBubble.columnCap)
             }
         }
     }
@@ -947,6 +954,7 @@ struct GramView: View {
                     }
                 }
                 .padding(16)
+                .readableColumn(GramBubble.columnCap)
             }
             // Same path as the buttons: a pull that lands inside a poll must not be
             // swallowed either.
@@ -2417,6 +2425,10 @@ enum GramBubble {
     static let avatarSlot: CGFloat = 42
     /// The minimum empty space on the side opposite the sender.
     static let oppositeInset: CGFloat = 48
+    /// iPad / Mac: the feed's width cap (#354 follow-up). About the width of a Messages
+    /// conversation on iPad, so a long message wraps at a readable measure and your bubbles
+    /// on the right stay near the agents' on the left.
+    static let columnCap: CGFloat = 720
 }
 
 /// The bubble's tail: one smooth shape drawn BEHIND the bubble (no layered mask), curving
