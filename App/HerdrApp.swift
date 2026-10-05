@@ -5119,9 +5119,10 @@ struct TerminalPaneContent: View {
     // MARK: header
 
     /// One bar (#358): back, the title block (heading over status · live time), and one
-    /// capsule holding Find, Reconnect and the ⋯ actions. The bar is a FIXED 44 pt tall in
-    /// every state, so opening find, a pane with no agent status, or a status change can never
-    /// resize the terminal underneath (a height change resizes the PTY and reflows the buffer).
+    /// capsule holding Find, Reconnect and the ⋯ actions. The bar's height is constant in
+    /// every state (44 pt at 100 % text, scaled with the app text size up to 62 pt), so opening
+    /// find, a pane with no agent status, or a status change can never resize the terminal
+    /// underneath (a height change resizes the PTY and reflows the buffer).
     private var header: some View {
         HStack(spacing: 10) {
             Button { onClose() } label: {
