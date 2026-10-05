@@ -300,7 +300,9 @@ struct RootView: View {
                 client: client,
                 onDisconnect: { disconnect() },
                 host: credentials.host,
-                hostKey: HostKey.canonical(host: credentials.host, port: credentials.port),
+                hostKey: SessionChoice.storeKey(credentials),
+                session: credentials.session,
+                onSwitchSession: { switchSession(to: $0) },
                 onReconnect: { reconnect() },
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
@@ -420,6 +422,10 @@ struct RootView: View {
             }
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
+                             livePaneIDs: MockTransport.demoLivePaneIDs)
+        case .sessions:
+            TerminalHomeView(client: HerdrClient(transport: SessionsMockTransport()), onDisconnect: {},
+                             session: "work", onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
         case .liveEvents, .liveEventsLegacy:
             // The live status stream receipt: `liveevents` is an events_v2 daemon whose
@@ -581,7 +587,11 @@ struct RootView: View {
         return saved?.label ?? creds.host
     }
 
-    private func connect(_ creds: SSHCredentials) {
+    private func connect(_ picked: SSHCredentials) {
+        // Reopen the herdr session last picked on this machine (#347). If it has stopped
+        // since, the home view's session check switches back to the default one.
+        var creds = picked
+        if creds.session == nil { creds.session = SessionChoice.remembered(for: creds) }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
         credentials = creds
@@ -650,6 +660,20 @@ struct RootView: View {
         session += 1
         registerPush(with: newClient)   // the reconnect built a fresh client actor — re-register the token with it
         registerActivityPush(with: newClient)   // re-register the Live Activity token with the fresh client too
+    }
+
+    /// Moves the app to another herdr session on the same machine (#347): each session is
+    /// its own herdr server, so this is a reconnect with the new session, which rebuilds
+    /// the client and remounts the home (agents, terminals, Gram) for that server.
+    /// nil is the default session. Remembered per machine for the next connect.
+    private func switchSession(to name: String?) {
+        guard var creds = credentials else { return }
+        let next = (name == "default") ? nil : name
+        guard creds.session != next else { return }
+        creds.session = next
+        credentials = creds
+        SessionChoice.remember(next, for: creds)
+        reconnect()
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
@@ -1676,6 +1700,10 @@ struct TerminalHomeView: View {
     /// Canonical `host:port` key that scopes saved terminals to THIS connection (a terminal is a pane
     /// on one daemon). Empty only in the DEBUG mock, which has no real terminals.
     var hostKey: String = ""
+    /// The herdr session this home shows (#347); nil is the default session.
+    var session: String? = nil
+    /// Switch the app to another herdr session on this machine (nil = default).
+    var onSwitchSession: (String?) -> Void = { _ in }
     var onReconnect: () -> Void = {}
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
@@ -1989,6 +2017,10 @@ struct TerminalHomeView: View {
     /// The roster's large "Agents" title has scrolled out of view, so the header shows its
     /// small centred title instead (#353).
     @State private var agentsTitleCollapsed = false
+    /// The machine's running herdr sessions (#347); the pills show with two or more.
+    @State private var runningSessions: [HerdrSession] = []
+    /// Needs-you counts in the sessions this home is NOT on, by session name.
+    @State private var otherSessionsNeedYou: [String: Int] = [:]
 
     /// The whole list derived once when the displayed roster changes. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -2940,9 +2972,11 @@ struct TerminalHomeView: View {
         // One-time: fold any pre-per-host (global) terminal list into THIS host on first connect, so
         // the owner keeps their named terminals on their main box. Idempotent — a no-op after the
         // first migration and when there's nothing legacy pending.
+        // Legacy terminals predate sessions, so they belong to the default session's bucket.
         .task(id: hostKey) {
-            if !hostKey.isEmpty { terminalsStore.migrateLegacyIfNeeded(host: hostKey) }
+            if !hostKey.isEmpty, session == nil { terminalsStore.migrateLegacyIfNeeded(host: hostKey) }
         }
+        .task { await watchSessions() }
         // First launch: show the gestures tutorial once — but NOT over a pending push
         // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
         // the pane, wasting the one-shot). Burn the seen-flag ONLY when we present.
@@ -3248,7 +3282,58 @@ struct TerminalHomeView: View {
                 // A remounted roster starts at the top with the large title visible; reset
                 // here so a stale "collapsed" never shows both titles before the first scroll.
                 .onAppear { agentsTitleCollapsed = false }
-            searchField
+            VStack(spacing: 0) {
+                searchField
+                if runningSessions.count >= 2 {
+                    SessionPills(
+                        sessions: runningSessions,
+                        current: session,
+                        needsYou: sessionNeedsYou,
+                        onSelect: { onSwitchSession($0.default ? nil : $0.name) }
+                    )
+                    .padding(.top, 4).padding(.bottom, 6)
+                }
+            }
+        }
+    }
+
+    /// Agents that need you in each running session, for the pills: this session's count
+    /// is the live roster's; the others come from `watchSessions`' periodic peek.
+    private var sessionNeedsYou: [String: Int] {
+        var counts = otherSessionsNeedYou
+        if let here = runningSessions.first(where: { $0.default ? (session ?? "default") == "default" : $0.name == session }) {
+            counts[here.name] = fullList.needsYouCount
+        }
+        return counts
+    }
+
+    /// Keeps the session pills current (#347): the machine's running herdr sessions and how
+    /// many agents need you in each of the others, every 15 s. A machine whose herdr has no
+    /// sessions (or a failed listing) shows no pills. If the session this home is on is no
+    /// longer running (stopped since it was remembered), it moves back to the default one.
+    @MainActor
+    private func watchSessions() async {
+        while !Task.isCancelled {
+            if let listed = try? await client.listSessions() {
+                let running = listed.filter(\.running)
+                if let session, session != "default", !running.contains(where: { $0.name == session }) {
+                    onSwitchSession(nil)
+                    return
+                }
+                runningSessions = running
+                var counts: [String: Int] = [:]
+                if running.count >= 2 {
+                    for other in running where (other.default ? "default" : other.name) != (session ?? "default") {
+                        if let agents = try? await client.agentList(inSession: other.default ? nil : other.name) {
+                            counts[other.name] = AgentList(agents: agents).needsYouCount
+                        }
+                    }
+                }
+                otherSessionsNeedYou = counts
+            } else {
+                runningSessions = []
+            }
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
         }
     }
 
@@ -8885,6 +8970,8 @@ enum ScreenshotMock {
     case share, sharedAccess
     // The home list's live status stream: an events_v2 daemon, and an older one.
     case liveEvents, liveEventsLegacy
+    // The Agents home on a machine with three running herdr sessions: the session pills (#347).
+    case sessions
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -8897,6 +8984,7 @@ enum ScreenshotMock {
         case "pairing-guidance": return .pairingGuidance
         case "rosterstress": return .rosterStress
         case "liveevents": return .liveEvents
+        case "sessions": return .sessions
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings
@@ -8953,6 +9041,23 @@ enum ScreenshotMock {
 /// Canned-response transport for the screenshot mock. The JSON is machine-checked
 /// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
 /// compiled on Linux) — keep the two fixtures in sync.
+/// `MockTransport` on a machine with three running herdr sessions (work, personal and
+/// default) for the session pills receipt (#347). Every session answers with the demo list.
+struct SessionsMockTransport: SessionListingTransport {
+    private let base = MockTransport()
+    func roundTrip(_ requestLine: String) async throws -> String { try await base.roundTrip(requestLine) }
+    func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> { base.stream(requestLine) }
+    func listSessions() async throws -> [HerdrSession] {
+        [HerdrSession(name: "personal", running: true, default: false),
+         HerdrSession(name: "work", running: true, default: false),
+         HerdrSession(name: "scratch", running: false, default: false),
+         HerdrSession(name: "default", running: true, default: true)]
+    }
+    func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String {
+        try await base.roundTrip(requestLine)
+    }
+}
+
 struct MockTransport: HerdrTransport {
     /// When true, `pane.stream` seeds MANY lines of scrollback (for the omp UI scroll
     /// receipt) instead of the short screenshot seed. Default false keeps the

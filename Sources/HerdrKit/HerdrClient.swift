@@ -98,6 +98,27 @@ public actor HerdrClient {
         try await machineTransport.setMachineFederation(profileID: profileID, enabled: enabled)
     }
 
+    /// The herdr sessions on the connected machine (#347). Throws when the transport can't
+    /// run commands or the machine's herdr predates sessions (no `session list`); callers
+    /// then treat the machine as default-only.
+    public func listSessions() async throws -> [HerdrSession] {
+        guard let sessionTransport = transport as? any SessionListingTransport else {
+            throw TransportError.machineCommandFailed(stderr: "Sessions require an SSH connection")
+        }
+        return try await sessionTransport.listSessions()
+    }
+
+    /// `agent.list` from another herdr session on the same machine (#347), for the
+    /// session pills' needs-you counts. Throws when the transport can't reach other sessions.
+    public func agentList(inSession session: String?) async throws -> [AgentInfo] {
+        guard let sessionTransport = transport as? any SessionListingTransport else {
+            throw TransportError.machineCommandFailed(stderr: "Sessions require an SSH connection")
+        }
+        let line = try encodeRequest("agent.list", EmptyParams())
+        let response = try await sessionTransport.roundTrip(line, inSession: session)
+        return try decodeResult(response, as: AgentListResult.self).agents
+    }
+
     /// Every credential account (subscription) the daemon knows about, for the
     /// Settings → Accounts list and the per-agent "Swap subscription" menu. Mirrors
     /// `agentList()`: a small parameterless JSON query. THROWS the server's
