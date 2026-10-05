@@ -1277,12 +1277,20 @@ public actor HerdrClient {
         let target: String
     }
 
-    /// `agent.forget`: remove an archived agent's record for good (#380, herdr#291). Its
-    /// transcript stays on the machine. Same target as `unarchiveAgent`. Only offered when
-    /// `ping` advertises `agent_forget`.
+    /// `agent.forget`: remove this archived agent's record for good (#380, herdr#291). Its
+    /// transcript stays on the machine. Only offered when `ping` advertises `agent_forget`.
     @discardableResult
-    public func forgetAgent(target: String) async throws -> AgentInfo {
-        try await call("agent.forget", AgentForgetParams(target: target), as: AgentInfoResult.self).agent
+    public func forgetAgent(_ archived: AgentInfo) async throws -> AgentInfo {
+        try await call("agent.forget", AgentForgetParams(target: Self.forgetTarget(archived)),
+                       as: AgentInfoResult.self).agent
+    }
+
+    /// The `agent.forget` target for an archived row. herdr takes a name or a terminal id
+    /// and acts on the FIRST archived record that matches, and two archived agents can
+    /// share a name. Forgetting is irreversible, so it addresses the row by its terminal
+    /// id, which is unique; the name is only a fallback for a record without one.
+    static func forgetTarget(_ archived: AgentInfo) -> String {
+        archived.terminalID ?? archived.name ?? archived.paneID
     }
 
     struct PaneRenameParams: Encodable {

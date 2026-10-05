@@ -3694,11 +3694,11 @@ struct TerminalHomeView: View {
             presenting: forgetCandidate
         ) { row in
             Button("Close", role: .destructive) {
-                let target = unarchiveTarget(row.info)
+                let archived = row.info
                 let title = row.title
                 Task {
                     do {
-                        try await client.forgetAgent(target: target)
+                        try await client.forgetAgent(archived)
                         await load()
                     } catch let e {
                         error = "couldn't close \(title): \(e)"
