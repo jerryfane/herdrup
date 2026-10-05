@@ -534,6 +534,9 @@ struct GramView: View {
     /// Search is offered only where there is something to filter. `content` shows a
     /// spinner while loading and an error card when the daemon has no gram, and a search
     /// control over either is a live control over nothing.
+    /// The feed's width cap: `GramBubble.columnCap` at regular width, none on iPhone.
+    private var feedCap: CGFloat { hSizeClass == .regular ? GramBubble.columnCap : .infinity }
+
     private var canFilter: Bool { showingSaved || phase == .loaded }
 
     /// Opens the field and takes focus, or closes it and clears the term — clearing is
@@ -805,8 +808,9 @@ struct GramView: View {
                 }
                 .padding(16)
                 // iPad / Mac: a readable conversation column, centred, so a bubble never
-                // stretches across the whole detail pane. Inert on iPhone.
-                .readableColumn(GramBubble.columnCap)
+                // stretches across the whole detail pane. Regular width only: a large iPhone in
+                // landscape is wider than the cap but must keep its full-width feed.
+                .readableColumn(feedCap)
             }
         }
     }
@@ -954,7 +958,7 @@ struct GramView: View {
                     }
                 }
                 .padding(16)
-                .readableColumn(GramBubble.columnCap)
+                .readableColumn(feedCap)
             }
             // Same path as the buttons: a pull that lands inside a poll must not be
             // swallowed either.

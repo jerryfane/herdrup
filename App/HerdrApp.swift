@@ -1668,6 +1668,22 @@ private struct ScrollActivityObserver: UIViewRepresentable {
 
 /// Lists the agents on the host; tapping one opens its pane. A failed load is
 /// recoverable (retry, or disconnect back to the connect form).
+/// The sidebar section bar's material: Apple's Liquid Glass where the system has it (iPadOS 26,
+/// and macOS 26 for the iPad app on Mac), the frosted bar of #369 before that.
+private struct SidebarTabBarMaterial: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: .capsule)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Capsule())
+                .background(Palette.surfaceRaised.opacity(0.72), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.45), radius: 15, y: 6)
+        }
+    }
+}
+
 struct TerminalHomeView: View {
     @Environment(\.scenePhase) private var scenePhase
     let client: HerdrClient
@@ -1989,6 +2005,8 @@ struct TerminalHomeView: View {
     /// The roster's large "Agents" title has scrolled out of view, so the header shows its
     /// small centred title instead (#353).
     @State private var agentsTitleCollapsed = false
+    /// The sidebar section bar's selected pill, shared so it slides between tabs.
+    @Namespace private var sidebarTabSelection
 
     /// The whole list derived once when the displayed roster changes. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -2541,20 +2559,29 @@ struct TerminalHomeView: View {
     /// iPhone) and the system red Gram count. iPadOS has no system tab bar inside a split
     /// view's sidebar column, so it is drawn to the iPhone bar's metrics: 62 pt tall,
     /// 31 pt corners, 14 pt from the column's sides.
+    ///
+    /// Liquid Glass (owner 2026-10-05): on iPadOS 26 / macOS 26 the bar is Apple's own glass,
+    /// the same material as the iPhone tab bar, and the selected pill slides between tabs.
+    /// The list scrolls underneath (the bar is a safe-area inset), which is what the glass
+    /// shows. Earlier systems keep the frosted bar. It follows the sidebar's width but never
+    /// grows past `sidebarTabBarMaxWidth`, centred, so a wide sidebar doesn't stretch it.
     private var sidebarTabBar: some View {
         HStack(spacing: 0) {
             ForEach(HomeTab.allCases, id: \.self) { tab in
                 sidebarTabItem(tab, badge: tab == .gram ? gramUnread.count : 0)
             }
         }
+        .animation(.smooth(duration: 0.3), value: selectedTab)
         .padding(4)
         .frame(height: 62)
-        .background(.ultraThinMaterial, in: Capsule())
-        .background(Palette.surfaceRaised.opacity(0.72), in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.45), radius: 15, y: 6)
+        .modifier(SidebarTabBarMaterial())
+        .frame(maxWidth: Self.sidebarTabBarMaxWidth)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 14).padding(.bottom, 12).padding(.top, 6)
     }
+
+    /// About three iPhone tab items wide; the sidebar ranges 250-460 pt.
+    private static let sidebarTabBarMaxWidth: CGFloat = 320
 
     private func sidebarTabItem(_ tab: HomeTab, badge: Int) -> some View {
         let selected = selectedTab == tab
@@ -2569,7 +2596,13 @@ struct TerminalHomeView: View {
             }
             .foregroundStyle(selected ? Palette.text : Palette.textDim)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(selected ? Color.white.opacity(0.12) : Color.clear, in: Capsule())
+            .background {
+                // One pill, moved between tabs, so a selection change slides instead of blinking.
+                if selected {
+                    Capsule().fill(Color.white.opacity(0.12))
+                        .matchedGeometryEffect(id: "sidebar-tab-selection", in: sidebarTabSelection)
+                }
+            }
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
