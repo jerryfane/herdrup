@@ -7185,7 +7185,7 @@ struct SettingsView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 13)
+            .padding(.horizontal, 18).padding(.vertical, 13)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -7200,7 +7200,7 @@ struct SettingsView: View {
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 13)
+        .padding(.horizontal, 18).padding(.vertical, 13)
     }
 
     /// The amber shortcut line — a `NavigationLink` into the Accounts detail, since the
@@ -7215,7 +7215,7 @@ struct SettingsView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 13)
+            .padding(.horizontal, 18).padding(.vertical, 13)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -7229,7 +7229,7 @@ struct SettingsView: View {
             Spacer(minLength: 0)
             Text(reach.text).font(Typography.machine(13)).foregroundStyle(reach.color)
         }
-        .padding(.horizontal, 16).padding(.vertical, 13)
+        .padding(.horizontal, 18).padding(.vertical, 13)
     }
 
     // MARK: MANAGE (drill-in rows)
@@ -7616,7 +7616,7 @@ struct SettingsView: View {
                 .disabled(federationBusyID != nil || (machine.savedState == "disabled" && !machine.hasFederationPolicy))
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// Local-only: no agent carries a machineID, so there are no remote peers yet.
@@ -7630,8 +7630,8 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 18).padding(.vertical, 14)
+        .settingsGroup()
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
@@ -7654,7 +7654,7 @@ struct SettingsView: View {
             Spacer(minLength: 8)
             peerBadge(peer.reachability)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// The peer's aggregate reachability as a badge. Offline reuses the agent list's
@@ -7754,8 +7754,8 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 18).padding(.vertical, 14)
+        .settingsGroup()
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
@@ -7784,7 +7784,7 @@ struct SettingsView: View {
             Spacer(minLength: 8)
             accountTrailing(account)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// "kind" or "kind · plan" — the plan/tier name folds into the subtitle so the
@@ -7958,7 +7958,9 @@ struct SettingsView: View {
         }
     }
 
-    /// Starts where the row text starts (#357), like an iOS inset group.
+    /// Starts at the 18 pt leading inset every Settings row uses (#357), so it lines up
+    /// with the first thing in each row: the label, or the status dot / icon chip of the
+    /// glance and notify-callout rows.
     private var rowDivider: some View {
         Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 18)
     }
@@ -8007,7 +8009,7 @@ struct SettingsView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
         .accessibilityElement(children: .contain)
     }
 
@@ -8176,7 +8178,7 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 12)
+                .padding(.horizontal, 18).padding(.vertical, 12)
             }
             .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
@@ -8236,14 +8238,14 @@ struct SettingsView: View {
                     Text(value)
                         .font(Typography.machine(13, .bold)).foregroundStyle(Palette.textDim)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 14)
+                .padding(.horizontal, 18).padding(.vertical, 14)
                 rowDivider
                 HStack(spacing: 10) {
                     textSizeButton("A\u{2212}", enabled: canDecrease, onDecrease)
                     textSizeButton("Reset", enabled: canReset, onReset)
                     textSizeButton("A+", enabled: canIncrease, onIncrease)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 12)
+                .padding(.horizontal, 18).padding(.vertical, 12)
             }
             .settingsGroup()
         }
@@ -8262,16 +8264,19 @@ struct SettingsView: View {
         terminalFontSize = min(24, max(9, terminalFontSize + delta))
     }
 
+    /// #357: A− / Reset / A+ as three equal round buttons, 38 pt tall, `surfaceRaised`;
+    /// a disabled step is dimmed rather than hidden so the row never changes shape.
     private func textSizeButton(_ title: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .font(Typography.app(15, .semibold))
                 .foregroundStyle(enabled ? Palette.text : Palette.textFaint)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                .frame(maxWidth: .infinity, minHeight: 38)
+                .background(Capsule().fill(Palette.surfaceRaised.opacity(enabled ? 1 : 0.5)))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .hoverEffect(.highlight)
         .disabled(!enabled)
     }
 
