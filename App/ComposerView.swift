@@ -491,12 +491,17 @@ struct ComposerQuickKeyLabel: View {
     var imageName: String?
     var primary = false
     var armed = false
+    /// Drawn inside a `ComposerKeyGroup`: the group owns the surface and the rounded outer
+    /// corners, so the cap only fills while armed or hovered.
+    var grouped = false
+    var minWidth: CGFloat = 44
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
     private var fill: Color {
         if armed { return Palette.working }
         if primary { return hovering && isEnabled ? ComposerStyle.primaryKeyHover : Palette.text }
+        if grouped { return hovering && isEnabled ? Palette.surfaceRaised : .clear }
         return hovering && isEnabled ? Palette.surfaceRaised : Palette.surface
     }
 
@@ -510,10 +515,30 @@ struct ComposerQuickKeyLabel: View {
         }
         .foregroundStyle(primary || armed ? Palette.ground : Palette.textDim)
         .padding(.horizontal, 10)
-        .frame(minWidth: 44, minHeight: 34)
-        .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .circular))
+        .frame(minWidth: minWidth, minHeight: 34)
+        .background(fill, in: RoundedRectangle(cornerRadius: grouped ? 0 : 8, style: .circular))
         .opacity(isEnabled ? 1 : 0.4)
         .onHover { hovering = $0 }
+    }
+}
+
+/// Related key caps sharing one rounded `surface` shape (#359): square joins inside, radius 8
+/// at the group's outer corners. Place a `ComposerKeyDivider` between caps.
+struct ComposerKeyGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 0) { content }
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .circular))
+    }
+}
+
+/// The hairline between two caps of a `ComposerKeyGroup`.
+struct ComposerKeyDivider: View {
+    var body: some View {
+        Rectangle().fill(Palette.hairline).frame(width: 1, height: 18)
+            .accessibilityHidden(true)
     }
 }
 
