@@ -194,6 +194,13 @@ struct RootView: View {
     @State private var client: HerdrClient?
     @State private var credentials: SSHCredentials?
     @State private var session = 0   // bumped to force a fresh load on reconnect
+    /// #377: after a machine is tapped, the machine list stays up (its row reads
+    /// "Connecting…") until the first agent list arrives, the attempt fails, or a short
+    /// cap passes; only then does the Agents screen slide in. `homeShown` gates that.
+    @State private var homeShown = false
+    /// Bumped per connect, so a superseded attempt's reveal cannot fire late.
+    @State private var connectGeneration = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let pins = KeychainHostKeyPolicy.shared
     // The APNs token + tapped-notification target live here (in PushCenter), not in the
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
@@ -295,7 +302,7 @@ struct RootView: View {
                 onBack: guestCanGoBack ? { self.openGuest = nil } : nil,
                 onLeave: { self.openGuest = nil })
             .id(openGuest.id)
-        } else if let client, let credentials {
+        } else if let client, let credentials, homeShown {
             TerminalHomeView(
                 client: client,
                 onDisconnect: { disconnect() },
@@ -323,8 +330,11 @@ struct RootView: View {
             // A per-agent mute toggled in the terminal header: re-register the new set
             // so the daemon starts/stops skipping that pane's pushes immediately.
             .onChange(of: mute.mutedPanes) { _, _ in registerPush() }
+            .transition(reduceMotion ? .opacity : .push(from: .trailing))
         } else {
-            ConnectView(onConnect: { connect($0) }, onOpenShared: { openGuest = $0 })
+            ConnectView(onConnect: { connect($0) }, onOpenShared: { openGuest = $0 },
+                        connecting: client == nil ? nil : credentials)
+            .transition(reduceMotion ? .opacity : .push(from: .trailing))
         }
     }
 
@@ -596,7 +606,30 @@ struct RootView: View {
         // and the home view's own load() coalesce into ONE session — no double
         // connect. Result is discarded; the view re-fetches (and reuses the warm
         // connection). Best-effort: a failure here surfaces normally in load().
-        Task { _ = try? await newClient.agentList() }
+        //
+        // #377: the same fetch also decides WHEN the Agents screen appears. The machine list
+        // stays up (its row reads "Connecting…") until this first list arrives or fails, or
+        // 10 s pass, so the Agents screen slides in already filled. A failure still reveals
+        // it: the error and host-key recovery live there.
+        homeShown = false
+        connectGeneration += 1
+        let generation = connectGeneration
+        // The fetch is an unstructured task that is only AWAITED here, never cancelled: the
+        // home view's own load() coalesces onto the same connection, so cancelling it when
+        // the cap wins would tear down the attempt the Agents screen is about to use.
+        let warm = Task { _ = try? await newClient.agentList() }
+        Task { @MainActor in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await warm.value }
+                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+                await group.next()
+                group.cancelAll()   // cancels the waits, not `warm`
+            }
+            guard generation == connectGeneration, client != nil else { return }
+            withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
+                homeShown = true
+            }
+        }
         registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
         registerActivityPush(with: newClient)   // and any existing Live Activity token (reclaimed activity)
         // Request the notification permission PROMPT here — push can now actually deliver: the build
@@ -697,10 +730,24 @@ enum HerdrSetup {
         "SSH is enabled on the computer. On Mac, turn on Remote Login."
 }
 
+/// #377: a machine row's press feedback. It fills `surfaceRaised` while pressed, like an
+/// inset-group row, and stays filled (`held`) while that machine is connecting.
+private struct ConnectRowButtonStyle: ButtonStyle {
+    var held: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed || held ? Palette.surfaceRaised : Color.clear)
+            .animation(.easeOut(duration: configuration.isPressed ? 0.05 : 0.2), value: configuration.isPressed || held)
+    }
+}
+
 struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
     /// Opens the home of a machine someone shared with this phone.
     var onOpenShared: (GuestAccess) -> Void = { _ in }
+    /// #377: the machine being connected to while the list is still on screen. Its row reads
+    /// "Connecting…" with a spinner, and the other machine rows stop taking taps.
+    var connecting: SSHCredentials? = nil
 
     @ObservedObject private var savedHosts = SavedHostsStore.shared
     @ObservedObject private var sharedMachines = SharedMachinesStore.shared
@@ -779,11 +826,15 @@ struct ConnectView: View {
             VStack(spacing: 0) {
                 ForEach(Array(sharedMachines.machines.enumerated()), id: \.element.id) { index, access in
                     if index > 0 { connectRowDivider }
-                    Button { onOpenShared(access) } label: {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        onOpenShared(access)
+                    } label: {
                         connectRow(icon: "person.2", title: access.machineLabel,
                                    subtitle: "\(access.agentName) · shared by \(access.ownerName)")
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(ConnectRowButtonStyle(held: false))
+                    .disabled(connecting != nil)
                     .accessibilityIdentifier("shared-machine-row")
                     .contextMenu {
                         Button(role: .destructive) { sharedMachines.remove(access) } label: {
@@ -805,22 +856,43 @@ struct ConnectView: View {
     }
 
     /// One machine row inside a group: plain glyph, name over the second line, chevron.
-    private func connectRow(icon: String, title: String, subtitle: String) -> some View {
+    private func connectRow(icon: String, title: String, subtitle: String,
+                            connecting: Bool = false) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
                 .font(.system(size: 19, weight: .regular)).foregroundStyle(Palette.textDim)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(Typography.app(17)).foregroundStyle(Palette.text).lineLimit(1)
-                Text(subtitle).font(Typography.machine(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+                // #377: while this machine connects, the second line says so.
+                Text(connecting ? "Connecting…" : subtitle)
+                    .font(Typography.machine(13))
+                    .foregroundStyle(connecting ? Palette.text : Palette.textDim).lineLimit(1)
+                    .contentTransition(.opacity)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            ZStack {
+                if connecting {
+                    ProgressView().controlSize(.small).tint(Palette.textDim)
+                        .transition(.opacity)
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                        .transition(.opacity)
+                }
+            }
+            .frame(width: 20)
         }
+        .animation(.easeInOut(duration: 0.15), value: connecting)
         .padding(.horizontal, 18).padding(.vertical, 10)
         .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    /// The saved machine `connecting` points at: same host, port and user.
+    private func isConnecting(_ saved: SavedHost) -> Bool {
+        guard let connecting, let ep = HostEndpoint.parse(saved.host) else { return false }
+        return ep.host == connecting.host && ep.port == connecting.port && saved.username == connecting.username
     }
 
     /// Between rows of a group; starts where the row text starts (18 + 22 + 14).
@@ -1053,10 +1125,17 @@ struct ConnectView: View {
     }
 
     private func savedHostRow(_ saved: SavedHost) -> some View {
-        Button { tapSavedHost(saved) } label: {
-            connectRow(icon: "desktopcomputer", title: saved.label, subtitle: secondaryLine(saved))
+        let busy = isConnecting(saved)
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            tapSavedHost(saved)
+        } label: {
+            connectRow(icon: "desktopcomputer", title: saved.label, subtitle: secondaryLine(saved),
+                       connecting: busy)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ConnectRowButtonStyle(held: busy))
+        .disabled(connecting != nil)
+        .accessibilityValue(busy ? "Connecting" : "")
         // Hold to manage: Edit opens the editor pre-filled; Remove drops it.
         .contextMenu {
             Button { editorTarget = .edit(saved) } label: {
