@@ -798,7 +798,8 @@ struct ConnectView: View {
 
     // MARK: #374 inset groups (the Settings look of #357)
 
-    /// A section label above a group: today's uppercase label, inset to the row text, no rule.
+    /// A section label above a group: today's uppercase label, inset 18 pt to line up with the
+    /// rows' leading glyph (as Settings' labels do), no rule.
     private func connectSectionLabel(_ text: String) -> some View {
         Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
             .padding(.horizontal, 18)
@@ -872,8 +873,8 @@ struct ConnectView: View {
         .buttonStyle(.plain)
     }
 
-    // Centered identity header: the app logo (the Lamb), the name, one line of intent.
-    // The icon carries its own dark ground, so it reads as the app mark.
+    // Identity header (#374): the app logo (the Lamb) above a large left-aligned name and one
+    // line of intent. The icon carries its own dark ground, so it reads as the app mark.
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             Image("AppLogo")
@@ -8706,7 +8707,7 @@ struct RenameSheet: View {
 /// measure; capping then re-expanding centers the capped column in the available
 /// space. On iPhone (narrower than the cap) it is inert — the inner cap never
 /// binds, so the layout is unchanged.
-private struct ReadableColumn: ViewModifier {
+struct ReadableColumn: ViewModifier {
     let cap: CGFloat
     func body(content: Content) -> some View {
         content
@@ -8743,9 +8744,12 @@ private extension View {
             .clipShape(RoundedRectangle(cornerRadius: 18))
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(Palette.hairlineQuiet, lineWidth: 1))
     }
+}
 
+extension View {
     /// Center + cap a column at a comfortable reading width on wide canvases;
-    /// inert on iPhone (narrower than `cap`). See `ReadableColumn`.
+    /// inert on iPhone (narrower than `cap`). See `ReadableColumn`. Module-wide so the
+    /// connect screen, Settings and Gram's feed share one definition.
     func readableColumn(_ cap: CGFloat = 560) -> some View {
         modifier(ReadableColumn(cap: cap))
     }
