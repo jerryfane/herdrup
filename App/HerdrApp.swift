@@ -8430,7 +8430,7 @@ struct SettingsView: View {
                         .font(Typography.machine(13, .semibold)).foregroundStyle(Palette.text)
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 18).padding(.vertical, 14)
         }
         .buttonStyle(.plain)
         .disabled(isPurchasing(product))
