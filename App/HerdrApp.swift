@@ -624,21 +624,21 @@ struct RootView: View {
         homeShown = false
         connectGeneration += 1
         let generation = connectGeneration
-        // The fetch is an unstructured task that is only AWAITED here, never cancelled: the
-        // home view's own load() coalesces onto the same connection, so cancelling it when
-        // the cap wins would tear down the attempt the Agents screen is about to use.
+        // The fetch is an unstructured task that is only AWAITED, never cancelled: the home
+        // view's own load() coalesces onto the same connection, so cancelling it when the cap
+        // wins would tear down the attempt the Agents screen is about to use.
+        //
+        // Two independent triggers race to one guarded reveal. NOT a task group: a group
+        // awaits every child before it returns, and `warm.value` ignores cancellation, so the
+        // cap could never end the wait before the fetch did (#384).
         let warm = Task { _ = try? await newClient.agentList() }
         Task { @MainActor in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await warm.value }
-                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
-                await group.next()
-                group.cancelAll()   // cancels the waits, not `warm`
-            }
-            guard generation == connectGeneration, client != nil else { return }
-            withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
-                homeShown = true
-            }
+            await warm.value
+            revealHome(generation: generation)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            revealHome(generation: generation)
         }
         registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
         registerActivityPush(with: newClient)   // and any existing Live Activity token (reclaimed activity)
@@ -653,6 +653,16 @@ struct RootView: View {
         // status silently. On grant it registers for remote notifications; the token reaches the server
         // via AppDelegate.didRegisterForRemoteNotificationsWithDeviceToken → registerPush.
         AppDelegate.requestAuthorizationIfWanted()
+    }
+
+    /// Shows the Agents screen for connect attempt `generation` (#377): the first of "first
+    /// list arrived or failed" and "10 s passed" wins; the later one, or one from a superseded
+    /// attempt, does nothing.
+    private func revealHome(generation: Int) {
+        guard generation == connectGeneration, client != nil, !homeShown else { return }
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
+            homeShown = true
+        }
     }
 
     private func disconnect() {
