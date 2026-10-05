@@ -1907,7 +1907,30 @@ struct TerminalHomeView: View {
 
     /// The bottom tabs. Terminal is deliberately absent — a terminal fronts a
     /// keep-mounted pane over the tabs rather than being one.
-    private enum HomeTab: Hashable { case agents, gram, settings }
+    ///
+    /// ONE definition of the sections (#360): the iPhone `TabView`, the iPad/Mac sidebar
+    /// bar and the minimised rail all read label and icon from here, so they cannot drift.
+    private enum HomeTab: Hashable, CaseIterable {
+        case agents, gram, settings
+
+        var label: String {
+            switch self {
+            case .agents: return "Agents"
+            case .gram: return "Gram"
+            case .settings: return "Settings"
+            }
+        }
+
+        /// The SF Symbol. A system tab bar draws the `.fill` variant; the sidebar bar does
+        /// the same explicitly with `.environment(\.symbolVariants, .fill)`.
+        var icon: String {
+            switch self {
+            case .agents: return "square.grid.2x2"
+            case .gram: return "bubble.left.and.bubble.right"
+            case .settings: return "gearshape"
+            }
+        }
+    }
 
     /// The only remaining MODAL covers: the new-agent form and the first-run gestures
     /// tutorial. Gram and Settings became persistent tabs (#88).
@@ -1950,6 +1973,9 @@ struct TerminalHomeView: View {
     /// The Archived section (issue #173) starts collapsed too — archived agents are
     /// the least-active thing on screen, so they stay tucked behind an ARCHIVED · N row.
     @State private var archivedCollapsed = true
+    /// The roster's large "Agents" title has scrolled out of view, so the header shows its
+    /// small centred title instead (#353).
+    @State private var agentsTitleCollapsed = false
 
     /// The whole list derived once when the displayed roster changes. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -2107,7 +2133,7 @@ struct TerminalHomeView: View {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    sidebarSectionPicker
+                    sidebarTopRow
                     switch selectedTab {
                     case .agents:
                         header
@@ -2128,6 +2154,10 @@ struct TerminalHomeView: View {
                         gramSidebar
                     }
                 }
+                // #360: the sections live in the iPhone tab bar's shape at the bottom of the
+                // column. A safe-area inset (not an overlay) so the lists end above it and
+                // can still scroll their last row into view.
+                .safeAreaInset(edge: .bottom, spacing: 0) { sidebarTabBar }
             }
             // Remembered width. SwiftUI exposes no way to READ a divider drag, so the
             // column measures itself and feeds the settled value back as `ideal` on the
@@ -2482,32 +2512,86 @@ struct TerminalHomeView: View {
         .hoverEffect(.highlight)
     }
 
-    /// The three top-level sections, a pill at the top of the iPad sidebar (the phone's tab
-    /// bar, rotated up here — same sections in the same order).
-    private var sidebarSectionPicker: some View {
-        HStack(spacing: 4) {
-            sectionButton(.agents, "Agents", "square.grid.2x2.fill")
-            sectionButton(.gram, "Gram", "bubble.left.and.bubble.right", badge: gramUnread.count)
-            sectionButton(.settings, "Settings", "gearshape")
+    /// The sidebar's top row (#360): only the minimise toggle, now that the sections moved to
+    /// the bar at the bottom. Leading, where the system puts a sidebar toggle.
+    private var sidebarTopRow: some View {
+        HStack {
             sidebarToggleButton(
                 icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
+            Spacer(minLength: 0)
         }
-        .padding(5)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
+        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 2)
+    }
+
+    /// The sections as the iPhone tab bar, at the bottom of the sidebar (#360): the same
+    /// items, `.fill` symbols, 10 pt labels, white selected tab (`.tint(Palette.text)` on
+    /// iPhone) and the system red Gram count. iPadOS has no system tab bar inside a split
+    /// view's sidebar column, so it is drawn to the iPhone bar's metrics: 62 pt tall,
+    /// 31 pt corners, 14 pt from the column's sides.
+    private var sidebarTabBar: some View {
+        HStack(spacing: 0) {
+            ForEach(HomeTab.allCases, id: \.self) { tab in
+                sidebarTabItem(tab, badge: tab == .gram ? gramUnread.count : 0)
+            }
+        }
+        .padding(4)
+        .frame(height: 62)
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(Palette.surfaceRaised.opacity(0.72), in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.45), radius: 15, y: 6)
+        .padding(.horizontal, 14).padding(.bottom, 12).padding(.top, 6)
+    }
+
+    private func sidebarTabItem(_ tab: HomeTab, badge: Int) -> some View {
+        let selected = selectedTab == tab
+        return Button { selectedTab = tab } label: {
+            VStack(spacing: 1) {
+                Image(systemName: tab.icon)
+                    .environment(\.symbolVariants, .fill)
+                    .font(.system(size: 21, weight: .medium))
+                    .frame(height: 28)
+                    .overlay(alignment: .topTrailing) { tabBadge(badge).offset(x: 12, y: -3) }
+                Text(tab.label).font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(selected ? Palette.text : Palette.textDim)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(selected ? Color.white.opacity(0.12) : Color.clear, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(tab.label)
+        .accessibilityValue(badge > 0 ? "\(badge) unread" : "")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// The system tab badge: a red capsule with the count, as `.badge` draws on iPhone.
+    @ViewBuilder
+    private func tabBadge(_ count: Int) -> some View {
+        if count > 0 {
+            Text(count > 99 ? "99+" : "\(count)")
+                .font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .frame(minWidth: 18, minHeight: 18)
+                .background(Capsule().fill(Color(uiColor: .systemRed)))
+                .accessibilityHidden(true)
+        }
     }
 
     /// The minimise / restore control. ⌘K was the only trigger before, bound to a
     /// zero-opacity button, and the navigation bar is hidden in both columns — so on
     /// an iPad without a hardware keyboard, or on the Mac build where a click is the
-    /// expected gesture, there was nothing to hit.
+    /// expected gesture, there was nothing to hit. A 44 pt round button (#360).
     private func sidebarToggleButton(icon: String, hint: String, minimize: Bool) -> some View {
         Button { toggleSidebar() } label: {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Palette.textFaint)
-                .frame(width: 34, height: 34)
-                .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(Palette.text)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Palette.surfaceRaised))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
@@ -2587,10 +2671,9 @@ struct TerminalHomeView: View {
             sidebarToggleButton(
                 icon: "sidebar.left", hint: "Expand sidebar (⌘K)", minimize: false)
                 .padding(.bottom, 2)
-            railSectionButton(.agents, "Agents", "square.grid.2x2.fill")
-            railSectionButton(.gram, "Gram", "bubble.left.and.bubble.right",
-                              badge: gramUnread.count)
-            railSectionButton(.settings, "Settings", "gearshape")
+            ForEach(HomeTab.allCases, id: \.self) { tab in
+                railSectionButton(tab, badge: tab == .gram ? gramUnread.count : 0)
+            }
             // Gated on the same condition as the counts below it: a separator with
             // nothing on its far side is precisely the zero-value noise those counts
             // are suppressed to avoid, and the quiet state is the COMMON rendering.
@@ -2623,9 +2706,7 @@ struct TerminalHomeView: View {
     /// A rail section icon. Tapping selects the section AND expands, which is the
     /// predictable reading of a click on a minimised menu; the chevron above expands
     /// without changing section.
-    private func railSectionButton(
-        _ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0
-    ) -> some View {
+    private func railSectionButton(_ tab: HomeTab, badge: Int = 0) -> some View {
         Button {
             selectedTab = tab
             // Both variables, for the same reason `toggleSidebar` writes both: the rail
@@ -2634,21 +2715,19 @@ struct TerminalHomeView: View {
             sidebarMinimized = false
             columnVisibility = .all      // unanimated: see `toggleSidebar`
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 16, weight: .medium))
-                .overlay(alignment: .topTrailing) {
-                    if badge > 0 {
-                        Circle().fill(Palette.waiting).frame(width: 7, height: 7).offset(x: 6, y: -2)
-                    }
-                }
-                .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textFaint)
-                .frame(width: 40, height: 36)
-                .background(selectedTab == tab ? Palette.surfaceRaised : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 12))
+            Image(systemName: tab.icon)
+                .environment(\.symbolVariants, .fill)
+                .font(.system(size: 18, weight: .medium))
+                .overlay(alignment: .topTrailing) { tabBadge(badge).offset(x: 11, y: -6) }
+                .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textDim)
+                .frame(width: 44, height: 40)
+                .background(selectedTab == tab ? Color.white.opacity(0.12) : Color.clear,
+                            in: Capsule())
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
-        .accessibilityLabel(label)
+        .accessibilityLabel(tab.label)
+        .accessibilityValue(badge > 0 ? "\(badge) unread" : "")
     }
 
     /// One activity count. Rendered only when non-zero: a rail of zeroes is noise.
@@ -2666,27 +2745,6 @@ struct TerminalHomeView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(count) \(label)")
         }
-    }
-
-    /// The sidebar's own section button (expanded state), unchanged.
-    private func sectionButton(_ tab: HomeTab, _ label: String, _ icon: String, badge: Int = 0) -> some View {
-        Button { selectedTab = tab } label: {
-            VStack(spacing: 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .overlay(alignment: .topTrailing) {
-                        if badge > 0 {
-                            Circle().fill(Palette.waiting).frame(width: 7, height: 7).offset(x: 5, y: -2)
-                        }
-                    }
-                Text(label).font(Typography.app(9, .medium))
-            }
-            .foregroundStyle(selectedTab == tab ? Palette.text : Palette.textFaint)
-            .frame(maxWidth: .infinity).padding(.vertical, 7)
-            .background(selectedTab == tab ? Palette.surfaceRaised : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
     }
 
     private func detailPlaceholder(_ text: String, _ icon: String) -> some View {
@@ -2712,14 +2770,14 @@ struct TerminalHomeView: View {
             TabView(selection: $selectedTab) {
                 agentsTab
                     .tag(HomeTab.agents)
-                    .tabItem { Label("Agents", systemImage: "square.grid.2x2.fill") }
+                    .tabItem { Label(HomeTab.agents.label, systemImage: HomeTab.agents.icon) }
 
                 // Gram and Settings were modal covers; they are persistent tabs now.
                 // Both are nav-agnostic and take no onClose as tabs (no close button).
                 GramView(client: client, agents: agents, unread: gramUnread,
                          showingSaved: $gramShowingSaved)
                     .tag(HomeTab.gram)
-                    .tabItem { Label("Gram", systemImage: "bubble.left.and.bubble.right") }
+                    .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
                     .badge(gramUnread.count == 0 ? nil : Text("\(gramUnread.count)"))
 
                 SettingsView(
@@ -2733,7 +2791,7 @@ struct TerminalHomeView: View {
                     canReconnect: rejectedFingerprint == nil,
                     onReconnect: onReconnect)
                     .tag(HomeTab.settings)
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
             }
             .tint(Palette.text)
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
@@ -3110,19 +3168,19 @@ struct TerminalHomeView: View {
 
     // MARK: chrome
 
-    /// #353: a round Back button, a large left-aligned "Agents" title, and New terminal / New
-    /// agent in one capsule. The old "N need you" subtitle is gone: the rows' amber marks and
-    /// the minimised rail's counts carry it.
+    /// #353: a round Back button and New terminal / New agent in one capsule. The large
+    /// "Agents" title lives at the top of the roster's scroll content (`rosterTitleBlock`) and
+    /// scrolls away with it; once it has, a small centred title fades into this bar, as a
+    /// system large title collapses. Without a roster on screen (first load, error) the bar
+    /// keeps the large title itself. The old "N need you" subtitle is gone: the rows' amber
+    /// marks and the minimised rail's counts carry it.
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
             circleButton("chevron.left") { onDisconnect() }
                 .accessibilityLabel("Back")
-            Text("Agents")
-                .font(Typography.app(34, .bold))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .accessibilityAddTraits(.isHeader)
+            if !rosterShowsTitle {
+                largeAgentsTitle
+            }
             Spacer(minLength: 0)
             HStack(spacing: 0) {
                 // Open a plain shell terminal — a small icon so agents stay the priority
@@ -3135,7 +3193,46 @@ struct TerminalHomeView: View {
             .padding(.horizontal, 2)
             .background(Capsule().fill(Palette.surfaceRaised))
         }
+        .overlay {
+            if rosterShowsTitle {
+                let shown = agentsTitleCollapsed
+                Text("Agents")
+                    .font(Typography.app(17, .semibold))
+                    .foregroundStyle(Palette.text)
+                    .opacity(shown ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: shown)
+                    .accessibilityHidden(!shown)
+                    .allowsHitTesting(false)
+            }
+        }
         .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+    }
+
+    private var largeAgentsTitle: some View {
+        Text("Agents")
+            .font(Typography.app(34, .bold))
+            .foregroundStyle(Palette.text)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Whether the roster (and with it the scrolling large title) is what's on screen.
+    private var rosterShowsTitle: Bool {
+        error == nil && !(loading && agents.isEmpty)
+    }
+
+    /// The top of the roster's scroll content: the large title, then the search field. Both
+    /// scroll away with the list (#353); the title reports when it has left the viewport.
+    private var rosterTitleBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            largeAgentsTitle
+                .padding(.horizontal, 16)
+                .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
+                    agentsTitleCollapsed = $0
+                }
+            searchField
+        }
     }
 
     /// A 44 pt round header control (Back, and the iPad Gram sidebar's actions).
@@ -3196,10 +3293,7 @@ struct TerminalHomeView: View {
     // MARK: list
 
     private var agentList: some View {
-        VStack(spacing: 0) {
-            searchField   // pinned above the scroll, as the mockup/Termius have it
-            agentRosterScroll
-        }
+        agentRosterScroll
     }
 
     /// macOS runs this iOS target through UIKit's Designed-for-iPad compatibility
@@ -3249,11 +3343,13 @@ struct TerminalHomeView: View {
     private var agentRosterStack: some View {
         if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack {
             VStack(alignment: .leading, spacing: 0) {
+                rosterTitleBlock
                 agentRosterRows
             }
             .onAppear { onEagerAgentRosterStackAppear?() }
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
+                rosterTitleBlock
                 agentRosterRows
             }
         }
@@ -7153,7 +7249,7 @@ struct SettingsView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 13)
+            .padding(.horizontal, 18).padding(.vertical, 13)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -7168,7 +7264,7 @@ struct SettingsView: View {
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 13)
+        .padding(.horizontal, 18).padding(.vertical, 13)
     }
 
     /// The amber shortcut line — a `NavigationLink` into the Accounts detail, since the
@@ -7183,7 +7279,7 @@ struct SettingsView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.horizontal, 16).padding(.vertical, 13)
+            .padding(.horizontal, 18).padding(.vertical, 13)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -7197,7 +7293,7 @@ struct SettingsView: View {
             Spacer(minLength: 0)
             Text(reach.text).font(Typography.machine(13)).foregroundStyle(reach.color)
         }
-        .padding(.horizontal, 16).padding(.vertical, 13)
+        .padding(.horizontal, 18).padding(.vertical, 13)
     }
 
     // MARK: MANAGE (drill-in rows)
@@ -7584,7 +7680,7 @@ struct SettingsView: View {
                 .disabled(federationBusyID != nil || (machine.savedState == "disabled" && !machine.hasFederationPolicy))
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// Local-only: no agent carries a machineID, so there are no remote peers yet.
@@ -7598,8 +7694,8 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 18).padding(.vertical, 14)
+        .settingsGroup()
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
@@ -7622,7 +7718,7 @@ struct SettingsView: View {
             Spacer(minLength: 8)
             peerBadge(peer.reachability)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// The peer's aggregate reachability as a badge. Offline reuses the agent list's
@@ -7722,8 +7818,8 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 18).padding(.vertical, 14)
+        .settingsGroup()
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
@@ -7752,7 +7848,7 @@ struct SettingsView: View {
             Spacer(minLength: 8)
             accountTrailing(account)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
 
     /// "kind" or "kind · plan" — the plan/tier name folds into the subtitle so the
@@ -7926,7 +8022,9 @@ struct SettingsView: View {
         }
     }
 
-    /// Starts where the row text starts (#357), like an iOS inset group.
+    /// Starts at the 18 pt leading inset every Settings row uses (#357), so it lines up
+    /// with the first thing in each row: the label, or the status dot / icon chip of the
+    /// glance and notify-callout rows.
     private var rowDivider: some View {
         Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 18)
     }
@@ -7975,7 +8073,7 @@ struct SettingsView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 18).padding(.vertical, 12)
         .accessibilityElement(children: .contain)
     }
 
@@ -8144,7 +8242,7 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 12)
+                .padding(.horizontal, 18).padding(.vertical, 12)
             }
             .settingsGroup()
             .padding(.horizontal, 16).padding(.top, 10)
@@ -8204,14 +8302,14 @@ struct SettingsView: View {
                     Text(value)
                         .font(Typography.machine(13, .bold)).foregroundStyle(Palette.textDim)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 14)
+                .padding(.horizontal, 18).padding(.vertical, 14)
                 rowDivider
                 HStack(spacing: 10) {
                     textSizeButton("A\u{2212}", enabled: canDecrease, onDecrease)
                     textSizeButton("Reset", enabled: canReset, onReset)
                     textSizeButton("A+", enabled: canIncrease, onIncrease)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 12)
+                .padding(.horizontal, 18).padding(.vertical, 12)
             }
             .settingsGroup()
         }
@@ -8230,16 +8328,19 @@ struct SettingsView: View {
         terminalFontSize = min(24, max(9, terminalFontSize + delta))
     }
 
+    /// #357: A− / Reset / A+ as three equal round buttons, 38 pt tall, `surfaceRaised`;
+    /// a disabled step is dimmed rather than hidden so the row never changes shape.
     private func textSizeButton(_ title: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .font(Typography.app(15, .semibold))
                 .foregroundStyle(enabled ? Palette.text : Palette.textFaint)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
+                .frame(maxWidth: .infinity, minHeight: 38)
+                .background(Capsule().fill(Palette.surfaceRaised.opacity(enabled ? 1 : 0.5)))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .hoverEffect(.highlight)
         .disabled(!enabled)
     }
 
