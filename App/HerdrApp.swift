@@ -720,7 +720,7 @@ struct ConnectView: View {
         ZStack {
             Palette.ground.ignoresSafeArea()
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 18) {
                     header
                     // Saved machines — the list you manage + tap to connect. Empty on
                     // first launch, where the Add button below is the way in.
@@ -775,38 +775,57 @@ struct ConnectView: View {
     /// Machines other people shared: each opens its guest home over the relay.
     private var sharedSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("SHARED WITH YOU").font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                Rectangle().fill(Palette.hairline).frame(height: 1)
-            }
-            ForEach(sharedMachines.machines) { access in
-                Button { onOpenShared(access) } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.2")
-                            .font(.system(size: 14, weight: .medium)).foregroundStyle(Palette.textDim)
-                            .frame(width: 36, height: 36)
-                            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(access.machineLabel).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                            Text("\(access.agentName) · shared by \(access.ownerName)")
-                                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+            connectSectionLabel("SHARED WITH YOU")
+            VStack(spacing: 0) {
+                ForEach(Array(sharedMachines.machines.enumerated()), id: \.element.id) { index, access in
+                    if index > 0 { connectRowDivider }
+                    Button { onOpenShared(access) } label: {
+                        connectRow(icon: "person.2", title: access.machineLabel,
+                                   subtitle: "\(access.agentName) · shared by \(access.ownerName)")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("shared-machine-row")
+                    .contextMenu {
+                        Button(role: .destructive) { sharedMachines.remove(access) } label: {
+                            Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
                         }
-                        Spacer(minLength: 8)
-                        Image(systemName: "arrow.right.circle.fill")
-                            .font(.system(size: 18)).foregroundStyle(Palette.textDim)
-                    }
-                    .padding(12)
-                    .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("shared-machine-row")
-                .contextMenu {
-                    Button(role: .destructive) { sharedMachines.remove(access) } label: {
-                        Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
                     }
                 }
             }
+            .settingsGroup()
         }
+    }
+
+    // MARK: #374 inset groups (the Settings look of #357)
+
+    /// A section label above a group: today's uppercase label, inset to the row text, no rule.
+    private func connectSectionLabel(_ text: String) -> some View {
+        Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
+            .padding(.horizontal, 18)
+    }
+
+    /// One machine row inside a group: plain glyph, name over the second line, chevron.
+    private func connectRow(icon: String, title: String, subtitle: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .regular)).foregroundStyle(Palette.textDim)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text).lineLimit(1)
+                Text(subtitle).font(Typography.machine(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.textFaint)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// Between rows of a group; starts where the row text starts (18 + 22 + 14).
+    private var connectRowDivider: some View {
+        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 54)
     }
 
     /// Someone shared an agent: open their invite link. The system PasteButton reads
@@ -847,8 +866,8 @@ struct ConnectView: View {
                 Text("Scan pairing code").font(Typography.app(16, .semibold))
             }
             .foregroundStyle(Palette.ground)
-            .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(Palette.text).clipShape(RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(Palette.text, in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -856,24 +875,27 @@ struct ConnectView: View {
     // Centered identity header: the app logo (the Lamb), the name, one line of intent.
     // The icon carries its own dark ground, so it reads as the app mark.
     private var header: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Image("AppLogo")
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 64, height: 64)
-                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            VStack(spacing: 4) {
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
                 Text("herdrup")
-                    .font(Typography.app(28, .bold))
+                    .font(Typography.app(34, .bold))
                     .foregroundStyle(Palette.text)
+                    .accessibilityAddTraits(.isHeader)
                 Text("connect to your machine")
                     .font(Typography.machine(13))
                     .foregroundStyle(Palette.textDim)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 24)
-        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
     }
 
     /// The first screen a new user ever sees, and the one that blocked one.
@@ -886,10 +908,10 @@ struct ConnectView: View {
     ///
     /// So it now says what the app is, and gives the one command that starts everything.
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("herdrup controls coding agents running on your computer.")
-                .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
-                .multilineTextAlignment(.center)
+                .font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("BEFORE PAIRING")
@@ -905,11 +927,11 @@ struct ConnectView: View {
                     identifier: "pairing-prerequisite-ssh")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 18).padding(.vertical, 14)
+            .settingsGroup()
 
             Text("Then, on your computer, run:")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                .multilineTextAlignment(.center)
 
             VStack(spacing: 8) {
                 monoCard(HerdrSetup.installCommand)
@@ -919,9 +941,9 @@ struct ConnectView: View {
 
             Text("Scan the code it prints and you're connected. No keys to copy.")
                 .font(Typography.app(13)).foregroundStyle(Palette.textDim)
-                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity).padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
     }
 
     private func prerequisiteRow(_ text: String, systemImage: String, identifier: String) -> some View {
@@ -983,7 +1005,8 @@ struct ConnectView: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairlineQuiet, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(copiedCommand == text ? "Copied" : "Copy command: \(text)"))
@@ -996,8 +1019,8 @@ struct ConnectView: View {
                 Text("Add host").font(Typography.app(15, .semibold))
             }
             .foregroundStyle(Palette.text)
-            .frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(Palette.surface, in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -1018,31 +1041,20 @@ struct ConnectView: View {
 
     private var savedHostsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("SAVED").font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                Rectangle().fill(Palette.hairline).frame(height: 1)
+            connectSectionLabel("SAVED")
+            VStack(spacing: 0) {
+                ForEach(Array(savedHosts.hosts.enumerated()), id: \.element.id) { index, saved in
+                    if index > 0 { connectRowDivider }
+                    savedHostRow(saved)
+                }
             }
-            ForEach(savedHosts.hosts) { saved in savedHostRow(saved) }
+            .settingsGroup()
         }
     }
 
     private func savedHostRow(_ saved: SavedHost) -> some View {
         Button { tapSavedHost(saved) } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: 15, weight: .medium)).foregroundStyle(Palette.textDim)
-                    .frame(width: 36, height: 36)
-                    .background(Palette.surface).clipShape(RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(saved.label).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                    Text(secondaryLine(saved)).font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "arrow.right.circle.fill")
-                    .font(.system(size: 18)).foregroundStyle(Palette.textDim)
-            }
-            .padding(12)
-            .background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
+            connectRow(icon: "desktopcomputer", title: saved.label, subtitle: secondaryLine(saved))
         }
         .buttonStyle(.plain)
         // Hold to manage: Edit opens the editor pre-filled; Remove drops it.
