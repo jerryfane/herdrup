@@ -1950,6 +1950,9 @@ struct TerminalHomeView: View {
     /// The Archived section (issue #173) starts collapsed too — archived agents are
     /// the least-active thing on screen, so they stay tucked behind an ARCHIVED · N row.
     @State private var archivedCollapsed = true
+    /// The roster's large "Agents" title has scrolled out of view, so the header shows its
+    /// small centred title instead (#353).
+    @State private var agentsTitleCollapsed = false
 
     /// The whole list derived once when the displayed roster changes. The grouping,
     /// fail-closed placement, stable order, count and quiet flag all live in
@@ -3110,19 +3113,19 @@ struct TerminalHomeView: View {
 
     // MARK: chrome
 
-    /// #353: a round Back button, a large left-aligned "Agents" title, and New terminal / New
-    /// agent in one capsule. The old "N need you" subtitle is gone: the rows' amber marks and
-    /// the minimised rail's counts carry it.
+    /// #353: a round Back button and New terminal / New agent in one capsule. The large
+    /// "Agents" title lives at the top of the roster's scroll content (`rosterTitleBlock`) and
+    /// scrolls away with it; once it has, a small centred title fades into this bar, as a
+    /// system large title collapses. Without a roster on screen (first load, error) the bar
+    /// keeps the large title itself. The old "N need you" subtitle is gone: the rows' amber
+    /// marks and the minimised rail's counts carry it.
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
             circleButton("chevron.left") { onDisconnect() }
                 .accessibilityLabel("Back")
-            Text("Agents")
-                .font(Typography.app(34, .bold))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .accessibilityAddTraits(.isHeader)
+            if !rosterShowsTitle {
+                largeAgentsTitle
+            }
             Spacer(minLength: 0)
             HStack(spacing: 0) {
                 // Open a plain shell terminal — a small icon so agents stay the priority
@@ -3135,7 +3138,46 @@ struct TerminalHomeView: View {
             .padding(.horizontal, 2)
             .background(Capsule().fill(Palette.surfaceRaised))
         }
+        .overlay {
+            if rosterShowsTitle {
+                let shown = agentsTitleCollapsed
+                Text("Agents")
+                    .font(Typography.app(17, .semibold))
+                    .foregroundStyle(Palette.text)
+                    .opacity(shown ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: shown)
+                    .accessibilityHidden(!shown)
+                    .allowsHitTesting(false)
+            }
+        }
         .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+    }
+
+    private var largeAgentsTitle: some View {
+        Text("Agents")
+            .font(Typography.app(34, .bold))
+            .foregroundStyle(Palette.text)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Whether the roster (and with it the scrolling large title) is what's on screen.
+    private var rosterShowsTitle: Bool {
+        error == nil && !(loading && agents.isEmpty)
+    }
+
+    /// The top of the roster's scroll content: the large title, then the search field. Both
+    /// scroll away with the list (#353); the title reports when it has left the viewport.
+    private var rosterTitleBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            largeAgentsTitle
+                .padding(.horizontal, 16)
+                .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
+                    agentsTitleCollapsed = $0
+                }
+            searchField
+        }
     }
 
     /// A 44 pt round header control (Back, and the iPad Gram sidebar's actions).
@@ -3196,10 +3238,7 @@ struct TerminalHomeView: View {
     // MARK: list
 
     private var agentList: some View {
-        VStack(spacing: 0) {
-            searchField   // pinned above the scroll, as the mockup/Termius have it
-            agentRosterScroll
-        }
+        agentRosterScroll
     }
 
     /// macOS runs this iOS target through UIKit's Designed-for-iPad compatibility
@@ -3249,11 +3288,13 @@ struct TerminalHomeView: View {
     private var agentRosterStack: some View {
         if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack {
             VStack(alignment: .leading, spacing: 0) {
+                rosterTitleBlock
                 agentRosterRows
             }
             .onAppear { onEagerAgentRosterStackAppear?() }
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
+                rosterTitleBlock
                 agentRosterRows
             }
         }
