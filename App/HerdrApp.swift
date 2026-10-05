@@ -3447,21 +3447,11 @@ struct TerminalHomeView: View {
     /// Unarchive (resume it into a fresh pane). Archived rows are NOT tappable to a
     /// terminal — there is no live pane to open.
     private var archivedSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
+        VStack(alignment: .leading, spacing: 0) {
+            // #352: a plain list row ("Archived  1 ›") at the end of the roster, not a header.
+            disclosureRow("Archived", count: fullList.archived.count, open: !archivedCollapsed) {
                 archivedCollapsed.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(archivedCollapsed
-                        ? "ARCHIVED · \(fullList.archived.count)" : "ARCHIVED")
-                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Image(systemName: archivedCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
-                    Rectangle().fill(Palette.hairline).frame(height: 1)
-                }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 10)
 
             if !archivedCollapsed {
                 ForEach(fullList.archived) { row in
@@ -3584,21 +3574,15 @@ struct TerminalHomeView: View {
         // the cached roster list and performs no sorting.
         let siblings = orderedSiblings
         return VStack(alignment: .leading, spacing: 0) {
-            Button {
-                if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
-            } label: {
-                HStack(spacing: 8) {
-                    // Count is shown when collapsed (so hidden work is legible);
-                    // an expanded section speaks for itself through its cards.
-                    Text(isCollapsed ? "\(group.sectionTitle) · \(rows.count)" : group.sectionTitle)
-                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
-                    Rectangle().fill(Palette.hairline).frame(height: 1)
+            // #352: no section headers. Needs you, working and stopped rows follow each
+            // other in that order; a collapsible group (Idle) is one plain row at the end
+            // ("Idle  4 ›") that opens its rows underneath. An active search shows the rows
+            // without the disclosure, as before.
+            if group.startsCollapsed && search.isEmpty {
+                disclosureRow(group.sectionTitle.capitalized, count: rows.count, open: !isCollapsed) {
+                    if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
                 }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 2)
 
             if !isCollapsed {
                 ForEach(rows) { row in
@@ -3734,6 +3718,31 @@ struct TerminalHomeView: View {
                 }
             }
         }
+    }
+
+    /// A plain roster row that opens or closes a group (#352): label, count and a chevron,
+    /// on the ground with an inset divider like the agent rows.
+    private func disclosureRow(_ title: String, count: Int, open: Bool,
+                               _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text)
+                Spacer(minLength: 8)
+                Text("\(count)").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                    .monospacedDigit()
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.leading, 20).padding(.trailing, 16)
+            .frame(minHeight: 48)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5).padding(.leading, 20)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityValue(open ? "expanded" : "collapsed")
     }
 
     /// #352: a Messages-style row. Full width on the ground (no card), a 52 pt round avatar
