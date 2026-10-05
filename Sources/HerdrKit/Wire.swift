@@ -993,6 +993,8 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// per-entry rejection) and all-pane status / turn entries without a `pane_id`.
     /// On a federation coordinator those entries also carry relayed remote panes.
     public let eventsV2: Bool
+    /// `agent.forget` removes an archived agent's record (herdr#291), #380.
+    public let agentForget: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1002,6 +1004,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentSessionTransfer = "agent_session_transfer"
         case agentSessionTransferHarnesses = "agent_session_transfer_harnesses"
         case eventsV2 = "events_v2"
+        case agentForget = "agent_forget"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1016,6 +1019,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
             forKey: .agentSessionTransferHarnesses
         )
         eventsV2 = try c.decodeIfPresent(Bool.self, forKey: .eventsV2) ?? false
+        agentForget = try c.decodeIfPresent(Bool.self, forKey: .agentForget) ?? false
     }
 }
 

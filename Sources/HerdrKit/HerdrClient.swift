@@ -1252,6 +1252,18 @@ public actor HerdrClient {
             .agent
     }
 
+    struct AgentForgetParams: Encodable {
+        let target: String
+    }
+
+    /// `agent.forget`: remove an archived agent's record for good (#380, herdr#291). Its
+    /// transcript stays on the machine. Same target as `unarchiveAgent`. Only offered when
+    /// `ping` advertises `agent_forget`.
+    @discardableResult
+    public func forgetAgent(target: String) async throws -> AgentInfo {
+        try await call("agent.forget", AgentForgetParams(target: target), as: AgentInfoResult.self).agent
+    }
+
     struct PaneRenameParams: Encodable {
         let paneID: String
         let label: String

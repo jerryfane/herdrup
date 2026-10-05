@@ -421,6 +421,9 @@ struct RootView: View {
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
+        case .archivedClose:
+            TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
+                             onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
         case .liveEvents, .liveEventsLegacy:
             // The live status stream receipt: `liveevents` is an events_v2 daemon whose
             // rows change only through streamed events, `liveevents-legacy` an older
@@ -1767,6 +1770,10 @@ struct TerminalHomeView: View {
     }
     @State private var transferCandidate: PendingHarnessTransfer?
     @State private var sessionTransferSupported = false
+    /// The daemon supports `agent.forget` (ping `agent_forget`), so archived rows offer Close (#380).
+    @State private var forgetSupported = false
+    /// The archived row awaiting Close confirmation.
+    @State private var forgetCandidate: AgentRow?
     @State private var sessionTransferHarnesses: Set<AgentSessionTransferHarness> = []
     @State private var checkedSessionTransferCapability = false
     /// A pending rename (nil = no sheet). An agent sets its daemon `name` (a resolvable mention
@@ -3583,9 +3590,39 @@ struct TerminalHomeView: View {
                                     }
                                 }
                             } label: { Label("Unarchive", systemImage: "arrow.uturn.up") }
+                            if forgetSupported {
+                                Button(role: .destructive) {
+                                    forgetCandidate = row
+                                } label: { Label("Close", systemImage: "xmark") }
+                            }
                         }
                 }
             }
+        }
+        .confirmationDialog(
+            forgetCandidate.map { "Close \($0.title)?" } ?? "Close?",
+            isPresented: Binding(
+                get: { forgetCandidate != nil },
+                set: { if !$0 { forgetCandidate = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: forgetCandidate
+        ) { row in
+            Button("Close", role: .destructive) {
+                let target = unarchiveTarget(row.info)
+                let title = row.title
+                Task {
+                    do {
+                        try await client.forgetAgent(target: target)
+                        await load()
+                    } catch let e {
+                        error = "couldn't close \(title): \(e)"
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("It leaves the Archived list. Its transcript stays on the machine.")
         }
     }
 
@@ -4231,6 +4268,7 @@ struct TerminalHomeView: View {
                         setLiveEventsSupported(capabilities?.eventsV2 == true)
                     }
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
+                    forgetSupported = capabilities?.agentForget == true
                     // PARSED HERE, IN THE SAME BLOCK THAT MARKS THE CHECK DONE.
                     //
                     // My first conflict resolution kept BOTH this gated probe and the
@@ -8885,6 +8923,8 @@ enum ScreenshotMock {
     case share, sharedAccess
     // The home list's live status stream: an events_v2 daemon, and an older one.
     case liveEvents, liveEventsLegacy
+    // The Agents home on a daemon that advertises `agent_forget`: archived rows offer Close (#380).
+    case archivedClose
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -8897,6 +8937,7 @@ enum ScreenshotMock {
         case "pairing-guidance": return .pairingGuidance
         case "rosterstress": return .rosterStress
         case "liveevents": return .liveEvents
+        case "archivedclose": return .archivedClose
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings
@@ -8953,6 +8994,20 @@ enum ScreenshotMock {
 /// Canned-response transport for the screenshot mock. The JSON is machine-checked
 /// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
 /// compiled on Linux) — keep the two fixtures in sync.
+/// `MockTransport` behind a daemon whose `ping` advertises `agent_forget` (#380), so the
+/// archived rows offer Close. The plain mock's ping does not decode, which is the
+/// older-daemon path where Close stays hidden.
+struct ForgetCapableMockTransport: HerdrTransport {
+    private let base = MockTransport()
+    func roundTrip(_ requestLine: String) async throws -> String {
+        if requestLine.contains(#""method":"ping""#) {
+            return #"{"id":"mock","result":{"type":"pong","version":"0.9.4","protocol":16,"capabilities":{"agent_forget":true}}}"#
+        }
+        return try await base.roundTrip(requestLine)
+    }
+    func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> { base.stream(requestLine) }
+}
+
 struct MockTransport: HerdrTransport {
     /// When true, `pane.stream` seeds MANY lines of scrollback (for the omp UI scroll
     /// receipt) instead of the short screenshot seed. Default false keeps the
