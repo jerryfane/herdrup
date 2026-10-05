@@ -53,6 +53,19 @@ final class LoginShellCommandTests: XCTestCase {
              ["api-bridge", "--duplex"]),
             ("machine federate", CitadelTransport.herdrCommand(["machine", "federate", profileID]),
              ["machine", "federate", profileID]),
+            // #347: a named session is the global `--session` flag before the subcommand;
+            // the default session sends none, so an older herdr sees the same command as before.
+            ("agent.list in a named session",
+             try CitadelTransport.bridgeCommand(for: agentList, session: "work.2_b-c"),
+             ["--session", "work.2_b-c", "api-bridge", CitadelTransport.encodedRequest(for: agentList)]),
+            ("agent.list in the default session",
+             try CitadelTransport.bridgeCommand(for: agentList, session: "default"),
+             ["api-bridge", CitadelTransport.encodedRequest(for: agentList)]),
+            ("duplex upload in a named session",
+             CitadelTransport.herdrCommand(["api-bridge", "--duplex"], session: "personal"),
+             ["--session", "personal", "api-bridge", "--duplex"]),
+            ("session list", CitadelTransport.herdrCommand(["session", "list", "--json"]),
+             ["session", "list", "--json"]),
         ]
 
         // Default install location only: PATH has no herdr (non-login SSH shells lack ~/.local/bin).
