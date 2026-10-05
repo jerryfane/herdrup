@@ -38,7 +38,7 @@ final class FirstPastThePost: @unchecked Sendable {
     }
 }
 
-public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
+public actor CitadelTransport: HerdrTransport, MachineFederationTransport, SessionListingTransport {
     private let credentials: SSHCredentials
     private let hostKeyValidator: SSHHostKeyValidator
     private var client: SSHClient?
@@ -296,6 +296,24 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     }
 
     /// Whether `word` may appear unquoted in the `sh` script as one plain word.
+    /// A herdr session name as `herdr --session` accepts it (`session::validate_name`):
+    /// 1-64 bytes of ASCII letters, digits, `.`, `_`, `-`, and not `.` or `..`. Every one of
+    /// those bytes is literal inside the single-quoted `sh -c` script.
+    public static func isSessionName(_ name: String) -> Bool {
+        guard (1...64).contains(name.utf8.count), name != ".", name != ".." else { return false }
+        return name.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || byte == UInt8(ascii: ".") || byte == UInt8(ascii: "_") || byte == UInt8(ascii: "-")
+        }
+    }
+
+    /// The session to pass as `--session`, or nil for the default session. An invalid name
+    /// is dropped rather than interpolated: it can only come from a corrupted saved value.
+    static func flagSession(_ session: String?) -> String? {
+        guard let session, session != "default", isSessionName(session) else { return nil }
+        return session
+    }
+
     static func isBareWord(_ word: String) -> Bool {
         !word.isEmpty && word.utf8.allSatisfy { byte in
             (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
@@ -320,11 +338,15 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     /// (base64) is split into `payloadWordBytes` words for csh, and the script
     /// rejoins them into one final argument: with `IFS` empty, `"$*"` concatenates
     /// the positional parameters with no separator.
-    static func herdrCommand(_ arguments: [String], payload: String? = nil) -> String {
+    static func herdrCommand(_ arguments: [String], payload: String? = nil, session: String? = nil) -> String {
         assert(arguments.allSatisfy(isBareWord), "an argument that is not a plain word")
         var script = herdrResolution
         if payload != nil { script += "IFS=; " }
         script += #"exec "$HERDR""#
+        // `--session` is a global flag herdr strips before the subcommand runs (#347). Only a
+        // NAMED session sends it: the default session is the flag's absence, which also keeps
+        // every command byte-identical for machines on a herdr that predates sessions.
+        if let name = flagSession(session) { script += " --session " + name }
         for argument in arguments { script += " " + argument }
         guard let payload else { return "/bin/sh -c '" + script + "'" }
         assert(isShellLiteral(payload), "a payload some login shell would not read literally")
@@ -385,8 +407,8 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     /// shell quoting. Throws `TransportError.requestTooLarge` rather than let the
     /// command exceed the argv limit and fail opaquely on the host (herdr#39's
     /// client contract).
-    static func bridgeCommand(for requestLine: String) throws -> String {
-        let command = herdrCommand(["api-bridge"], payload: encodedRequest(for: requestLine))
+    static func bridgeCommand(for requestLine: String, session: String? = nil) throws -> String {
+        let command = herdrCommand(["api-bridge"], payload: encodedRequest(for: requestLine), session: session)
         let byteCount = command.utf8.count
         guard byteCount <= maxCommandBytes else {
             throw TransportError.requestTooLarge(bytes: byteCount, max: maxCommandBytes)
@@ -407,14 +429,42 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     /// and counting those is the only progress signal a caller can have. Used by
     /// `gramGetFile` to drive a real progress bar instead of a spinner that says
     /// nothing for twenty seconds on a 40 MB video.
+    public func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String {
+        let client = try await connectedClient()
+        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine, session: session))
+        return try await Self.parseBridgeOutput(output, host: credentials.host, onBytesReceived: nil)
+    }
+
     public func roundTrip(
         _ requestLine: String, onBytesReceived: ((Int) -> Void)?
     ) async throws -> String {
         let client = try await connectedClient()
-        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
+        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine, session: credentials.session))
         return try await Self.parseBridgeOutput(
             output, host: credentials.host, onBytesReceived: onBytesReceived
         )
+    }
+
+    /// The herdr sessions on this machine (`herdr session list --json`, herdr >= 0.5.3), #347.
+    /// Machine-level, so it never carries `--session`. Throws when the command fails, which
+    /// is what an older herdr without sessions does: callers treat that as "default only".
+    public func listSessions() async throws -> [HerdrSession] {
+        let command = Self.herdrCommand(["session", "list", "--json"])
+        let output = try await connectedClient().executeCommandStream(command)
+        var stdout = Data()
+        do {
+            for try await chunk in output {
+                if case .stdout(let bytes) = chunk {
+                    stdout.append(contentsOf: bytes.readableBytesView)
+                    guard stdout.count <= 256 * 1024 else {
+                        throw TransportError.machineCommandFailed(stderr: "Session list returned too much output")
+                    }
+                }
+            }
+        } catch let failure as RemoteExitError {
+            throw TransportError.machineCommandFailed(stderr: "herdr session list failed (exit \(failure.remoteExitCode))")
+        }
+        return try HerdrSession.decodeList(stdout)
     }
 
     /// Run exactly one fixed machine command on the connected coordinator.
@@ -533,7 +583,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
                     let client = try await self.makeConnection()
                     await connection.adopt(client)
                     if Task.isCancelled { await connection.close(); continuation.finish(); return }
-                    let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine))
+                    let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine, session: credentials.session))
                     // Same byte-accurate decoding as roundTrip: decode UTF-8 only
                     // at newline boundaries so a multi-byte scalar straddling two
                     // chunks is never corrupted.
@@ -599,7 +649,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport {
     public nonisolated func openUploadChannel(_ openLine: String) -> GramUploadChannel {
         GramUploadChannel(
             makeConnection: { try await self.makeConnection() },
-            command: Self.herdrCommand(["api-bridge", "--duplex"]),
+            command: Self.herdrCommand(["api-bridge", "--duplex"], session: credentials.session),
             openLine: openLine
         )
     }

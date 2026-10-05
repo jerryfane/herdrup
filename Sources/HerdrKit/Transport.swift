@@ -23,6 +23,10 @@ public struct SSHCredentials: Sendable {
     /// resolves the API socket itself, so `CitadelTransport` ignores this. Kept
     /// so existing call sites compile; pruning it is a follow-up.
     public var remoteSocketPath: String
+    /// The herdr session on that machine (`herdr --session <name>`, herdr >= 0.5.3), #347.
+    /// nil or "default" means the default session, which sends NO flag, so a machine on an
+    /// older herdr (which rejects `--session`) keeps working unchanged.
+    public var session: String? = nil
 
     /// The two SSH auth methods herdr offers. `Equatable` for tests; the secrets
     /// live only here and in the Keychain on the client.
@@ -94,6 +98,15 @@ public protocol HerdrTransport: Sendable {
 /// ordinary API transport remains a single-request JSON channel.
 public protocol MachineFederationTransport: HerdrTransport {
     func setMachineFederation(profileID: String, enabled: Bool) async throws
+}
+
+/// A transport that can list the herdr sessions on its machine (#347). Separate from
+/// `HerdrTransport` for the same reason as `MachineFederationTransport`.
+public protocol SessionListingTransport: HerdrTransport {
+    func listSessions() async throws -> [HerdrSession]
+    /// One request to ANOTHER session on the same machine (nil = default), over the
+    /// same SSH connection: how the session pills count who needs you elsewhere.
+    func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String
 }
 
 public enum TransportError: Error, CustomStringConvertible {
