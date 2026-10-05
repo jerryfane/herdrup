@@ -3215,6 +3215,7 @@ struct TerminalHomeView: View {
                     .opacity(shown ? 1 : 0)
                     .animation(.easeInOut(duration: 0.15), value: shown)
                     .accessibilityHidden(!shown)
+                    .accessibilityAddTraits(.isHeader)
                     .allowsHitTesting(false)
             }
         }
@@ -3244,6 +3245,9 @@ struct TerminalHomeView: View {
                 .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
                     agentsTitleCollapsed = $0
                 }
+                // A remounted roster starts at the top with the large title visible; reset
+                // here so a stale "collapsed" never shows both titles before the first scroll.
+                .onAppear { agentsTitleCollapsed = false }
             searchField
         }
     }
@@ -3556,21 +3560,11 @@ struct TerminalHomeView: View {
     /// Unarchive (resume it into a fresh pane). Archived rows are NOT tappable to a
     /// terminal — there is no live pane to open.
     private var archivedSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
+        VStack(alignment: .leading, spacing: 0) {
+            // #352: a plain list row ("Archived  1 ›") at the end of the roster, not a header.
+            disclosureRow("Archived", count: fullList.archived.count, open: !archivedCollapsed) {
                 archivedCollapsed.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(archivedCollapsed
-                        ? "ARCHIVED · \(fullList.archived.count)" : "ARCHIVED")
-                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Image(systemName: archivedCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
-                    Rectangle().fill(Palette.hairline).frame(height: 1)
-                }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 10)
 
             if !archivedCollapsed {
                 ForEach(fullList.archived) { row in
@@ -3693,21 +3687,15 @@ struct TerminalHomeView: View {
         // the cached roster list and performs no sorting.
         let siblings = orderedSiblings
         return VStack(alignment: .leading, spacing: 0) {
-            Button {
-                if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
-            } label: {
-                HStack(spacing: 8) {
-                    // Count is shown when collapsed (so hidden work is legible);
-                    // an expanded section speaks for itself through its cards.
-                    Text(isCollapsed ? "\(group.sectionTitle) · \(rows.count)" : group.sectionTitle)
-                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
-                    Rectangle().fill(Palette.hairline).frame(height: 1)
+            // #352: no section headers. Needs you, working and stopped rows follow each
+            // other in that order; a collapsible group (Idle) is one plain row at the end
+            // ("Idle  4 ›") that opens its rows underneath. An active search shows the rows
+            // without the disclosure, as before.
+            if group.startsCollapsed && search.isEmpty {
+                disclosureRow(group.sectionTitle.capitalized, count: rows.count, open: !isCollapsed) {
+                    if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
                 }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 2)
 
             if !isCollapsed {
                 ForEach(rows) { row in
@@ -3845,22 +3833,52 @@ struct TerminalHomeView: View {
         }
     }
 
+    /// A plain roster row that opens or closes a group (#352): label, count and a chevron,
+    /// on the ground with an inset divider like the agent rows.
+    private func disclosureRow(_ title: String, count: Int, open: Bool,
+                               _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text)
+                Spacer(minLength: 8)
+                Text("\(count)").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+                    .monospacedDigit()
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            }
+            .padding(.leading, 20).padding(.trailing, 16)
+            .frame(minHeight: 48)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5).padding(.leading, 20)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityValue(open ? "expanded" : "collapsed")
+    }
+
     /// #352: a Messages-style row. Full width on the ground (no card), a 52 pt round avatar
     /// with the status as a small badge on it, the amber needs-you dot left of the avatar
     /// (like Messages' unread dot), the name over a two-line preview, and an inset divider.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
-        HStack(alignment: .top, spacing: 0) {
+        // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
+        // agent open in the detail column gets a rounded highlight, like Messages' sidebar.
+        let sidebar = hSizeClass == .regular
+        let avatar: CGFloat = sidebar ? 44 : 52
+        let isOpen = sidebar && frontID == row.info.paneID
+        return HStack(alignment: .top, spacing: 0) {
             Circle().fill(row.group == .needsYou ? Palette.waiting : .clear)
                 .frame(width: 10, height: 10)
-                .padding(.top, 33)
+                .padding(.top, 12 + avatar / 2 - 5)
                 .frame(width: 20)
                 .accessibilityHidden(true)
             ZStack(alignment: .bottomTrailing) {
                 Circle().fill(AgentIdentity.gradient(for: row.info.agent))
-                    .frame(width: 52, height: 52)
+                    .frame(width: avatar, height: avatar)
                     .overlay(Text(AgentIdentity.glyph(for: row.info.agent))
-                        .font(Typography.app(22, .bold)).foregroundStyle(.white))
+                        .font(Typography.app(sidebar ? 19 : 22, .bold)).foregroundStyle(.white))
                 Group {
                     if row.info.isUnreachable {
                         avatarBadge(.offline).accessibilityLabel(Text("offline"))
@@ -3874,7 +3892,7 @@ struct TerminalHomeView: View {
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(row.title).font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                    Text(row.title).font(Typography.app(sidebar ? 16 : 17, .semibold)).foregroundStyle(Palette.text)
                         .lineLimit(1)
                     rowMarkers(row)
                     Spacer(minLength: 6)
@@ -3888,7 +3906,7 @@ struct TerminalHomeView: View {
                         nowUnixMs: UInt64(rosterNow.timeIntervalSince1970 * 1000)
                     ) {
                         Text(age)
-                            .font(Typography.app(15))
+                            .font(Typography.app(sidebar ? 14 : 15))
                             .foregroundStyle(Palette.textDim)
                             .monospacedDigit()
                     }
@@ -3900,7 +3918,7 @@ struct TerminalHomeView: View {
                 // The preview: what it is doing (folder · activity). A waiting agent's reads in
                 // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(Typography.app(15))
+                    .font(Typography.app(sidebar ? 14 : 15))
                     .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -3919,13 +3937,21 @@ struct TerminalHomeView: View {
                 }
             }
             .padding(.top, 13).padding(.bottom, 12).padding(.trailing, 16)
-            .frame(maxWidth: .infinity, minHeight: 76, alignment: .topLeading)
-            // The divider starts where the text starts, not under the avatar.
+            .frame(maxWidth: .infinity, minHeight: sidebar ? 72 : 76, alignment: .topLeading)
+            // The divider starts where the text starts, not under the avatar. The open
+            // row's highlight replaces it.
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5)
+                if !isOpen { Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5) }
+            }
+        }
+        .background {
+            if isOpen {
+                RoundedRectangle(cornerRadius: 12).fill(Palette.surfaceRaised)
+                    .padding(.horizontal, 6)
             }
         }
         .contentShape(Rectangle())
+        .accessibilityAddTraits(isOpen ? .isSelected : [])
     }
 
     /// The no-account and stale pills, after the name.
@@ -5215,9 +5241,10 @@ struct TerminalPaneContent: View {
     // MARK: header
 
     /// One bar (#358): back, the title block (heading over status · live time), and one
-    /// capsule holding Find, Reconnect and the ⋯ actions. The bar is a FIXED 44 pt tall in
-    /// every state, so opening find, a pane with no agent status, or a status change can never
-    /// resize the terminal underneath (a height change resizes the PTY and reflows the buffer).
+    /// capsule holding Find, Reconnect and the ⋯ actions. The bar's height is constant in
+    /// every state (44 pt at 100 % text, scaled with the app text size up to 62 pt), so opening
+    /// find, a pane with no agent status, or a status change can never resize the terminal
+    /// underneath (a height change resizes the PTY and reflows the buffer).
     private var header: some View {
         HStack(spacing: 10) {
             Button { onClose() } label: {
@@ -8420,7 +8447,7 @@ struct SettingsView: View {
                         .font(Typography.machine(13, .semibold)).foregroundStyle(Palette.text)
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 18).padding(.vertical, 14)
         }
         .buttonStyle(.plain)
         .disabled(isPurchasing(product))
