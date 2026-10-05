@@ -3741,17 +3741,22 @@ struct TerminalHomeView: View {
     /// (like Messages' unread dot), the name over a two-line preview, and an inset divider.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
-        HStack(alignment: .top, spacing: 0) {
+        // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
+        // agent open in the detail column gets a rounded highlight, like Messages' sidebar.
+        let sidebar = hSizeClass == .regular
+        let avatar: CGFloat = sidebar ? 44 : 52
+        let isOpen = sidebar && frontID == row.info.paneID
+        return HStack(alignment: .top, spacing: 0) {
             Circle().fill(row.group == .needsYou ? Palette.waiting : .clear)
                 .frame(width: 10, height: 10)
-                .padding(.top, 33)
+                .padding(.top, 12 + avatar / 2 - 5)
                 .frame(width: 20)
                 .accessibilityHidden(true)
             ZStack(alignment: .bottomTrailing) {
                 Circle().fill(AgentIdentity.gradient(for: row.info.agent))
-                    .frame(width: 52, height: 52)
+                    .frame(width: avatar, height: avatar)
                     .overlay(Text(AgentIdentity.glyph(for: row.info.agent))
-                        .font(Typography.app(22, .bold)).foregroundStyle(.white))
+                        .font(Typography.app(sidebar ? 19 : 22, .bold)).foregroundStyle(.white))
                 Group {
                     if row.info.isUnreachable {
                         avatarBadge(.offline).accessibilityLabel(Text("offline"))
@@ -3765,7 +3770,7 @@ struct TerminalHomeView: View {
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(row.title).font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                    Text(row.title).font(Typography.app(sidebar ? 16 : 17, .semibold)).foregroundStyle(Palette.text)
                         .lineLimit(1)
                     rowMarkers(row)
                     Spacer(minLength: 6)
@@ -3779,7 +3784,7 @@ struct TerminalHomeView: View {
                         nowUnixMs: UInt64(rosterNow.timeIntervalSince1970 * 1000)
                     ) {
                         Text(age)
-                            .font(Typography.app(15))
+                            .font(Typography.app(sidebar ? 14 : 15))
                             .foregroundStyle(Palette.textDim)
                             .monospacedDigit()
                     }
@@ -3791,7 +3796,7 @@ struct TerminalHomeView: View {
                 // The preview: what it is doing (folder · activity). A waiting agent's reads in
                 // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(Typography.app(15))
+                    .font(Typography.app(sidebar ? 14 : 15))
                     .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -3810,13 +3815,21 @@ struct TerminalHomeView: View {
                 }
             }
             .padding(.top, 13).padding(.bottom, 12).padding(.trailing, 16)
-            .frame(maxWidth: .infinity, minHeight: 76, alignment: .topLeading)
-            // The divider starts where the text starts, not under the avatar.
+            .frame(maxWidth: .infinity, minHeight: sidebar ? 72 : 76, alignment: .topLeading)
+            // The divider starts where the text starts, not under the avatar. The open
+            // row's highlight replaces it.
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5)
+                if !isOpen { Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5) }
+            }
+        }
+        .background {
+            if isOpen {
+                RoundedRectangle(cornerRadius: 12).fill(Palette.surfaceRaised)
+                    .padding(.horizontal, 6)
             }
         }
         .contentShape(Rectangle())
+        .accessibilityAddTraits(isOpen ? .isSelected : [])
     }
 
     /// The no-account and stale pills, after the name.
