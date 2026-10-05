@@ -616,8 +616,8 @@ struct GramView: View {
     private var headerButtons: some View {
         HStack(spacing: 0) {
             if canFilter {
-                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search") { toggleSearch() }
-                    .frame(width: 40, height: 44)
+                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
+                                   target: CGSize(width: 40, height: 44)) { toggleSearch() }
             }
             // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
@@ -673,6 +673,9 @@ struct GramView: View {
             .foregroundStyle(color)
             .frame(width: 40, height: 44)
             .contentShape(Rectangle())
+            // Inside the Button's label, so the pointer highlight covers the whole segment,
+            // matching the iPad sidebar capsule's `gramHeaderButton`.
+            .hoverEffect(.highlight)
     }
 
     /// The badge and the Read-all control read the WHOLE store's count, which the

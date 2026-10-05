@@ -2282,8 +2282,8 @@ struct TerminalHomeView: View {
     private var detailColumn: some View {
         ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
-                // Base layer: the switch renders Gram / Settings / Call and the agents
-                // placeholder. The terminal container is deliberately NOT in here — it is the
+                // Base layer: the switch renders Gram / Settings and the agents placeholder.
+                // The terminal container is deliberately NOT in here — it is the
                 // always-mounted overlay below.
                 switch selectedTab {
                 case .agents:
@@ -2602,14 +2602,12 @@ struct TerminalHomeView: View {
             // ROSTER's STRICT count (`AgentList.needsYouCount`), deliberately NOT
             // `activityContent.needsYouCount`: that one folds `.unrecognised` rows into
             // the total for the section-less Live Activity, so it would print a BIGGER
-            // number than the expanded header this rail stands in for
-            // (`headerSubtitle` -> `needsYouSummary` -> the strict count). One
-            // unrecognised agent and the two surfaces disagree one click apart.
+            // number than the expanded list's NEEDS YOU section this rail stands in for.
+            // One unrecognised agent and the two surfaces would disagree one click apart.
             //
-            // The same fold is why the wording spec hedges unrecognised agents as
-            // "N may need you": they are unconfirmed, not facts. A bare number cannot
-            // carry that hedge, so the rail shows only what IS confirmed and leaves the
-            // maybes to the header, which has room to say so.
+            // The same fold is why the wording spec (`AgentList.needsYouSummary`) hedges
+            // unrecognised agents as "N may need you": they are unconfirmed, not facts. A
+            // bare number cannot carry that hedge, so the rail shows only what IS confirmed.
             railCount(fullList.needsYouCount, tone: Palette.waiting, label: "need you")
             railCount(activity.workingCount, tone: Palette.working, label: "working")
             Spacer()
@@ -5132,8 +5130,8 @@ struct TerminalPaneContent: View {
                 if let chip = guestShare.chipText { GuestShareChip(text: chip) }
             }
             HStack(spacing: 0) {
-                InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find") { toggleFind() }
-                    .frame(width: 40, height: 44)
+                InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find",
+                                   target: CGSize(width: 40, height: 44)) { toggleFind() }
                 Button {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
@@ -5153,7 +5151,11 @@ struct TerminalPaneContent: View {
             .padding(.horizontal, 2)
             .background(Capsule().fill(Palette.surfaceRaised))
         }
-        .frame(height: 44)
+        // Fixed across find / status / no-status states, but scaled with the app's text
+        // size: at 140 % the title (16 pt) over the status line (11 pt) needs ~47 pt and
+        // would overflow a plain 44 pt bar. The height then changes only when the user
+        // changes Settings → Text size, a deliberate one-off, never while working.
+        .frame(height: max(44, (44 * Typography.scale).rounded()))
         // A keep-mounted BACKGROUND pane still renders its header, so without this every
         // loaded pane publishes its own "terminal-refresh"/"terminal-find"/"terminal-actions"
         // to the accessibility tree. VoiceOver could then land on a hidden pane's controls,
