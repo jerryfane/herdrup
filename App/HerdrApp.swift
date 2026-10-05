@@ -3202,6 +3202,7 @@ struct TerminalHomeView: View {
                     .opacity(shown ? 1 : 0)
                     .animation(.easeInOut(duration: 0.15), value: shown)
                     .accessibilityHidden(!shown)
+                    .accessibilityAddTraits(.isHeader)
                     .allowsHitTesting(false)
             }
         }
@@ -3231,6 +3232,9 @@ struct TerminalHomeView: View {
                 .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
                     agentsTitleCollapsed = $0
                 }
+                // A remounted roster starts at the top with the large title visible; reset
+                // here so a stale "collapsed" never shows both titles before the first scroll.
+                .onAppear { agentsTitleCollapsed = false }
             searchField
         }
     }
