@@ -194,6 +194,8 @@ struct RootView: View {
     @State private var client: HerdrClient?
     @State private var credentials: SSHCredentials?
     @State private var session = 0   // bumped to force a fresh load on reconnect
+    /// The connected machine's sessions as last seen, so a session switch starts from them (#386).
+    @State private var sessionCache = SessionSwitchCache()
     /// #377: after a machine is tapped, the machine list stays up (its row reads
     /// "Connecting…") until the first agent list arrives, the attempt fails, or a short
     /// cap passes; only then does the Agents screen slide in. `homeShown` gates that.
@@ -310,6 +312,7 @@ struct RootView: View {
                 hostKey: SessionChoice.storeKey(credentials),
                 session: credentials.session,
                 onSwitchSession: { switchSession(to: $0) },
+                sessionCache: sessionCache,
                 onReconnect: { reconnect() },
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
@@ -437,9 +440,7 @@ struct RootView: View {
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
         case .sessions:
-            TerminalHomeView(client: HerdrClient(transport: SessionsMockTransport()), onDisconnect: {},
-                             session: "work", onTrustHostKey: { _ in false },
-                             livePaneIDs: MockTransport.demoLivePaneIDs)
+            SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
             // The live status stream receipt: `liveevents` is an events_v2 daemon whose
             // rows change only through streamed events, `liveevents-legacy` an older
@@ -607,6 +608,7 @@ struct RootView: View {
         if creds.session == nil { creds.session = SessionChoice.remembered(for: creds) }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
+        sessionCache = SessionSwitchCache()   // another machine's sessions must not seed this one
         credentials = creds
         transport = newTransport
         client = newClient
@@ -685,6 +687,7 @@ struct RootView: View {
         client = nil
         transport = nil
         credentials = nil
+        sessionCache = SessionSwitchCache()
         LiveActivityController.shared.end()   // tear down the #90 Live Activity with the session
         // Downloaded gram files are readable without a connection, so they must not
         // survive the session that fetched them.
@@ -713,13 +716,24 @@ struct RootView: View {
     /// the client and remounts the home (agents, terminals, Gram) for that server.
     /// nil is the default session. Remembered per machine for the next connect.
     private func switchSession(to name: String?) {
-        guard var creds = credentials else { return }
+        guard var creds = credentials, let current = transport else { return }
         let next = (name == "default") ? nil : name
         guard creds.session != next else { return }
         creds.session = next
         credentials = creds
         SessionChoice.remember(next, for: creds)
-        reconnect()
+        // Same machine, same SSH connection (#386): only the herdr session changes, so
+        // there is no handshake to pay. A NEW client on a transport scoped to the new
+        // session, rather than retargeting the old one, so nothing the previous
+        // session's screens still send can reach the same pane id in this one. The
+        // old transport is not closed: it shares the connection.
+        let scoped = current.forSession(next)
+        let newClient = HerdrClient(transport: scoped)
+        transport = scoped
+        client = newClient
+        session += 1
+        registerPush(with: newClient)          // each session is its own herdr server
+        registerActivityPush(with: newClient)
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
@@ -1812,6 +1826,9 @@ struct TerminalHomeView: View {
     var session: String? = nil
     /// Switch the app to another herdr session on this machine (nil = default).
     var onSwitchSession: (String?) -> Void = { _ in }
+    /// What the app last saw of each session on this machine (#386): this screen starts
+    /// from it after a session switch, and keeps it current.
+    var sessionCache: SessionSwitchCache? = nil
     var onReconnect: () -> Void = {}
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
@@ -3105,6 +3122,7 @@ struct TerminalHomeView: View {
         .task(id: hostKey) {
             if !hostKey.isEmpty, session == nil { terminalsStore.migrateLegacyIfNeeded(host: hostKey) }
         }
+        .onAppear { seedFromSessionCache() }
         .task { await watchSessions() }
         // First launch: show the gestures tutorial once — but NOT over a pending push
         // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
@@ -3450,11 +3468,14 @@ struct TerminalHomeView: View {
                     return
                 }
                 runningSessions = running
+                sessionCache?.setRunningSessions(running)
                 var counts: [String: Int] = [:]
                 if running.count >= 2 {
                     for other in running where (other.default ? "default" : other.name) != (session ?? "default") {
-                        if let agents = try? await client.agentList(inSession: other.default ? nil : other.name) {
+                        let otherSession = other.default ? nil : other.name
+                        if let agents = try? await client.agentList(inSession: otherSession) {
                             counts[other.name] = AgentList(agents: agents).needsYouCount
+                            sessionCache?.store(agents, session: otherSession)
                         }
                     }
                 }
@@ -3463,6 +3484,27 @@ struct TerminalHomeView: View {
                 runningSessions = []
             }
             try? await Task.sleep(nanoseconds: 15_000_000_000)
+        }
+    }
+
+    /// After a session switch (#386), start from what the app already knows instead of an
+    /// empty screen: the running sessions (so the pills don't vanish and reappear), their
+    /// needs-you counts, and this session's agents if seen in the last minute. The first
+    /// load replaces all of it. Never overwrites a list a load has already published.
+    private func seedFromSessionCache() {
+        guard let sessionCache else { return }
+        if runningSessions.isEmpty, !sessionCache.runningSessions.isEmpty {
+            runningSessions = sessionCache.runningSessions
+            var counts: [String: Int] = [:]
+            for other in runningSessions where (other.default ? "default" : other.name) != (session ?? "default") {
+                if let agents = sessionCache.roster(for: other.default ? nil : other.name) {
+                    counts[other.name] = AgentList(agents: agents).needsYouCount
+                }
+            }
+            otherSessionsNeedYou = counts
+        }
+        if agents.isEmpty, let cached = sessionCache.roster(for: session) {
+            receiveRoster(agents: cached, accounts: [])
         }
     }
 
@@ -4439,6 +4481,7 @@ struct TerminalHomeView: View {
             // actually changed, because receiveRoster is equality-gated.
             let latestAccounts = rosterRefreshState().latest.accounts
             receiveRoster(agents: fetched, accounts: latestAccounts)
+            sessionCache?.store(fetched, session: session)
 
             clearSuccessfulLoadState()
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
@@ -9220,9 +9263,49 @@ struct ForgetCapableMockTransport: HerdrTransport {
 
 /// `MockTransport` on a machine with three running herdr sessions (work, personal and
 /// default) for the session pills receipt (#347). Every session answers with the demo list.
+/// The `sessions` mock's stand-in for RootView's session switch (#386): a tap on a pill
+/// remounts the home on a client for that session, sharing one `SessionSwitchCache`,
+/// exactly as RootView does on a real machine.
+struct SessionsMockHome: View {
+    @State private var session: String? = "work"
+    @State private var generation = 0
+    @State private var cache = SessionSwitchCache()
+
+    var body: some View {
+        TerminalHomeView(
+            client: HerdrClient(transport: SessionsMockTransport(session: session, startedOn: generation)),
+            onDisconnect: {}, session: session,
+            onSwitchSession: { next in
+                session = next
+                generation += 1
+            },
+            sessionCache: cache,
+            onTrustHostKey: { _ in false },
+            livePaneIDs: MockTransport.demoLivePaneIDs)
+        .id(generation)
+    }
+}
+
 struct SessionsMockTransport: SessionListingTransport {
     private let base = MockTransport()
-    func roundTrip(_ requestLine: String) async throws -> String { try await base.roundTrip(requestLine) }
+    /// The session this client addresses, and whether it was reached by a switch.
+    let session: String?
+    let startedOn: Int
+
+    init(session: String? = "work", startedOn: Int = 0) {
+        self.session = session
+        self.startedOn = startedOn
+    }
+
+    /// After a switch, this session's own `agent.list` is slow (4 s), as on a machine far
+    /// away, while the pills' peeks at other sessions answer at once. So the agents can
+    /// only appear quickly from what the app already knew (#386).
+    func roundTrip(_ requestLine: String) async throws -> String {
+        if startedOn > 0, requestLine.contains(#""agent.list""#) {
+            try await Task.sleep(nanoseconds: 4_000_000_000)
+        }
+        return try await base.roundTrip(requestLine)
+    }
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> { base.stream(requestLine) }
     func listSessions() async throws -> [HerdrSession] {
         [HerdrSession(name: "personal", running: true, default: false),

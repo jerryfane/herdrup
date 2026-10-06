@@ -29,4 +29,26 @@ final class SessionPillsTests: XCTestCase {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'scratch'")).firstMatch.exists,
                        "a stopped session must not be offered")
     }
+
+    /// #386: switching shows the new session's agents from what the app already saw (the
+    /// pills check every session), instead of an empty screen until its own list loads.
+    /// In this mock the switched-to session takes 4 s to answer its own `agent.list`.
+    func testSwitchingShowsTheNewSessionsAgentsWithoutWaitingForItsLoad() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "sessions"
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["mcb-air/mcb-air"].waitForExistence(timeout: 12),
+                      "the roster should have loaded")
+        let personal = app.buttons["personal, 3 need you"]
+        XCTAssertTrue(personal.waitForExistence(timeout: 6), "the pills should have checked the other sessions")
+
+        personal.tap()
+
+        XCTAssertTrue(app.buttons["personal, 3 need you"].waitForExistence(timeout: 1.5),
+                      "the pills should stay up through the switch")
+        XCTAssertTrue(app.buttons["personal, 3 need you"].isSelected, "the tapped session should be the current one")
+        XCTAssertTrue(app.staticTexts["mcb-air/mcb-air"].waitForExistence(timeout: 1.5),
+                      "the new session's agents should show at once, not after its 4 s load")
+    }
 }

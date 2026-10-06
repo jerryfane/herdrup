@@ -40,17 +40,10 @@ final class FirstPastThePost: @unchecked Sendable {
 
 public actor CitadelTransport: HerdrTransport, MachineFederationTransport, SessionListingTransport {
     private let credentials: SSHCredentials
-    private let hostKeyValidator: SSHHostKeyValidator
-    private var client: SSHClient?
-    /// A connect in flight, so concurrent first-use awaits one attempt (see
-    /// `connectedClient`) rather than each opening — and leaking — its own session.
-    private var connectTask: Task<SSHClient, Error>?
-    /// Bumped by `close()`. A connect that resolves after its starting generation is
-    /// STALE: close() has already torn down and believes there is no live session, so
-    /// the resolved client must be reaped, never installed. This closes the residual
-    /// window where a handshake completing exactly as the user disconnects would
-    /// otherwise re-install a live session behind close()'s back (leak).
-    private var generation = 0
+    /// The SSH connection one-off requests share. Siblings made with
+    /// `forSession(_:)` hold the SAME core, so switching herdr sessions reuses the
+    /// connection instead of paying a new SSH handshake (#386).
+    private let connection: SSHConnectionCore
 
     /// - Parameters:
     ///   - credentials: host/port/username, the Ed25519 private key, and the
@@ -59,20 +52,38 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     ///   - hostKeyValidator: the raw Citadel validator, for callers that need
     ///     full control (e.g. `.acceptAnything()` in an isolated live test).
     ///     Prefer the `hostKeyPolicy` initializer, whose default pins.
-    /// This transport's connect budget. Injectable so the timeout can be TESTED
-    /// against a black-hole address in milliseconds instead of being asserted from
-    /// reading the code — a 15s test is one nobody runs.
-    let connectTimeoutNanoseconds: UInt64
-
+    ///   - connectTimeoutNanoseconds: the connect budget. Injectable so the timeout
+    ///     can be TESTED against a black-hole address in milliseconds.
     public init(
         credentials: SSHCredentials,
         hostKeyValidator: SSHHostKeyValidator,
         connectTimeoutNanoseconds: UInt64 = CitadelTransport.defaultConnectTimeoutNanoseconds
     ) {
         self.credentials = credentials
-        self.hostKeyValidator = hostKeyValidator
-        self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
+        self.connection = SSHConnectionCore(
+            credentials: credentials, hostKeyValidator: hostKeyValidator,
+            connectTimeoutNanoseconds: connectTimeoutNanoseconds)
     }
+
+    private init(credentials: SSHCredentials, connection: SSHConnectionCore) {
+        self.credentials = credentials
+        self.connection = connection
+    }
+
+    /// A transport for ANOTHER herdr session on the same machine that shares this
+    /// one's SSH connection (#386): switching sessions costs no handshake. It is a
+    /// separate object on purpose: a client built on it can only ever address its
+    /// own session, so a late request from the previous session's screens (a
+    /// terminal's resize, a reload) can never land on the same pane id in the new
+    /// one. `close()` on either closes the shared connection.
+    public nonisolated func forSession(_ session: String?) -> CitadelTransport {
+        var scoped = credentials
+        scoped.session = session
+        return CitadelTransport(credentials: scoped, connection: connection)
+    }
+
+    /// The herdr session this transport addresses; nil is the default session.
+    public nonisolated var session: String? { credentials.session }
 
     /// Pins the host key on first contact and hard-stops on change (TOFU),
     /// wrapping the policy in the nio-ssh delegate internally so a caller needs
@@ -90,140 +101,21 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         hostKeyPolicy: HostKeyPolicy = PinningHostKeyPolicy(),
         connectTimeoutNanoseconds: UInt64 = CitadelTransport.defaultConnectTimeoutNanoseconds
     ) {
-        self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
-        self.credentials = credentials
-        self.hostKeyValidator = .custom(PinningHostKeyValidator(
-            host: credentials.host, port: credentials.port, policy: hostKeyPolicy))
+        self.init(
+            credentials: credentials,
+            hostKeyValidator: .custom(PinningHostKeyValidator(
+                host: credentials.host, port: credentials.port, policy: hostKeyPolicy)),
+            connectTimeoutNanoseconds: connectTimeoutNanoseconds)
     }
 
     // MARK: - connection
 
-    /// Returns the held client, connecting on first use or after a drop.
-    ///
-    /// Concurrent first-use joins ONE connect. `SSHClient.connect` is a
-    /// suspension point, and actor reentrancy lets a second caller pass the
-    /// `client == nil` check while the first is still connecting; without the
-    /// shared `connectTask` both would open a session and all but the last would
-    /// leak (a live SSH session never closed). Callers await the same in-flight
-    /// task instead.
     private func connectedClient() async throws -> SSHClient {
-        if let client, client.isConnected { return client }
-
-        // Capture the generation BEFORE awaiting: if close() runs during the
-        // handshake it bumps `generation`, marking whatever resolves as stale.
-        let gen = generation
-        let task: Task<SSHClient, Error>
-        if let connectTask {
-            task = connectTask                      // join the in-flight attempt
-        } else {
-            let created = Task<SSHClient, Error> { try await self.makeConnection() }
-            connectTask = created
-            task = created
-        }
-        do {
-            let connected = try await task.value
-            // Validate AFTER the suspension, under actor isolation. If close() ran
-            // while we awaited, this session is orphaned — close() already believes
-            // there is nothing to tear down, so reap it rather than installing a live
-            // client behind close()'s back. BOTH the creator and any joined waiter
-            // pass through this same check.
-            guard gen == generation else {
-                try? await connected.close()
-                throw CancellationError()
-            }
-            client = connected
-            if connectTask == task { connectTask = nil }
-            return connected
-        } catch {
-            // Only clear the slot if it still holds OUR task — never clobber a newer
-            // connect started after a close() bumped the generation.
-            if connectTask == task { connectTask = nil }
-            throw error
-        }
+        try await connection.connectedClient()
     }
 
     private func makeConnection() async throws -> SSHClient {
-        let method: SSHAuthenticationMethod
-        switch credentials.auth {
-        case .privateKey(let pem, let passphrase):
-            let privateKey = try Curve25519.Signing.PrivateKey(
-                sshEd25519: Data(pem.utf8),
-                decryptionKey: passphrase.map { Data($0.utf8) }
-            )
-            method = .ed25519(username: credentials.username, privateKey: privateKey)
-        case .password(let password):
-            method = .passwordBased(username: credentials.username, password: password)
-        }
-        // A client that resolves after a concurrent close() is reaped by the
-        // generation check in connectedClient() (the only publisher of `self.client`),
-        // so no cancellation handling is needed here.
-        // RACE THE HANDSHAKE AGAINST A CLOCK. Without this an unroutable address —
-        // a Tailscale host reached from a device that is not on the tailnet — hangs
-        // at the TCP layer until the OS gives up (~75s on iOS). That is not
-        // experienced as a failure; it is experienced as an endless spinner, with
-        // nothing on screen to act on. A budget converts silence into an error the
-        // UI can show.
-        //
-        // NOT a task group, and the reason is measured: a group awaits its children
-        // at scope exit, and `SSHClient.connect` does not observe cancellation
-        // promptly — so a group-based race returned only when the LOSING connect
-        // finally gave up on its own (30s against a 0.3s budget, caught by
-        // `testConnectFailsWithinTheBudgetAgainstABlackHoleAddress`). The winner
-        // must be able to return while the loser unwinds unobserved.
-        let host = credentials.host
-        let port = Int(credentials.port)
-        let validator = hostKeyValidator
-        let budget = connectTimeoutNanoseconds
-        let work = Task<SSHClient, Error> {
-            try await SSHClient.connect(
-                host: host,
-                port: port,
-                authenticationMethod: method,
-                hostKeyValidator: validator,
-                reconnect: .never
-            )
-        }
-        do {
-            return try await withCheckedThrowingContinuation { continuation in
-                // Exactly one of the two branches may resume the continuation;
-                // resuming twice is undefined behaviour, not a recoverable error.
-                let settled = FirstPastThePost()
-                Task {
-                    do {
-                        let client = try await work.value
-                        if settled.claim() {
-                            continuation.resume(returning: client)
-                        } else {
-                            // The clock already won and the caller has its error.
-                            // Close this rather than leaking a live session nobody
-                            // holds a reference to.
-                            try? await client.close()
-                        }
-                    } catch {
-                        if settled.claim() { continuation.resume(throwing: error) }
-                    }
-                }
-                Task {
-                    try? await Task.sleep(nanoseconds: budget)
-                    guard settled.claim() else { return }
-                    work.cancel()
-                    continuation.resume(throwing: TransportError.connectTimedOut(
-                        host: host,
-                        // credentials.host is already the bare host (the port is a
-                        // separate field), so classify it directly rather than
-                        // re-parsing a string that was never joined.
-                        onTailnet: HostEndpoint(host: host, port: 22).isTailnetAddress
-                    ))
-                }
-            }
-        } catch SSHClientError.unsupportedPasswordAuthentication {
-            // The server offers no password auth (e.g. `PasswordAuthentication no`).
-            throw TransportError.passwordAuthUnsupported(host: credentials.host)
-        } catch SSHClientError.allAuthenticationOptionsFailed {
-            // Wrong password / rejected key. Host-key rejection is thrown by the
-            // validator, not caught here, so it keeps its dedicated recovery path.
-            throw TransportError.authenticationFailed(host: credentials.host)
-        }
+        try await connection.makeConnection()
     }
 
     /// Conservative ceiling on the full command line, well under the kernel's
@@ -652,6 +544,165 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
             command: Self.herdrCommand(["api-bridge", "--duplex"], session: credentials.session),
             openLine: openLine
         )
+    }
+
+    /// Closes the SSH connection this transport shares with every `forSession`
+    /// sibling. Idempotent.
+    public func close() async {
+        await connection.close()
+    }
+}
+
+/// The SSH connection behind one `CitadelTransport` and its `forSession` siblings.
+/// Holds no herdr session: commands carry `--session` themselves.
+actor SSHConnectionCore {
+    private let credentials: SSHCredentials
+    private let hostKeyValidator: SSHHostKeyValidator
+    private var client: SSHClient?
+    /// A connect in flight, so concurrent first-use awaits one attempt (see
+    /// `connectedClient`) rather than each opening — and leaking — its own session.
+    private var connectTask: Task<SSHClient, Error>?
+    /// Bumped by `close()`. A connect that resolves after its starting generation is
+    /// STALE: close() has already torn down and believes there is no live session, so
+    /// the resolved client must be reaped, never installed. This closes the residual
+    /// window where a handshake completing exactly as the user disconnects would
+    /// otherwise re-install a live session behind close()'s back (leak).
+    private var generation = 0
+
+    let connectTimeoutNanoseconds: UInt64
+
+    init(credentials: SSHCredentials, hostKeyValidator: SSHHostKeyValidator, connectTimeoutNanoseconds: UInt64) {
+        self.credentials = credentials
+        self.hostKeyValidator = hostKeyValidator
+        self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
+    }
+
+    /// Returns the held client, connecting on first use or after a drop.
+    ///
+    /// Concurrent first-use joins ONE connect. `SSHClient.connect` is a
+    /// suspension point, and actor reentrancy lets a second caller pass the
+    /// `client == nil` check while the first is still connecting; without the
+    /// shared `connectTask` both would open a session and all but the last would
+    /// leak (a live SSH session never closed). Callers await the same in-flight
+    /// task instead.
+    func connectedClient() async throws -> SSHClient {
+        if let client, client.isConnected { return client }
+
+        // Capture the generation BEFORE awaiting: if close() runs during the
+        // handshake it bumps `generation`, marking whatever resolves as stale.
+        let gen = generation
+        let task: Task<SSHClient, Error>
+        if let connectTask {
+            task = connectTask                      // join the in-flight attempt
+        } else {
+            let created = Task<SSHClient, Error> { try await self.makeConnection() }
+            connectTask = created
+            task = created
+        }
+        do {
+            let connected = try await task.value
+            // Validate AFTER the suspension, under actor isolation. If close() ran
+            // while we awaited, this session is orphaned — close() already believes
+            // there is nothing to tear down, so reap it rather than installing a live
+            // client behind close()'s back. BOTH the creator and any joined waiter
+            // pass through this same check.
+            guard gen == generation else {
+                try? await connected.close()
+                throw CancellationError()
+            }
+            client = connected
+            if connectTask == task { connectTask = nil }
+            return connected
+        } catch {
+            // Only clear the slot if it still holds OUR task — never clobber a newer
+            // connect started after a close() bumped the generation.
+            if connectTask == task { connectTask = nil }
+            throw error
+        }
+    }
+
+    func makeConnection() async throws -> SSHClient {
+        let method: SSHAuthenticationMethod
+        switch credentials.auth {
+        case .privateKey(let pem, let passphrase):
+            let privateKey = try Curve25519.Signing.PrivateKey(
+                sshEd25519: Data(pem.utf8),
+                decryptionKey: passphrase.map { Data($0.utf8) }
+            )
+            method = .ed25519(username: credentials.username, privateKey: privateKey)
+        case .password(let password):
+            method = .passwordBased(username: credentials.username, password: password)
+        }
+        // A client that resolves after a concurrent close() is reaped by the
+        // generation check in connectedClient() (the only publisher of `self.client`),
+        // so no cancellation handling is needed here.
+        // RACE THE HANDSHAKE AGAINST A CLOCK. Without this an unroutable address —
+        // a Tailscale host reached from a device that is not on the tailnet — hangs
+        // at the TCP layer until the OS gives up (~75s on iOS). That is not
+        // experienced as a failure; it is experienced as an endless spinner, with
+        // nothing on screen to act on. A budget converts silence into an error the
+        // UI can show.
+        //
+        // NOT a task group, and the reason is measured: a group awaits its children
+        // at scope exit, and `SSHClient.connect` does not observe cancellation
+        // promptly — so a group-based race returned only when the LOSING connect
+        // finally gave up on its own (30s against a 0.3s budget, caught by
+        // `testConnectFailsWithinTheBudgetAgainstABlackHoleAddress`). The winner
+        // must be able to return while the loser unwinds unobserved.
+        let host = credentials.host
+        let port = Int(credentials.port)
+        let validator = hostKeyValidator
+        let budget = connectTimeoutNanoseconds
+        let work = Task<SSHClient, Error> {
+            try await SSHClient.connect(
+                host: host,
+                port: port,
+                authenticationMethod: method,
+                hostKeyValidator: validator,
+                reconnect: .never
+            )
+        }
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                // Exactly one of the two branches may resume the continuation;
+                // resuming twice is undefined behaviour, not a recoverable error.
+                let settled = FirstPastThePost()
+                Task {
+                    do {
+                        let client = try await work.value
+                        if settled.claim() {
+                            continuation.resume(returning: client)
+                        } else {
+                            // The clock already won and the caller has its error.
+                            // Close this rather than leaking a live session nobody
+                            // holds a reference to.
+                            try? await client.close()
+                        }
+                    } catch {
+                        if settled.claim() { continuation.resume(throwing: error) }
+                    }
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: budget)
+                    guard settled.claim() else { return }
+                    work.cancel()
+                    continuation.resume(throwing: TransportError.connectTimedOut(
+                        host: host,
+                        // credentials.host is already the bare host (the port is a
+                        // separate field), so classify it directly rather than
+                        // re-parsing a string that was never joined.
+                        onTailnet: HostEndpoint(host: host, port: 22).isTailnetAddress
+                    ))
+                }
+            }
+        } catch SSHClientError.unsupportedPasswordAuthentication {
+            // The server offers no password auth (e.g. `PasswordAuthentication no`).
+            throw TransportError.passwordAuthUnsupported(host: credentials.host)
+        } catch SSHClientError.allAuthenticationOptionsFailed {
+            // Wrong password / rejected key. Host-key rejection is thrown by the
+            // validator, not caught here, so it keeps its dedicated recovery path.
+            throw TransportError.authenticationFailed(host: credentials.host)
+        }
     }
 
     /// Closes the held SSH connection. Idempotent.

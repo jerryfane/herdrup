@@ -32,6 +32,37 @@ enum SessionChoice {
     }
 }
 
+/// What the app last saw of each herdr session on the connected machine (#386), kept
+/// above the Agents screen so it survives the remount a session switch causes. The
+/// screen for the new session starts from it — the pills stay put and the agents show
+/// at once — and its first load replaces the copy a moment later.
+@MainActor
+final class SessionSwitchCache {
+    /// A roster older than this is not shown on a switch; the screen loads instead.
+    static let rosterFreshFor: TimeInterval = 60
+
+    private(set) var runningSessions: [HerdrSession] = []
+    private var rosters: [String: (agents: [AgentInfo], at: Date)] = [:]
+
+    func setRunningSessions(_ sessions: [HerdrSession]) { runningSessions = sessions }
+
+    /// `session` nil is the default session.
+    func store(_ agents: [AgentInfo], session: String?, at now: Date = Date()) {
+        rosters[Self.key(session)] = (agents, now)
+    }
+
+    func roster(for session: String?, now: Date = Date()) -> [AgentInfo]? {
+        guard let entry = rosters[Self.key(session)],
+              now.timeIntervalSince(entry.at) <= Self.rosterFreshFor else { return nil }
+        return entry.agents
+    }
+
+    private static func key(_ session: String?) -> String {
+        guard let session, session != "default" else { return "default" }
+        return session
+    }
+}
+
 /// Session pills under the Agents search (#353 variant 2, without "All"): one pill per
 /// running herdr session, the amber count of agents that need you in it, and a tap
 /// switches the app to that session. The caller shows this only with two or more
