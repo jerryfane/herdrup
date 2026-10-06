@@ -243,6 +243,57 @@ final class CitadelTransportTests: XCTestCase {
         XCTAssertGreaterThan(refused, 0, "the boundary is above the probed range")
     }
 
+    /// herdrup#324. `prefix` counts Characters, so U+20AC (3 UTF-8 bytes) can emit
+    /// one word of several times `payloadWordBytes` and pass Debian csh's "Word too
+    /// long" limit. Each word closes before the next Character would cross the
+    /// budget, and joining the words is the payload. ASCII of exactly the budget
+    /// stays one word; one extra byte starts a second.
+    func testPayloadWordsAreCappedInUTF8Bytes() throws {
+        let budget = CitadelTransport.payloadWordBytes
+        let euro = "\u{20AC}"
+        XCTAssertEqual(euro.utf8.count, 3, "U+20AC is the 3-byte scalar this split is measured on")
+        let payload = String(repeating: euro, count: budget / euro.utf8.count + 1)
+
+        let words = try Self.wordsEveryShellAgreesOn(
+            CitadelTransport.herdrCommand(["api-bridge"], payload: payload))
+        let pieces = Array(words.dropFirst(4))
+        XCTAssertFalse(pieces.isEmpty, "a payload longer than the budget produced no words")
+        XCTAssertTrue(pieces.allSatisfy { $0.utf8.count <= budget },
+                      "a payload word passed \(budget) UTF-8 bytes: \(pieces.map(\.utf8.count))")
+        XCTAssertEqual(pieces[0].utf8.count, budget - budget % euro.utf8.count,
+                       "the word did not stop before the next scalar crossed the budget")
+        XCTAssertEqual(pieces.joined(), payload, "the remote \"$*\" rejoin would not be the payload")
+
+        let exact = String(repeating: "a", count: budget)
+        let oneWord = try Self.wordsEveryShellAgreesOn(
+            CitadelTransport.herdrCommand(["api-bridge"], payload: exact))
+        XCTAssertEqual(Array(oneWord.dropFirst(4)), [exact], "an ASCII payload of exactly the budget was split")
+
+        let spilled = exact + "b"
+        let twoWords = try Self.wordsEveryShellAgreesOn(
+            CitadelTransport.herdrCommand(["api-bridge"], payload: spilled))
+        XCTAssertEqual(Array(twoWords.dropFirst(4)), [exact, "b"],
+                       "one byte past the budget did not start a second word")
+    }
+
+    /// herdrup#324. An empty payload is still an argument — `IFS=;` and `"$*"` stay —
+    /// but the `repeat` split used to append one `''` word the account shell sees.
+    /// `nil` is the absence of a payload and omits both.
+    func testEmptyPayloadAddsNoPayloadWord() throws {
+        let words = try Self.wordsEveryShellAgreesOn(
+            CitadelTransport.herdrCommand(["api-bridge"], payload: ""))
+        XCTAssertEqual(Array(words.prefix(2)), ["/bin/sh", "-c"])
+        XCTAssertEqual(words.count, 4, "an empty payload appended a '' word: \(words)")
+        XCTAssertEqual(words[3], "sh")
+        XCTAssertTrue(words[2].contains("\"$*\""), "an empty payload lost the rejoin")
+        XCTAssertFalse(words.contains(""), "an empty payload word was quoted")
+
+        let omitted = CitadelTransport.herdrCommand(["api-bridge"], payload: nil)
+        XCTAssertFalse(omitted.contains("\"$*\""), "a nil payload still rejoins positional parameters")
+        let omittedWords = try Self.wordsEveryShellAgreesOn(omitted)
+        XCTAssertEqual(omittedWords.count, 3, "a nil payload appended payload words: \(omittedWords)")
+    }
+
     // MARK: - "herdr not installed" detection
 
     /// A stderr carrying the sentinel classifies as `.herdrNotInstalled(host:)`,
