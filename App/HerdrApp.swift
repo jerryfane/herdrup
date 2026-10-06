@@ -900,10 +900,15 @@ struct ConnectView: View {
 
     // MARK: #374 inset groups (the Settings look of #357)
 
+    // Native UI type on the host picker; retain the app's text-size preference.
+    private func connectFont(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * Typography.scale, weight: weight)
+    }
+
     /// A section label above a group: today's uppercase label, inset 18 pt to line up with the
     /// rows' leading glyph (as Settings' labels do), no rule.
     private func connectSectionLabel(_ text: String) -> some View {
-        Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
+        Text(text).font(connectFont(12, .semibold)).tracking(1.4).foregroundStyle(Palette.textDim)
             .padding(.horizontal, 18)
     }
 
@@ -915,10 +920,10 @@ struct ConnectView: View {
                 .font(.system(size: 19, weight: .regular)).foregroundStyle(Palette.textDim)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text).lineLimit(1)
+                Text(title).font(connectFont(17)).foregroundStyle(Palette.text).lineLimit(1)
                 // #377: while this machine connects, the second line says so.
                 Text(connecting ? "Connecting…" : subtitle)
-                    .font(Typography.machine(13))
+                    .font(connectFont(14))
                     .foregroundStyle(connecting ? Palette.text : Palette.textDim).lineLimit(1)
                     .contentTransition(.opacity)
             }
@@ -958,7 +963,7 @@ struct ConnectView: View {
     private var inviteEntry: some View {
         VStack(spacing: 10) {
             Text("Got an invite link from someone?")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
             HStack(spacing: 10) {
                 PasteButton(payloadType: String.self) { items in
                     Task { @MainActor in
@@ -972,7 +977,7 @@ struct ConnectView: View {
                 .accessibilityLabel("Paste invite link")
                 Button { showingInviteScan = true } label: {
                     Label("Scan invite", systemImage: "qrcode.viewfinder")
-                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                        .font(connectFont(15, .semibold)).foregroundStyle(Palette.text)
                         .padding(.horizontal, 16).frame(height: 44)
                         .background(Palette.surface, in: Capsule())
                 }
@@ -987,7 +992,7 @@ struct ConnectView: View {
         Button { showingPairing = true } label: {
             HStack(spacing: 8) {
                 Image(systemName: "qrcode.viewfinder").font(.system(size: 16, weight: .semibold))
-                Text("Scan pairing code").font(Typography.app(16, .semibold))
+                Text("Scan pairing code").font(connectFont(16, .semibold))
             }
             .foregroundStyle(Palette.ground)
             .frame(maxWidth: .infinity, minHeight: 50)
@@ -1008,11 +1013,11 @@ struct ConnectView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("herdrup")
-                    .font(Typography.app(34, .bold))
+                    .font(connectFont(34, .bold))
                     .foregroundStyle(Palette.text)
                     .accessibilityAddTraits(.isHeader)
                 Text("connect to your machine")
-                    .font(Typography.machine(13))
+                    .font(connectFont(16))
                     .foregroundStyle(Palette.textDim)
             }
         }
@@ -1034,13 +1039,13 @@ struct ConnectView: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("herdrup controls coding agents running on your computer.")
-                .font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                .font(connectFont(17, .semibold)).foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("BEFORE PAIRING")
-                    .font(Typography.microLabel).tracking(1.1)
-                    .foregroundStyle(Palette.textFaint)
+                    .font(connectFont(12, .semibold)).tracking(1.1)
+                    .foregroundStyle(Palette.textDim)
                 prerequisiteRow(
                     HerdrSetup.tailscalePrerequisite,
                     systemImage: "network",
@@ -1055,16 +1060,16 @@ struct ConnectView: View {
             .settingsGroup()
 
             Text("Then, on your computer, run:")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
 
             VStack(spacing: 8) {
                 monoCard(HerdrSetup.installCommand)
-                Text("then").font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                Text("then").font(connectFont(12)).foregroundStyle(Palette.textDim)
                 monoCard(HerdrSetup.pairCommand)
             }
 
             Text("Scan the code it prints and you're connected. No keys to copy.")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
@@ -1077,7 +1082,7 @@ struct ConnectView: View {
                 .foregroundStyle(Palette.textFaint)
                 .frame(width: 15)
             Text(text)
-                .font(Typography.app(12.5))
+                .font(connectFont(12.5))
                 .foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1140,7 +1145,7 @@ struct ConnectView: View {
         Button { editorTarget = .add } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus").font(.system(size: 15, weight: .semibold))
-                Text("Add host").font(Typography.app(15, .semibold))
+                Text("Add host").font(connectFont(15, .semibold))
             }
             .foregroundStyle(Palette.text)
             .frame(maxWidth: .infinity, minHeight: 50)
@@ -1149,14 +1154,14 @@ struct ConnectView: View {
         .buttonStyle(.plain)
     }
 
-    // Two faint captions: what the connection is, and where the key lives.
+    // Readable secondary copy, using the same native type as the host picker.
     private var captions: some View {
         VStack(spacing: 8) {
             Text("Connects privately over your Tailscale network. Nothing is exposed to the public internet.")
-                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
             Text("Your key or password stays in this device's Keychain, never uploaded.")
-                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
