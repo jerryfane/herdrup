@@ -50,6 +50,36 @@ final class LinkLookupTests: TerminalDelegate {
         #expect(link == "https://example.com")
     }
 
+    @Test func testArchivedImplicitLinkRemainsSelectablePastCurrentGridWidth() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 2))
+        terminal.preservesScrollbackLayout = true
+        let url = "https://example.com/tail"
+        terminal.feed(text: String(repeating: " ", count: 55) + url + "\r\n\r\nlater\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        let link = terminal.linkMatch(at: .buffer(Position(col: 60, row: 0)), mode: .explicitAndImplicit)
+        #expect(link?.text == url)
+        #expect(link?.range.contains(60) == true)
+    }
+
+    @Test(arguments: [true, false])
+    func testArchivedImplicitLinksKeepEditorSeamsAtOriginalWidth(_ joins: Bool) {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 92, rows: 2))
+        terminal.preservesScrollbackLayout = true
+        let prefix = joins ? 70 : 0
+        let indent = joins ? 55 : 4
+        let url = "https://example.com/" + (joins ? "" : String(repeating: "a", count: 30))
+        terminal.feed(text: String(repeating: " ", count: prefix) + url + "\r\n"
+                      + String(repeating: " ", count: indent) + "continued\r\nlater\r\nlater\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        let expected = url + (joins ? "continued" : "")
+        #expect(terminal.link(at: .buffer(Position(col: prefix + 3, row: 0)),
+                              mode: .explicitAndImplicit) == expected)
+        if joins {
+            #expect(terminal.link(at: .buffer(Position(col: indent + 2, row: 1)),
+                                  mode: .explicitAndImplicit) == expected)
+        }
+    }
+
     @Test func testImplicitFilePathLookup() {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 30, rows: 1))
         terminal.feed(text: "/tmp/example.txt")

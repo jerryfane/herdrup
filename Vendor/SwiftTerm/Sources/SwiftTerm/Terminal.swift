@@ -6275,7 +6275,7 @@ open class Terminal {
 
         let targetRow = position.row
         let targetLine = buffer.lines[targetRow]
-        let targetRawLimit = min(cols, targetLine.count)
+        let targetRawLimit = min(buffer.displayColumns(at: targetRow), targetLine.count)
         guard targetRawLimit > 0 else {
             return nil
         }
@@ -6392,7 +6392,8 @@ open class Terminal {
 
         // Heuristic for editor-rendered wraps: the upper segment should reach
         // near the visual right edge and the seam should form a valid link.
-        let continuationThreshold = max(0, cols - max(2, cols / 5))
+        let columns = buffer.displayColumns(at: upper)
+        let continuationThreshold = max(0, columns - max(2, columns / 5))
         guard upperInfo.lastCol >= continuationThreshold else {
             return false
         }
@@ -6483,7 +6484,7 @@ open class Terminal {
         }
 
         let upperLine = buffer.lines[upper]
-        let upperLimit = min(min(cols, upperLine.count), upperLastCol + 1)
+        let upperLimit = min(min(buffer.displayColumns(at: upper), upperLine.count), upperLastCol + 1)
         guard upperLimit > 0 else {
             return false
         }
@@ -6494,7 +6495,7 @@ open class Terminal {
         }
 
         let lowerLine = buffer.lines[lower]
-        let lowerLimit = min(min(cols, lowerLine.count), lowerLine.getTrimmedLength())
+        let lowerLimit = min(min(buffer.displayColumns(at: lower), lowerLine.count), lowerLine.getTrimmedLength())
         guard lowerFirstCol < lowerLimit else {
             return false
         }

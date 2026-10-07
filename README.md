@@ -25,6 +25,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   boxes or background blocks. Pan sideways to read wide rows; text stays at your chosen size,
   including when a desktop viewer holds a wider grid. New output wraps at the current PTY width.
   Sideways scrolling follows the visible rows: moving into a narrow section returns to its left edge.
+  Search, link lookup, and copying include the full width of archived rows.
   Resizing preserves your reading position, including after a momentum scroll; live followers
   stay at the tail. The on-screen Ctrl key arms one native terminal chord in direct input,
   or a control character in the reply field.
