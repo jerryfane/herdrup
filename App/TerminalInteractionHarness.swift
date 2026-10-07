@@ -222,7 +222,8 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private func seed() {
         var body = "\u{1b}[?25l"
         if !control {
-            for n in 0..<100 {
+            let recordCount = ProcessInfo.processInfo.environment["HERDR_LONG_HISTORY"] == "1" ? 400 : 100
+            for n in 0..<recordCount {
                 let marker = n == 20 ? "ANCHOR020" : String(format: "RECORD%03d", n)
                 if n == 20 && ProcessInfo.processInfo.environment["HERDR_HISTORY_BOX"] == "1" {
                     body += "\u{1b}[48;2;35;30;50m"

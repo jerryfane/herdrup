@@ -7,12 +7,15 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     private var reply: XCUIElement { app.textViews["terminal-reply-input"] }
 
     func testNativeHistoryCoastSurvivesComposerFocusTypingAndSend() throws {
-        launch("resize")
+        launch("resize", environment: ["HERDR_LONG_HISTORY": "1"])
         command("natural")
         command("history")
         anchor()
         let initial = probe()["top"] as? String
-        terminal.swipeUp(velocity: .fast)
+        // Keep the flick distance independent of the tablet's taller viewport.
+        let flickStart = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let flickEnd = flickStart.withOffset(CGVector(dx: 0, dy: -120))
+        flickStart.press(forDuration: 0, thenDragTo: flickEnd, withVelocity: .fast, thenHoldForDuration: 0)
         let reading = wait {
             ($0["top"] as? String) != initial && ($0["tail"] as? Bool) == false
         }
@@ -27,8 +30,14 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         let send = try XCTUnwrap(app.buttons.matching(identifier: "terminal-send-button")
             .allElementsBoundByIndex.first(where: { $0.isHittable }))
         send.tap()
+        wait { ($0["prompts"] as? Int) == 1 && ($0["top"] as? String) == top }
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let collapse = try XCTUnwrap(app.buttons.matching(NSPredicate(format: "label == %@", "Collapse keyboard"))
+                .allElementsBoundByIndex.first(where: { $0.isHittable }))
+            collapse.tap()
+        }
         wait { ($0["rows"] as? Int) == rows && ($0["top"] as? String) == top }
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "Send must still dismiss the keyboard")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "Keyboard dismissal must preserve the reading position")
         attach("native-history-position-after-send")
     }
 

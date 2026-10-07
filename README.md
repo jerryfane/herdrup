@@ -37,7 +37,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   shows a live waveform and a glowing border. Attachments show per-file progress inside
   the card. Terminal quick keys stay above the card. In a terminal the composer grows
   over the terminal's bottom rows instead of shrinking it, so typing never resizes the
-  agent's screen. Send dismisses the keyboard without forcing a history reader back to live output.
+  agent's screen. On iPhone, Send dismisses the keyboard without forcing a history reader
+  back to live output. On iPad, the composer stays focused; use Collapse keyboard to dismiss it.
 - **Host picker** — native system typography for names, addresses, and guidance, with
   higher-contrast supporting text and the app's text-size preference respected.
   Copyable shell commands and terminal output retain their monospaced fonts.
