@@ -981,7 +981,7 @@ extension TerminalView {
             return nil
         }
         let line = buffer.lines[position.row]
-        let maxCol = max(0, min(terminal.cols - 1, line.count - 1))
+        let maxCol = max(0, min(buffer.displayColumns(at: position.row) - 1, line.count - 1))
         let col = max(0, min(position.col, maxCol))
         let cell = line[col]
         if let payload = cell.getPayload() as? String {
@@ -1061,7 +1061,7 @@ extension TerminalView {
         // single row
         if endRow == startRow && startRow == row {
             if startCol < endCol {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
+                let extra = endCol == cols - 1 ? 1 : 0
                 selectionRange = NSRange(location: startCol, length: endCol - startCol + extra)
             } else if startCol > endCol {
                 selectionRange = NSRange(location: endCol, length: startCol - endCol)
@@ -1079,7 +1079,7 @@ extension TerminalView {
 
             // last row
             if startRow < row && endRow == row {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
+                let extra = endCol == cols - 1 ? 1 : 0
                 selectionRange = NSRange(location: 0, length: endCol + extra)
             }
         } else if endRow < startRow {
@@ -1095,7 +1095,7 @@ extension TerminalView {
 
             // last row
             if endRow < row && startRow == row {
-                let extra = startCol == terminal.cols-1 ? 1 : 0
+                let extra = startCol == cols - 1 ? 1 : 0
                 selectionRange = NSRange(location: 0, length: startCol + extra)
             }
         }
@@ -1458,7 +1458,8 @@ extension TerminalView {
             } 
             #endif
             let line = displayBuffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+            let rowColumns = displayBuffer.displayColumns(at: row)
+            let lineInfo = buildAttributedString(row: row, line: line, cols: rowColumns)
             let rowBase = lineOrigin.y + cellDimension.height
             var underTextImages: [AppleImage] = []
             var overTextKittyImages: [AppleImage] = []
@@ -1541,13 +1542,13 @@ extension TerminalView {
                             }
                             #endif
 
-                            if endColumn >= terminal.cols {
+                            if endColumn >= rowColumns {
                                 if backgroundColor == nativeBackgroundColor {
-                                    rect.size.width = frame.width - rect.origin.x
+                                    rect.size.width = max(rect.size.width, bounds.maxX - rect.origin.x)
                                 } else {
                                     let marginX = rect.origin.x + rect.size.width
-                                    if marginX < frame.width {
-                                        let marginRect = CGRect(x: marginX, y: rect.origin.y, width: frame.width - marginX, height: rect.size.height)
+                                    if marginX < bounds.maxX {
+                                        let marginRect = CGRect(x: marginX, y: rect.origin.y, width: bounds.maxX - marginX, height: rect.size.height)
                                         #if os(macOS)
                                         nativeBackgroundColor.setFill()
                                         marginRect.fill()

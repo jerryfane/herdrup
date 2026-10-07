@@ -83,6 +83,11 @@ public final class Buffer {
 //                return
 //                #endif
             }
+            if preservesScrollbackLayout && newValue > _yBase {
+                for row in _yBase..<min(newValue, _lines.count) {
+                    _lines[row].preserveLayout(columns: cols)
+                }
+            }
             _yBase = newValue
         }
     }
@@ -451,8 +456,15 @@ public final class Buffer {
         }
     }
     
+    var preservesScrollbackLayout = false
+
+    func displayColumns(at row: Int) -> Int {
+        guard preservesScrollbackLayout, row >= 0, row < lines.count else { return cols }
+        return lines[row].preservedColumns ?? cols
+    }
+
     public var isReflowEnabled: Bool {
-        return hasScrollback
+        return hasScrollback && !preservesScrollbackLayout
     }
     
     public func resize (newCols : Int, newRows : Int)
@@ -478,7 +490,8 @@ public final class Buffer {
                 // are created on demand at the buffer's current cols, so they never
                 // need resizing here.
                 for i in 0..<lines.count {
-                    lines [i].resize (cols: newCols, fillData: CharData.Null)
+                    let line = lines[i]
+                    line.resize(cols: max(newCols, line.preservedColumns ?? 0), fillData: CharData.Null)
                 }
 
             }
@@ -574,6 +587,9 @@ public final class Buffer {
             // trip the abort() when widening.
             for i in 0..<lines.count {
                 let line = lines [i]
+                if preservesScrollbackLayout && cols != newCols && line.preservedColumns == nil {
+                    line.resize(cols: newCols, fillData: CharData.Null)
+                }
                 if line.count < newCols {
                     print ("stop here newCols=\(newCols) but the element has: \(line.count)")
                     abort ()
@@ -596,12 +612,16 @@ public final class Buffer {
 
         // The alternate buffer has no scrollback and no reflow: it is always at
         // its own top, and its contents are the application's to redraw.
-        guard isReflowEnabled, lines.count > 0, _yDisp >= 0, _yDisp < yBase else {
+        guard hasScrollback, lines.count > 0, _yDisp >= 0, _yDisp < yBase else {
             cachedAnchorLine = nil
             return .tail
         }
 
         let top = lines [_yDisp]
+        if preservesScrollbackLayout {
+            trackedAnchorLine = top
+            return .history(line: top, column: 0)
+        }
         // Same top line as the last resize, unmodified since, and the cell we
         // mapped then is still inside its content: keep using it, so repeated
         // resizes cannot drift. `===` also rejects a line object that the

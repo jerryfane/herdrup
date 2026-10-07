@@ -730,7 +730,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if row < 0 {
             return (Position(col: 0, row: 0), toInt (point))
         }
-        return (Position(col: min (max (0, col), terminal.cols-1), row: row), toInt (point))
+        return (Position(col: min(max(0, col), terminal.displayBuffer.displayColumns(at: row) - 1), row: row), toInt(point))
     }
 
     func encodeFlags (release: Bool) -> Int
@@ -1565,7 +1565,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         defer { updatingContentOffsetFromTerminal = wasUpdatingFromTerminal }
 
         let displayBuffer = terminal.displayBuffer
-        contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
+        contentSize = CGSize (width: CGFloat(visibleColumns(in: displayBuffer, startingAt: displayBuffer.yDisp)) * cellDimension.width,
                               height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
         // Let the gesture own contentOffset while the finger is physically down
         // (isTracking), and while frozen history coasts under momentum —
@@ -1587,9 +1587,29 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // Clamp to the scroll view's real maximum so following the bottom rests
         // flush against the last line instead of over-scrolling past it.
         let offsetY = min(desiredY, maxContentOffsetY())
-        setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
+        let offsetX = min(max(0, contentOffset.x), max(0, contentSize.width - bounds.width))
+        setContentOffsetFromTerminal(CGPoint(x: offsetX, y: offsetY))
         //Xscroller.doubleValue = scrollPosition
         //Xscroller.knobProportion = scrollThumbsize
+    }
+
+    private func visibleColumns(in buffer: Buffer, startingAt row: Int) -> Int {
+        guard buffer.preservesScrollbackLayout, cellDimension.height > 0 else { return buffer.cols }
+        let first = min(max(0, row), buffer.lines.count)
+        let end = min(buffer.lines.count, first + Int(ceil(bounds.height / cellDimension.height)) + 1)
+        var columns = buffer.cols
+        for row in first..<end { columns = max(columns, buffer.displayColumns(at: row)) }
+        return columns
+    }
+
+    private func updateHorizontalScrollExtent() {
+        guard terminal != nil, cellDimension.height > 0, !updatingContentOffsetFromTerminal else { return }
+        let first = Int(floor(max(0, contentOffset.y) / cellDimension.height))
+        let width = CGFloat(visibleColumns(in: terminal.displayBuffer, startingAt: first)) * cellDimension.width
+        guard contentSize.width != width else { return }
+        updatingContentOffsetFromTerminal = true
+        defer { updatingContentOffsetFromTerminal = false }
+        contentSize.width = width
     }
 
 #if canImport(MetalKit)
@@ -1711,17 +1731,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        // Freeze auto-follow only while the finger is physically down
-        // (isTracking). Excluding the momentum coast is essential: after the
-        // finger lifts, deceleration keeps firing sync while streaming output
-        // extends the content and the bottom recedes ahead of the coasting
-        // offset — treating that "not at the bottom yet" reading as a manual
-        // scroll would re-freeze a view the user just flung to the bottom. This
-        // must key off isTracking, not isDragging: on device isDragging stays
-        // true through the entire coast, so it fails to exclude momentum. It also
-        // covers layout/system-driven offset changes (startup sizing, rotation,
-        // keyboard insets, buffer shrink), which are never a manual scroll.
-        guard isTracking else {
+        // Only a finger may start manual reading. Once started, its momentum
+        // keeps moving the logical anchor too. A tail-following coast must not
+        // freeze just because streaming output moved the bottom farther away.
+        guard isTracking || (userScrolling && isDecelerating) else {
             return
         }
 
@@ -1823,11 +1836,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     open override var contentOffset: CGPoint {
         didSet {
             syncYDispFromContentOffset()
-#if canImport(MetalKit)
+            updateHorizontalScrollExtent()
+            #if canImport(MetalKit)
             if useMetalRenderer, metalView != nil {
                 requestMetalDisplay()
             }
-#endif
+            #endif
         }
     }
 

@@ -6,6 +6,32 @@ final class TerminalControlTests: TerminalInteractionTestCase {
     /// which SwiftUI's multiline TextField could not observe.
     private var reply: XCUIElement { app.textViews["terminal-reply-input"] }
 
+    func testNativeHistoryCoastSurvivesComposerFocusTypingAndSend() throws {
+        launch("resize")
+        command("natural")
+        command("history")
+        anchor()
+        let initial = probe()["top"] as? String
+        terminal.swipeUp(velocity: .fast)
+        let reading = wait {
+            ($0["top"] as? String) != initial && ($0["tail"] as? Bool) == false
+        }
+        let top = try XCTUnwrap(reading["top"] as? String)
+        let rows = try XCTUnwrap(reading["rows"] as? Int)
+        let editor = try XCTUnwrap(app.textViews.matching(identifier: "terminal-reply-input")
+            .allElementsBoundByIndex.first(where: { $0.isHittable }))
+        editor.tap()
+        wait { ($0["rows"] as? Int ?? rows) < rows && ($0["top"] as? String) == top }
+        editor.typeText("Keep my place in this history while writing a wrapped reply.")
+        XCTAssertEqual(probe()["top"] as? String, top)
+        let send = try XCTUnwrap(app.buttons.matching(identifier: "terminal-send-button")
+            .allElementsBoundByIndex.first(where: { $0.isHittable }))
+        send.tap()
+        wait { ($0["rows"] as? Int) == rows && ($0["top"] as? String) == top }
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "Send must still dismiss the keyboard")
+        attach("native-history-position-after-send")
+    }
+
     /// Whether the ctrl one-shot is armed, read from the production cap's own
     /// accessibility label. Idiom-independent, and the only observable that survives a
     /// state where no keyboard is available at all.

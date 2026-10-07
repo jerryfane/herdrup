@@ -21,8 +21,12 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   after a stream reconnect. An older herdr is polled every 5 s.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
-  Resizing preserves the logical history position; live followers stay at the tail. The on-screen
-  Ctrl key arms one native terminal chord in direct input, or a control character in the reply field.
+  History keeps its original row layout, including plain text, so resizing does not rewrap old
+  boxes or background blocks. Pan sideways to read wide rows; text stays at your chosen size,
+  including when a desktop viewer holds a wider grid. New output wraps at the current PTY width.
+  Resizing preserves your reading position, including after a momentum scroll; live followers
+  stay at the tail. The on-screen Ctrl key arms one native terminal chord in direct input,
+  or a control character in the reply field.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
@@ -31,7 +35,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   shows a live waveform and a glowing border. Attachments show per-file progress inside
   the card. Terminal quick keys stay above the card. In a terminal the composer grows
   over the terminal's bottom rows instead of shrinking it, so typing never resizes the
-  agent's screen.
+  agent's screen. Send dismisses the keyboard without forcing a history reader back to live output.
 - **Host picker** — native system typography for names, addresses, and guidance, with
   higher-contrast supporting text and the app's text-size preference respected.
   Copyable shell commands and terminal output retain their monospaced fonts.
@@ -88,10 +92,11 @@ herdr server; the iOS app consumes it unchanged. Floors: macOS 14+, iOS 17+ (dec
 — macOS 14 because Citadel requires it).
 
 SwiftTerm is vendored at [`Vendor/SwiftTerm`](Vendor/SwiftTerm), based on upstream v1.15.0,
-commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain a logical viewport cell
-through reflow, keep terminal modes during geometry/font commits, and expose managed-size and
-completed-paint hooks. The app commits geometry only from ordered stream frames; a short retained
-frame covers resize transitions without stretching text or restarting the stream. For unmarked output,
+commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain viewport anchors and terminal
+modes during geometry/font commits, preserve archived row widths when the app opts in, and expose
+managed-size and completed-paint hooks. The default library mode still reflows text. The app commits
+geometry only from ordered stream frames; a short retained frame covers resize transitions without
+stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
 

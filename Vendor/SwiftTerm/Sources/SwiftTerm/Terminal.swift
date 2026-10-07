@@ -332,6 +332,13 @@ open class Terminal {
     /// Terminal configuration options.
     /// Setup(isReset:) method should be called to apply changes
     public var options: TerminalOptions
+
+    /// Keep archived rows in their original grid instead of rewrapping painted
+    /// terminal output on resize. New output still wraps at the current PTY width.
+    public var preservesScrollbackLayout: Bool {
+        get { normalBuffer.preservesScrollbackLayout }
+        set { normalBuffer.preservesScrollbackLayout = newValue }
+    }
     
     // The current buffers
     var normalBuffer, altBuffer: Buffer
@@ -741,7 +748,7 @@ open class Terminal {
     ///
     public func getCharData (col: Int, row: Int) -> CharData?
     {
-        if col < 0 || col >= cols {
+        if col < 0 || col >= buffer.displayColumns(at: row + buffer.yDisp) {
             return nil
         }
         if let l = getLine (row: row) {
@@ -5353,6 +5360,9 @@ open class Terminal {
             buffer.clearImagesFromLine(at: bottomRow)
             bottomLine.renderMode = .single
         } else if scrollTop == 0 {
+            if buffer.preservesScrollbackLayout {
+                lines[topRow].preserveLayout(columns: buffer.cols)
+            }
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = lines.isFull
 
