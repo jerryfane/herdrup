@@ -2153,6 +2153,9 @@ struct TerminalHomeView: View {
     @State private var agentsTitleCollapsed = false
     /// The sidebar section bar's selected pill, shared so it slides between tabs.
     @Namespace private var sidebarTabSelection
+    /// Sidebar-row hover → the empty detail column's glyph field. A reference, never
+    /// reassigned, so hovering the roster does not invalidate this view.
+    @State private var glyphFieldSpotlight = TerminalGlyphFieldView.Spotlight()
     /// The machine's running herdr sessions (#347); the pills show with two or more.
     @State private var runningSessions: [HerdrSession] = []
     /// Needs-you counts in the sessions this home is NOT on, by session name.
@@ -2162,6 +2165,22 @@ struct TerminalHomeView: View {
     /// fail-closed placement, stable order, count and quiet flag all live in
     /// HerdrKit's tested `AgentList`, not in SwiftUI's render path.
     private var fullList: AgentList { displayedRoster.agentList }
+
+    /// What each agent types into the empty detail column's glyph field.
+    private var glyphFieldLines: [TerminalGlyphFieldView.Line] {
+        fullList.sections.flatMap { $0.rows }.map(glyphFieldLine)
+    }
+
+    private func glyphFieldLine(_ row: AgentRow) -> TerminalGlyphFieldView.Line {
+        let tone: TerminalGlyphFieldView.Tone
+        switch row.group {
+        case .needsYou, .unrecognised: tone = .waiting
+        case .stopped: tone = .died
+        case .working: tone = .working
+        case .idle: tone = row.status == .done ? .done : .dim
+        }
+        return .init(id: row.id, text: "\(row.title) › \(subtitle(row.info))", tone: tone)
+    }
 
     /// The ordered LIVE agents a pushed pane can page through with a horizontal swipe.
     /// DELIBERATELY the full sorted live list (`AgentList.rows`, needs-you first), NOT the
@@ -2499,7 +2518,7 @@ struct TerminalHomeView: View {
                 switch selectedTab {
                 case .agents:
                     if frontID == nil {
-                        detailPlaceholder("Select an agent", "square.grid.2x2")
+                        SelectAgentPlaceholder(lines: glyphFieldLines, spotlight: glyphFieldSpotlight)
                     }
                 case .gram:
                     GramView(client: client, agents: agents, unread: gramUnread,
@@ -2941,14 +2960,6 @@ struct TerminalHomeView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(count) \(label)")
         }
-    }
-
-    private func detailPlaceholder(_ text: String, _ icon: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 34)).foregroundStyle(Palette.textFaint)
-            Text(text).font(Typography.app(15, .medium)).foregroundStyle(Palette.textDim)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     var body: some View {
@@ -3997,6 +4008,16 @@ struct TerminalHomeView: View {
                         card(row)
                     }
                     .buttonStyle(.plain)
+                    // Over the sidebar on iPad / Mac, the hovered agent speaks in the empty
+                    // detail column's glyph field. No state changes here.
+                    .onContinuousHover(coordinateSpace: .global) { phase in
+                        switch phase {
+                        case .active(let location):
+                            glyphFieldSpotlight.hover(glyphFieldLine(row), globalY: location.y)
+                        case .ended:
+                            glyphFieldSpotlight.end(row.id)
+                        }
+                    }
                     // Bind UI receipts to the tappable row, not a Text child whose
                     // `isHittable` is false because the parent Button owns the hit.
                     .accessibilityIdentifier("agent-row-\(row.info.paneID)")
