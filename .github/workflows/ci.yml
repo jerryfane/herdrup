@@ -342,6 +342,8 @@ jobs:
           # Existing coordinate/keyboard receipts keep their iPhone destination.
           # The new suites explicitly handle iPad's hardware-keyboard prerequisite.
           run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
+          # The empty detail column (and its glyph field) exists only in the iPad layout.
+          run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
           exit "$failed"
 
       - name: Run UIKit SwiftTerm API regressions on both devices

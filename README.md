@@ -19,6 +19,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   On a herdr that advertises `events_v2`, rows change as status events arrive, including agents on
   federated machines the coordinator relays; the list is re-fetched every 30 s as a backstop and
   after a stream reconnect. An older herdr is polled every 5 s.
+  On iPad and Mac, the empty detail column is a live terminal field: it stirs under the pointer
+  or a finger, ripples on a tap, and your agents type their current activity into it. Hovering a
+  row types that agent's line beside it. With Reduce Motion on, only the typing remains.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
   History keeps its original row layout, including plain text, so resizing does not rewrap old
