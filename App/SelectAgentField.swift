@@ -146,6 +146,8 @@ final class TerminalGlyphFieldView: UIView {
     private var builtScale: CGFloat = 0
     private var generation = 0
     private var restRenderInFlight = false
+    private var restRenderPending = false
+    private var atlasScale: CGFloat = 0
     private var nextTwinkle: Double = TerminalGlyphFieldView.twinklePeriod
     private static let restQueue = DispatchQueue(label: "herdr.select-agent.rest-field", qos: .utility)
 
@@ -270,11 +272,14 @@ final class TerminalGlyphFieldView: UIView {
         isActive = Array(repeating: false, count: n)
         active = []
 
-        buildAtlas()
+        // Rebuilt only when the screen scale changes (or a new character appears), not per size.
+        if scale != atlasScale { buildAtlas() }
         restNode.size = size
         restNode.position = .zero
+        // Plain ground until the new size's field arrives from the background render.
+        restNode.texture = nil
         scene.addChild(restNode)
-        renderRestField(synchronously: true)
+        renderRestField()
         for _ in 0..<4 {
             let cursor = SKSpriteNode(color: Self.palette[Int(Self.dimIndex)],
                                       size: CGSize(width: Self.cellW - 1, height: Self.cellH - 4))
@@ -289,6 +294,7 @@ final class TerminalGlyphFieldView: UIView {
     /// One texture per (character, colour), all cut from a single image so SpriteKit batches them.
     private func buildAtlas() {
         atlasCharacterCount = characters.count
+        atlasScale = builtScale
         let across = 64
         let down = (characters.count + across - 1) / across
         let colours = Self.palette.count
@@ -326,33 +332,30 @@ final class TerminalGlyphFieldView: UIView {
         }
     }
 
-    /// Draws the resting field into one texture. Twinkle redraws run off the main thread.
-    private func renderRestField(synchronously: Bool) {
+    /// Draws the resting field into one texture, always off the main thread. Requests made while
+    /// a render is running collapse into one follow-up, so a rotation or a window being dragged
+    /// through many sizes renders only the latest one; results for a stale size are dropped.
+    private func renderRestField() {
+        guard !restRenderInFlight else { restRenderPending = true; return }
+        restRenderInFlight = true
+        restRenderPending = false
         let job = RestFieldJob(
             cols: cols, rows: rows, size: builtSize, scale: builtScale,
             characters: restChr, alpha: restAlpha, font: font,
             colour: Self.palette[Self.restIndex].cgColor, ground: Self.ground.cgColor,
             glyphs: Self.scrambleCharacters, cellW: Self.cellW, cellH: Self.cellH)
-        if synchronously {
-            restNode.texture = job.render().map { SKTexture(cgImage: $0) }
-            return
-        }
-        guard !restRenderInFlight else { return }
-        restRenderInFlight = true
         let generation = generation
         Self.restQueue.async { [weak self] in
-            guard let image = job.render() else {
-                DispatchQueue.main.async { self?.restRenderInFlight = false }
-                return
-            }
-            let texture = SKTexture(cgImage: image)
-            texture.preload {
+            let texture = job.render().map { SKTexture(cgImage: $0) }
+            let finish = {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.restRenderInFlight = false
-                    if self.generation == generation { self.restNode.texture = texture }
+                    if self.generation == generation, let texture { self.restNode.texture = texture }
+                    if self.restRenderPending { self.renderRestField() }
                 }
             }
+            if let texture { texture.preload(completionHandler: finish) } else { finish() }
         }
     }
 
@@ -451,7 +454,7 @@ final class TerminalGlyphFieldView: UIView {
             for _ in 0..<Int(Double(restChr.count) * Self.twinkleShare) {
                 restChr[Int.random(in: 0..<restChr.count)] = UInt8.random(in: 0..<scrambleCount)
             }
-            renderRestField(synchronously: false)
+            renderRestField()
         }
 
         lensRadius = pointer.ghost ? 80 : 115
@@ -570,7 +573,12 @@ final class TerminalGlyphFieldView: UIView {
         }
     }
 
+    /// At most this many lines type at once. Hovering quickly down the sidebar replaces the
+    /// oldest line rather than stacking one per row; the evicted cells simply fade.
+    private static let maxWriters = 4
+
     private func write(_ line: Line, column: Int, row: Int, hold: Double) {
+        if writers.count >= Self.maxWriters { writers.removeFirst(writers.count - Self.maxWriters + 1) }
         var cells: [(index: Int, glyph: Int32)] = []
         for (j, character) in line.text.enumerated() where column + j < cols {
             cells.append((row * cols + column + j, glyphIndex(character)))
