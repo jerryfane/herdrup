@@ -107,7 +107,8 @@ class SelectionService: CustomDebugStringConvertible {
         
     func clamp (_ buffer: Buffer, _ p: Position) -> Position {
         let maxRow = max(0, buffer.lines.count - 1)
-        return Position(col: min(p.col, buffer.cols - 1), row: min(p.row, maxRow))
+        let row = max(0, min(p.row, maxRow))
+        return Position(col: max(0, min(p.col, buffer.displayColumns(at: row) - 1)), row: row)
     }
     /**
      * Sets the selection, this is validated against the
@@ -174,7 +175,7 @@ class SelectionService: CustomDebugStringConvertible {
         var newPos = Position  (col: col, row: row + terminal.displayBuffer.yDisp)
         if selectingRows {
             if Position.compare(start, newPos) == .before {
-                newPos.col = terminal.cols - 1
+                newPos.col = terminal.displayBuffer.displayColumns(at: newPos.row) - 1
             } else {
                 newPos.col = 0
             }
@@ -320,7 +321,9 @@ class SelectionService: CustomDebugStringConvertible {
     public func selectAll ()
     {
         start = Position(col: 0, row: 0)
-        end = Position(col: terminal.cols-1, row: terminal.displayBuffer.lines.maxLength - 1)
+        let buffer = terminal.displayBuffer
+        let lastRow = max(0, buffer.lines.count - 1)
+        end = Position(col: buffer.displayColumns(at: lastRow) - 1, row: lastRow)
         setActiveAndNotify()
     }
     
@@ -341,7 +344,7 @@ class SelectionService: CustomDebugStringConvertible {
     public func select(row: Int)
     {
         start = Position(col: 0, row: row)
-        end = Position(col: terminal.cols-1, row: row)
+        end = Position(col: terminal.displayBuffer.displayColumns(at: row) - 1, row: row)
         selectingRows = true
         selectionMode = .row
         wordSelectionAnchor = nil
@@ -374,7 +377,7 @@ class SelectionService: CustomDebugStringConvertible {
         // Look forward
         colScan = position.col
         var right = colScan
-        let limit = terminal.cols
+        let limit = buffer.displayColumns(at: position.row)
         while colScan < limit {
             let ch = character (at: Position (col: colScan, row: position.row), in: buffer)
             if !includeFunc (ch) {
@@ -403,7 +406,7 @@ class SelectionService: CustomDebugStringConvertible {
             return
         }
         for line in position.row..<maxRow {
-            for col in startCol..<terminal.cols {
+            for col in startCol..<buffer.displayColumns(at: line) {
                 let p =  Position(col: col, row: line)
                 let ch = character (at: p, in: buffer)
                 
@@ -462,7 +465,7 @@ class SelectionService: CustomDebugStringConvertible {
                     }
                 }
             }
-            startCol = terminal.cols-1
+            startCol = buffer.displayColumns(at: line - 1) - 1
         }
         start = position
         end = position
@@ -503,7 +506,7 @@ class SelectionService: CustomDebugStringConvertible {
         } else {
             // Extend forward
             var col = position.col
-            while col < terminal.cols {
+            while col < buffer.displayColumns(at: position.row) {
                 let testCh = character (at: Position(col: col, row: position.row), in: buffer)
                 if !includeFunc(testCh) {
                     break
@@ -521,11 +524,7 @@ class SelectionService: CustomDebugStringConvertible {
      */
     public func selectWordOrExpression (at uncheckedPosition: Position, in buffer: Buffer)
     {
-//        let position = Position(
-//            col: max (min (uncheckedPosition.col, buffer.cols-1), 0),
-//            row: max (min (uncheckedPosition.row, buffer.rows-1+buffer.yDisp), buffer.yDisp))
-        let position = Position (col: (min (terminal.cols, max (uncheckedPosition.col, 0))),
-                                 row: (max (uncheckedPosition.row, 0)))
+        let position = clamp(buffer, uncheckedPosition)
         switch character (at: position, in: buffer) {
         case Character(UnicodeScalar(0)):
             simpleScanSelection (from: position, in: buffer) { ch in ch == nullChar }

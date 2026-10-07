@@ -128,11 +128,13 @@ final class SearchService {
         guard cells > 0 else {
             return position
         }
-        let cols = max(terminal.cols, 1)
-        let linearStart = position.row * cols + position.col
-        let linearEnd = linearStart + cells
-        let newRow = linearEnd / cols
-        let newCol = linearEnd % cols
-        return Position(col: newCol, row: newRow)
+        let buffer = terminal.displayBuffer
+        var row = position.row
+        var column = position.col + cells
+        while column >= max(buffer.displayColumns(at: row), 1) {
+            column -= max(buffer.displayColumns(at: row), 1)
+            row += 1
+        }
+        return Position(col: column, row: row)
     }
 }

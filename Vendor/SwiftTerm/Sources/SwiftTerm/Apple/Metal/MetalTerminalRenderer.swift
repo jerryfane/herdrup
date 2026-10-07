@@ -431,6 +431,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         bufferPool.beginFrame()
         let viewport = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+        #if os(iOS) || os(visionOS)
+        var horizontalOffset = Float(terminalView.contentOffset.x * scale)
+        #else
+        var horizontalOffset: Float = 0
+        #endif
+        // Translate cached geometry in the shader; horizontal panning must not
+        // reshape every glyph or rebuild all row buffers on every frame.
+        encoder.setVertexBytes(&horizontalOffset, length: MemoryLayout<Float>.stride, index: 2)
 
         if let frame = drawData.frame {
             drawFrameData(frame, encoder: encoder, viewport: viewport)
@@ -887,7 +895,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
-        let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
+        let rowColumns = buffer.displayColumns(at: row)
+        let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: rowColumns)
         let shapedSegments = buildShapedSegments(lineInfo.segments, terminalView: terminalView)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale
@@ -1058,9 +1067,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                             let x0 = lineOriginPx.x + (CGFloat(startColumn) * cellWidthPx)
                             let y0 = lineOriginPx.y
                             var x1 = lineOriginPx.x + (CGFloat(startColumn + columnSpan) * cellWidthPx)
-                            if endColumn >= buffer.cols {
+                            if endColumn >= rowColumns {
                                 if backgroundColor == terminalView.nativeBackgroundColor {
-                                    x1 = lineOriginPx.x + viewWidthPx
+                                    x1 = max(x1, lineOriginPx.x + viewWidthPx)
                                 } else {
                                     let marginX0 = x1
                                     let marginX1 = lineOriginPx.x + viewWidthPx

@@ -16,6 +16,91 @@ final class BufferTests: TerminalDelegate {
         // Required by TerminalDelegate
     }
 
+    @Test func testArchivedBoxKeepsCellsAndSelectionAcrossWidthChanges() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 4))
+        terminal.preservesScrollbackLayout = true
+        let top = "╭" + String(repeating: "─", count: 78) + "╮"
+        let middle = "│" + String(repeating: " ", count: 69) + "RIGHTEND │"
+        let bottom = "╰" + String(repeating: "─", count: 78) + "╯"
+        terminal.feed(text: "\u{1b}[48;2;35;30;50m\(top)\r\n\(middle)\r\n\(bottom)\u{1b}[0m\r\n")
+        terminal.feed(text: String(repeating: "later\r\n", count: 12))
+        let original = (0..<3).map { terminal.buffer.lines[$0].getData() }
+        terminal.userScrolling = true
+        terminal.setViewYDisp(0)
+
+        for width in [50, 60, 120, 40, 80] {
+            terminal.resize(cols: width, rows: 4)
+            #expect(terminal.buffer.yDisp == 0)
+            for row in 0..<3 {
+                #expect(terminal.buffer.displayColumns(at: row) == 80)
+                let actual = terminal.buffer.lines[row].getData()
+                for column in 0..<80 {
+                    #expect(actual[column].code == original[row][column].code)
+                    #expect(actual[column].width == original[row][column].width)
+                    #expect(actual[column].attribute == original[row][column].attribute)
+                }
+            }
+            #expect(terminal.getCharData(col: 79, row: 0)?.getCharacter() == "╮")
+            let selection = SelectionService(terminal: terminal)
+            selection.selectWordOrExpression(at: Position(col: 73, row: 1), in: terminal.buffer)
+            #expect(selection.getSelectedText() == "RIGHTEND")
+        }
+
+        terminal.resize(cols: 50, rows: 4)
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J" + String(repeating: "x", count: 51))
+        #expect(terminal.buffer.x == 1)
+        #expect(terminal.buffer.y == 1)
+        #expect(terminal.buffer.displayColumns(at: terminal.buffer.yBase) == 50)
+        #expect(terminal.buffer.lines[0][79].getCharacter() == "╮")
+    }
+
+    @Test func testPulledHistoryKeepsWidthUntilApplicationEditsIt() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 2))
+        terminal.preservesScrollbackLayout = true
+        terminal.feed(text: String(repeating: "A", count: 80) + "\r\nB\r\n")
+        let archived = terminal.buffer.lines[0]
+        #expect(archived.preservedColumns == 80)
+        terminal.resize(cols: 50, rows: 4)
+        #expect(terminal.buffer.yBase == 0)
+        #expect(terminal.buffer.displayColumns(at: 0) == 80)
+        terminal.feed(text: "\u{1b}[Hchanged")
+        #expect(terminal.buffer.displayColumns(at: 0) == 50)
+        #expect(terminal.buffer.translateBufferLineToString(lineIndex: 0, trimRight: true)
+                == "changed" + String(repeating: "A", count: 43))
+        terminal.feed(text: "\u{1b}[4;1H\r\n")
+        #expect(terminal.buffer.lines[0] === archived)
+        #expect(terminal.buffer.displayColumns(at: 0) == 50)
+    }
+
+    @Test func testArchivedHyperlinkRemainsSelectablePastCurrentGridWidth() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 2))
+        terminal.preservesScrollbackLayout = true
+        let url = "https://example.com/archived"
+        terminal.feed(text: String(repeating: " ", count: 70)
+                      + "\u{1b}]8;;\(url)\u{7}link\u{1b}]8;;\u{7}\r\nlater\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        let link = terminal.linkMatch(at: .buffer(Position(col: 72, row: 0)), mode: .explicitAndImplicit)
+        #expect(link?.text == url)
+        #expect(link?.range.contains(72) == true)
+    }
+
+    @Test func testFixedHistorySurvivesRingReuseAndAlternateScreen() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 3, scrollback: 8))
+        terminal.preservesScrollbackLayout = true
+        terminal.feed(text: String(repeating: "W", count: 80) + "\r\n" + String(repeating: "old\r\n", count: 10))
+        terminal.resize(cols: 50, rows: 3)
+        terminal.feed(text: String(repeating: "new\r\n", count: 20))
+        for row in 0..<terminal.buffer.lines.count {
+            #expect(terminal.buffer.displayColumns(at: row) == 50)
+        }
+        terminal.feed(text: "\u{1b}[?1049h")
+        #expect(terminal.isCurrentBufferAlternate)
+        #expect(terminal.getCharData(col: 50, row: 0) == nil)
+        terminal.feed(text: "\u{1b}[?1049l")
+        #expect(!terminal.isCurrentBufferAlternate)
+        #expect(terminal.preservesScrollbackLayout)
+    }
+
     /// Test for issue #256: yBase was not reset in Buffer.clear(), causing crashes
     /// when switching between normal and alternate buffers.
     ///
