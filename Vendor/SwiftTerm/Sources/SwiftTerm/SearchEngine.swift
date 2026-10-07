@@ -33,7 +33,7 @@ final class SearchEngine {
         if term.isEmpty {
             return nil
         }
-        if startCol > terminal.cols {
+        if startCol > terminal.displayBuffer.displayColumns(at: startRow) {
             return nil
         }
 
@@ -123,7 +123,7 @@ final class SearchEngine {
 
         let maxRow = terminal.displayBuffer.lines.count - 1
         var startRow = maxRow
-        var startCol = terminal.cols
+        var startCol = terminal.displayBuffer.displayColumns(at: maxRow)
         let isReverseSearch = true
 
         var searchPosition = SearchPosition(startCol: startCol, startRow: startRow)
@@ -150,9 +150,12 @@ final class SearchEngine {
         }
 
         if result == nil {
-            searchPosition.startCol = max(searchPosition.startCol, terminal.cols)
+            searchPosition.startCol = max(searchPosition.startCol, terminal.displayBuffer.displayColumns(at: startRow))
             if startRow - 1 >= 0 {
                 for y in stride(from: startRow - 1, through: 0, by: -1) {
+                    if !terminal.displayBuffer.lines[y + 1].isWrapped {
+                        searchPosition.startCol = terminal.displayBuffer.displayColumns(at: y)
+                    }
                     searchPosition.startRow = y
                     result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: isReverseSearch)
                     if result != nil {
@@ -216,11 +219,11 @@ final class SearchEngine {
         let firstLine = buffer.lines[row]
         if firstLine.isWrapped {
             if isReverseSearch {
-                searchPosition.startCol += terminal.cols
+                searchPosition.startCol += buffer.displayColumns(at: row - 1)
                 return nil
             }
             searchPosition.startRow -= 1
-            searchPosition.startCol += terminal.cols
+            searchPosition.startCol += buffer.displayColumns(at: searchPosition.startRow)
             return findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: isReverseSearch)
         }
 
@@ -308,7 +311,10 @@ final class SearchEngine {
         let endColOffset = foundIndex + matchTerm.count - offsets[endRowOffset]
         let startColIndex = stringLengthToBufferSize(row: row + startRowOffset, offset: startColOffset)
         let endColIndex = stringLengthToBufferSize(row: row + endRowOffset, offset: endColOffset)
-        let size = endColIndex - startColIndex + terminal.cols * (endRowOffset - startRowOffset)
+        var size = endColIndex - startColIndex
+        for offset in startRowOffset..<endRowOffset {
+            size += buffer.displayColumns(at: row + offset)
+        }
 
         return SearchResult(term: matchTerm, col: startColIndex, row: row + startRowOffset, size: size)
     }
@@ -325,11 +331,12 @@ final class SearchEngine {
         let line = buffer.lines[row]
         var adjustedOffset = offset
         var i = 0
-        while i < adjustedOffset && i < line.count {
+        let columns = min(line.count, buffer.displayColumns(at: row))
+        while i < adjustedOffset && i < columns {
             let cell = line[i]
             if cell.width == 2 {
                 let nextIndex = i + 1
-                if nextIndex < line.count {
+                if nextIndex < columns {
                     let nextCell = line[nextIndex]
                     if nextCell.width == 0 {
                         adjustedOffset += 1
@@ -350,7 +357,8 @@ final class SearchEngine {
 
         while remainingCols > 0 && lineIndex < buffer.lines.count {
             let line = buffer.lines[lineIndex]
-            let limit = min(remainingCols, terminal.cols)
+            let columns = buffer.displayColumns(at: lineIndex)
+            let limit = min(remainingCols, columns)
             if limit > 0 {
                 for i in 0..<limit {
                     let cell = line[i]
@@ -367,7 +375,7 @@ final class SearchEngine {
             if !nextLine.isWrapped {
                 break
             }
-            remainingCols -= terminal.cols
+            remainingCols -= columns
         }
 
         return offset

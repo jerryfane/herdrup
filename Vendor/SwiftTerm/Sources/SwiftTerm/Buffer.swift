@@ -823,7 +823,9 @@ public final class Buffer {
     func translateBufferLineToString (lineIndex: Int, trimRight: Bool, startCol: Int = 0, endCol: Int = -1, skipNullCellsFollowingWide: Bool = false, characterProvider: ((CharData) -> Character)? = nil) -> String
     {
         let line = _lines [lineIndex]
-        return line.translateToString(trimRight: trimRight, startCol: startCol, endCol: endCol, skipNullCellsFollowingWide: skipNullCellsFollowingWide, characterProvider: characterProvider)
+        let width = displayColumns(at: lineIndex)
+        let end = endCol < 0 ? width : min(endCol, width)
+        return line.translateToString(trimRight: trimRight, startCol: startCol, endCol: end, skipNullCellsFollowingWide: skipNullCellsFollowingWide, characterProvider: characterProvider)
     }
     
     func setupTabStops (index: Int = -1, tabStopWidth: Int)
@@ -1417,7 +1419,7 @@ public final class Buffer {
                     scroll(true)
                 } else {
                     _y += 1
-                    _lines[_y].isWrapped = true
+                    _lines[_y + _yBase].isWrapped = true
                 }
             }
             let available = right - _x + 1
@@ -1457,7 +1459,7 @@ public final class Buffer {
                     // The line already exists (eg. the initial viewport), mark it as a
                     // wrapped line
                     _y += 1
-                    _lines [_y].isWrapped = true
+                    _lines [_y + _yBase].isWrapped = true
                 }
                 // row changed, get it again
             } else {

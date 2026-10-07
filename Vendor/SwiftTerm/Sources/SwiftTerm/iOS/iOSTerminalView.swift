@@ -3234,7 +3234,8 @@ extension TerminalView: UIAccessibilityReadingContent {
         }
 
         let line = terminal.displayBuffer.lines[row]
-        let rawLimit = endCol == -1 ? line.count : min(endCol, line.count)
+        let width = min(line.count, terminal.displayBuffer.displayColumns(at: row))
+        let rawLimit = endCol == -1 ? width : min(endCol, width)
         let lineLimit = min(rawLimit, line.getTrimmedLength())
         guard line.hasAnyContent(), lineLimit > 0 else {
             return NSAttributedString(string: "")

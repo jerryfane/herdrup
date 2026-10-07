@@ -5964,8 +5964,7 @@ open class Terminal {
         let b = bufferFromKind(kind: kind)
         let newLine = Data([10])
         for row in 0..<b.lines.count {
-            let bufferLine = b.lines [row]
-            let str = bufferLine.translateToString(trimRight: true)
+            let str = b.translateBufferLineToString(lineIndex: row, trimRight: true)
             if let encoded = str.data(using: encoding) {
                 result.append (encoded)
                 result.append (newLine)
@@ -6025,7 +6024,7 @@ open class Terminal {
             return nil
         }
         let row = max(0, min(pos.row, buffer.lines.count - 1))
-        let col = max(0, min(pos.col, cols - 1))
+        let col = max(0, min(pos.col, buffer.displayColumns(at: row) - 1))
         return Position(col: col, row: row)
     }
 
@@ -6053,7 +6052,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[position.row]
-        let lineLimit = min(cols, line.count)
+        let lineLimit = min(buffer.displayColumns(at: position.row), line.count)
         guard lineLimit > 0 else {
             return nil
         }
@@ -6172,7 +6171,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[position.row]
-        let lineLimit = min(cols, line.count)
+        let lineLimit = min(buffer.displayColumns(at: position.row), line.count)
         guard lineLimit > 0 else {
             return nil
         }
@@ -6303,12 +6302,12 @@ open class Terminal {
 
         var text = ""
         var cells: [GhosttyImplicitCellRef] = []
-        cells.reserveCapacity((endRow - startRow + 1) * cols)
+        cells.reserveCapacity((startRow...endRow).reduce(0) { $0 + buffer.displayColumns(at: $1) })
         var targetIsInsideTrimmedContent = false
 
         for row in startRow...endRow {
             let line = buffer.lines[row]
-            let rawLimit = min(cols, line.count)
+            let rawLimit = min(buffer.displayColumns(at: row), line.count)
             if rawLimit <= 0 {
                 continue
             }
@@ -6424,7 +6423,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[row]
-        let rawLimit = min(cols, line.count)
+        let rawLimit = min(buffer.displayColumns(at: row), line.count)
         guard rawLimit > 0 else {
             return nil
         }

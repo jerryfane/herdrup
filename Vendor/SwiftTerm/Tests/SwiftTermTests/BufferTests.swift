@@ -65,9 +65,23 @@ final class BufferTests: TerminalDelegate {
         #expect(terminal.buffer.displayColumns(at: 0) == 80)
         terminal.feed(text: "\u{1b}[Hchanged")
         #expect(terminal.buffer.displayColumns(at: 0) == 50)
+        #expect(terminal.buffer.translateBufferLineToString(lineIndex: 0, trimRight: true)
+                == "changed" + String(repeating: "A", count: 43))
         terminal.feed(text: "\u{1b}[4;1H\r\n")
         #expect(terminal.buffer.lines[0] === archived)
         #expect(terminal.buffer.displayColumns(at: 0) == 50)
+    }
+
+    @Test func testArchivedHyperlinkRemainsSelectablePastCurrentGridWidth() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 2))
+        terminal.preservesScrollbackLayout = true
+        let url = "https://example.com/archived"
+        terminal.feed(text: String(repeating: " ", count: 70)
+                      + "\u{1b}]8;;\(url)\u{7}link\u{1b}]8;;\u{7}\r\nlater\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        let link = terminal.linkMatch(at: .buffer(Position(col: 72, row: 0)), mode: .explicitAndImplicit)
+        #expect(link?.text == url)
+        #expect(link?.range.contains(72) == true)
     }
 
     @Test func testFixedHistorySurvivesRingReuseAndAlternateScreen() {

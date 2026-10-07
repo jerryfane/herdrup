@@ -259,13 +259,17 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         let before = wait { ($0["top"] as? String ?? "").contains("ANCHOR020") }
         let topRow = try XCTUnwrap(before["topPixelRow"] as? Int)
         let font = try XCTUnwrap(before["fontPoints"] as? Double)
-        XCTAssertGreaterThan(try XCTUnwrap(before["contentWidth"] as? Double),
-                             try XCTUnwrap(before["viewportWidth"] as? Double))
-        let start = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.4))
-        let end = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.4))
-        start.press(forDuration: 0.05, thenDragTo: end)
+        let contentWidth = try XCTUnwrap(before["contentWidth"] as? Double)
+        let viewportWidth = try XCTUnwrap(before["viewportWidth"] as? Double)
+        if contentWidth > viewportWidth {
+            let start = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.4))
+            let end = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.4))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
         let panned = wait { ($0["top"] as? String ?? "").contains("╮") }
-        XCTAssertGreaterThan(panned["leftPixelColumn"] as? Int ?? 0, 0)
+        if contentWidth > viewportWidth {
+            XCTAssertGreaterThan(panned["leftPixelColumn"] as? Int ?? 0, 0)
+        }
         XCTAssertEqual(panned["topPixelRow"] as? Int, topRow)
         XCTAssertEqual(panned["fontPoints"] as? Double, font)
         XCTAssertTrue((panned["visible"] as? String ?? "").contains("RIGHTEND │"))

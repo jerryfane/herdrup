@@ -79,7 +79,7 @@ final class SearchLineCache {
             ).replacingOccurrences(of: "\u{0}", with: " ")
 
             if lineWrapsToNext, let nextLine {
-                let lastIndex = max(line.count - 1, 0)
+                let lastIndex = max(min(line.count, buffer.displayColumns(at: idx)) - 1, 0)
                 let lastCell = line[lastIndex]
                 let lastCellIsNull = lastCell.code == 0 && lastCell.width <= 1
                 if lastCellIsNull && nextLine.getWidth(index: 0) == 2 {
