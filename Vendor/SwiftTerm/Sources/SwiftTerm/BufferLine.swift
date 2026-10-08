@@ -35,6 +35,18 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// draw state can compare this counter against a cached value to detect in-place
     /// changes without diffing individual cells.
     public private(set) var generation: UInt64 = 0
+    // A row that entered scrollback keeps its original grid until the application
+    // edits it. Generation checks also cover rows pulled back into the live screen.
+    private var archivedLayout: (columns: Int, generation: UInt64)?
+    var preservedColumns: Int? {
+        guard let layout = archivedLayout, layout.generation == generation else { return nil }
+        return layout.columns
+    }
+
+    func preserveLayout(columns: Int) {
+        guard preservedColumns == nil else { return }
+        archivedLayout = (min(columns, dataSize), generation)
+    }
 
     @inline(__always)
     private func bump() { generation &+= 1 }
@@ -67,6 +79,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         
         data = buf
         dataSize = otherSize
+        if let columns = other.preservedColumns { preserveLayout(columns: columns) }
     }
 
     deinit {
@@ -200,7 +213,11 @@ public final class BufferLine: CustomDebugStringConvertible {
         if len == cols {
             return
         }
-        defer { bump() }
+        let preserved = preservedColumns
+        defer {
+            bump()
+            if let preserved, preserved <= cols { preserveLayout(columns: preserved) }
+        }
 
         if cols > len {
             let newBuf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: cols)
@@ -292,6 +309,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         dataSize = srcSize
         isWrapped = line.isWrapped
         bump()
+        if let columns = line.preservedColumns { preserveLayout(columns: columns) }
     }
 
     /// Returns the trimmed length in terms of cells used from the BufferLine

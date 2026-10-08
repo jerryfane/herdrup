@@ -222,9 +222,17 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private func seed() {
         var body = "\u{1b}[?25l"
         if !control {
-            for n in 0..<100 {
+            let recordCount = ProcessInfo.processInfo.environment["HERDR_LONG_HISTORY"] == "1" ? 400 : 100
+            for n in 0..<recordCount {
                 let marker = n == 20 ? "ANCHOR020" : String(format: "RECORD%03d", n)
-                body += marker + " " + String(repeating: String(UnicodeScalar(65 + n % 26)!), count: 80) + "\r\n"
+                if n == 20 && ProcessInfo.processInfo.environment["HERDR_HISTORY_BOX"] == "1" {
+                    body += "\u{1b}[48;2;35;30;50m"
+                    body += "╭─ ANCHOR020 " + String(repeating: "─", count: 66) + "╮\r\n"
+                    body += "│" + String(repeating: " ", count: 69) + "RIGHTEND │\r\n"
+                    body += "╰" + String(repeating: "─", count: 78) + "╯\u{1b}[0m\r\n"
+                } else {
+                    body += marker + " " + String(repeating: String(UnicodeScalar(65 + n % 26)!), count: 80) + "\r\n"
+                }
             }
         }
         if kitty { body += "\u{1b}[>9u" }
@@ -602,6 +610,7 @@ final class TerminalInteractionHarness: ObservableObject {
     private func viewport(_ view: TerminalView, cellSize: CGSize) -> [String: Any] {
         let terminal = view.getTerminal()
         let top = max(0, Int(floor(view.contentOffset.y / cellSize.height)))
+        let left = max(0, Int(floor(view.contentOffset.x / cellSize.width)))
         let start = terminal.buffer.totalLinesTrimmed
         let count = max(0, Int((view.contentSize.height / cellSize.height).rounded()))
         var markerRow = -999, markerColumn = -1, topText = "", visible: [String] = []
@@ -612,7 +621,8 @@ final class TerminalInteractionHarness: ObservableObject {
             if text.hasPrefix("RECORD"), let number = Int(text.dropFirst(6).prefix(3)) { records.append(number) }
             if text.hasPrefix("ANCHOR020") { records.append(20) }
             if text.hasPrefix("APPENDED"), let number = Int(text.dropFirst(8).prefix(4)) { appendedRecords.append(number) }
-            let clipped = String(text.prefix(max(0, Int(floor(view.bounds.width / max(1, cellSize.width))))))
+            let right = Int(ceil((view.contentOffset.x + view.bounds.width) / max(1, cellSize.width)))
+            let clipped = String(text.dropFirst(left).prefix(max(0, right - left)))
             if row == top { topText = clipped }
             if row >= top && row < top + Int(ceil(view.bounds.height / cellSize.height)) { visible.append(clipped) }
             if let range = text.range(of: "ANCHOR020") {
@@ -627,6 +637,9 @@ final class TerminalInteractionHarness: ObservableObject {
                 "tail": view.contentOffset.y >= max(0, view.contentSize.height - view.bounds.height) - cellSize.height,
                 "cols": terminal.cols, "rows": terminal.rows,
                 "alternate": terminal.isCurrentBufferAlternate, "topPixelRow": top,
+                "logicalTopRow": terminal.buffer.yDisp, "leftPixelColumn": left,
+                "offsetX": Double(view.contentOffset.x), "contentWidth": Double(view.contentSize.width),
+                "viewportWidth": Double(view.bounds.width),
                 "rowOffset": Double(view.contentOffset.y - CGFloat(top) * cellSize.height)]
     }
 

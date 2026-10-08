@@ -41,6 +41,21 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
                       "tapping the magnifier must reveal the field")
     }
 
+    func testFindRevealsMatchBeyondThePhoneWidth() {
+        launch("resize", environment: ["HERDR_HISTORY_BOX": "1"])
+        command("natural")
+        command("history")
+        let before = wait { ($0["top"] as? String ?? "").contains("ANCHOR020") }
+        openFind()
+        findField().typeText("RIGHTEND")
+        let found = wait {
+            ($0["leftPixelColumn"] as? Int ?? 0) > 0
+                && ($0["visible"] as? String ?? "").contains("RIGHTEND")
+        }
+        XCTAssertEqual(found["fontPoints"] as? Double, before["fontPoints"] as? Double)
+        attach("wide-history-search-revealed")
+    }
+
     /// Which half is broken, if either. `engineMatches` asks SwiftTerm directly on the
     /// live fixture buffer; the counter is what the app's wiring produced. Running both in
     /// one test means a failure names the culprit instead of just failing.

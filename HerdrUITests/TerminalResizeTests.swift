@@ -17,9 +17,10 @@ class TerminalInteractionTestCase: XCTestCase {
     /// history records, where the prompt is legitimately off-viewport.
     private(set) var fixtureMode = ""
 
-    func launch(_ mode: String) {
+    func launch(_ mode: String, environment: [String: String] = [:]) {
         fixtureMode = mode
         app = XCUIApplication()
+        app.launchEnvironment = environment
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
         app.launch()
         XCTAssertTrue(app.staticTexts["terminal-interaction-probe"].waitForExistence(timeout: 15))
@@ -251,6 +252,39 @@ class TerminalInteractionTestCase: XCTestCase {
 }
 
 final class TerminalResizeTests: TerminalInteractionTestCase {
+    func testBoxedHistoryPansWithoutReflowOrFontShrinking() throws {
+        launch("resize", environment: ["HERDR_HISTORY_BOX": "1"])
+        command("natural")
+        command("history")
+        let before = wait { ($0["top"] as? String ?? "").contains("ANCHOR020") }
+        let topRow = try XCTUnwrap(before["topPixelRow"] as? Int)
+        let font = try XCTUnwrap(before["fontPoints"] as? Double)
+        let contentWidth = try XCTUnwrap(before["contentWidth"] as? Double)
+        let viewportWidth = try XCTUnwrap(before["viewportWidth"] as? Double)
+        if contentWidth > viewportWidth {
+            let start = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.4))
+            let end = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.4))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        let panned = wait { ($0["top"] as? String ?? "").contains("╮") }
+        if contentWidth > viewportWidth {
+            XCTAssertGreaterThan(panned["leftPixelColumn"] as? Int ?? 0, 0)
+        }
+        XCTAssertEqual(panned["topPixelRow"] as? Int, topRow)
+        XCTAssertEqual(panned["fontPoints"] as? Double, font)
+        XCTAssertTrue((panned["visible"] as? String ?? "").contains("RIGHTEND │"))
+        attach("original-width-history-right-edge")
+
+        command("wider")
+        command("80x24")
+        let shared = wait { ($0["cols"] as? Int) == 140 && ($0["covered"] as? Bool) == false }
+        XCTAssertEqual(shared["fontPoints"] as? Double, font)
+        XCTAssertGreaterThan(try XCTUnwrap(shared["contentWidth"] as? Double),
+                             try XCTUnwrap(shared["viewportWidth"] as? Double))
+        XCTAssertEqual(shared["topPixelRow"] as? Int, topRow)
+        attach("shared-desktop-grid-readable-font")
+    }
+
     // Three painted cycles here; the vendored core suite drives ten inside a long
     // wrapped line, where a cycle costs microseconds instead of two app launches'
     // worth of accessibility round trips.

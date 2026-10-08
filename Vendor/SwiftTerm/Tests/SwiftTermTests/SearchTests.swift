@@ -9,6 +9,40 @@ final class SearchTests {
         return terminal
     }
 
+    @Test func testSearchAdvancesAcrossArchivedWideRows() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 80, rows: 2, scrollback: 100)
+        terminal.preservesScrollbackLayout = true
+        let row = String(repeating: " ", count: 60) + "NEEDLE\r\n"
+        terminal.feed(text: row + row + "later\r\nlater\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        let service = SearchService(terminal: terminal)
+        let first = SearchResult(term: "NEEDLE", col: 60, row: 0, size: 6)
+        let second = SearchResult(term: "NEEDLE", col: 60, row: 1, size: 6)
+        #expect(service.findAll(term: "NEEDLE") == [first, second])
+        #expect(service.findNext(term: "NEEDLE") == first)
+        #expect(service.findNext(term: "NEEDLE") == second)
+        #expect(service.findNext(term: "NEEDLE") == first)
+        #expect(service.findPrevious(term: "NEEDLE") == second)
+        #expect(service.selectionRange(for: first).end == Position(col: 66, row: 0))
+    }
+
+    @Test(arguments: ["NEEDLE", "NEEλLE"])
+    func testSearchMapsWrappedMatchesUsingEachRowsOriginalWidth(_ term: String) {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 80, rows: 2, scrollback: 100)
+        terminal.preservesScrollbackLayout = true
+        terminal.feed(text: String(repeating: "A", count: 77) + term + "\r\nZ\r\n")
+        terminal.resize(cols: 50, rows: 2)
+        terminal.feed(text: "\u{1b}[H" + String(repeating: "A", count: 47) + term)
+        let service = SearchService(terminal: terminal)
+        let archived = SearchResult(term: term, col: 77, row: 0, size: 6)
+        let live = SearchResult(term: term, col: 47, row: 2, size: 6)
+        #expect(service.findAll(term: term) == [archived, live])
+        #expect(service.selectionRange(for: archived).end == Position(col: 3, row: 1))
+        #expect(service.selectionRange(for: live).end == Position(col: 3, row: 3))
+        #expect(service.findPrevious(term: term) == live)
+        #expect(service.findPrevious(term: term) == archived)
+    }
+
     // MARK: - SearchLineCache
 
     @Test func testSearchLineCacheStartsEmpty() {

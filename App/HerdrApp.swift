@@ -194,6 +194,8 @@ struct RootView: View {
     @State private var client: HerdrClient?
     @State private var credentials: SSHCredentials?
     @State private var session = 0   // bumped to force a fresh load on reconnect
+    /// The connected machine's sessions as last seen, so a session switch starts from them (#386).
+    @State private var sessionCache = SessionSwitchCache()
     /// #377: after a machine is tapped, the machine list stays up (its row reads
     /// "Connecting…") until the first agent list arrives, the attempt fails, or a short
     /// cap passes; only then does the Agents screen slide in. `homeShown` gates that.
@@ -201,6 +203,7 @@ struct RootView: View {
     /// Bumped per connect, so a superseded attempt's reveal cannot fire late.
     @State private var connectGeneration = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     private let pins = KeychainHostKeyPolicy.shared
     // The APNs token + tapped-notification target live here (in PushCenter), not in the
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
@@ -291,6 +294,13 @@ struct RootView: View {
         // killed session — up to ten 100 MB attachments — would otherwise survive every
         // launch in which the user never opens the Gram tab.
         .task { await GramView.Staging.sweepAbandonedOffMainActor() }
+        // Back in the foreground the held request channels may have died with the
+        // network while the app was suspended (#391): have each ping before its next
+        // request instead of letting that request find out by timing out.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, let transport else { return }
+            Task { await transport.markRequestChannelsSuspect() }
+        }
     }
 
     @ViewBuilder
@@ -310,6 +320,7 @@ struct RootView: View {
                 hostKey: SessionChoice.storeKey(credentials),
                 session: credentials.session,
                 onSwitchSession: { switchSession(to: $0) },
+                sessionCache: sessionCache,
                 onReconnect: { reconnect() },
                 onTrustHostKey: { fingerprint in trustAndReconnect(credentials, fingerprint: fingerprint) }
             )
@@ -437,9 +448,7 @@ struct RootView: View {
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
         case .sessions:
-            TerminalHomeView(client: HerdrClient(transport: SessionsMockTransport()), onDisconnect: {},
-                             session: "work", onTrustHostKey: { _ in false },
-                             livePaneIDs: MockTransport.demoLivePaneIDs)
+            SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
             // The live status stream receipt: `liveevents` is an events_v2 daemon whose
             // rows change only through streamed events, `liveevents-legacy` an older
@@ -607,6 +616,7 @@ struct RootView: View {
         if creds.session == nil { creds.session = SessionChoice.remembered(for: creds) }
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
+        sessionCache = SessionSwitchCache()   // another machine's sessions must not seed this one
         credentials = creds
         transport = newTransport
         client = newClient
@@ -685,6 +695,7 @@ struct RootView: View {
         client = nil
         transport = nil
         credentials = nil
+        sessionCache = SessionSwitchCache()
         LiveActivityController.shared.end()   // tear down the #90 Live Activity with the session
         // Downloaded gram files are readable without a connection, so they must not
         // survive the session that fetched them.
@@ -713,13 +724,24 @@ struct RootView: View {
     /// the client and remounts the home (agents, terminals, Gram) for that server.
     /// nil is the default session. Remembered per machine for the next connect.
     private func switchSession(to name: String?) {
-        guard var creds = credentials else { return }
+        guard var creds = credentials, let current = transport else { return }
         let next = (name == "default") ? nil : name
         guard creds.session != next else { return }
         creds.session = next
         credentials = creds
         SessionChoice.remember(next, for: creds)
-        reconnect()
+        // Same machine, same SSH connection (#386): only the herdr session changes, so
+        // there is no handshake to pay. A NEW client on a transport scoped to the new
+        // session, rather than retargeting the old one, so nothing the previous
+        // session's screens still send can reach the same pane id in this one. The
+        // old transport is not closed: it shares the connection.
+        let scoped = current.forSession(next)
+        let newClient = HerdrClient(transport: scoped)
+        transport = scoped
+        client = newClient
+        session += 1
+        registerPush(with: newClient)          // each session is its own herdr server
+        registerActivityPush(with: newClient)
     }
 
     /// A verified key rotation: pin the EXACT fingerprint the user verified out
@@ -886,10 +908,15 @@ struct ConnectView: View {
 
     // MARK: #374 inset groups (the Settings look of #357)
 
+    // Native UI type on the host picker; retain the app's text-size preference.
+    private func connectFont(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * Typography.scale, weight: weight)
+    }
+
     /// A section label above a group: today's uppercase label, inset 18 pt to line up with the
     /// rows' leading glyph (as Settings' labels do), no rule.
     private func connectSectionLabel(_ text: String) -> some View {
-        Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
+        Text(text).font(connectFont(12, .semibold)).tracking(1.4).foregroundStyle(Palette.textDim)
             .padding(.horizontal, 18)
     }
 
@@ -901,10 +928,10 @@ struct ConnectView: View {
                 .font(.system(size: 19, weight: .regular)).foregroundStyle(Palette.textDim)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text).lineLimit(1)
+                Text(title).font(connectFont(17)).foregroundStyle(Palette.text).lineLimit(1)
                 // #377: while this machine connects, the second line says so.
                 Text(connecting ? "Connecting…" : subtitle)
-                    .font(Typography.machine(13))
+                    .font(connectFont(14))
                     .foregroundStyle(connecting ? Palette.text : Palette.textDim).lineLimit(1)
                     .contentTransition(.opacity)
             }
@@ -944,7 +971,7 @@ struct ConnectView: View {
     private var inviteEntry: some View {
         VStack(spacing: 10) {
             Text("Got an invite link from someone?")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
             HStack(spacing: 10) {
                 PasteButton(payloadType: String.self) { items in
                     Task { @MainActor in
@@ -958,7 +985,7 @@ struct ConnectView: View {
                 .accessibilityLabel("Paste invite link")
                 Button { showingInviteScan = true } label: {
                     Label("Scan invite", systemImage: "qrcode.viewfinder")
-                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+                        .font(connectFont(15, .semibold)).foregroundStyle(Palette.text)
                         .padding(.horizontal, 16).frame(height: 44)
                         .background(Palette.surface, in: Capsule())
                 }
@@ -973,7 +1000,7 @@ struct ConnectView: View {
         Button { showingPairing = true } label: {
             HStack(spacing: 8) {
                 Image(systemName: "qrcode.viewfinder").font(.system(size: 16, weight: .semibold))
-                Text("Scan pairing code").font(Typography.app(16, .semibold))
+                Text("Scan pairing code").font(connectFont(16, .semibold))
             }
             .foregroundStyle(Palette.ground)
             .frame(maxWidth: .infinity, minHeight: 50)
@@ -994,11 +1021,11 @@ struct ConnectView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("herdrup")
-                    .font(Typography.app(34, .bold))
+                    .font(connectFont(34, .bold))
                     .foregroundStyle(Palette.text)
                     .accessibilityAddTraits(.isHeader)
                 Text("connect to your machine")
-                    .font(Typography.machine(13))
+                    .font(connectFont(16))
                     .foregroundStyle(Palette.textDim)
             }
         }
@@ -1020,13 +1047,13 @@ struct ConnectView: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("herdrup controls coding agents running on your computer.")
-                .font(Typography.app(17, .semibold)).foregroundStyle(Palette.text)
+                .font(connectFont(17, .semibold)).foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("BEFORE PAIRING")
-                    .font(Typography.microLabel).tracking(1.1)
-                    .foregroundStyle(Palette.textFaint)
+                    .font(connectFont(12, .semibold)).tracking(1.1)
+                    .foregroundStyle(Palette.textDim)
                 prerequisiteRow(
                     HerdrSetup.tailscalePrerequisite,
                     systemImage: "network",
@@ -1041,16 +1068,16 @@ struct ConnectView: View {
             .settingsGroup()
 
             Text("Then, on your computer, run:")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
 
             VStack(spacing: 8) {
                 monoCard(HerdrSetup.installCommand)
-                Text("then").font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                Text("then").font(connectFont(12)).foregroundStyle(Palette.textDim)
                 monoCard(HerdrSetup.pairCommand)
             }
 
             Text("Scan the code it prints and you're connected. No keys to copy.")
-                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
@@ -1063,7 +1090,7 @@ struct ConnectView: View {
                 .foregroundStyle(Palette.textFaint)
                 .frame(width: 15)
             Text(text)
-                .font(Typography.app(12.5))
+                .font(connectFont(12.5))
                 .foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1126,7 +1153,7 @@ struct ConnectView: View {
         Button { editorTarget = .add } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus").font(.system(size: 15, weight: .semibold))
-                Text("Add host").font(Typography.app(15, .semibold))
+                Text("Add host").font(connectFont(15, .semibold))
             }
             .foregroundStyle(Palette.text)
             .frame(maxWidth: .infinity, minHeight: 50)
@@ -1135,14 +1162,14 @@ struct ConnectView: View {
         .buttonStyle(.plain)
     }
 
-    // Two faint captions: what the connection is, and where the key lives.
+    // Readable secondary copy, using the same native type as the host picker.
     private var captions: some View {
         VStack(spacing: 8) {
             Text("Connects privately over your Tailscale network. Nothing is exposed to the public internet.")
-                .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
             Text("Your key or password stays in this device's Keychain, never uploaded.")
-                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+                .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -1812,6 +1839,9 @@ struct TerminalHomeView: View {
     var session: String? = nil
     /// Switch the app to another herdr session on this machine (nil = default).
     var onSwitchSession: (String?) -> Void = { _ in }
+    /// What the app last saw of each session on this machine (#386): this screen starts
+    /// from it after a session switch, and keeps it current.
+    var sessionCache: SessionSwitchCache? = nil
     var onReconnect: () -> Void = {}
     var onTrustHostKey: (String) -> Bool
     /// The set of panes herdr still lists; anything absent is `stopped`. `nil`
@@ -2131,6 +2161,9 @@ struct TerminalHomeView: View {
     @State private var agentsTitleCollapsed = false
     /// The sidebar section bar's selected pill, shared so it slides between tabs.
     @Namespace private var sidebarTabSelection
+    /// Sidebar-row hover → the empty detail column's glyph field. A reference, never
+    /// reassigned, so hovering the roster does not invalidate this view.
+    @State private var glyphFieldSpotlight = TerminalGlyphFieldView.Spotlight()
     /// The machine's running herdr sessions (#347); the pills show with two or more.
     @State private var runningSessions: [HerdrSession] = []
     /// Needs-you counts in the sessions this home is NOT on, by session name.
@@ -2140,6 +2173,22 @@ struct TerminalHomeView: View {
     /// fail-closed placement, stable order, count and quiet flag all live in
     /// HerdrKit's tested `AgentList`, not in SwiftUI's render path.
     private var fullList: AgentList { displayedRoster.agentList }
+
+    /// What each agent types into the empty detail column's glyph field.
+    private var glyphFieldLines: [TerminalGlyphFieldView.Line] {
+        fullList.sections.flatMap { $0.rows }.map(glyphFieldLine)
+    }
+
+    private func glyphFieldLine(_ row: AgentRow) -> TerminalGlyphFieldView.Line {
+        let tone: TerminalGlyphFieldView.Tone
+        switch row.group {
+        case .needsYou, .unrecognised: tone = .waiting
+        case .stopped: tone = .died
+        case .working: tone = .working
+        case .idle: tone = row.status == .done ? .done : .dim
+        }
+        return .init(id: row.id, text: "\(row.title) › \(subtitle(row.info))", tone: tone)
+    }
 
     /// The ordered LIVE agents a pushed pane can page through with a horizontal swipe.
     /// DELIBERATELY the full sorted live list (`AgentList.rows`, needs-you first), NOT the
@@ -2477,7 +2526,7 @@ struct TerminalHomeView: View {
                 switch selectedTab {
                 case .agents:
                     if frontID == nil {
-                        detailPlaceholder("Select an agent", "square.grid.2x2")
+                        SelectAgentPlaceholder(lines: glyphFieldLines, spotlight: glyphFieldSpotlight)
                     }
                 case .gram:
                     GramView(client: client, agents: agents, unread: gramUnread,
@@ -2921,14 +2970,6 @@ struct TerminalHomeView: View {
         }
     }
 
-    private func detailPlaceholder(_ text: String, _ icon: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 34)).foregroundStyle(Palette.textFaint)
-            Text(text).font(Typography.app(15, .medium)).foregroundStyle(Palette.textDim)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     var body: some View {
         // Observe the text-size setting so the home re-renders at the new
         // `Typography.scale` on change (identity unchanged → @State preserved).
@@ -3105,6 +3146,7 @@ struct TerminalHomeView: View {
         .task(id: hostKey) {
             if !hostKey.isEmpty, session == nil { terminalsStore.migrateLegacyIfNeeded(host: hostKey) }
         }
+        .onAppear { seedFromSessionCache() }
         .task { await watchSessions() }
         // First launch: show the gestures tutorial once — but NOT over a pending push
         // deep-link (openGramIfPending / applyDeepLink would dismiss it to show Gram or
@@ -3450,11 +3492,14 @@ struct TerminalHomeView: View {
                     return
                 }
                 runningSessions = running
+                sessionCache?.setRunningSessions(running)
                 var counts: [String: Int] = [:]
                 if running.count >= 2 {
                     for other in running where (other.default ? "default" : other.name) != (session ?? "default") {
-                        if let agents = try? await client.agentList(inSession: other.default ? nil : other.name) {
+                        let otherSession = other.default ? nil : other.name
+                        if let agents = try? await client.agentList(inSession: otherSession) {
                             counts[other.name] = AgentList(agents: agents).needsYouCount
+                            sessionCache?.store(agents, session: otherSession)
                         }
                     }
                 }
@@ -3463,6 +3508,27 @@ struct TerminalHomeView: View {
                 runningSessions = []
             }
             try? await Task.sleep(nanoseconds: 15_000_000_000)
+        }
+    }
+
+    /// After a session switch (#386), start from what the app already knows instead of an
+    /// empty screen: the running sessions (so the pills don't vanish and reappear), their
+    /// needs-you counts, and this session's agents if seen in the last minute. The first
+    /// load replaces all of it. Never overwrites a list a load has already published.
+    private func seedFromSessionCache() {
+        guard let sessionCache else { return }
+        if runningSessions.isEmpty, !sessionCache.runningSessions.isEmpty {
+            runningSessions = sessionCache.runningSessions
+            var counts: [String: Int] = [:]
+            for other in runningSessions where (other.default ? "default" : other.name) != (session ?? "default") {
+                if let agents = sessionCache.roster(for: other.default ? nil : other.name) {
+                    counts[other.name] = AgentList(agents: agents).needsYouCount
+                }
+            }
+            otherSessionsNeedYou = counts
+        }
+        if agents.isEmpty, let cached = sessionCache.roster(for: session) {
+            receiveRoster(agents: cached, accounts: [])
         }
     }
 
@@ -3950,6 +4016,16 @@ struct TerminalHomeView: View {
                         card(row)
                     }
                     .buttonStyle(.plain)
+                    // Over the sidebar on iPad / Mac, the hovered agent speaks in the empty
+                    // detail column's glyph field. No state changes here.
+                    .onContinuousHover(coordinateSpace: .global) { phase in
+                        switch phase {
+                        case .active(let location):
+                            glyphFieldSpotlight.hover(glyphFieldLine(row), globalY: location.y)
+                        case .ended:
+                            glyphFieldSpotlight.end(row.id)
+                        }
+                    }
                     // Bind UI receipts to the tappable row, not a Text child whose
                     // `isHittable` is false because the parent Button owns the hit.
                     .accessibilityIdentifier("agent-row-\(row.info.paneID)")
@@ -4103,8 +4179,9 @@ struct TerminalHomeView: View {
     }
 
     /// #352: a Messages-style row. Full width on the ground (no card), a 52 pt round avatar
-    /// with the status as a small badge on it, the amber needs-you dot left of the avatar
-    /// (like Messages' unread dot), the name over a two-line preview, and an inset divider.
+    /// with the status as a small badge on it, the name over a two-line preview, and an inset
+    /// divider. A waiting agent is marked by its "!" badge and a bright preview only; the old
+    /// amber dot left of the avatar duplicated the badge and was removed at the owner's request.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
         // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
@@ -4113,11 +4190,8 @@ struct TerminalHomeView: View {
         let avatar: CGFloat = sidebar ? 44 : 52
         let isOpen = sidebar && frontID == row.info.paneID
         return HStack(alignment: .top, spacing: 0) {
-            Circle().fill(row.group == .needsYou ? Palette.waiting : .clear)
-                .frame(width: 10, height: 10)
-                .padding(.top, 12 + avatar / 2 - 5)
-                .frame(width: 20)
-                .accessibilityHidden(true)
+            // The row's leading inset (where the needs-you dot used to sit).
+            Color.clear.frame(width: 20, height: 1)
             ZStack(alignment: .bottomTrailing) {
                 Circle().fill(AgentIdentity.gradient(for: row.info.agent))
                     .frame(width: avatar, height: avatar)
@@ -4439,6 +4513,7 @@ struct TerminalHomeView: View {
             // actually changed, because receiveRoster is equality-gated.
             let latestAccounts = rosterRefreshState().latest.accounts
             receiveRoster(agents: fetched, accounts: latestAccounts)
+            sessionCache?.store(fetched, session: session)
 
             clearSuccessfulLoadState()
             // Prune keep-mounted panes whose agent is gone (Stopped / vanished) so no dead
@@ -9220,9 +9295,49 @@ struct ForgetCapableMockTransport: HerdrTransport {
 
 /// `MockTransport` on a machine with three running herdr sessions (work, personal and
 /// default) for the session pills receipt (#347). Every session answers with the demo list.
+/// The `sessions` mock's stand-in for RootView's session switch (#386): a tap on a pill
+/// remounts the home on a client for that session, sharing one `SessionSwitchCache`,
+/// exactly as RootView does on a real machine.
+struct SessionsMockHome: View {
+    @State private var session: String? = "work"
+    @State private var generation = 0
+    @State private var cache = SessionSwitchCache()
+
+    var body: some View {
+        TerminalHomeView(
+            client: HerdrClient(transport: SessionsMockTransport(session: session, startedOn: generation)),
+            onDisconnect: {}, session: session,
+            onSwitchSession: { next in
+                session = next
+                generation += 1
+            },
+            sessionCache: cache,
+            onTrustHostKey: { _ in false },
+            livePaneIDs: MockTransport.demoLivePaneIDs)
+        .id(generation)
+    }
+}
+
 struct SessionsMockTransport: SessionListingTransport {
     private let base = MockTransport()
-    func roundTrip(_ requestLine: String) async throws -> String { try await base.roundTrip(requestLine) }
+    /// The session this client addresses, and whether it was reached by a switch.
+    let session: String?
+    let startedOn: Int
+
+    init(session: String? = "work", startedOn: Int = 0) {
+        self.session = session
+        self.startedOn = startedOn
+    }
+
+    /// After a switch, this session's own `agent.list` is slow (4 s), as on a machine far
+    /// away, while the pills' peeks at other sessions answer at once. So the agents can
+    /// only appear quickly from what the app already knew (#386).
+    func roundTrip(_ requestLine: String) async throws -> String {
+        if startedOn > 0, requestLine.contains(#""agent.list""#) {
+            try await Task.sleep(nanoseconds: 4_000_000_000)
+        }
+        return try await base.roundTrip(requestLine)
+    }
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> { base.stream(requestLine) }
     func listSessions() async throws -> [HerdrSession] {
         [HerdrSession(name: "personal", running: true, default: false),

@@ -332,6 +332,13 @@ open class Terminal {
     /// Terminal configuration options.
     /// Setup(isReset:) method should be called to apply changes
     public var options: TerminalOptions
+
+    /// Keep archived rows in their original grid instead of rewrapping painted
+    /// terminal output on resize. New output still wraps at the current PTY width.
+    public var preservesScrollbackLayout: Bool {
+        get { normalBuffer.preservesScrollbackLayout }
+        set { normalBuffer.preservesScrollbackLayout = newValue }
+    }
     
     // The current buffers
     var normalBuffer, altBuffer: Buffer
@@ -741,7 +748,7 @@ open class Terminal {
     ///
     public func getCharData (col: Int, row: Int) -> CharData?
     {
-        if col < 0 || col >= cols {
+        if col < 0 || col >= buffer.displayColumns(at: row + buffer.yDisp) {
             return nil
         }
         if let l = getLine (row: row) {
@@ -5353,6 +5360,9 @@ open class Terminal {
             buffer.clearImagesFromLine(at: bottomRow)
             bottomLine.renderMode = .single
         } else if scrollTop == 0 {
+            if buffer.preservesScrollbackLayout {
+                lines[topRow].preserveLayout(columns: buffer.cols)
+            }
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = lines.isFull
 
@@ -5954,8 +5964,7 @@ open class Terminal {
         let b = bufferFromKind(kind: kind)
         let newLine = Data([10])
         for row in 0..<b.lines.count {
-            let bufferLine = b.lines [row]
-            let str = bufferLine.translateToString(trimRight: true)
+            let str = b.translateBufferLineToString(lineIndex: row, trimRight: true)
             if let encoded = str.data(using: encoding) {
                 result.append (encoded)
                 result.append (newLine)
@@ -6015,7 +6024,7 @@ open class Terminal {
             return nil
         }
         let row = max(0, min(pos.row, buffer.lines.count - 1))
-        let col = max(0, min(pos.col, cols - 1))
+        let col = max(0, min(pos.col, buffer.displayColumns(at: row) - 1))
         return Position(col: col, row: row)
     }
 
@@ -6043,7 +6052,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[position.row]
-        let lineLimit = min(cols, line.count)
+        let lineLimit = min(buffer.displayColumns(at: position.row), line.count)
         guard lineLimit > 0 else {
             return nil
         }
@@ -6162,7 +6171,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[position.row]
-        let lineLimit = min(cols, line.count)
+        let lineLimit = min(buffer.displayColumns(at: position.row), line.count)
         guard lineLimit > 0 else {
             return nil
         }
@@ -6266,7 +6275,7 @@ open class Terminal {
 
         let targetRow = position.row
         let targetLine = buffer.lines[targetRow]
-        let targetRawLimit = min(cols, targetLine.count)
+        let targetRawLimit = min(buffer.displayColumns(at: targetRow), targetLine.count)
         guard targetRawLimit > 0 else {
             return nil
         }
@@ -6293,12 +6302,12 @@ open class Terminal {
 
         var text = ""
         var cells: [GhosttyImplicitCellRef] = []
-        cells.reserveCapacity((endRow - startRow + 1) * cols)
+        cells.reserveCapacity((startRow...endRow).reduce(0) { $0 + buffer.displayColumns(at: $1) })
         var targetIsInsideTrimmedContent = false
 
         for row in startRow...endRow {
             let line = buffer.lines[row]
-            let rawLimit = min(cols, line.count)
+            let rawLimit = min(buffer.displayColumns(at: row), line.count)
             if rawLimit <= 0 {
                 continue
             }
@@ -6383,7 +6392,8 @@ open class Terminal {
 
         // Heuristic for editor-rendered wraps: the upper segment should reach
         // near the visual right edge and the seam should form a valid link.
-        let continuationThreshold = max(0, cols - max(2, cols / 5))
+        let columns = buffer.displayColumns(at: upper)
+        let continuationThreshold = max(0, columns - max(2, columns / 5))
         guard upperInfo.lastCol >= continuationThreshold else {
             return false
         }
@@ -6414,7 +6424,7 @@ open class Terminal {
             return nil
         }
         let line = buffer.lines[row]
-        let rawLimit = min(cols, line.count)
+        let rawLimit = min(buffer.displayColumns(at: row), line.count)
         guard rawLimit > 0 else {
             return nil
         }
@@ -6474,7 +6484,7 @@ open class Terminal {
         }
 
         let upperLine = buffer.lines[upper]
-        let upperLimit = min(min(cols, upperLine.count), upperLastCol + 1)
+        let upperLimit = min(min(buffer.displayColumns(at: upper), upperLine.count), upperLastCol + 1)
         guard upperLimit > 0 else {
             return false
         }
@@ -6485,7 +6495,7 @@ open class Terminal {
         }
 
         let lowerLine = buffer.lines[lower]
-        let lowerLimit = min(min(cols, lowerLine.count), lowerLine.getTrimmedLength())
+        let lowerLimit = min(min(buffer.displayColumns(at: lower), lowerLine.count), lowerLine.getTrimmedLength())
         guard lowerFirstCol < lowerLimit else {
             return false
         }

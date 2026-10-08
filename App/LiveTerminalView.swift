@@ -183,6 +183,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // Ctrl+End and mis-dedupes the tail callback.
         context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail,
                                           userInputToken: userInputToken)
+        surface.terminal.getTerminal().preservesScrollbackLayout = true
         context.coordinator.attach(surface)
         return surface
     }

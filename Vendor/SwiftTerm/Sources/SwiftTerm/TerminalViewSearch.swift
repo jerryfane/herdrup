@@ -79,6 +79,19 @@ extension TerminalView {
         selection.setSelection(start: range.start, end: range.end)
         if scrollToResult {
             scrollToReveal(row: result.row)
+            #if os(iOS) || os(visionOS)
+            let startX = CGFloat(result.col) * cellDimension.width
+            let endColumn = min(result.col + result.size, terminal.displayBuffer.displayColumns(at: result.row))
+            let endX = CGFloat(endColumn) * cellDimension.width
+            var x = contentOffset.x
+            if startX < x {
+                x = startX
+            } else if endX > x + bounds.width {
+                x = min(startX, endX - bounds.width)
+            }
+            x = min(max(0, x), max(0, contentSize.width - bounds.width))
+            setContentOffset(CGPoint(x: x, y: contentOffset.y), animated: false)
+            #endif
         }
         return true
     }
