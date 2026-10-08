@@ -203,6 +203,7 @@ struct RootView: View {
     /// Bumped per connect, so a superseded attempt's reveal cannot fire late.
     @State private var connectGeneration = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     private let pins = KeychainHostKeyPolicy.shared
     // The APNs token + tapped-notification target live here (in PushCenter), not in the
     // `.id(session)` home view, so they survive a reconnect. RootView owns the client, so it is what
@@ -293,6 +294,13 @@ struct RootView: View {
         // killed session — up to ten 100 MB attachments — would otherwise survive every
         // launch in which the user never opens the Gram tab.
         .task { await GramView.Staging.sweepAbandonedOffMainActor() }
+        // Back in the foreground the held request channels may have died with the
+        // network while the app was suspended (#391): have each ping before its next
+        // request instead of letting that request find out by timing out.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, let transport else { return }
+            Task { await transport.markRequestChannelsSuspect() }
+        }
     }
 
     @ViewBuilder

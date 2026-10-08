@@ -163,6 +163,10 @@ public enum TransportError: Error, CustomStringConvertible {
     /// hangs at the TCP layer until the OS gives up (~75s on iOS), which the user
     /// experiences as an endless spinner rather than as a failure.
     case connectTimedOut(host: String, onTailnet: Bool)
+    /// A request on a held `api-bridge --multi` channel got no reply within its bound
+    /// (`RequestChannelSettings.requestTimeout`). The per-request path cannot hang
+    /// this way: a dead link ends its exec channel, while a held channel can go silent.
+    case requestTimedOut(host: String)
 
     public var description: String {
         switch self {
@@ -200,6 +204,8 @@ public enum TransportError: Error, CustomStringConvertible {
                     + "open Tailscale and connect, then try again."
                 : "couldn't reach \(h) in time. It may be offline, or on a network "
                     + "this device cannot see."
+        case .requestTimedOut(let h):
+            return "herdr on \(h) did not answer in time; try again"
         }
     }
 }

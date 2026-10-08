@@ -111,7 +111,8 @@ CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and
 ```
 App/                     the SwiftUI app (terminal, status board, Gram, Settings) — iOS only
 Sources/HerdrKit/        pure-Swift transport + typed API — Linux-testable, no UI framework
-  CitadelTransport.swift   pure-Swift SSH transport: execs `herdr api-bridge` per channel
+  CitadelTransport.swift   pure-Swift SSH transport: one-off requests over `herdr api-bridge`
+  RequestChannel.swift     held `api-bridge --multi` channel per herdr session (when herdr has it)
   HerdrClient.swift        typed API: agentList, read, prompt, sendKeys, gram, subscribe
   AgentStatusStream.swift  all-pane status stream lines (events v2) and row patching
   AgentList.swift          agent-list model with fail-open-visible unknown statuses

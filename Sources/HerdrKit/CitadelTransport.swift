@@ -13,15 +13,21 @@ import NIOCore
 ///
 /// It reaches herdr's JSON API not by forwarding a unix socket (libssh2's
 /// `direct-streamlocal`, which nio-ssh does not implement) but by exec'ing the
-/// `herdr api-bridge` subcommand over one SSH channel per call and reading its
-/// stdout. The request rides as a base64 argument — Citadel's
-/// `executeCommandStream` execs and reads output but does not write the channel
-/// stdin, and base64 keeps arbitrary JSON off the remote shell's quoting rules.
+/// `herdr api-bridge` subcommand over SSH channels and reading its stdout. Two
+/// ways, chosen per herdr session (#390):
 ///
-/// One `SSHClient` is held and reused across calls (a fresh channel per call, no
-/// per-request handshake — closing issue #25). Conforms to the two-method
-/// `HerdrTransport` seam; `SessionRecovery`/`RecoveryExecutor` sit above it
-/// unchanged.
+/// - On a herdr that advertises `api_bridge_multi`, one held channel runs
+///   `herdr api-bridge --multi` and carries every one-off request as a line
+///   (`RequestChannel`, `RequestChannelPool`), so a request costs neither a channel
+///   open nor a herdr process start.
+/// - Otherwise — and for anything the channel cannot carry, or whenever it is
+///   unavailable — the per-request path: one channel per call, the request riding as
+///   a base64 argument (Citadel's `executeCommandStream` does not write the channel
+///   stdin, and base64 keeps arbitrary JSON off the remote shell's quoting rules).
+///
+/// One `SSHClient` is held and reused across calls (no per-request handshake —
+/// closing issue #25). Conforms to the two-method `HerdrTransport` seam;
+/// `SessionRecovery`/`RecoveryExecutor` sit above it unchanged.
 /// Lets exactly one racer resume a continuation. Resuming a continuation twice is
 /// undefined behaviour rather than a catchable error, so the guard has to be
 /// atomic — a plain Bool read-then-write is a race in exactly the interleaving
@@ -44,6 +50,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     /// `forSession(_:)` hold the SAME core, so switching herdr sessions reuses the
     /// connection instead of paying a new SSH handshake (#386).
     private let connection: SSHConnectionCore
+    /// How exec channels are opened. Production execs over `connection`; tests script it.
+    private let backend: ExecBackend
+    /// The `api-bridge --multi` channels, one per herdr session, shared by every
+    /// `forSession` sibling so `close()` on any of them closes all (#390).
+    private let requestChannels: RequestChannelPool
 
     /// - Parameters:
     ///   - credentials: host/port/username, the Ed25519 private key, and the
@@ -59,15 +70,41 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         hostKeyValidator: SSHHostKeyValidator,
         connectTimeoutNanoseconds: UInt64 = CitadelTransport.defaultConnectTimeoutNanoseconds
     ) {
-        self.credentials = credentials
-        self.connection = SSHConnectionCore(
+        let connection = SSHConnectionCore(
             credentials: credentials, hostKeyValidator: hostKeyValidator,
             connectTimeoutNanoseconds: connectTimeoutNanoseconds)
+        self.init(credentials: credentials, connection: connection, backend: .ssh(connection))
     }
 
-    private init(credentials: SSHCredentials, connection: SSHConnectionCore) {
+    /// The designated initializer. `backend` replaces the SSH exec plumbing and
+    /// `requestChannelSettings` the channel timers, so routing is testable without SSH.
+    init(
+        credentials: SSHCredentials,
+        connection: SSHConnectionCore,
+        backend: ExecBackend,
+        requestChannelSettings: RequestChannelSettings = RequestChannelSettings()
+    ) {
         self.credentials = credentials
         self.connection = connection
+        self.backend = backend
+        let host = credentials.host
+        self.requestChannels = RequestChannelPool(
+            host: host,
+            settings: requestChannelSettings,
+            perRequest: { requestLine, session in
+                try await CitadelTransport.perRequestRoundTrip(
+                    requestLine, session: session, host: host, backend: backend)
+            },
+            openLink: { session in
+                try await backend.openLink(CitadelTransport.multiBridgeCommand(session: session))
+            })
+    }
+
+    private init(credentials: SSHCredentials, sharing sibling: CitadelTransport) {
+        self.credentials = credentials
+        self.connection = sibling.connection
+        self.backend = sibling.backend
+        self.requestChannels = sibling.requestChannels
     }
 
     /// A transport for ANOTHER herdr session on the same machine that shares this
@@ -79,7 +116,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     public nonisolated func forSession(_ session: String?) -> CitadelTransport {
         var scoped = credentials
         scoped.session = session
-        return CitadelTransport(credentials: scoped, connection: connection)
+        return CitadelTransport(credentials: scoped, sharing: self)
     }
 
     /// The herdr session this transport addresses; nil is the default session.
@@ -127,6 +164,11 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     /// request may be up to ~90 KiB — ample for every request except an enormous
     /// `agent.prompt` / `pane.send_text`, which is refused rather than failing at
     /// execve with no bridge to report it.
+    ///
+    /// Bounds the per-request path only. A request riding a `--multi` request
+    /// channel is a stdin line, not an argument, and is bounded by the bridge's own
+    /// line limit instead (`RequestChannel.maxRequestLineBytes`, 1 MiB); a line over
+    /// that takes this path and is refused here exactly as before.
     static let maxCommandBytes = 120_000
 
     /// Default budget for a connect, handshake included.
@@ -308,10 +350,34 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         return command
     }
 
+    /// The exec command line for a session's held request channel (#389).
+    static func multiBridgeCommand(session: String?) -> String {
+        herdrCommand(["api-bridge", "--multi"], session: session)
+    }
+
+    /// The per-request path: one exec channel running `api-bridge <base64>`.
+    static func perRequestRoundTrip(
+        _ requestLine: String, session: String?, host: String, backend: ExecBackend,
+        onBytesReceived: ((Int) -> Void)? = nil
+    ) async throws -> String {
+        let output = try await backend.execute(try bridgeCommand(for: requestLine, session: session))
+        return try await parseBridgeOutput(output, host: host, onBytesReceived: onBytesReceived)
+    }
+
     // MARK: - HerdrTransport
 
+    /// Sends one request and returns its reply line: over the session's
+    /// `api-bridge --multi` channel when the host supports it and the request fits
+    /// (`RequestChannelPool`), else down the per-request path. Either way a failure
+    /// surfaces as the same `TransportError`.
     public func roundTrip(_ requestLine: String) async throws -> String {
-        try await roundTrip(requestLine, onBytesReceived: nil)
+        try await roundTrip(requestLine, inSession: credentials.session)
+    }
+
+    public func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String {
+        if let reply = try await requestChannels.send(requestLine, session: session) { return reply }
+        return try await Self.perRequestRoundTrip(
+            requestLine, session: session, host: credentials.host, backend: backend)
     }
 
     /// `roundTrip` that reports how many reply BYTES have arrived so far.
@@ -321,20 +387,28 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     /// and counting those is the only progress signal a caller can have. Used by
     /// `gramGetFile` to drive a real progress bar instead of a spinner that says
     /// nothing for twenty seconds on a 40 MB video.
-    public func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String {
-        let client = try await connectedClient()
-        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine, session: session))
-        return try await Self.parseBridgeOutput(output, host: credentials.host, onBytesReceived: nil)
-    }
-
+    ///
+    /// With a callback this ALWAYS takes the per-request path, never the shared
+    /// request channel. Counting one reply's bytes on the channel would be possible,
+    /// but the channel is one ordered byte stream: a 40 MB reply would stall every
+    /// other request queued behind it (the poll, a keystroke) for the whole download,
+    /// and would run into the channel's request timeout. On its own exec channel the
+    /// download has its own SSH flow-control window and its own lifetime.
     public func roundTrip(
         _ requestLine: String, onBytesReceived: ((Int) -> Void)?
     ) async throws -> String {
-        let client = try await connectedClient()
-        let output = try await client.executeCommandStream(try Self.bridgeCommand(for: requestLine, session: credentials.session))
-        return try await Self.parseBridgeOutput(
-            output, host: credentials.host, onBytesReceived: onBytesReceived
-        )
+        guard let onBytesReceived else { return try await roundTrip(requestLine) }
+        return try await Self.perRequestRoundTrip(
+            requestLine, session: credentials.session, host: credentials.host, backend: backend,
+            onBytesReceived: onBytesReceived)
+    }
+
+    /// The app returned to the foreground: every held request channel pings before
+    /// its next request, because the link may have died while the process was
+    /// suspended (#391). Without this a dead channel is only noticed after
+    /// `RequestChannelSettings.idleProbeAfter` of silence or a request timeout.
+    public func markRequestChannelsSuspect() async {
+        await requestChannels.markSuspect()
     }
 
     /// The herdr sessions on this machine (`herdr session list --json`, herdr >= 0.5.3), #347.
@@ -546,10 +620,35 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         )
     }
 
-    /// Closes the SSH connection this transport shares with every `forSession`
-    /// sibling. Idempotent.
+    /// Closes every request channel and the SSH connection this transport shares with
+    /// every `forSession` sibling. Idempotent.
     public func close() async {
+        await requestChannels.close()
         await connection.close()
+    }
+
+    /// Test-only window into the request channels.
+    var requestChannelPool: RequestChannelPool { requestChannels }
+}
+
+/// How `CitadelTransport` opens the exec channels that carry one-off requests: the
+/// per-request `api-bridge <base64>` exec and the held `api-bridge --multi` link.
+/// Production execs on the shared `SSHConnectionCore`; tests script both.
+struct ExecBackend: Sendable {
+    /// Runs `command` and streams its output; the stream throws a `RemoteExitError`
+    /// on a non-zero exit.
+    let execute: @Sendable (_ command: String) async throws -> AsyncThrowingStream<ExecCommandOutput, Error>
+    /// The link for a held channel running `command`. Nothing runs until `run`.
+    let openLink: @Sendable (_ command: String) async throws -> RequestChannelLink
+
+    static func ssh(_ connection: SSHConnectionCore) -> ExecBackend {
+        ExecBackend(
+            execute: { command in
+                try await connection.connectedClient().executeCommandStream(command)
+            },
+            openLink: { command in
+                CitadelRequestLink(client: try await connection.connectedClient(), command: command)
+            })
     }
 }
 

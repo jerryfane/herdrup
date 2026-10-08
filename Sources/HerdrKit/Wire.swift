@@ -995,6 +995,9 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let eventsV2: Bool
     /// `agent.forget` removes an archived agent's record (herdr#291), #380.
     public let agentForget: Bool
+    /// `herdr api-bridge --multi` exists: one exec channel serves many requests
+    /// (herdr PR #296). `CitadelTransport` routes one-off requests over it (#390).
+    public let apiBridgeMulti: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1005,6 +1008,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentSessionTransferHarnesses = "agent_session_transfer_harnesses"
         case eventsV2 = "events_v2"
         case agentForget = "agent_forget"
+        case apiBridgeMulti = "api_bridge_multi"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1020,6 +1024,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         )
         eventsV2 = try c.decodeIfPresent(Bool.self, forKey: .eventsV2) ?? false
         agentForget = try c.decodeIfPresent(Bool.self, forKey: .agentForget) ?? false
+        apiBridgeMulti = try c.decodeIfPresent(Bool.self, forKey: .apiBridgeMulti) ?? false
     }
 }
 
