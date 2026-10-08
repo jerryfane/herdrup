@@ -8,6 +8,14 @@ The plan for this task was revised four times. Each revision was forced by a
 measurement contradicting the previous premise, and the sequence is recorded
 below because the wrong turns are more instructive than the answer.
 
+> **Update (herdrup#387).** One-off requests no longer always open a channel each.
+> When a herdr session's `ping` advertises `capabilities.api_bridge_multi`, they
+> ride one held `herdr api-bridge --multi` exec channel per session, matched to
+> replies by `id` (`Sources/HerdrKit/RequestChannel.swift`). The per-request
+> channel described below is still the path for older herdr, requests over the
+> bridge's 1 MiB line limit, Gram downloads that report progress, and any request
+> made while the channel is unavailable. Streams keep their own connections.
+
 ## The design
 
 **Pool authenticated SSH sessions. Open a fresh channel per request. Do not pool
