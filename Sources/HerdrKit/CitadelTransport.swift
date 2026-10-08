@@ -269,9 +269,10 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     /// shell function can shadow it.
     ///
     /// `arguments` are fixed `isBareWord` words written into the script. `payload`
-    /// (base64) is split into `payloadWordBytes` words for csh, and the script
-    /// rejoins them into one final argument: with `IFS` empty, `"$*"` concatenates
-    /// the positional parameters with no separator.
+    /// is split on Character boundaries into words of at most `payloadWordBytes`
+    /// UTF-8 bytes for csh, and the script rejoins them into one final argument:
+    /// with `IFS` empty, `"$*"` concatenates the positional parameters with no
+    /// separator.
     static func herdrCommand(_ arguments: [String], payload: String? = nil, session: String? = nil) -> String {
         assert(arguments.allSatisfy(isBareWord), "an argument that is not a plain word")
         var script = herdrResolution
@@ -287,12 +288,22 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
 
         var command = "/bin/sh -c '" + script + #" "$*"' sh"#
         var rest = payload[...]
-        repeat {
+        // Close each word before the next Character's UTF-8 would pass the budget.
+        // A Character larger than the budget is emitted alone so this terminates.
+        while !rest.isEmpty {
+            var end = rest.startIndex
+            var used = 0
+            while end < rest.endIndex {
+                let nextBytes = rest[end].utf8.count
+                if used > 0 && used + nextBytes > payloadWordBytes { break }
+                used += nextBytes
+                end = rest.index(after: end)
+            }
             command += " '"
-            command += rest.prefix(payloadWordBytes)
+            command += rest[..<end]
             command += "'"
-            rest = rest.dropFirst(payloadWordBytes)
-        } while !rest.isEmpty
+            rest = rest[end...]
+        }
         return command
     }
 
