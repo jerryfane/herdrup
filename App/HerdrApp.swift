@@ -4171,8 +4171,9 @@ struct TerminalHomeView: View {
     }
 
     /// #352: a Messages-style row. Full width on the ground (no card), a 52 pt round avatar
-    /// with the status as a small badge on it, the amber needs-you dot left of the avatar
-    /// (like Messages' unread dot), the name over a two-line preview, and an inset divider.
+    /// with the status as a small badge on it, the name over a two-line preview, and an inset
+    /// divider. A waiting agent is marked by its "!" badge and a bright preview only; the old
+    /// amber dot left of the avatar duplicated the badge and was removed at the owner's request.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
         // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
@@ -4181,11 +4182,8 @@ struct TerminalHomeView: View {
         let avatar: CGFloat = sidebar ? 44 : 52
         let isOpen = sidebar && frontID == row.info.paneID
         return HStack(alignment: .top, spacing: 0) {
-            Circle().fill(row.group == .needsYou ? Palette.waiting : .clear)
-                .frame(width: 10, height: 10)
-                .padding(.top, 12 + avatar / 2 - 5)
-                .frame(width: 20)
-                .accessibilityHidden(true)
+            // The row's leading inset (where the needs-you dot used to sit).
+            Color.clear.frame(width: 20, height: 1)
             ZStack(alignment: .bottomTrailing) {
                 Circle().fill(AgentIdentity.gradient(for: row.info.agent))
                     .frame(width: avatar, height: avatar)
