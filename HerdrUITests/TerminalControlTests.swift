@@ -585,6 +585,29 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.isHittable)
     }
 
+    /// Owner report (2026-10-09): during a long dictation the reply field stayed at the top,
+    /// so the newest words ran on out of sight. Dictation writes through the reply binding,
+    /// not by typing, so the field must follow the end of text it didn't type itself.
+    /// Proof: a tap at the field's bottom-right lands at the very end of the text only if
+    /// the last line is what's on screen.
+    func testDictatedReplyKeepsItsNewestTextInView() {
+        launch("control")
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        command("reply-dictation")
+        let filled = NSPredicate { _, _ in (field.value as? String)?.hasSuffix("dictation-tail") == true }
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: filled, evaluatedWith: nil)], timeout: 8),
+                       .completed, "the dictated text should arrive in the reply field")
+        Thread.sleep(forTimeInterval: 0.6)
+        attach("terminal-composer-dictation")
+
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.88)).tap()
+        field.typeText("Z")
+        let value = field.value as? String ?? ""
+        XCTAssertTrue(value.hasSuffix("dictation-tailZ"),
+                      "the field should show the newest dictated line; the tap landed mid-text: …\(value.suffix(60))")
+    }
+
     /// Wraps just past one row, then deletes until the text fits again: the composer must
     /// return to a single row (after the hysteresis margin), with text still in it.
     /// Device-width independent: it types word by word until the toolbar appears.
