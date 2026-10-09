@@ -48,7 +48,9 @@ public func permanentStreamRefusal(code: String) -> String? {
     case "pane_not_found":
         return "this pane no longer exists on the server; not reconnecting"
     case "invalid_request":
-        return "this server does not support live terminals; not reconnecting"
+        // Seen most after installing the fork without restarting the running server.
+        return "this herdr server does not support live terminals. If you just installed "
+            + "jerryfane/herdr, restart it: herdr server stop, then herdr"
     case "guest_revoked":
         return "your access to this agent was revoked; not reconnecting"
     case "guest_forbidden":

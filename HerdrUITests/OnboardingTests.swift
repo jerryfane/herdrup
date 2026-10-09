@@ -36,6 +36,28 @@ final class OnboardingTests: XCTestCase {
         pair.tap()
         XCTAssertTrue(app.buttons["Copied"].waitForExistence(timeout: 2),
                       "tapping the pairing command should confirm the clipboard write")
+
+        // Pairing doesn't start herdr; the first screen must say how (Discord, 2026-10-08).
+        let start = app.buttons["Copy command: herdr"]
+        XCTAssertTrue(start.waitForExistence(timeout: 3),
+                      "the first screen should give the command that starts herdr after pairing")
+    }
+
+    /// Installing the fork doesn't restart a server that is already running, so the
+    /// "missing features" notice must give the restart commands, not only "install it".
+    func testForkNoticeGivesTheRestartCommands() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "fork-notice"
+        app.launch()
+
+        let stop = app.buttons["Copy command: herdr server stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 8),
+                      "the fork notice should give the command that stops the old server")
+        XCTAssertTrue(app.buttons["Copy command: herdr"].exists,
+                      "the fork notice should give the command that starts herdr again")
+        stop.tap()
+        XCTAssertTrue(app.buttons["Copied"].waitForExistence(timeout: 2),
+                      "tapping the restart command should confirm the clipboard write")
     }
 
     func testScannerExplainsBothCleanQRAlternatives() {

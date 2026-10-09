@@ -441,6 +441,8 @@ struct RootView: View {
                 Palette.ground.ignoresSafeArea()
                 PairingCommandGuidance().padding(24)
             }
+        case .forkNotice:
+            ForkNoticeView(onDismiss: {})
         case .list:
             TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
                              livePaneIDs: MockTransport.demoLivePaneIDs)
@@ -782,6 +784,11 @@ enum HerdrSetup {
     static let pairCommand = "herdr pair"
     static let openQRCommand = "herdr pair --open"
     static let saveQRCommand = "herdr pair --qr-file ~/Desktop/herdr-pair.svg"
+    /// Starts herdr (and its server, which keeps running after the window closes).
+    static let startCommand = "herdr"
+    /// Stops the running server so the next `startCommand` runs the installed version.
+    /// It closes the agents and terminals running in herdr.
+    static let stopServerCommand = "herdr server stop"
 
     static let tailscalePrerequisite =
         "Tailscale is connected on this iPhone and your computer."
@@ -819,8 +826,6 @@ struct ConnectView: View {
     /// The scan-to-connect sheet (#126) — the path that needs no key, no host address and
     /// no knowledge of what a daemon is.
     @State private var showingPairing = false
-    /// Which command was just copied, so the card can confirm it. Nil = none.
-    @State private var copiedCommand: String?
 
     var body: some View {
         ZStack {
@@ -1071,12 +1076,17 @@ struct ConnectView: View {
                 .font(connectFont(13)).foregroundStyle(Palette.textDim)
 
             VStack(spacing: 8) {
-                monoCard(HerdrSetup.installCommand)
+                CopyableCommand(command: HerdrSetup.installCommand)
                 Text("then").font(connectFont(12)).foregroundStyle(Palette.textDim)
-                monoCard(HerdrSetup.pairCommand)
+                CopyableCommand(command: HerdrSetup.pairCommand)
+                Text("scan the code it prints, then start herdr").font(connectFont(12))
+                    .foregroundStyle(Palette.textDim)
+                CopyableCommand(command: HerdrSetup.startCommand)
             }
 
-            Text("Scan the code it prints and you're connected. No keys to copy.")
+            // Pairing only authorises this phone; it doesn't start herdr. Without a running
+            // herdr the app connects to a machine with nothing to talk to.
+            Text("herdr keeps running after you close the terminal. No keys to copy.")
                 .font(connectFont(13)).foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1096,57 +1106,6 @@ struct ConnectView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(identifier)
-    }
-
-    /// A command the reader is meant to run on their computer — and can now COPY.
-    ///
-    /// It looked tappable and did nothing, which is worse than looking inert: the
-    /// obvious gesture on a command you are being told to run somewhere else is to
-    /// copy it, and this screen is a phone showing a command for a laptop, so
-    /// copy-then-paste is the whole point.
-    ///
-    /// Clipboard WRITE only (`UIPasteboard.general.string`), the same pattern as
-    /// `CopyForAgentButton` — a programmatic READ is what triggers the system paste
-    /// prompt that failed App Review under 2.1a.
-    private func monoCard(_ text: String) -> some View {
-        Button {
-            UIPasteboard.general.string = text
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            copiedCommand = text
-            // Revert the label rather than leaving a permanent "Copied", which would
-            // stop telling the truth the moment the clipboard changed.
-            #if DEBUG
-            // UI-test/screenshot fixtures may spend several seconds synchronizing
-            // after the tap before querying the new accessibility label. Keep the
-            // receipt visible in mock mode without changing production UX timing.
-            let confirmationNanoseconds: UInt64 = ScreenshotMock.mode == nil
-                ? 1_600_000_000
-                : 10_000_000_000
-            #else
-            let confirmationNanoseconds: UInt64 = 1_600_000_000
-            #endif
-            Task {
-                try? await Task.sleep(nanoseconds: confirmationNanoseconds)
-                if copiedCommand == text { copiedCommand = nil }
-            }
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Text(text)
-                    .font(Typography.machine(13)).foregroundStyle(Palette.text)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .multilineTextAlignment(.leading)
-                Image(systemName: copiedCommand == text ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(copiedCommand == text ? Palette.done : Palette.textFaint)
-                    .padding(.top, 2)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairlineQuiet, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text(copiedCommand == text ? "Copied" : "Copy command: \(text)"))
     }
 
     private var addHostButton: some View {
@@ -4383,11 +4342,12 @@ struct TerminalHomeView: View {
                 herdrInstallGuidance
             } else if let host = unavailableDaemonHost {
                 VStack(spacing: 10) {
-                    Text("herdr API daemon not responding")
+                    Text("herdr isn't running on \(host)")
                         .font(Typography.app(18, .semibold)).foregroundStyle(Palette.died)
-                    Text("The herdr binary is installed on \(host), but its API daemon could not be reached. Start or check the herdr daemon on that host, then retry.")
+                    Text("herdr is installed, but it isn't running. Start it on that computer, then retry:")
                         .font(Typography.app(13)).foregroundStyle(Palette.textDim)
                         .multilineTextAlignment(.center)
+                    CopyableCommand(command: HerdrSetup.startCommand)
                     Button("retry") { Task { await load() } }
                         .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
                 }
@@ -9199,7 +9159,7 @@ struct HtmlPreviewHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
+    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost, guestSettings
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
@@ -9219,6 +9179,7 @@ enum ScreenshotMock {
         case "control": return .control
         case "onboarding": return .onboarding
         case "pairing-guidance": return .pairingGuidance
+        case "fork-notice": return .forkNotice
         case "rosterstress": return .rosterStress
         case "liveevents": return .liveEvents
         case "archivedclose": return .archivedClose

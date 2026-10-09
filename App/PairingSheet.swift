@@ -87,12 +87,14 @@ struct PairingSheet: View {
                 tint: Palette.died,
                 primary: ("Try again", { phase = .scanning; scannerGeneration += 1 }))
         case .paired(let nickname):
+            // Pairing only authorises this phone; it doesn't start herdr, so say how.
             message(
                 title: "Connected",
-                body: "\(nickname) is saved on this device. You can reach it any time from "
-                    + "the machine list.",
+                body: "\(nickname) is saved on this device. If herdr isn't running on that "
+                    + "computer yet, start it there:",
                 systemImage: "checkmark.seal.fill",
                 tint: Palette.done,
+                command: HerdrSetup.startCommand,
                 primary: ("Open it", { dismiss(); onPaired(nickname) }))
         }
     }
@@ -119,6 +121,7 @@ struct PairingSheet: View {
 
     private func message(
         title: String, body: String, systemImage: String, tint: Color,
+        command: String? = nil,
         primary: (String, () -> Void)?
     ) -> some View {
         VStack(spacing: 14) {
@@ -126,6 +129,9 @@ struct PairingSheet: View {
             Text(title).font(Typography.app(19, .semibold)).foregroundStyle(Palette.text)
             Text(body).font(Typography.app(14)).foregroundStyle(Palette.textDim)
                 .multilineTextAlignment(.center)
+            if let command {
+                CopyableCommand(command: command)
+            }
             if let (label, action) = primary {
                 Button(action: action) {
                     Text(label).font(Typography.app(16, .semibold))
