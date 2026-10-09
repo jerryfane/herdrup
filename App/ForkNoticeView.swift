@@ -45,6 +45,7 @@ struct ForkNoticeView: View {
                     .foregroundStyle(Palette.textFaint)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                restartHelp
             }
             .padding(.horizontal, 28)
             Spacer(minLength: 0)
@@ -65,6 +66,26 @@ struct ForkNoticeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Palette.ground.ignoresSafeArea())
+    }
+
+    /// Installing replaces the program on disk but not the server that is already running,
+    /// so someone who has just installed the fork still sees this screen until they restart.
+    /// That was the most common report (Discord, 2026-10-08): pair worked (it doesn't use
+    /// the server), Gram and the live terminal didn't.
+    private var restartHelp: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Already installed it? Restart herdr so it runs the new version:")
+                .font(Typography.app(13, .semibold))
+                .foregroundStyle(Palette.text)
+                .fixedSize(horizontal: false, vertical: true)
+            CopyableCommand(command: HerdrSetup.stopServerCommand)
+            CopyableCommand(command: HerdrSetup.startCommand)
+            Text("Stopping closes the agents and terminals running in herdr.")
+                .font(Typography.app(12))
+                .foregroundStyle(Palette.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func row(_ item: (symbol: String, name: String, detail: String)) -> some View {

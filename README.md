@@ -57,6 +57,12 @@ public; it rides your own network). You need the fork that adds the gram / push 
 [**jerryfane/herdr**](https://github.com/jerryfane/herdr). The app tells you if it's talking to a
 daemon that doesn't have them.
 
+After `herdr pair`, start herdr on that computer with `herdr`; pairing alone doesn't start it. If you
+install the fork over a herdr that is already running, restart it so the new version runs:
+`herdr server stop`, then `herdr`. Stopping closes the agents and terminals running in herdr. The app
+shows these commands where they're needed (first run, after pairing, "herdr isn't running", and the
+missing-features notice).
+
 Push notifications go through the HerdrUp push relay (`push.herdrup.themartian.app`), so your machine
 needs no Apple push key. The app enrolls its push tokens with the relay and gives the daemon the sealed
 capability it gets back; notification text passes through the relay but is never stored or logged.
