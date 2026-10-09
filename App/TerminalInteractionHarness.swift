@@ -349,6 +349,8 @@ final class KeyboardSpacerBox: ObservableObject {
 final class TerminalInteractionHarness: ObservableObject {
     static let shared = TerminalInteractionHarness()
     static let navigateNotification = Notification.Name("TerminalInteractionNavigate")
+    /// Sets the control pane's reply text from outside the field, the way dictation does.
+    static let replyTextNotification = Notification.Name("TerminalInteractionReplyText")
     static let agents = [MockTransport.pagingAgent(kind: "RESIZE-ALFA", pane: "ix:a"),
                          MockTransport.pagingAgent(kind: "RESIZE-BRAVO", pane: "ix:b")]
     static let driver = TerminalInteractionDriver(control: ScreenshotMock.mode == .control)
@@ -762,6 +764,19 @@ final class TerminalInteractionHarness: ObservableObject {
             }
         case "reply-multiline-pasteboard":
             UIPasteboard.general.string = "pasted-one\npasted-two\npasted-three\npasted-four\npasted-tail"
+        case "reply-dictation":
+            // Dictation writes the reply through its binding, one partial result at a
+            // time, while the field isn't being typed in. Twenty-four lines ending in a
+            // marker, delivered in chunks, so the field must follow the growing end.
+            Task { @MainActor in
+                var text = ""
+                for line in 1...24 {
+                    text += (line == 1 ? "" : " ") + "dictated line \(line)"
+                    if line == 24 { text += " dictation-tail" }
+                    NotificationCenter.default.post(name: Self.replyTextNotification, object: text)
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                }
+            }
         case "newline-pasteboard":
             UIPasteboard.general.string = "\n\n"
         case "file-pasteboard":
@@ -866,7 +881,7 @@ private struct TerminalInteractionControls: View {
     private static let commands =
         ["80x24", "120x24", "80x32", "natural", "history", "tail", "kitty",
          "reset", "server", "switch", "close", "bounce", "paste-batch", "photo-pasteboard",
-         "reply-multiline-pasteboard", "newline-pasteboard", "file-pasteboard",
+         "reply-multiline-pasteboard", "reply-dictation", "newline-pasteboard", "file-pasteboard",
          "file-url-pasteboard", "finder-document-pasteboard",
          "batch-insert", "ime-commit", "keyboard-show", "keyboard-hide", "keyboard-nudge",
          "keyboard-show-live",

@@ -4893,11 +4893,20 @@ struct ComposerTextField: UIViewRepresentable {
         view.configureTypography()
         view.setPlaceholder(placeholder)
         if view.text != text {
+            // Dictation fills the field through this binding, a partial result at a time.
+            // Replacing `attributedText` scrolls the view back to the top, so a long
+            // dictation ran on out of sight. When the caret was at the end (dictation,
+            // a restored draft), keep the end in view; an edit elsewhere keeps its place.
+            let followsEnd = view.selectedRange.location >= (view.text as NSString).length
             view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
             view.typingAttributes = view.composerAttributes
             view.updatePlaceholder()
             view.invalidateIntrinsicContentSize()
             view.refreshScrollMode()
+            if followsEnd {
+                view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
+                view.requestCaretReveal()
+            }
         }
         if view.fixedHeight != fixedHeight {
             view.fixedHeight = fixedHeight
@@ -5478,6 +5487,14 @@ struct TerminalPaneContent: View {
         // recognizer to the WINDOW, so N keep-mounted panes would otherwise stack N
         // recognizers that all fire on one edge swipe.
         .overlay { if isForeground { EdgeSwipeBack { onClose() } } }
+        #if DEBUG
+        // The control harness's "reply-dictation" fills the reply through this binding,
+        // exactly as `MicButton` does with partial results.
+        .onReceive(NotificationCenter.default.publisher(for: TerminalInteractionHarness.replyTextNotification)) { note in
+            guard ScreenshotMock.mode == .control, let text = note.object as? String else { return }
+            reply = text
+        }
+        #endif
         // Hardware-keyboard shortcuts for this pane. Foreground only: N keep-mounted panes
         // would otherwise register N identical Command-F bindings, and UIKit would pick one
         // arbitrarily — quite possibly a hidden pane's.
