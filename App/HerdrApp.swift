@@ -3864,7 +3864,7 @@ struct TerminalHomeView: View {
     private func archivedCard(_ row: AgentRow) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(forName: row.title))
                     .frame(width: 40, height: 40).opacity(0.5)
                 Image(systemName: "archivebox.fill")
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
@@ -6970,18 +6970,23 @@ struct ShortcutsSheet: View {
 /// tab/sheet, the wrong level. The iPad split passes `showBack: false` (its sidebar is
 /// the navigation, so there is nothing to pop).
 private struct SettingsBackButton: View {
+    var inSectionBar = false
     @Environment(\.dismiss) private var dismiss
     var body: some View {
-        Button { dismiss() } label: {
-            ZStack {
-                Circle().fill(Palette.surfaceRaised).frame(width: 32, height: 32)
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Palette.text)
+        if inSectionBar {
+            SectionBarButton(icon: "chevron.left", label: "Back") { dismiss() }
+        } else {
+            Button { dismiss() } label: {
+                ZStack {
+                    Circle().fill(Palette.surfaceRaised).frame(width: 32, height: 32)
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                }
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Back"))
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text("Back"))
     }
 }
 
@@ -7511,7 +7516,7 @@ struct SettingsView: View {
         if UIDevice.current.userInterfaceIdiom == .pad {
             VStack(spacing: 1) {
                 SectionTopBar(title: title) {
-                    if showBack { SettingsBackButton() }
+                    if showBack { SettingsBackButton(inSectionBar: true) }
                 }
                 if !subtitle.isEmpty {
                     Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint)

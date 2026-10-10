@@ -148,9 +148,11 @@ Claude Design kit (design: [jerryfane/herdr#28](https://github.com/jerryfane/her
 *meaning* (amber = waiting on you, red = died, blue = working, green = done), monospace is the machine
 voice and a proportional sans is the app voice.
 
-Agent rows use system text, equal-height previews and a name-based avatar with a stable
-colour; the badge still carries status. Previews omit leading CLI prompt/spinner marks.
-The search capsule supports dictation using the same microphone and permission flow as the composer.
+Live agent rows use system text, equal-height previews and a name-based avatar with a stable
+colour; the badge still carries status. Archive entries share the name colour but keep their
+archive icon. Gram-feed and guest-view identity styling is unchanged. Previews omit leading
+CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
+Clear replaces the mic, and clearing restores it.
 On iPad and Designed-for-iPad Mac, Agents, Gram and Settings share a compact title bar:
 actions, Back and the sidebar toggle sit together on the right, clear of window controls.
 iPhone keeps its large titles. The sidebar rail and ⌘K remain available.
