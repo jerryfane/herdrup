@@ -57,6 +57,9 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
 
     private func content(leading: CGFloat, trailing: CGFloat) -> some View {
         SectionBarLayout(leadingInset: leading, trailingInset: trailing) {
+            HStack(spacing: 0, content: self.leading)
+                .padding(.horizontal, 2)
+                .background(Capsule().fill(Palette.surfaceRaised))
             HStack(spacing: 6) {
                 Text(title)
                     .font(Typography.app(17, .semibold))
@@ -75,9 +78,6 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
             HStack(spacing: 0, content: actions)
                 .padding(.horizontal, 2)
                 .background(Capsule().fill(Palette.surfaceRaised))
-            HStack(spacing: 0, content: self.leading)
-                .padding(.horizontal, 2)
-                .background(Capsule().fill(Palette.surfaceRaised))
         }
     }
 }
@@ -93,21 +93,21 @@ private struct SectionBarLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let actions = subviews[1].sizeThatFits(.unspecified)
-        let leading = subviews[2].sizeThatFits(.unspecified)
+        let actions = subviews[2].sizeThatFits(.unspecified)
+        let leading = subviews[0].sizeThatFits(.unspecified)
         let leadingWidth = leading.height > 0 ? leading.width : 0
         let titleLeading = leadingInset + (leadingWidth > 0 ? leadingWidth + 8 : 0)
         let available = max(0, bounds.width - titleLeading - trailingInset - actions.width - 8)
         let titleProposal = ProposedViewSize(width: available, height: bounds.height)
-        let title = subviews[0].sizeThatFits(titleProposal)
+        let title = subviews[1].sizeThatFits(titleProposal)
         let titleX = max(titleLeading + title.width / 2,
                          min(bounds.width / 2, titleLeading + available - title.width / 2))
-        subviews[0].place(at: CGPoint(x: bounds.minX + titleX, y: bounds.midY),
+        subviews[1].place(at: CGPoint(x: bounds.minX + titleX, y: bounds.midY),
                           anchor: .center, proposal: titleProposal)
-        subviews[1].place(at: CGPoint(x: bounds.maxX - trailingInset, y: bounds.midY),
+        subviews[2].place(at: CGPoint(x: bounds.maxX - trailingInset, y: bounds.midY),
                           anchor: .trailing, proposal: .unspecified)
         if leadingWidth > 0 {
-            subviews[2].place(at: CGPoint(x: bounds.minX + leadingInset, y: bounds.midY),
+            subviews[0].place(at: CGPoint(x: bounds.minX + leadingInset, y: bounds.midY),
                               anchor: .leading, proposal: .unspecified)
         }
     }

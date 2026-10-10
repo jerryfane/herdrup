@@ -161,6 +161,7 @@ On iPad and Designed-for-iPad Mac, Agents, Gram and Settings share a compact tit
 on iPad, Back stays with the actions and sidebar toggle on the right, clear of window controls.
 On Mac, Back sits on the left, below the separate system window-title row; other actions stay
 on the right. Pushed Settings pages follow the same platform-specific Back placement.
+The leading control is declared before the title, matching the visual reading order.
 iPhone keeps its large titles. The sidebar rail and ⌘K remain available.
 
 ## License
