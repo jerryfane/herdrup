@@ -388,6 +388,13 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
                               machineID: machineID, machineLabel: machineLabel)
     }
 
+    /// Activity without the CLI's leading prompt/spinner decoration.
+    public var activityText: String? {
+        guard let terminalTitleStripped else { return nil }
+        let activity = AgentPresentation.activity(terminalTitleStripped)
+        return activity.isEmpty ? nil : activity
+    }
+
     public var isWorking: Bool { agentStatus == "working" }
 
     /// The agent is showing an interactive menu / permission prompt (plan-approval or

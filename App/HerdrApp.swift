@@ -193,6 +193,9 @@ struct RootView: View {
     @State private var transport: CitadelTransport?
     @State private var client: HerdrClient?
     @State private var credentials: SSHCredentials?
+    #if DEBUG
+    @State private var mockDisconnected = false
+    #endif
     @State private var session = 0   // bumped to force a fresh load on reconnect
     /// The connected machine's sessions as last seen, so a session switch starts from them (#386).
     @State private var sessionCache = SessionSwitchCache()
@@ -444,8 +447,12 @@ struct RootView: View {
         case .forkNotice:
             ForkNoticeView(onDismiss: {})
         case .list:
-            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
-                             livePaneIDs: MockTransport.demoLivePaneIDs)
+            if mockDisconnected {
+                ConnectView { _ in mockDisconnected = false }
+            } else {
+                TerminalHomeView(client: mockClient, onDisconnect: { mockDisconnected = true },
+                                 onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
+            }
         case .archivedClose:
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
@@ -1866,6 +1873,8 @@ struct TerminalHomeView: View {
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
+    @State private var searchDictating = false
     /// The agent a pending "Restart agent" confirmation is about (nil = no
     /// dialog). Set from the agent card's context menu; a restart interrupts a
     /// busy agent's turn, so it is confirmed before firing.
@@ -2300,7 +2309,6 @@ struct TerminalHomeView: View {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    sidebarTopRow
                     switch selectedTab {
                     case .agents:
                         header
@@ -2312,6 +2320,7 @@ struct TerminalHomeView: View {
                             agentList
                         }
                     case .settings:
+                        SectionTopBar(title: "Settings") { hideSidebarButton }
                         settingsIndex   // the section index; each jumps the detail pane
                     case .gram:
                         // Gram's Inbox/Saved selector belongs in THIS column, beside the section
@@ -2586,37 +2595,13 @@ struct TerminalHomeView: View {
     /// reads as a binding, so the detail pane's content swaps in place with no navigation.
     private var gramSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // #355: the phone header's shape — a large left-aligned title with the amber unread
-            // count, and the actions in one capsule. No subtitle line: the count carries it.
-            HStack(alignment: .center, spacing: 8) {
-                Text("Gram").font(Typography.app(34, .bold)).foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                    .accessibilityAddTraits(.isHeader)
-                if gramUnread.count > 0 {
-                    Text("\(gramUnread.count)")
-                        .font(Typography.machine(11, .semibold))
-                        .foregroundStyle(Palette.ground)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Palette.waiting))
-                        .accessibilityLabel("\(gramUnread.count) unread")
+            SectionTopBar(title: "Gram", count: gramUnread.count) {
+                hideSidebarButton
+                if !gramShowingSaved, gramUnread.count > 0 {
+                    SectionBarButton(icon: "envelope.open", label: "Read all") { gramReadAllToken += 1 }
                 }
-                Spacer(minLength: 0)
-                HStack(spacing: 0) {
-                    // Read all, beside refresh. Gated exactly like the phone header's copy: only
-                    // on the Inbox (Saved has no unread concept, so it would be a no-op control
-                    // there) and only while something is unread. The count comes from the ambient
-                    // poll this view already owns, so the button needs nothing from the page.
-                    if !gramShowingSaved, gramUnread.count > 0 {
-                        gramHeaderButton("envelope.open") { gramReadAllToken += 1 }
-                            .accessibilityLabel("Read all")
-                    }
-                    gramHeaderButton("arrow.clockwise") { gramRefreshToken += 1 }
-                        .accessibilityLabel("Refresh")
-                }
-                .padding(.horizontal, 2)
-                .background(Capsule().fill(Palette.surfaceRaised))
+                SectionBarButton(icon: "arrow.clockwise", label: "Refresh") { gramRefreshToken += 1 }
             }
-            .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
             Divider().overlay(Palette.hairlineQuiet)
             VStack(spacing: 4) {
                 gramSidebarRow(title: "Inbox", icon: "tray", selected: !gramShowingSaved,
@@ -2632,18 +2617,6 @@ struct TerminalHomeView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// One segment of the Gram sidebar header's capsule: a 40 x 44 glyph target.
-    private func gramHeaderButton(_ icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Palette.text)
-                .frame(width: 40, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .hoverEffect(.highlight)
-    }
 
     /// One selectable row in the Gram sidebar. `badgeMuted` renders the count as a quiet pill
     /// (Saved) rather than the attention-coloured unread pill (Inbox).
@@ -2678,18 +2651,11 @@ struct TerminalHomeView: View {
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
     }
-
-    /// The sidebar's top row (#360): only the minimise toggle, now that the sections moved to
-    /// the bar at the bottom. Leading, where the system puts a sidebar toggle.
-    private var sidebarTopRow: some View {
-        HStack {
-            sidebarToggleButton(
-                icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 2)
+    private var hideSidebarButton: some View {
+        SectionBarButton(icon: "sidebar.leading", label: "Minimise sidebar",
+                         identifier: "terminal-sidebar-toggle", action: toggleSidebar)
+            .help("Minimise sidebar (⌘K)")
     }
-
     /// The sections as the iPhone tab bar, at the bottom of the sidebar (#360): the same
     /// items, `.fill` symbols, 10 pt labels, white selected tab (`.tint(Palette.text)` on
     /// iPhone) and the system red Gram count. iPadOS has no system tab bar inside a split
@@ -3351,7 +3317,24 @@ struct TerminalHomeView: View {
     /// system large title collapses. Without a roster on screen (first load, error) the bar
     /// keeps the large title itself. The old "N need you" subtitle is gone: the rows' amber
     /// marks and the minimised rail's counts carry it.
+    @ViewBuilder
     private var header: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            SectionTopBar(title: "Agents") {
+                if hSizeClass == .regular { hideSidebarButton }
+                SectionBarButton(icon: "chevron.left", label: "Back",
+                                 identifier: "agents-back", action: onDisconnect)
+                SectionBarButton(icon: "terminal", label: "New terminal") {
+                    Task { await createTerminal() }
+                }
+                SectionBarButton(icon: "plus", label: "New agent") { activeCover = .newAgent }
+            }
+        } else {
+            phoneHeader
+        }
+    }
+
+    private var phoneHeader: some View {
         HStack(alignment: .center, spacing: 10) {
             circleButton("chevron.left") { onDisconnect() }
                 .accessibilityLabel("Back")
@@ -3404,14 +3387,14 @@ struct TerminalHomeView: View {
     /// scroll away with the list (#353); the title reports when it has left the viewport.
     private var rosterTitleBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
-            largeAgentsTitle
-                .padding(.horizontal, 16)
-                .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
-                    agentsTitleCollapsed = $0
-                }
-                // A remounted roster starts at the top with the large title visible; reset
-                // here so a stale "collapsed" never shows both titles before the first scroll.
-                .onAppear { agentsTitleCollapsed = false }
+            if UIDevice.current.userInterfaceIdiom != .pad {
+                largeAgentsTitle
+                    .padding(.horizontal, 16)
+                    .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
+                        agentsTitleCollapsed = $0
+                    }
+                    .onAppear { agentsTitleCollapsed = false }
+            }
             VStack(spacing: 0) {
                 searchField
                 if runningSessions.count >= 2 {
@@ -3518,7 +3501,7 @@ struct TerminalHomeView: View {
         .hoverEffect(.highlight)
     }
 
-    /// The native-style search field: magnifier, 36 pt, rounded.
+    /// Search shares the composer's speech pipeline and stops recording off-screen.
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
@@ -3528,7 +3511,9 @@ struct TerminalHomeView: View {
             TextField("Search", text: $search)
                 .font(Typography.app(16)).foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-            if !search.isEmpty {
+                .focused($searchFocused)
+                .accessibilityIdentifier("agent-search")
+            if !search.isEmpty && !searchDictating {
                 Button { search = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
@@ -3536,13 +3521,17 @@ struct TerminalHomeView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
+            } else {
+                MicButton(text: $search, isActive: searchFocused,
+                          recording: $searchDictating, onStart: { searchFocused = true })
+                    .accessibilityIdentifier("agent-search-mic")
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 36)
+        .frame(height: 42)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(Capsule())
         .padding(.horizontal, 16).padding(.bottom, 6)
     }
 
@@ -4143,18 +4132,18 @@ struct TerminalHomeView: View {
     /// amber dot left of the avatar duplicated the badge and was removed at the owner's request.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
     private func card(_ row: AgentRow) -> some View {
-        // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
-        // agent open in the detail column gets a rounded highlight, like Messages' sidebar.
+        // Fixed two-line rows; scale the text area with the app's text-size setting.
+        // The selected sidebar row retains its rounded highlight.
         let sidebar = hSizeClass == .regular
         let avatar: CGFloat = sidebar ? 44 : 52
         let isOpen = sidebar && frontID == row.info.paneID
-        return HStack(alignment: .top, spacing: 0) {
+        return HStack(alignment: .center, spacing: 0) {
             // The row's leading inset (where the needs-you dot used to sit).
             Color.clear.frame(width: 20, height: 1)
             ZStack(alignment: .bottomTrailing) {
-                Circle().fill(AgentIdentity.gradient(for: row.info.agent))
+                Circle().fill(AgentIdentity.gradient(forName: row.title))
                     .frame(width: avatar, height: avatar)
-                    .overlay(Text(AgentIdentity.glyph(for: row.info.agent))
+                    .overlay(Text(AgentIdentity.glyph(forName: row.title))
                         .font(Typography.app(sidebar ? 19 : 22, .bold)).foregroundStyle(.white))
                 Group {
                     if row.info.isUnreachable {
@@ -4165,11 +4154,10 @@ struct TerminalHomeView: View {
                 }
                 .offset(x: 4, y: 4)
             }
-            .padding(.top, 12)
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(row.title).font(Typography.app(sidebar ? 16 : 17, .semibold)).foregroundStyle(Palette.text)
+                    Text(row.title).font(.system(size: (sidebar ? 16 : 17) * Typography.scale, weight: .semibold)).foregroundStyle(Palette.text)
                         .lineLimit(1)
                     rowMarkers(row)
                     Spacer(minLength: 6)
@@ -4195,7 +4183,7 @@ struct TerminalHomeView: View {
                 // The preview: what it is doing (folder · activity). A waiting agent's reads in
                 // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(Typography.app(sidebar ? 14 : 15))
+                    .font(.system(size: (sidebar ? 14 : 15) * Typography.scale))
                     .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -4213,12 +4201,15 @@ struct TerminalHomeView: View {
                         .lineLimit(1)
                 }
             }
-            .padding(.top, 13).padding(.bottom, 12).padding(.trailing, 16)
-            .frame(maxWidth: .infinity, minHeight: sidebar ? 72 : 76, alignment: .topLeading)
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: (sidebar ? 80 : 86) * max(1, Typography.scale), alignment: .center)
             // The divider starts where the text starts, not under the avatar. The open
             // row's highlight replaces it.
             .overlay(alignment: .bottom) {
-                if !isOpen { Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5) }
+                if !isOpen {
+                    Rectangle().fill(Palette.hairline).frame(height: 1).padding(.trailing, 16)
+                }
             }
         }
         .background {
@@ -4271,7 +4262,7 @@ struct TerminalHomeView: View {
         let folder = info.cwd
             .map { URL(fileURLWithPath: $0).lastPathComponent }
             .flatMap { $0.isEmpty || $0 == "/" ? nil : $0 }
-        switch (folder, info.terminalTitleStripped) {
+        switch (folder, info.activityText) {
         case let (f?, a?): return "\(f) · \(a)"
         case let (f?, nil): return f
         case let (nil, a?): return a
@@ -7510,7 +7501,25 @@ struct SettingsView: View {
 
     /// The detail header: an optional circular back button, then a title in the app
     /// voice with a machine-voice subtitle beneath it.
+    @ViewBuilder
     private func detailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            VStack(spacing: 1) {
+                SectionTopBar(title: title) {
+                    if showBack { SettingsBackButton() }
+                }
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint)
+                        .lineLimit(1).frame(maxWidth: .infinity)
+                        .padding(.horizontal, 16).padding(.bottom, 12)
+                }
+            }
+        } else {
+            phoneDetailHeader(title, subtitle: subtitle, tint: tint, showBack: showBack)
+        }
+    }
+
+    private func phoneDetailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
         HStack(spacing: 12) {
             if showBack { SettingsBackButton() }
             VStack(alignment: .leading, spacing: 1) {
@@ -7757,7 +7766,20 @@ struct SettingsView: View {
     // voice at .semibold, a bare xmark close on the right, and NO baked-in hairline
     // (the body draws a separate Divider under it, like its sibling sheets). This is
     // a sheet, not a nav push — xmark and swipe-down both dismiss, so there's no back.
+    @ViewBuilder
     private var header: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            SectionTopBar(title: "Settings") {
+                if let onClose {
+                    SectionBarButton(icon: "xmark", label: "Close", action: onClose)
+                }
+            }
+        } else {
+            phoneHeader
+        }
+    }
+
+    private var phoneHeader: some View {
         HStack(spacing: 10) {
             Text("Settings")
                 .font(Typography.app(34, .bold))

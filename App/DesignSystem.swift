@@ -149,6 +149,22 @@ enum AgentIdentity {
             return first.isEmpty ? "?" : first
         }
     }
+
+    static func glyph(forName name: String) -> String {
+        AgentPresentation.initial(for: name)
+    }
+
+    static func gradient(forName name: String) -> LinearGradient {
+        let (a, b): (UInt32, UInt32)
+        switch AgentPresentation.colorIndex(for: name) {
+        case 0: (a, b) = (0x8B79F6, 0x5B44C9)
+        case 1: (a, b) = (0xCE58A4, 0xA32E77)
+        case 2: (a, b) = (0xE8923C, 0xC5622A)
+        default: (a, b) = (0x4C6EF5, 0x2E44C4)
+        }
+        return LinearGradient(colors: [Color(hex: a), Color(hex: b)],
+                              startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
 }
 
 extension Color {

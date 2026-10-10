@@ -344,6 +344,7 @@ jobs:
           run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
           # The empty detail column (and its glyph field) exists only in the iPad layout.
           run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
+          run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
           exit "$failed"
 
       - name: Run UIKit SwiftTerm API regressions on both devices
