@@ -8,6 +8,14 @@ final class AgentListChromeTests: XCTestCase {
         app.launch()
         let back = app.buttons[UIDevice.current.userInterfaceIdiom == .pad ? "agents-back" : "Back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 10))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let window = app.windows.firstMatch
+            let initialWidth = window.frame.width
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+                .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.82)))
+            XCTAssertLessThan(window.frame.width, initialWidth,
+                              "Back must be exercised in a system window, not just full screen")
+        }
         XCTAssertTrue(back.isHittable)
         back.tap()
         XCTAssertTrue(app.staticTexts["connect to your machine"].waitForExistence(timeout: 5))

@@ -2002,9 +2002,9 @@ struct TerminalHomeView: View {
     /// longer than the split view's own column animation, so a minimise/expand sweep
     /// commits once, at the width it ended on.
     private static let sidebarWidthSettle: UInt64 = 500_000_000
-    /// The bounds the modifier enforces. Kept as one constant so the stored width, the
-    /// clamp and the modifier cannot drift apart.
-    private static let sidebarWidthRange: ClosedRange<CGFloat> = 250...460
+    /// Four 40 pt actions, the title and the system window corner must fit together.
+    /// Keep the stored width, clamp and split-view modifier on the same bounds.
+    private static let sidebarWidthRange: ClosedRange<CGFloat> = 320...460
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -2304,6 +2304,7 @@ struct TerminalHomeView: View {
     /// those sections). Reuses the SAME views + terminal machinery as the phone layout — only the
     /// arrangement differs. iPhone / narrow width keeps the tab-bar-with-terminal-over layout.
     private var iPadLayout: some View {
+        GeometryReader { geometry in
         agentActions(
         NavigationSplitView(columnVisibility: $columnVisibility) {
             ZStack {
@@ -2482,6 +2483,10 @@ struct TerminalHomeView: View {
                 .presentationDragIndicator(.visible)
         }
         )
+        // NavigationSplitView consumes corner insets before passing its environment
+        // to the sidebar; retain window presence for the shared bar's vertical alignment.
+        .environment(\.sectionHasWindowControls, sectionWindowHasControls(geometry))
+        }
     }
 
     /// The detail column's content, factored out so the rail can sit beside it.

@@ -33,4 +33,12 @@ final class AgentPresentationTests: XCTestCase {
         XCTAssertEqual(AgentPresentation.initial(for: "👩🏽‍💻 coding"), "👩🏽‍💻")
         XCTAssertEqual(AgentPresentation.initial(for: " \n"), "?")
     }
+
+    func testPaletteSeparatesTheRosterNames() {
+        let names = ["mcb-air/mcb-air", "jarvis", "vetrina", "trend-scout", "herdr-app", "clientloop"]
+        let colors = Set(names.map(AgentPresentation.colorIndex(for:)))
+        XCTAssertTrue(colors.isSubset(of: Set(0..<4)))
+        // The approved roster must have at least three colours, not one colour per tool.
+        XCTAssertGreaterThanOrEqual(colors.count, 3)
+    }
 }

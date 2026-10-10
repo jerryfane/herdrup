@@ -697,8 +697,7 @@ struct GramView: View {
             .foregroundStyle(color)
             .frame(width: 40, height: 44)
             .contentShape(Rectangle())
-            // Inside the Button's label, so the pointer highlight covers the whole segment,
-            // matching the iPad sidebar capsule's `gramHeaderButton`.
+            // The pointer highlight covers the segment, matching the shared section bar.
             .hoverEffect(.highlight)
     }
 
