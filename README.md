@@ -111,6 +111,9 @@ geometry only from ordered stream frames; a short retained frame covers resize t
 stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
+The app and test bundles are built before the timed UI runs, and each simulator is booted
+before its test deadline starts. Debug resize receipts are per pane, so a background
+terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
 
 ## Architecture
 

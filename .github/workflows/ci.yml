@@ -188,15 +188,15 @@ jobs:
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY
 
-      - name: Build for simulator (compile check — SwiftTerm 1.15.0 + Metal + app)
+      - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
         run: |
           set -o pipefail
-          xcodebuild build \
+          xcodebuild build-for-testing \
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
             -derivedDataPath .build-dd \
             -clonedSourcePackagesDirPath SourcePackages \
-            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build-for-testing \
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
             -derivedDataPath .build-dd \
@@ -273,12 +273,15 @@ jobs:
             local label="$1" udid="$2" budget="$3"
             shift 3
             local status=0
+            # Keep simulator startup and compilation outside the test deadline,
+            # as in the SwiftTerm API suite below. The compile step built the test bundles.
+            xcrun simctl bootstatus "$udid" -b || return
             # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the
             # whole job budget and take the receipt upload down with it: that is
             # exactly how the first run of this workflow ended with a cancelled step
             # and no artifacts at all. Per-case allowances make xcodebuild itself
             # fail a stuck test with diagnostics instead of blocking to the deadline.
-            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
+            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
@@ -298,7 +301,7 @@ jobs:
                 return 1
               fi
               echo "::error::$label first run failed; preserving it and collecting raw diagnostics"
-              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
+              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
