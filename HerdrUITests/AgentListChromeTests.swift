@@ -10,11 +10,14 @@ final class AgentListChromeTests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 10))
         if UIDevice.current.userInterfaceIdiom == .pad {
             let window = app.windows.firstMatch
-            let initialWidth = window.frame.width
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
-                .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.82)))
-            XCTAssertLessThan(window.frame.width, initialWidth,
-                              "Back must be exercised in a system window, not just full screen")
+            // iPadOS can restore a compact window from an earlier launch. Resize only
+            // a full-screen window: a minimum-size window cannot shrink any further.
+            if window.frame.minX == 0 && window.frame.minY == 0 {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+                    .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.82)))
+            }
+            XCTAssertTrue(window.frame.minX > 0 || window.frame.minY > 0,
+                          "Back must be exercised in a system window, not just full screen")
         }
         XCTAssertTrue(back.isHittable)
         back.tap()
