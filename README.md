@@ -111,6 +111,10 @@ geometry only from ordered stream frames; a short retained frame covers resize t
 stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
+The app and test bundles are built before the timed UI runs, and each simulator is booted
+before its test deadline starts. Debug resize receipts are per pane, so a background
+terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
+The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
 
 ## Architecture
 
@@ -147,6 +151,18 @@ Dark, deep-desaturated navy — never black. The design system (`App/DesignSyste
 Claude Design kit (design: [jerryfane/herdr#28](https://github.com/jerryfane/herdr/issues/28)): colour is
 *meaning* (amber = waiting on you, red = died, blue = working, green = done), monospace is the machine
 voice and a proportional sans is the app voice.
+
+Live agent rows use system text, equal-height previews and a name-based avatar with a stable
+colour; the badge still carries status. Archive entries share the name colour but keep their
+archive icon. Gram-feed and guest-view identity styling is unchanged. Previews omit leading
+CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
+Clear replaces the mic, and clearing restores it.
+On iPad and Designed-for-iPad Mac, Agents, Gram and Settings share a compact title bar:
+on iPad, Back stays with the actions and sidebar toggle on the right, clear of window controls.
+On Mac, Back sits on the left, below the separate system window-title row; other actions stay
+on the right. Pushed Settings pages follow the same platform-specific Back placement.
+The leading control is declared before the title, matching the visual reading order.
+iPhone keeps its large titles. The sidebar rail and ⌘K remain available.
 
 ## License
 

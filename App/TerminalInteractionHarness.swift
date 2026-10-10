@@ -365,14 +365,10 @@ final class TerminalInteractionHarness: ObservableObject {
     /// the iPhone suite ran long enough to hit the job's 120-minute ceiling. Measured in
     /// run 35329283397.
     let spacer = KeyboardSpacerBox()
-    /// Grid proposals this pane actually COMMITTED — i.e. that reached the resize
-    /// pipeline rather than being coalesced away. A keyboard sweep proposes one per
-    /// animation frame, so this is what tells "the sweep was taken as one event" from
-    /// "every frame was taken as its own resize".
-    private var commits = 0
-    /// The grid of the newest committed proposal, so a receipt can assert that the one
-    /// commit a sweep makes is the fit the sweep ENDED on.
-    private var commitGrid: (cols: Int, rows: Int)?
+    /// Committed proposals, kept per pane just like the painted geometry. A hidden
+    /// pane can commit its fixed grid after the foreground pane's keyboard sweep;
+    /// its receipt must not replace the foreground pane's grid or inflate its count.
+    private var committedFits: [String: (count: Int, cols: Int, rows: Int)] = [:]
     private struct Surface {
         weak var view: TerminalView?
         let requestFit: (Int, Int) -> Void
@@ -428,8 +424,8 @@ final class TerminalInteractionHarness: ObservableObject {
     /// Recorded when a proposal is committed as a new target, AFTER coalescing.
     static func noteCommittedFit(paneID: String, cols: Int, rows: Int) {
         guard enabled else { return }
-        shared.commits += 1
-        shared.commitGrid = (cols: cols, rows: rows)
+        let count = shared.committedFits[paneID]?.count ?? 0
+        shared.committedFits[paneID] = (count: count + 1, cols: cols, rows: rows)
     }
 
     /// Drives a keyboard transition the way UIKit does: the notification (carrying the
@@ -668,9 +664,10 @@ final class TerminalInteractionHarness: ObservableObject {
         value["mounted"] = surfaces.count
         value["iPad"] = UIDevice.current.userInterfaceIdiom == .pad
         value["physicalKeyboard"] = GCKeyboard.coalesced != nil
-        value["commits"] = commits
-        value["commitCols"] = commitGrid?.cols ?? 0
-        value["commitRows"] = commitGrid?.rows ?? 0
+        let committed = committedFits[id]
+        value["commits"] = committed?.count ?? 0
+        value["commitCols"] = committed?.cols ?? 0
+        value["commitRows"] = committed?.rows ?? 0
         value["keyboardSpacer"] = Int(spacer.height.rounded())
         // The fixture's own record of what the last fit command asked for, so a receipt
         // can tell a command tap that landed from one that was dropped.

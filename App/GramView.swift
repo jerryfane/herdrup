@@ -588,7 +588,20 @@ struct GramView: View {
     /// one capsule on the right (search, Saved, Read all, Refresh, close). Same controls and
     /// visibility rules as before. The search field opens as its own row under the title,
     /// so the title never disappears while filtering.
+    @ViewBuilder
     private var header: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            VStack(spacing: 10) {
+                SectionTopBar(title: showingSaved ? "Saved" : "Gram",
+                              count: showingSaved ? 0 : unreadCount) { headerActions }
+                if searchOpen { searchField.padding(.horizontal, 16).padding(.bottom, 10) }
+            }
+        } else {
+            phoneHeader
+        }
+    }
+
+    private var phoneHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 10) {
                 HStack(alignment: .center, spacing: 8) {
@@ -621,6 +634,12 @@ struct GramView: View {
 
     /// The header's controls in one capsule, each a 44 pt-tall target.
     private var headerButtons: some View {
+        headerActions
+            .padding(.horizontal, 2)
+            .background(Capsule().fill(Palette.surfaceRaised))
+    }
+
+    private var headerActions: some View {
         HStack(spacing: 0) {
             if canFilter {
                 InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
@@ -670,8 +689,6 @@ struct GramView: View {
                     .accessibilityLabel("Close")
             }
         }
-        .padding(.horizontal, 2)
-        .background(Capsule().fill(Palette.surfaceRaised))
     }
 
     private func headerGlyph(_ name: String, color: Color = Palette.text) -> some View {
@@ -680,8 +697,7 @@ struct GramView: View {
             .foregroundStyle(color)
             .frame(width: 40, height: 44)
             .contentShape(Rectangle())
-            // Inside the Button's label, so the pointer highlight covers the whole segment,
-            // matching the iPad sidebar capsule's `gramHeaderButton`.
+            // The pointer highlight covers the segment, matching the shared section bar.
             .hoverEffect(.highlight)
     }
 

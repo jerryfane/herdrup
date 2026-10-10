@@ -188,15 +188,15 @@ jobs:
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY
 
-      - name: Build for simulator (compile check — SwiftTerm 1.15.0 + Metal + app)
+      - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
         run: |
           set -o pipefail
-          xcodebuild build \
+          xcodebuild build-for-testing \
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
             -derivedDataPath .build-dd \
             -clonedSourcePackagesDirPath SourcePackages \
-            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build-for-testing \
             -project Herdr.xcodeproj -scheme Herdr \
             -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
             -derivedDataPath .build-dd \
@@ -216,8 +216,9 @@ jobs:
         # the 1.0 train (altool 90186) and every upload started failing. Comparing the
         # BUILT value against project.yml proves the setting actually reaches the bundle.
         run: |
-          APP=$(find .build-dd/Build/Products -name '*.app' -maxdepth 3 -type d | head -1)
-          if [ -z "$APP" ]; then echo "::error::no built .app found under .build-dd"; exit 1; fi
+          # build-for-testing also produces a runner .app, whose version is unrelated.
+          APP=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
+          if [ ! -d "$APP" ]; then echo "::error::main app missing at $APP"; exit 1; fi
           echo "built app: $APP"
           BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
           EXPECTED=$(grep -m1 'MARKETING_VERSION:' project.yml | sed 's/.*MARKETING_VERSION:[[:space:]]*//' | tr -d '" ')
@@ -273,12 +274,15 @@ jobs:
             local label="$1" udid="$2" budget="$3"
             shift 3
             local status=0
+            # Keep simulator startup and compilation outside the test deadline,
+            # as in the SwiftTerm API suite below. The compile step built the test bundles.
+            xcrun simctl bootstatus "$udid" -b || return
             # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the
             # whole job budget and take the receipt upload down with it: that is
             # exactly how the first run of this workflow ended with a cancelled step
             # and no artifacts at all. Per-case allowances make xcodebuild itself
             # fail a stuck test with diagnostics instead of blocking to the deadline.
-            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
+            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
@@ -298,7 +302,7 @@ jobs:
                 return 1
               fi
               echo "::error::$label first run failed; preserving it and collecting raw diagnostics"
-              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test \
+              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
                 -project Herdr.xcodeproj -scheme Herdr \
                 -destination "platform=iOS Simulator,id=$udid" \
                 -parallel-testing-enabled NO \
@@ -344,6 +348,7 @@ jobs:
           run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
           # The empty detail column (and its glyph field) exists only in the iPad layout.
           run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
+          run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
           exit "$failed"
 
       - name: Run UIKit SwiftTerm API regressions on both devices
