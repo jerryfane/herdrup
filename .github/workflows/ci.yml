@@ -216,8 +216,9 @@ jobs:
         # the 1.0 train (altool 90186) and every upload started failing. Comparing the
         # BUILT value against project.yml proves the setting actually reaches the bundle.
         run: |
-          APP=$(find .build-dd/Build/Products -name '*.app' -maxdepth 3 -type d | head -1)
-          if [ -z "$APP" ]; then echo "::error::no built .app found under .build-dd"; exit 1; fi
+          # build-for-testing also produces a runner .app, whose version is unrelated.
+          APP=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
+          if [ ! -d "$APP" ]; then echo "::error::main app missing at $APP"; exit 1; fi
           echo "built app: $APP"
           BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
           EXPECTED=$(grep -m1 'MARKETING_VERSION:' project.yml | sed 's/.*MARKETING_VERSION:[[:space:]]*//' | tr -d '" ')

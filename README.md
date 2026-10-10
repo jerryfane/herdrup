@@ -114,6 +114,7 @@ CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and
 The app and test bundles are built before the timed UI runs, and each simulator is booted
 before its test deadline starts. Debug resize receipts are per pane, so a background
 terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
+The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
 
 ## Architecture
 
