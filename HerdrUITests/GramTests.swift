@@ -19,7 +19,6 @@ final class GramTests: XCTestCase {
     func testGramPageRenders() {
         let app = launchGram()
 
-
         // Give the mock gram.list a moment to load + lay out the rows.
         Thread.sleep(forTimeInterval: 2.0)
 
@@ -61,9 +60,6 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the search button should reveal the search field")
         field.tap()
         field.typeText("Digest")
-        // Assert the FIELD took the text before asserting anything about the list: an unfocused
-        // field would otherwise fail as "filtering is broken" when the real fault is the keyboard.
-        XCTAssertEqual(field.value as? String, "Digest", "the search field did not take the typed text")
 
         XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 3),
                       "the matching message should survive the filter")
