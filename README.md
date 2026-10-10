@@ -158,7 +158,9 @@ archive icon. Gram-feed and guest-view identity styling is unchanged. Previews o
 CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
 Clear replaces the mic, and clearing restores it.
 On iPad and Designed-for-iPad Mac, Agents, Gram and Settings share a compact title bar:
-actions, Back and the sidebar toggle sit together on the right, clear of window controls.
+on iPad, Back stays with the actions and sidebar toggle on the right, clear of window controls.
+On Mac, Back sits on the left, below the separate system window-title row; other actions stay
+on the right. Pushed Settings pages follow the same platform-specific Back placement.
 iPhone keeps its large titles. The sidebar rail and ⌘K remain available.
 
 ## License

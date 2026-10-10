@@ -3325,10 +3325,12 @@ struct TerminalHomeView: View {
     @ViewBuilder
     private var header: some View {
         if UIDevice.current.userInterfaceIdiom == .pad {
-            SectionTopBar(title: "Agents") {
+            let isMac = ProcessInfo.processInfo.isiOSAppOnMac
+            SectionTopBar(title: "Agents", leading: {
+                if isMac { sectionBackButton }
+            }) {
                 if hSizeClass == .regular { hideSidebarButton }
-                SectionBarButton(icon: "chevron.left", label: "Back",
-                                 identifier: "agents-back", action: onDisconnect)
+                if !isMac { sectionBackButton }
                 SectionBarButton(icon: "terminal", label: "New terminal") {
                     Task { await createTerminal() }
                 }
@@ -3337,6 +3339,11 @@ struct TerminalHomeView: View {
         } else {
             phoneHeader
         }
+    }
+
+    private var sectionBackButton: some View {
+        SectionBarButton(icon: "chevron.left", label: "Back",
+                         identifier: "agents-back", action: onDisconnect)
     }
 
     private var phoneHeader: some View {
@@ -7514,9 +7521,12 @@ struct SettingsView: View {
     @ViewBuilder
     private func detailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
         if UIDevice.current.userInterfaceIdiom == .pad {
+            let isMac = ProcessInfo.processInfo.isiOSAppOnMac
             VStack(spacing: 1) {
-                SectionTopBar(title: title) {
-                    if showBack { SettingsBackButton(inSectionBar: true) }
+                SectionTopBar(title: title, leading: {
+                    if isMac && showBack { SettingsBackButton(inSectionBar: true) }
+                }) {
+                    if !isMac && showBack { SettingsBackButton(inSectionBar: true) }
                 }
                 if !subtitle.isEmpty {
                     Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint)
