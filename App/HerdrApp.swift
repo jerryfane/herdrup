@@ -3341,17 +3341,16 @@ struct TerminalHomeView: View {
     // MARK: chrome
 
     /// One bar on every device: a small centred "Agents" title, Back and the New terminal /
-    /// New agent actions. Back sits on the left on iPhone and Mac; on iPad the system window
-    /// controls share that corner, so it joins the right-hand capsule there. The old "N need
-    /// you" subtitle is gone: the rows' amber marks and the minimised rail's counts carry it.
+    /// New agent actions. Back sits on the left on iPhone, Mac and a full-screen iPad; in an
+    /// iPad window the system window controls take the left corner, so it joins the
+    /// right-hand capsule (`SectionBackSlot`). The old "N need you" subtitle is gone: the
+    /// rows' amber marks and the minimised rail's counts carry it.
     private var header: some View {
-        let backLeads = UIDevice.current.userInterfaceIdiom != .pad
-            || ProcessInfo.processInfo.isiOSAppOnMac
-        return SectionTopBar(title: "Agents", leading: {
-            if backLeads { sectionBackButton }
+        SectionTopBar(title: "Agents", leading: {
+            SectionBackSlot(.leading) { sectionBackButton }
         }) {
             if hSizeClass == .regular { hideSidebarButton }
-            if !backLeads { sectionBackButton }
+            SectionBackSlot(.trailing) { sectionBackButton }
             // A plain shell terminal: a small icon so agents stay the priority (the
             // re-entry guard in createTerminal absorbs an eager double-tap).
             SectionBarButton(icon: "terminal", label: "New terminal") {
@@ -7476,16 +7475,14 @@ struct SettingsView: View {
     }
 
     /// The detail header: the shared small centred title, with the summary line beneath it.
-    /// Back sits on the left on iPhone and Mac, and in the right-hand capsule on iPad,
-    /// where the system window controls share the left corner.
+    /// Back follows the bar's rule (`SectionBackSlot`): left on iPhone, Mac and a
+    /// full-screen iPad, the right-hand capsule in an iPad window.
     private func detailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
-        let backLeads = UIDevice.current.userInterfaceIdiom != .pad
-            || ProcessInfo.processInfo.isiOSAppOnMac
-        return VStack(spacing: 1) {
+        VStack(spacing: 1) {
             SectionTopBar(title: title, leading: {
-                if backLeads && showBack { SettingsBackButton() }
+                if showBack { SectionBackSlot(.leading) { SettingsBackButton() } }
             }) {
-                if !backLeads && showBack { SettingsBackButton() }
+                if showBack { SectionBackSlot(.trailing) { SettingsBackButton() } }
             }
             if !subtitle.isEmpty {
                 Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint)

@@ -24,6 +24,51 @@ final class AgentListChromeTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["connect to your machine"].waitForExistence(timeout: 5))
     }
 
+    /// iPad: Back leads in full screen (no window controls on the left), joins the
+    /// right-hand capsule in a window, and in a window the bar sits inside the window's
+    /// top edge instead of touching it. Named to run first in this class: the next test
+    /// leaves the window shrunk, and iPadOS restores that size on later launches.
+    func testAIPadBackFollowsFullScreenAndWindowMode() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("iPad window modes only")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
+        app.launch()
+        let window = app.windows.firstMatch
+        let back = app.buttons["agents-back"].firstMatch
+        let title = app.staticTexts["Agents"].firstMatch
+        let newAgent = app.buttons["New agent"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+
+        let startedFullScreen = window.frame.minX == 0 && window.frame.minY == 0
+        if startedFullScreen {
+            attach("ipad-fullscreen-back-left", app)
+            XCTAssertLessThan(back.frame.maxX, title.frame.minX, "full screen: Back is left of the title")
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+                .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.82)))
+        }
+        XCTAssertTrue(window.frame.minX > 0 || window.frame.minY > 0, "must be in a window")
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        attach("ipad-window-back-right", app)
+        XCTAssertGreaterThan(back.frame.minX, title.frame.maxX, "window: Back joins the right-hand capsule")
+        XCTAssertGreaterThan(newAgent.frame.minY, window.frame.minY + 4,
+                             "window: the bar must not touch the window's top edge")
+        XCTAssertTrue(back.isHittable)
+        if !startedFullScreen {
+            // The window survived from an earlier run; the window case above still ran.
+            throw XCTSkip("started in a restored window: the full-screen half was not exercised")
+        }
+    }
+
+    private func attach(_ name: String, _ app: XCUIApplication) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testSearchFiltersAndClearsWithoutLosingMic() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"

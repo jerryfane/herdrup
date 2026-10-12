@@ -165,10 +165,12 @@ archive icon. Gram-feed and guest-view identity styling is unchanged. Previews o
 CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
 Clear replaces the mic, and clearing restores it.
 Agents, Gram and Settings share one compact bar with a small centred title on iPhone, iPad and
-Designed-for-iPad Mac. On iPad, Back stays with the actions and sidebar toggle on the right,
-clear of the window controls. On iPhone and Mac, Back sits on the left (on Mac, below the
-separate system window-title row); other actions stay on the right. Pushed Settings pages
-follow the same Back placement. The leading control is declared before the title, matching
+Designed-for-iPad Mac. Back sits on the left on iPhone, Mac and a full-screen iPad. In an
+iPad window, whose controls take the top-left corner, Back joins the actions and sidebar
+toggle on the right, and the bar's capsules line up with the window controls inside the
+window's top edge. On Mac, Back sits below the separate system window-title row; other
+actions stay on the right. Pushed Settings pages follow the same Back placement. The leading
+control is declared before the title, matching
 the visual reading order. The sidebar rail and ⌘K remain available.
 Settings builds its compact index in a separate view body, keeping the large section tuple
 off the adaptive navigation stack. CI checks resize/resume in an optimized simulator build

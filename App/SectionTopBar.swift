@@ -4,10 +4,29 @@ private struct SectionWindowControlsKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct SectionBackLeadsKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct SectionBarRowHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 44
+}
+
 extension EnvironmentValues {
     var sectionHasWindowControls: Bool {
         get { self[SectionWindowControlsKey.self] }
         set { self[SectionWindowControlsKey.self] = newValue }
+    }
+    /// Set by `SectionTopBar` for its own content: whether Back belongs on the left.
+    fileprivate(set) var sectionBackLeads: Bool {
+        get { self[SectionBackLeadsKey.self] }
+        set { self[SectionBackLeadsKey.self] = newValue }
+    }
+    /// Set by `SectionTopBar`: the height of its capsules. 44 normally; in an iPad window
+    /// they share the row with the window controls and take that row's height.
+    fileprivate(set) var sectionBarRowHeight: CGFloat {
+        get { self[SectionBarRowHeightKey.self] }
+        set { self[SectionBarRowHeightKey.self] = newValue }
     }
 }
 
@@ -16,6 +35,26 @@ func sectionWindowHasControls(_ geometry: GeometryProxy) -> Bool {
         return geometry.containerCornerInsets.topLeading.width > 0
     }
     return false
+}
+
+/// Where Back goes in a `SectionTopBar`. Put one in `leading` and one in `actions`;
+/// the bar shows the one that fits the window: the left on iPhone, on Mac (whose window
+/// controls have their own row) and on a full-screen iPad; the right-hand capsule on an
+/// iPad window, whose controls take the top-left corner.
+struct SectionBackSlot<Content: View>: View {
+    enum Side { case leading, trailing }
+    let side: Side
+    @ViewBuilder var content: () -> Content
+    @Environment(\.sectionBackLeads) private var backLeads
+
+    init(_ side: Side, @ViewBuilder content: @escaping () -> Content) {
+        self.side = side
+        self.content = content
+    }
+
+    var body: some View {
+        if backLeads == (side == .leading) { content() }
+    }
 }
 
 /// Shared section chrome. Mac can place Back below its separate window-title row;
@@ -40,13 +79,19 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
         GeometryReader { geometry in
             if #available(iOS 26.0, *) {
                 let corners = geometry.containerCornerInsets
-                content(leading: corners.topLeading.width, trailing: corners.topTrailing.width)
-                    .frame(height: 44)
-                    // Window controls already occupy the top row. Only full-screen
-                    // sections need the usual breathing room above their capsule.
-                    .offset(y: hostHasWindowControls || corners.topLeading.width > 0 ? 0 : 6)
+                let windowed = hostHasWindowControls || corners.topLeading.width > 0
+                // Mac keeps its window controls in their own row above the bar.
+                let sharesRow = windowed && !ProcessInfo.processInfo.isiOSAppOnMac
+                let rowHeight = sharesRow ? Self.windowRowHeight(corners.topLeading.height) : 44
+                content(leading: corners.topLeading.width, trailing: corners.topTrailing.width,
+                        windowed: windowed, rowHeight: rowHeight)
+                    .frame(height: rowHeight)
+                    // In an iPad window the controls already sit on this row: line the
+                    // capsules up with them, inside the window's top edge. Full screen
+                    // keeps the usual breathing room above the capsule.
+                    .offset(y: sharesRow ? Self.windowRowOffset(corners.topLeading.height) : (windowed ? 0 : 6))
             } else {
-                content(leading: 0, trailing: 0)
+                content(leading: 0, trailing: 0, windowed: false, rowHeight: 44)
                     .frame(height: 44).offset(y: 6)
             }
         }
@@ -55,8 +100,23 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
         .padding(.bottom, 8)
     }
 
-    private func content(leading: CGFloat, trailing: CGFloat) -> some View {
-        SectionBarLayout(leadingInset: leading, trailingInset: trailing) {
+    /// The capsules' height in a window: the window controls' row minus a margin above
+    /// and below, so a capsule never touches the window's top edge. 44 when unknown.
+    static func windowRowHeight(_ controlsHeight: CGFloat) -> CGFloat {
+        controlsHeight > 0 ? min(44, max(30, controlsHeight - 2 * windowRowInset)) : 44
+    }
+
+    static func windowRowOffset(_ controlsHeight: CGFloat) -> CGFloat {
+        controlsHeight > 0 ? windowRowInset : 0
+    }
+
+    private static var windowRowInset: CGFloat { 6 }
+
+    private func content(leading: CGFloat, trailing: CGFloat, windowed: Bool, rowHeight: CGFloat) -> some View {
+        let backLeads = UIDevice.current.userInterfaceIdiom != .pad
+            || ProcessInfo.processInfo.isiOSAppOnMac
+            || !windowed
+        return SectionBarLayout(leadingInset: leading, trailingInset: trailing) {
             HStack(spacing: 0, content: self.leading)
                 .padding(.horizontal, 2)
                 .background(Capsule().fill(Palette.surfaceRaised))
@@ -79,6 +139,8 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
                 .padding(.horizontal, 2)
                 .background(Capsule().fill(Palette.surfaceRaised))
         }
+        .environment(\.sectionBackLeads, backLeads)
+        .environment(\.sectionBarRowHeight, rowHeight)
     }
 }
 
@@ -89,7 +151,7 @@ private struct SectionBarLayout: Layout {
     var trailingInset: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        CGSize(width: proposal.width ?? 320, height: 44)
+        CGSize(width: proposal.width ?? 320, height: proposal.height ?? 44)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -118,14 +180,17 @@ struct SectionBarButton: View {
     let label: String
     var identifier: String = ""
     var action: () -> Void
+    @Environment(\.sectionBarRowHeight) private var rowHeight
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Palette.text)
-                .frame(width: 40, height: 44)
-                .contentShape(Rectangle())
+                .frame(width: 40, height: rowHeight)
+                // The capsule may shrink to the window controls' row; the tap target keeps
+                // at least 44 pt.
+                .contentShape(Rectangle().inset(by: -max(0, (44 - rowHeight) / 2)))
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
