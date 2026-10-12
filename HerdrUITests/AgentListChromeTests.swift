@@ -54,8 +54,10 @@ final class AgentListChromeTests: XCTestCase {
         waitForSettledFrame(window)
         attach("ipad-window-back-right", app)
         XCTAssertGreaterThan(back.frame.minX, title.frame.maxX, "window: Back joins the right-hand capsule")
-        XCTAssertGreaterThan(newAgent.frame.minY, window.frame.minY + 4,
-                             "window: the bar must not touch the window's top edge")
+        // The window controls' pill is ~21.5 pt tall, centred ~31.5 pt below the window's
+        // top; the sidebar panel starts 10 pt down. The capsules match the pill instead of
+        // a 44 pt capsule flush against the panel's top edge.
+        assertLinesUpWithWindowControls(newAgent, in: window, "Agents")
         XCTAssertTrue(back.isHittable)
         // Gram's header is built from the same bar: it must sit inside the edge too.
         let refresh = app.buttons["Refresh"].firstMatch
@@ -64,13 +66,45 @@ final class AgentListChromeTests: XCTestCase {
             _ = refresh.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(refresh.exists, "Gram should open with its header")
+        waitForSettledFrame(refresh)   // the section switch may still be animating
         attach("ipad-window-gram", app)
-        XCTAssertGreaterThan(refresh.frame.minY, window.frame.minY + 4,
-                             "window: Gram's bar must not touch the window's top edge")
+        assertLinesUpWithWindowControls(refresh, in: window, "Gram")
         if !startedFullScreen {
             // The window survived from an earlier run; the window case above still ran.
             throw XCTSkip("started in a restored window: the full-screen half was not exercised")
         }
+    }
+
+    /// Pixels, not element frames: a control's frame includes its 44 pt tap band, so it is
+    /// the same either way. Just inside the capsule's left edge (no glyph there), the
+    /// capsule colour must show at the controls' centre line and NOT 4 pt below the
+    /// panel's top edge, where the old 44 pt capsule began.
+    private func assertLinesUpWithWindowControls(_ control: XCUIElement, in window: XCUIElement,
+                                                 _ section: String) {
+        let shot = XCUIScreen.main.screenshot()
+        guard let image = shot.image.cgImage,
+              let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
+            return XCTFail("\(section): no screenshot to measure")
+        }
+        // The sampler reads 8-bit RGB(A)/BGR(A) with any alpha byte last.
+        let alphaFirst = [CGImageAlphaInfo.first, .premultipliedFirst, .noneSkipFirst]
+            .contains(CGImageAlphaInfo(rawValue: image.alphaInfo.rawValue) ?? .none)
+        guard image.bitsPerComponent == 8, image.bitsPerPixel >= 24, !alphaFirst else {
+            return XCTFail("\(section): unexpected screenshot format \(image.bitsPerComponent)/\(image.bitsPerPixel) \(image.alphaInfo.rawValue)")
+        }
+        let scale = CGFloat(image.width) / shot.image.size.width
+        func luminance(_ x: CGFloat, _ y: CGFloat) -> Int {
+            let px = Int(x * scale), py = Int(y * scale)
+            let i = py * image.bytesPerRow + px * (image.bitsPerPixel / 8)
+            return (Int(bytes[i]) + Int(bytes[i + 1]) + Int(bytes[i + 2])) / 3
+        }
+        let x = control.frame.minX + 3
+        let capsule = luminance(x, window.frame.minY + 31.5)
+        let panel = luminance(control.frame.midX, window.frame.minY + 60)  // below the bar
+        let nearEdge = luminance(x, window.frame.minY + 14)
+        XCTAssertGreaterThan(abs(capsule - panel), 6, "\(section): the capsule should show on the controls' line")
+        XCTAssertLessThan(abs(nearEdge - panel), 4,
+                          "\(section): the capsule must not reach up to the panel's top edge")
     }
 
     private func attach(_ name: String, _ app: XCUIApplication) {
@@ -92,20 +126,20 @@ final class AgentListChromeTests: XCTestCase {
         }
     }
 
-    func testSearchFiltersAndClearsWithoutLosingMic() {
+    func testSearchFiltersAndClears() {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
         app.launch()
         let search = app.textFields["agent-search"]
         XCTAssertTrue(search.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["agent-search-mic"].exists)
+        XCTAssertFalse(app.buttons["Clear search"].exists, "nothing to clear yet")
         search.tap()
         search.typeText("jarvis")
         XCTAssertTrue(app.staticTexts["jarvis"].exists)
         XCTAssertFalse(app.staticTexts["vetrina"].exists)
         app.buttons["Clear search"].tap()
         XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["agent-search-mic"].exists)
+        XCTAssertFalse(app.buttons["Clear search"].exists)
     }
 
     func testTabletSidebarCanHideAndRestoreInEverySection() throws {

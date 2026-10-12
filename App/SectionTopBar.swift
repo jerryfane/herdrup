@@ -1,7 +1,20 @@
 import SwiftUI
 
+/// Where the iPad's inline window controls (●●●) sit, in global coordinates: the top-left
+/// corner the window reserves for them. nil in full screen and on iPhone.
+struct SectionWindowControls: Equatable {
+    /// The reserved corner's top edge and height. The system draws the controls' pill
+    /// half this height, centred in it (measured on iPadOS 26.5: a 43 pt corner holds a
+    /// 21.5 pt pill whose top and bottom sit 10.75 pt inside).
+    var top: CGFloat
+    var height: CGFloat
+
+    var centerY: CGFloat { top + height / 2 }
+    var pillHeight: CGFloat { height / 2 }
+}
+
 private struct SectionWindowControlsKey: EnvironmentKey {
-    static let defaultValue = false
+    static let defaultValue: SectionWindowControls? = nil
 }
 
 private struct SectionBackLeadsKey: EnvironmentKey {
@@ -13,7 +26,9 @@ private struct SectionBarRowHeightKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    var sectionHasWindowControls: Bool {
+    /// Set where the window's corner insets are still visible (NavigationSplitView
+    /// consumes them before its sidebar sees any), so the bar inside can line up.
+    var sectionWindowControls: SectionWindowControls? {
         get { self[SectionWindowControlsKey.self] }
         set { self[SectionWindowControlsKey.self] = newValue }
     }
@@ -23,18 +38,21 @@ extension EnvironmentValues {
         set { self[SectionBackLeadsKey.self] = newValue }
     }
     /// Set by `SectionTopBar`: the height of its capsules. 44 normally; in an iPad window
-    /// they share the row with the window controls and take that row's height.
+    /// they match the window controls' pill.
     fileprivate(set) var sectionBarRowHeight: CGFloat {
         get { self[SectionBarRowHeightKey.self] }
         set { self[SectionBarRowHeightKey.self] = newValue }
     }
 }
 
-func sectionWindowHasControls(_ geometry: GeometryProxy) -> Bool {
+/// The window controls' corner as `geometry` sees it, nil when there is none.
+func sectionWindowControls(_ geometry: GeometryProxy) -> SectionWindowControls? {
     if #available(iOS 26.0, *) {
-        return geometry.containerCornerInsets.topLeading.width > 0
+        let corner = geometry.containerCornerInsets.topLeading
+        guard corner.width > 0, corner.height > 0 else { return nil }
+        return SectionWindowControls(top: geometry.frame(in: .global).minY, height: corner.height)
     }
-    return false
+    return nil
 }
 
 /// Where Back goes in a `SectionTopBar`. Put one in `leading` and one in `actions`;
@@ -64,7 +82,7 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
     var count: Int = 0
     @ViewBuilder var leading: () -> Leading
     @ViewBuilder var actions: () -> Actions
-    @Environment(\.sectionHasWindowControls) private var hostHasWindowControls
+    @Environment(\.sectionWindowControls) private var hostWindowControls
 
     init(title: String, count: Int = 0,
          @ViewBuilder leading: @escaping () -> Leading = { EmptyView() },
@@ -79,17 +97,26 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
         GeometryReader { geometry in
             if #available(iOS 26.0, *) {
                 let corners = geometry.containerCornerInsets
-                let windowed = hostHasWindowControls || corners.topLeading.width > 0
+                // The bar's own insets when it sits directly in the window; else what the
+                // host passed down from outside the split view, but only for a bar that
+                // starts on the controls' row (a sheet's bar further down does not).
+                let barTop = geometry.frame(in: .global).minY
+                let controls = sectionWindowControls(geometry)
+                    ?? hostWindowControls.flatMap { barTop < $0.top + $0.height ? $0 : nil }
+                let windowed = controls != nil
                 // Mac keeps its window controls in their own row above the bar.
                 let sharesRow = windowed && !ProcessInfo.processInfo.isiOSAppOnMac
-                let rowHeight = sharesRow ? Self.windowRowHeight(corners.topLeading.height) : 44
+                let rowHeight = sharesRow ? max(20, (controls?.pillHeight ?? 44).rounded()) : 44
                 content(leading: corners.topLeading.width, trailing: corners.topTrailing.width,
                         windowed: windowed, rowHeight: rowHeight)
                     .frame(height: rowHeight)
-                    // In an iPad window the controls already sit on this row: line the
-                    // capsules up with them, inside the window's top edge. Full screen
-                    // keeps the usual breathing room above the capsule.
-                    .offset(y: sharesRow ? Self.windowRowOffset(corners.topLeading.height) : (windowed ? 0 : 6))
+                    // In an iPad window the capsules take the controls' pill height and
+                    // centre, so their tops and bottoms line up and keep the same margin
+                    // from the panel's edge. Full screen keeps the usual 6 pt above.
+                    .offset(y: sharesRow
+                        ? Self.rowOffset(centerY: controls!.centerY - geometry.frame(in: .global).minY,
+                                         rowHeight: rowHeight)
+                        : (windowed ? 0 : 6))
             } else {
                 content(leading: 0, trailing: 0, windowed: false, rowHeight: 44)
                     .frame(height: 44).offset(y: 6)
@@ -100,17 +127,11 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
         .padding(.bottom, 8)
     }
 
-    /// The capsules' height in a window: the window controls' row minus a margin above
-    /// and below, so a capsule never touches the window's top edge. 44 when unknown.
-    static func windowRowHeight(_ controlsHeight: CGFloat) -> CGFloat {
-        controlsHeight > 0 ? min(44, max(30, controlsHeight - 2 * windowRowInset)) : 44
+    /// Offset that centres a `rowHeight` row on `centerY`, a point in the bar's own
+    /// coordinates; never above the bar.
+    static func rowOffset(centerY: CGFloat, rowHeight: CGFloat) -> CGFloat {
+        max(0, centerY - rowHeight / 2)
     }
-
-    static func windowRowOffset(_ controlsHeight: CGFloat) -> CGFloat {
-        controlsHeight > 0 ? windowRowInset : 0
-    }
-
-    private static var windowRowInset: CGFloat { 6 }
 
     private func content(leading: CGFloat, trailing: CGFloat, windowed: Bool, rowHeight: CGFloat) -> some View {
         let backLeads = UIDevice.current.userInterfaceIdiom != .pad
@@ -209,6 +230,9 @@ private struct SectionBarSlot: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // A row shorter than 44 (an iPad window) gets slightly smaller glyphs, like
+            // the controls beside it.
+            .scaleEffect(rowHeight < 44 ? 13.0 / 15.0 : 1)
             .frame(width: 40, height: rowHeight)
             // A short row keeps a 44 pt tap target by growing it up and down only;
             // growing sideways would hand a neighbour's taps to this control.
