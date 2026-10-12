@@ -356,4 +356,23 @@ final class TypingLatencyTests: XCTestCase {
         }
         XCTAssertEqual(try only(recorder).count, TypingLatencyRecorder.ringCapacity)
     }
+
+    func testPredictionsAreReportedPerHostWithKeyToPrediction() throws {
+        let (recorder, _) = makeRecorder()
+        recorder.predictionPainted(keyToPrediction: 0.004)
+        recorder.predictionPainted(keyToPrediction: 0.012)
+        recorder.notePredictions(confirmed: 1, wrong: 1)
+
+        let report = try only(recorder)
+        XCTAssertEqual(report.count, 0, "a painted prediction is not a measured echo")
+        XCTAssertEqual(try XCTUnwrap(report.keyToPrediction).max, 12, accuracy: 0.001)
+        XCTAssertEqual(report.predictionsShown, 2)
+        XCTAssertEqual(report.predictionsConfirmed, 1)
+        XCTAssertEqual(report.predictionsWrong, 1)
+        XCTAssertTrue(report.plainLines().contains("Key to prediction: 4 ms typical, 12 ms slow (90%), 12 ms worst"))
+        XCTAssertTrue(report.plainLines().contains("Predictions: 2 shown, 1 confirmed, 1 wrong"))
+
+        recorder.reset()
+        XCTAssertTrue(recorder.report().isEmpty)
+    }
 }

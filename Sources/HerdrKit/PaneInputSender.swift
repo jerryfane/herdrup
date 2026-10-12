@@ -48,10 +48,18 @@ public final class PaneInputSender {
     private var generation = 0
     private var stream: PaneInputChannel?
     /// Frames written and not yet acked, oldest first: the seq of each `enqueue`'s last
-    /// frame and the recorder batch its keys went out in.
-    private var unacked: [(seq: UInt64, batch: UInt64)] = []
+    /// frame, the recorder batch its keys went out in, and the last `enqueue` it carries.
+    private var unacked: [(seq: UInt64, batch: UInt64, through: UInt64)] = []
+    /// Number of the last `enqueue`.
+    private var enqueued: UInt64 = 0
     private var nextOpenAt: TimeInterval = -.infinity
     private var stopped = false
+
+    /// Called when the server has answered every `enqueue` numbered up to `through`
+    /// (the number `enqueue` returned): a `send_text` returned, or the stream acked the
+    /// frame carrying it. `failed`: the send failed, or the stream ended without acking
+    /// it, so whether those keys reached the pane is unknown. Answers come in order.
+    public var onAcked: ((_ through: UInt64, _ failed: Bool) -> Void)?
 
     /// - Parameters:
     ///   - sendText: one `pane.send_text` for the pane.
@@ -74,11 +82,15 @@ public final class PaneInputSender {
     /// Whether keys currently go out on the input stream.
     public var isStreaming: Bool { stream != nil }
 
-    /// Sends `text` after everything enqueued before it.
-    public func enqueue(_ text: String) {
-        guard !stopped, !text.isEmpty else { return }
+    /// Sends `text` after everything enqueued before it. Returns its number, increasing
+    /// per call, which `onAcked` reports; 0 when nothing is sent.
+    @discardableResult
+    public func enqueue(_ text: String) -> UInt64 {
+        guard !stopped, !text.isEmpty else { return 0 }
+        enqueued += 1
         pending += text
         pump()
+        return enqueued
     }
 
     /// The pane left the foreground: close its stream. Keys typed until the stream has
@@ -129,7 +141,7 @@ public final class PaneInputSender {
         }
         pending = ""
         let batch = recorder.batchSent(byteCount: text.utf8.count, route: .inputStream)
-        unacked.append((seq, batch))
+        unacked.append((seq, batch, enqueued))
     }
 
     private func drainText() {
@@ -137,6 +149,7 @@ public final class PaneInputSender {
         textDrain = Task { @MainActor [weak self] in
             while let self, !self.stopped, self.stream == nil, !self.pending.isEmpty {
                 let text = self.pending
+                let through = self.enqueued
                 self.pending = ""
                 let batch = self.recorder.batchSent(byteCount: text.utf8.count, route: .sendText)
                 // A failed batch is dropped, as ever; the recorder counts its keys lost.
@@ -148,6 +161,7 @@ public final class PaneInputSender {
                     failed = true
                 }
                 self.recorder.batchAcked(failed: failed, through: batch)
+                self.onAcked?(through, failed)
             }
             guard let self else { return }
             self.textDrain = nil
@@ -201,12 +215,15 @@ public final class PaneInputSender {
     /// Stamps the recorder's ack on the keys of every frame up to `seq`, and only those:
     /// later frames are still in flight.
     private func resolveAcks(through seq: UInt64) {
-        var covered: UInt64?
+        var covered: (batch: UInt64, through: UInt64)?
         while let first = unacked.first, first.seq <= seq {
-            covered = first.batch
+            covered = (first.batch, first.through)
             unacked.removeFirst()
         }
-        if let covered { recorder.batchAcked(through: covered) }
+        if let covered {
+            recorder.batchAcked(through: covered.batch)
+            onAcked?(covered.through, false)
+        }
     }
 
     /// Resolves every frame in flight (acked, or else lost) and returns the pane to
@@ -216,6 +233,7 @@ public final class PaneInputSender {
         resolveAcks(through: channel.ackedThrough)
         if let last = unacked.last {
             recorder.batchAcked(failed: true, through: last.batch)
+            onAcked?(last.through, true)
         }
         unacked.removeAll()
         stream = nil

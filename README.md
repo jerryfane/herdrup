@@ -39,6 +39,12 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   machine and per network (Wi-Fi or cellular): the wait to send, the server's reply, the echo
   and the painted frame, typical and slow (90%). Type in a terminal, then open it; Copy report
   gives plain text to paste into an issue. It is always on and keeps the last 1000 keys each.
+  Instant typing (Settings → Typing; Auto, Always or Off) draws what you type at once, mosh-style,
+  then checks each guess against the machine's own screen once it has the key: a right guess
+  stays, a wrong one disappears. Nothing shows until the pane has echoed a key once, so a
+  password prompt never shows your typing. Auto shows guesses only on a slow link (round trip
+  over 30 ms) and underlines unconfirmed ones over 80 ms. Typing latency also reports key to
+  prediction and how many guesses were shown, confirmed and wrong.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and

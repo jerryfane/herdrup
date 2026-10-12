@@ -91,6 +91,13 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         String(decoding: try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
 
+    /// `HERDR_ECHO_DELAY_MS`, nil when unset or 0.
+    static let echoDelayNanos: UInt64? = {
+        guard let raw = ProcessInfo.processInfo.environment["HERDR_ECHO_DELAY_MS"],
+              let ms = UInt64(raw), ms > 0 else { return nil }
+        return ms * 1_000_000
+    }()
+
     func roundTrip(_ line: String) async throws -> String {
         let request = try JSONDecoder().decode(Request.self, from: Data(line.utf8))
         if let id = request.params?.paneID, id != paneID {
@@ -102,6 +109,10 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         case "pane.set_pty_size":
             return try await resize(request)
         case "pane.send_text":
+            // HERDR_ECHO_DELAY_MS: a slow link, so the simulator shows instant typing's
+            // predictions. The echo and the reply both come after the delay, as over a
+            // real round trip; keys go out stop-and-wait here, so order is kept.
+            if let delay = Self.echoDelayNanos { try await Task.sleep(nanoseconds: delay) }
             locked { consume(request.params?.text ?? "") }
             return Self.json(["id": request.id, "result": [:]])
         case "agent.read":

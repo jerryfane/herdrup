@@ -61,6 +61,8 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public let keyToAck: TypingLatencyStats?
     public let keyToEcho: TypingLatencyStats?
     public let keyToPaint: TypingLatencyStats?
+    /// Press to the first paint of the key's predicted echo (instant typing).
+    public let keyToPrediction: TypingLatencyStats?
     /// Mean keys per send over the measured keys (0 without samples).
     public let meanBatchSize: Double
     /// Mean bytes per send over the measured keys (0 without samples).
@@ -75,6 +77,12 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public let streamKeys: Int
     /// Keys typed to this host that went out through `pane.send_text`.
     public let sendTextKeys: Int
+    /// Typed characters instant typing drew on this host before the server's echo.
+    public let predictionsShown: Int
+    /// Drawn predictions the server's screen then confirmed.
+    public let predictionsConfirmed: Int
+    /// Drawn predictions withdrawn because the server's screen disagreed.
+    public let predictionsWrong: Int
 
     /// Share of this host's requests that used the held channel, nil before any request.
     public var heldShare: Double? {
@@ -92,6 +100,9 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public func plainLines() -> [String] {
         var lines: [String] = []
         lines.append(Self.line("Key to screen", keyToPaint))
+        lines.append(Self.line("Key to prediction", keyToPrediction))
+        lines.append("Predictions: \(predictionsShown) shown, \(predictionsConfirmed) confirmed, "
+            + "\(predictionsWrong) wrong")
         lines.append(Self.line("Key to echo", keyToEcho))
         lines.append(Self.line("Key to server reply", keyToAck))
         lines.append(Self.line("Waiting to send", queueWait))
@@ -170,11 +181,11 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         var batch: UInt64?
     }
 
-    private struct Ring {
-        private(set) var samples: [TypingLatencySample] = []
+    private struct Ring<Sample> {
+        private(set) var samples: [Sample] = []
         private var next = 0
 
-        mutating func append(_ sample: TypingLatencySample) {
+        mutating func append(_ sample: Sample) {
             if samples.count < TypingLatencyRecorder.ringCapacity {
                 samples.append(sample)
             } else {
@@ -190,6 +201,9 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         var openFailures = 0
         var streamKeys = 0
         var sendTextKeys = 0
+        var predictionsShown = 0
+        var predictionsConfirmed = 0
+        var predictionsWrong = 0
     }
 
     /// How a batch of keys left for the PTY.
@@ -206,7 +220,9 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
     private var pending: [PendingKey] = []
     /// Number of the last batch `batchSent` stamped.
     private var batchCount: UInt64 = 0
-    private var rings: [Context: Ring] = [:]
+    private var rings: [Context: Ring<TypingLatencySample>] = [:]
+    /// Key press → first paint of its prediction, per (host, network).
+    private var predictionRings: [Context: Ring<TimeInterval>] = [:]
     private var dropped: [Context: Int] = [:]
     /// Keys whose send failed or whose stream frame was never acked; never resent.
     private var lost: [Context: Int] = [:]
@@ -331,6 +347,25 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         }
     }
 
+    // MARK: Instant typing
+
+    /// A key's predicted echo was painted `keyToPrediction` after the key was pressed.
+    public func predictionPainted(keyToPrediction: TimeInterval) {
+        locked {
+            predictionRings[context, default: Ring()].append(keyToPrediction)
+            routes[context.host, default: Routes()].predictionsShown += 1
+        }
+    }
+
+    /// Painted predictions the server's screen confirmed, or withdrew as wrong.
+    public func notePredictions(confirmed: Int, wrong: Int) {
+        guard confirmed > 0 || wrong > 0 else { return }
+        locked {
+            routes[context.host, default: Routes()].predictionsConfirmed += confirmed
+            routes[context.host, default: Routes()].predictionsWrong += wrong
+        }
+    }
+
     // MARK: Transport
 
     /// One request to `host` went over the held channel (`held`) or the per-request path.
@@ -359,7 +394,7 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
     /// One report per (host, network) seen, ordered by host then network.
     public func report() -> [TypingLatencyReport] {
         locked {
-            let contexts = Set(rings.keys).union(dropped.keys).union(lost.keys)
+            let contexts = Set(rings.keys).union(dropped.keys).union(lost.keys).union(predictionRings.keys)
                 .sorted { ($0.host, $0.network) < ($1.host, $1.network) }
             return contexts.map { context in
                 let samples = rings[context]?.samples ?? []
@@ -372,11 +407,15 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
                     keyToAck: TypingLatencyStats(seconds: samples.map(\.keyToAck)),
                     keyToEcho: TypingLatencyStats(seconds: samples.map(\.keyToEcho)),
                     keyToPaint: TypingLatencyStats(seconds: samples.map(\.keyToPaint)),
+                    keyToPrediction: TypingLatencyStats(seconds: predictionRings[context]?.samples ?? []),
                     meanBatchSize: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchSize }) / n,
                     meanBatchBytes: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchBytes }) / n,
                     heldRequests: route.held, perRequestRequests: route.perRequest,
                     heldOpenFailures: route.openFailures,
-                    streamKeys: route.streamKeys, sendTextKeys: route.sendTextKeys)
+                    streamKeys: route.streamKeys, sendTextKeys: route.sendTextKeys,
+                    predictionsShown: route.predictionsShown,
+                    predictionsConfirmed: route.predictionsConfirmed,
+                    predictionsWrong: route.predictionsWrong)
             }
         }
     }
@@ -408,6 +447,7 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         locked {
             pending.removeAll()
             rings.removeAll()
+            predictionRings.removeAll()
             dropped.removeAll()
             lost.removeAll()
             routes.removeAll()

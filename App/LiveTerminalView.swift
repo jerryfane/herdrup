@@ -128,6 +128,9 @@ struct LiveTerminalView: UIViewRepresentable {
     /// in-place via `Coordinator.applyFont` when it changes — re-lays-out the grid,
     /// no view recreation.
     var fontSize: CGFloat = 12.5
+    /// Instant typing (`predictiveEcho` preference, a `PredictionEngine.Mode` raw value).
+    /// A view-only pane never predicts whatever this says.
+    var predictiveEcho: String = PredictiveEchoSetting.defaultValue
     /// Shared with the host so it can ask whether this pane's stream is alive before
     /// deciding to remount on foreground. Written by the Coordinator, read by the host.
     var liveness: StreamLiveness? = nil
@@ -165,6 +168,7 @@ struct LiveTerminalView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalSurfaceView {
         // BEFORE attach, which starts the stream and the geometry drain.
         context.coordinator.viewOnly = viewOnly
+        context.coordinator.setPredictionMode(viewOnly ? .off : PredictiveEchoSetting.mode(predictiveEcho))
         context.coordinator.hostFitsStreamWidth = fitsStreamWidth
         context.coordinator.onResizeRefused = onResizeRefused
         context.coordinator.paneFontSize =
@@ -206,6 +210,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
         context.coordinator.viewOnly = viewOnly
+        context.coordinator.setPredictionMode(viewOnly ? .off : PredictiveEchoSetting.mode(predictiveEcho))
         context.coordinator.hostFitsStreamWidth = fitsStreamWidth
         context.coordinator.onResizeRefused = onResizeRefused
         context.coordinator.setForeground(isForeground)
@@ -1034,6 +1039,8 @@ struct LiveTerminalView: UIViewRepresentable {
             guard token != lastUserInputToken else { return }
             lastUserInputToken = token
             guard !stopped, foreground else { return }
+            // These bytes bypass the key path, so no prediction can stand on them.
+            prediction.reset()
             prepareHostInputFrameAndTakeControl()
         }
 
@@ -1187,6 +1194,7 @@ struct LiveTerminalView: UIViewRepresentable {
         private func setPaneFontSize(_ size: CGFloat) {
             guard size != paneFontSize else { return }
             paneFontSize = size
+            prediction.reset()   // the overlay is laid out in the old cell size
             beginResizePresentation(reason: .local)
             view?.font = paneFont
             publishGridProbe()
@@ -1249,6 +1257,7 @@ struct LiveTerminalView: UIViewRepresentable {
             self.surface = surface
             view.allowsFocus = !viewOnly
             view.terminalDelegate = self
+            prediction.attach(to: view)
             #if DEBUG
             MainActor.assumeIsolated {
                 TerminalInteractionHarness.register(paneID: paneID, view: view,
@@ -1531,6 +1540,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 // front cleared the pill while a rejected or dropped Ctrl+End left the
                 // agent's viewport exactly where it was, so the reader lost the affordance
                 // and the state lied at the same time.
+                prediction.reset()   // Ctrl+End bypasses the key path
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped, !self.viewOnly else { return }
                     do {
@@ -2020,6 +2030,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // No forwarded keystroke can reach an exited/replaced pane: the send in flight is
             // cancelled and the input stream closed (frames it never acked count as lost).
             if let inputSender { MainActor.assumeIsolated { inputSender.stop() } }
+            prediction.detach()
             if !viewOnly { TypingLatencyRecorder.shared.abandonUnsent() }  // queued keys never go out
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
@@ -2171,6 +2182,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 }
             } else {
                 finishPresentation()
+                prediction.reset()
                 cancelArmedControl()
                 relockPending = false           // a hide cancels any pending re-lock intent
                 // Typing goes to the pane in front: release this one's input stream. Its next
@@ -2441,6 +2453,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     // already collapsed the backlog into this keyframe).
                     view.feed(byteArray: Self.clearSequence[...])
                     if !data.isEmpty { feedFiltered(data, into: view) }
+                    prediction.reset()   // a keyframe replaced the screen the guesses stood on
                     noteStreamData()
                     publishTopRowProbe()
                 case .data(_, _, let data):
@@ -2448,6 +2461,8 @@ struct LiveTerminalView: UIViewRepresentable {
                     // Typing-latency diagnostics: only the pane being typed into can echo.
                     if foreground, !data.isEmpty { TypingLatencyRecorder.shared.outputArrived() }
                     if !data.isEmpty { feedFiltered(data, into: view) }
+                    // Instant typing checks its guesses against the screen this frame made.
+                    if foreground, !data.isEmpty { prediction.outputArrived() }
                     publishTopRowProbe()   // a repaint (after a resize, say) moves the top row too
                 case .resize(_, _, let cols, let rows):
                     applyStreamGeometry(cols: cols, rows: rows, in: view)
@@ -2530,7 +2545,10 @@ struct LiveTerminalView: UIViewRepresentable {
             synchronizedBatchBegan = false
             presentationSyncEnded = false
             lastCompleteDraw = nil
-            if changed { resizeCount += 1 }
+            if changed {
+                resizeCount += 1
+                prediction.reset()
+            }
             view.applyTerminalSize(cols: newCols, rows: newRows)
             // A live-anchored terminal now follows the container again, in the same
             // layout pass as this reflow.
@@ -2862,6 +2880,7 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             presentationGeneration += 1
             presentationActive = true
+            prediction.reset()   // a retained frame may cover the terminal
             presentationClosed = false
             presentationReason = reason == .server ? .server : .local
             presentationStartedOnNormalBuffer = !(view?.getTerminal().isCurrentBufferAlternate ?? false)
@@ -2924,6 +2943,7 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         private func noteSynchronizedOutput(active: Bool) {
+            if !active { prediction.synchronizedOutputEnded() }
             guard presentationActive else { return }
             if active {
                 synchronizedBatchBegan = true
@@ -3091,7 +3111,10 @@ struct LiveTerminalView: UIViewRepresentable {
                   let v = view, v.isFirstResponder else { return }
             userTookControl()
             TypingLatencyRecorder.shared.keyPressed()
-            enqueueInput(String(decoding: data, as: UTF8.self))
+            let batch = enqueueInput(String(decoding: data, as: UTF8.self))
+            // Instant typing: the same bytes, against the screen as it is before any echo.
+            // Not under a retained resize frame, which is not the screen they act on.
+            prediction.userBytes(Array(data), batch: batch, allowed: surface?.isCovered != true)
         }
 
         /// Ordered key input to the PTY (`PaneInputSender`): each batch goes out at once as a
@@ -3101,17 +3124,30 @@ struct LiveTerminalView: UIViewRepresentable {
         /// key, so a view-only pane never builds one. Nonisolated like `emitScroll` (called on
         /// the main thread from the delegate callback).
         private var inputSender: PaneInputSender?
-        private func enqueueInput(_ s: String) {
-            guard !viewOnly, !stopped, !s.isEmpty else { return }
-            MainActor.assumeIsolated {
+        /// Instant typing for this pane (see `PredictiveEchoController`).
+        private let prediction = PredictiveEchoController()
+
+        func setPredictionMode(_ mode: PredictionEngine.Mode) {
+            prediction.setMode(mode)
+        }
+
+        /// Returns the batch number `PaneInputSender.enqueue` gave `s`, 0 when not sent.
+        @discardableResult
+        private func enqueueInput(_ s: String) -> UInt64 {
+            guard !viewOnly, !stopped, !s.isEmpty else { return 0 }
+            return MainActor.assumeIsolated {
                 if inputSender == nil {
                     let client = self.client
                     let pane = self.paneID
-                    inputSender = PaneInputSender(
+                    let sender = PaneInputSender(
                         sendText: { text in try await client.sendText(pane: pane, text: text) },
                         openStream: { await client.openPaneInput(pane: pane) })
+                    sender.onAcked = { [weak self] through, failed in
+                        self?.prediction.batchAcked(through, failed: failed)
+                    }
+                    inputSender = sender
                 }
-                inputSender?.enqueue(s)
+                return inputSender?.enqueue(s) ?? 0
             }
         }
 
@@ -3212,6 +3248,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     // guard uses. See `handleFocusTap` for why a timestamp rather than a live flag.
                     if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     self.publishTopRowProbe()
+                    self.prediction.viewScrolled()   // guesses stand only on the live screen
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
@@ -3353,6 +3390,7 @@ struct LiveTerminalView: UIViewRepresentable {
         /// with no mouse reporting, fall back to arrow keys (best-effort).
         private func emitScroll(up: Bool, count: Int, at point: CGPoint, term: SwiftTerm.Terminal) {
             guard !viewOnly, count > 0 else { return }
+            prediction.reset()   // these bytes bypass the key path
             let seq: String
             if term.mouseMode != .off {
                 // NOTE: SwiftTerm 1.11.2 keeps the mouse ENCODING (mouseProtocol)

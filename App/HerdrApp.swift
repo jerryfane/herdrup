@@ -5131,6 +5131,8 @@ struct TerminalPaneContent: View {
     /// drive `LiveTerminalView.fontSize` (applied in-place, no view recreation) and
     /// mutated by ⌘± and the ⋯ "Text size" control. Clamped to [9, 24].
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// Settings › Typing › Instant typing, handed to `LiveTerminalView.predictiveEcho`.
+    @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
     /// App foreground/background phase. On return to `.active` the front pane's
     /// live `pane.stream` has stalled (no network while backgrounded) and
     /// reconnects from the live tail, missing output produced while away — so we
@@ -5323,6 +5325,7 @@ struct TerminalPaneContent: View {
                                  // fresh Coordinator instead of replaying the last jump.
                                  isAtTail: terminalAtTail,
                                  fontSize: CGFloat(terminalFontSize),
+                                 predictiveEcho: predictiveEcho,
                                  // Read on foreground to tell a suspended stream from a
                                  // still-running one; see the scenePhase handler below.
                                  liveness: terminalLiveness,
@@ -6840,7 +6843,7 @@ enum SettingsSection: Hashable, CaseIterable {
         case .notifications: return "Notifications"
         case .sharedAccess:  return "Shared access"
         case .about:         return "App & About"
-        case .appearance:    return "Text size"
+        case .appearance:    return "Text & typing"
         }
     }
 
@@ -7248,7 +7251,10 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 atAGlanceSection
                                 manageSection
-                                appearanceSection
+                                Group {
+                                    appearanceSection
+                                    typingSection
+                                }
                                 previewsSection
                                 troubleSection
                                 helpSection
@@ -7299,11 +7305,12 @@ struct SettingsView: View {
         }
     }
 
-    /// iPad/Mac "Text size": the same control the iPhone index shows inline, given its
-    /// own split-view detail so the setting is reachable on regular-width layouts.
+    /// iPad/Mac "Text & typing": the same controls the iPhone index shows inline, given
+    /// their own split-view detail so the settings are reachable on regular-width layouts.
     private func appearanceDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "Text size", subtitle: "App & terminal text", showBack: showBack) {
+        detailScaffold(title: "Text & typing", subtitle: "Text size and instant typing", showBack: showBack) {
             appearanceControls
+            typingSection
         }
     }
 
@@ -8474,6 +8481,9 @@ struct SettingsView: View {
     /// `Typography.scale`). Writing it here re-renders the whole app at the new
     /// size — the terminal is unaffected (it has its own font control below).
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+    /// Instant typing (`PredictionEngine.Mode` raw value); every open terminal reads the
+    /// same key, so a change applies to the next key typed.
+    @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
 
     /// The terminal font size (points), the same app-wide pref the per-agent ⋯ menu
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
@@ -8520,6 +8530,36 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("TEXT SIZE")
             appearanceControls
+        }
+    }
+
+    /// "Typing": instant typing (predictive local echo, `PredictionEngine`).
+    private var typingSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("TYPING")
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("Instant typing").font(Typography.app(17)).foregroundStyle(Palette.text)
+                    Spacer(minLength: 8)
+                    Picker("Instant typing", selection: $predictiveEcho) {
+                        Text("Auto").tag(PredictionEngine.Mode.auto.rawValue)
+                        Text("Always").tag(PredictionEngine.Mode.always.rawValue)
+                        Text("Off").tag(PredictionEngine.Mode.off.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                .padding(.horizontal, 18).padding(.vertical, 8)
+                .frame(minHeight: 52)
+                rowDivider
+                Text("Shows what you type at once and checks it against the server. Off: wait for the server's echo.")
+                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+            }
+            .settingsGroup()
+            .padding(.horizontal, 16).padding(.top, 10)
         }
     }
 

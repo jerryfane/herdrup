@@ -274,6 +274,41 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         CGSize(width: cellDimension.width, height: cellDimension.height)
     }
 
+    /// herdr: where cell (col, row) of the LIVE screen is drawn, in this view's own
+    /// (content) coordinates: the caret's arithmetic (`updateCursorPosition`). nil while
+    /// the reader has scrolled away from the live screen, outside the grid, or on a
+    /// double-width/height line. Lets an embedder draw over a cell (predicted echo).
+    public func liveCellRect(col: Int, row: Int) -> CGRect? {
+        let buffer = terminal.displayBuffer
+        guard buffer.yDisp == buffer.yBase, col >= 0, row >= 0,
+              col < terminal.cols, row < terminal.rows, buffer.yBase + row < buffer.lines.count,
+              buffer.lines[buffer.yBase + row].renderMode == .single else { return nil }
+        return CGRect(x: CGFloat(col) * cellDimension.width,
+                      y: CGFloat(buffer.yBase + row) * cellDimension.height,
+                      width: cellDimension.width, height: cellDimension.height)
+    }
+
+    /// herdr: whether the caret is on screen (the application has not hidden it).
+    public var isCaretShown: Bool {
+        guard let caretView, caretView.superview === self else { return false }
+        return !(caretSuppressed ? caretHiddenBeforeSuppression : caretView.isHidden)
+    }
+
+    /// herdr: hides the caret while an embedder draws its own (a predicted cursor).
+    /// Restores the caret's own hidden state (the Metal renderer hides it) afterwards.
+    public var caretSuppressed = false {
+        didSet {
+            guard caretSuppressed != oldValue, let caretView else { return }
+            if caretSuppressed {
+                caretHiddenBeforeSuppression = caretView.isHidden
+                caretView.isHidden = true
+            } else {
+                caretView.isHidden = caretHiddenBeforeSuppression
+            }
+        }
+    }
+    private var caretHiddenBeforeSuppression = false
+
     /// Last proposed grid plus the cell metrics it was computed from, so an
     /// unchanged layout does not re-propose, but a font change does.
     var requestedTerminalGrid: (cols: Int, rows: Int)? = nil

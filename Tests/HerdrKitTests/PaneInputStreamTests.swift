@@ -618,6 +618,31 @@ final class PaneInputSenderTests: XCTestCase {
         XCTAssertEqual(report.streamKeys, 2)
         sender.stop()
     }
+
+    func testOnAckedReportsEnqueueNumbersInOrderOnBothRoutes() async {
+        let sink = TextSink()
+        let bridge = ScriptedBridge(responder: answerOpen)
+        let sender = makeSender(sink: sink, bridge: bridge)
+        var answered: [UInt64] = []
+        var failures = 0
+        sender.onAcked = { through, failed in
+            answered.append(through)
+            if failed { failures += 1 }
+        }
+
+        XCTAssertEqual(sender.enqueue("a"), 1)
+        await waitUntil("send_text answered") { answered == [1] }
+        await waitUntil("the stream opens") { sender.isStreaming }
+        XCTAssertEqual(sender.enqueue("b"), 2)
+        XCTAssertEqual(sender.enqueue("c"), 3)
+        await waitUntil("two frames") { frames(bridge).count == 2 }
+        XCTAssertEqual(answered, [1], "frames are not answered before their ack")
+        bridge.emit(#"{"seq":2,"ok":true}"#)
+        await waitUntil("the cumulative ack answers both frames") { answered == [1, 3] }
+        XCTAssertEqual(failures, 0)
+        XCTAssertEqual(sender.enqueue(""), 0, "nothing to send has no number")
+        sender.stop()
+    }
 }
 
 // MARK: - Recorder: per-batch acks and the input-stream share
