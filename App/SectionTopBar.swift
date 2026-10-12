@@ -98,8 +98,11 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
             if #available(iOS 26.0, *) {
                 let corners = geometry.containerCornerInsets
                 // The bar's own insets when it sits directly in the window; else what the
-                // host passed down from outside the split view.
-                let controls = sectionWindowControls(geometry) ?? hostWindowControls
+                // host passed down from outside the split view, but only for a bar that
+                // starts on the controls' row (a sheet's bar further down does not).
+                let barTop = geometry.frame(in: .global).minY
+                let controls = sectionWindowControls(geometry)
+                    ?? hostWindowControls.flatMap { barTop < $0.top + $0.height ? $0 : nil }
                 let windowed = controls != nil
                 // Mac keeps its window controls in their own row above the bar.
                 let sharesRow = windowed && !ProcessInfo.processInfo.isiOSAppOnMac

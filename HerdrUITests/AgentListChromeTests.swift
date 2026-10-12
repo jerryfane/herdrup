@@ -66,6 +66,7 @@ final class AgentListChromeTests: XCTestCase {
             _ = refresh.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(refresh.exists, "Gram should open with its header")
+        waitForSettledFrame(refresh)   // the section switch may still be animating
         attach("ipad-window-gram", app)
         assertLinesUpWithWindowControls(refresh, in: window, "Gram")
         if !startedFullScreen {
@@ -84,6 +85,12 @@ final class AgentListChromeTests: XCTestCase {
         guard let image = shot.image.cgImage,
               let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
             return XCTFail("\(section): no screenshot to measure")
+        }
+        // The sampler reads 8-bit RGB(A)/BGR(A) with any alpha byte last.
+        let alphaFirst = [CGImageAlphaInfo.first, .premultipliedFirst, .noneSkipFirst]
+            .contains(CGImageAlphaInfo(rawValue: image.alphaInfo.rawValue) ?? .none)
+        guard image.bitsPerComponent == 8, image.bitsPerPixel >= 24, !alphaFirst else {
+            return XCTFail("\(section): unexpected screenshot format \(image.bitsPerComponent)/\(image.bitsPerPixel) \(image.alphaInfo.rawValue)")
         }
         let scale = CGFloat(image.width) / shot.image.size.width
         func luminance(_ x: CGFloat, _ y: CGFloat) -> Int {
