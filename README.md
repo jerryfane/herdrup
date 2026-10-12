@@ -32,6 +32,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   Resizing preserves your reading position, including after a momentum scroll; live followers
   stay at the tail. The on-screen Ctrl key arms one native terminal chord in direct input,
   or a control character in the reply field.
+  Keys typed into a pane on the connected machine go out the moment you type them, in order,
+  on one held `pane.input.stream` channel per pane (herdr 0.9.3+) instead of waiting for the
+  previous key's reply; federated panes and older herdr builds keep using `pane.send_text`.
   Settings → Typing latency measures how long your own keys take to reach the screen, per
   machine and per network (Wi-Fi or cellular): the wait to send, the server's reply, the echo
   and the painted frame, typical and slow (90%). Type in a terminal, then open it; Copy report

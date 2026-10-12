@@ -366,6 +366,13 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         herdrCommand(["api-bridge", "--multi"], session: session)
     }
 
+    /// The exec command line for a pane's `pane.input.stream`: `remote-api-bridge`
+    /// forwards stdin to the daemon socket for the channel's whole life, which
+    /// `api-bridge` does not.
+    static func inputStreamBridgeCommand(session: String?) -> String {
+        herdrCommand(["remote-api-bridge"], session: session)
+    }
+
     /// The per-request path: one exec channel running `api-bridge <base64>`.
     static func perRequestRoundTrip(
         _ requestLine: String, session: String?, host: String, backend: ExecBackend,
@@ -423,6 +430,25 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     /// `RequestChannelSettings.idleProbeAfter` of silence or a request timeout.
     public func markRequestChannelsSuspect() async {
         await requestChannels.markSuspect()
+    }
+
+    /// Opens `pane.input.stream` (`openLine` is its request) on its own exec channel of
+    /// the shared SSH connection, in this transport's session. nil when the channel
+    /// cannot start or the daemon refuses: the caller keeps `pane.send_text`.
+    func openPaneInput(openLine: String) async -> PaneInputChannel? {
+        let link: RequestChannelLink
+        do {
+            link = try await backend.openLink(Self.inputStreamBridgeCommand(session: credentials.session))
+        } catch {
+            return nil
+        }
+        let channel = PaneInputChannel(link: link, openLine: openLine)
+        do {
+            try await channel.start()
+        } catch {
+            return nil
+        }
+        return channel
     }
 
     /// The herdr sessions on this machine (`herdr session list --json`, herdr >= 0.5.3), #347.
@@ -646,7 +672,8 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
 }
 
 /// How `CitadelTransport` opens the exec channels that carry one-off requests: the
-/// per-request `api-bridge <base64>` exec and the held `api-bridge --multi` link.
+/// per-request `api-bridge <base64>` exec and the held `api-bridge --multi` link, plus
+/// the held `remote-api-bridge` link a pane's `pane.input.stream` rides.
 /// Production execs on the shared `SSHConnectionCore`; tests script both.
 struct ExecBackend: Sendable {
     /// Runs `command` and streams its output; the stream throws a `RemoteExitError`

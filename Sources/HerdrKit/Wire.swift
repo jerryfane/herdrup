@@ -857,6 +857,54 @@ extension StreamFrame: Decodable {
     }
 }
 
+// MARK: - pane.input.stream (ordered, fire-and-forget key input)
+
+/// Open params for `pane.input.stream`: the write-side mirror of `pane.stream`.
+public struct PaneInputStreamParams: Encodable, Sendable {
+    public let paneID: String
+    public init(paneID: String) { self.paneID = paneID }
+    enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+}
+
+/// One line the daemon writes on an open `pane.input.stream`. Frames themselves are
+/// encoded by `PaneInputFrame`.
+enum PaneInputStreamReply: Equatable {
+    /// The open request's `{"id":…,"result":{"type":"ok"}}`.
+    case opened
+    /// `{"seq":N,"ok":true}`: frame N reached the PTY.
+    case acked(UInt64)
+    /// `{"seq":N,"error":{…}}`: frame N was refused; the daemon closes the stream.
+    case frameRejected(seq: UInt64, APIError)
+    /// An error envelope carrying the open request's id (unknown pane, guest, a
+    /// malformed frame); the daemon closes the stream.
+    case rejected(APIError)
+
+    private struct Line: Decodable {
+        struct OpenResult: Decodable { let type: String? }
+        let seq: UInt64?
+        let ok: Bool?
+        let error: APIError?
+        let result: OpenResult?
+    }
+
+    /// nil for a line that is none of these; the caller ignores it.
+    init?(line: String) {
+        guard let decoded = try? JSONDecoder().decode(Line.self, from: Data(line.utf8)) else { return nil }
+        switch (decoded.seq, decoded.error) {
+        case let (seq?, error?): self = .frameRejected(seq: seq, error)
+        case let (nil, error?): self = .rejected(error)
+        case let (seq?, nil):
+            guard decoded.ok == true else { return nil }
+            self = .acked(seq)
+        case (nil, nil):
+            guard let result = decoded.result else { return nil }
+            self = result.type == "ok"
+                ? .opened
+                : .rejected(APIError(code: "unexpected_open_reply", message: line))
+        }
+    }
+}
+
 /// What `streamTerminal` yields, mirroring how `subscribe` unifies its ack + event
 /// lines into one `StreamLine`: the opening `stream_started` ack, then frames.
 public enum TerminalStreamEvent: Sendable, Equatable {

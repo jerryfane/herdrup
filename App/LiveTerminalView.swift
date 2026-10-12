@@ -2017,8 +2017,9 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollPan?.isEnabled = false    // no drag can send bytes to an exited/replaced pane
             scrollSendTask?.cancel()
             scrollSendTask = nil
-            inputSendTask?.cancel()         // no forwarded keystroke can reach an exited/replaced pane
-            inputSendTask = nil
+            // No forwarded keystroke can reach an exited/replaced pane: the send in flight is
+            // cancelled and the input stream closed (frames it never acked count as lost).
+            if let inputSender { MainActor.assumeIsolated { inputSender.stop() } }
             if !viewOnly { TypingLatencyRecorder.shared.abandonUnsent() }  // queued keys never go out
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
@@ -2172,6 +2173,9 @@ struct LiveTerminalView: UIViewRepresentable {
                 finishPresentation()
                 cancelArmedControl()
                 relockPending = false           // a hide cancels any pending re-lock intent
+                // Typing goes to the pane in front: release this one's input stream. Its next
+                // key opens a fresh one.
+                if let inputSender { MainActor.assumeIsolated { inputSender.closeStream() } }
                 // DELIBERATELY NO RELEASE HERE. A `lock:false` would drop the last width lease,
                 // and the daemon then stops forcing a size on purpose (`effective_pty_size` -> None,
                 // so `reconcile_pty_lease_size` leaves the winsize to the local TUI, which reclaims
@@ -3090,27 +3094,24 @@ struct LiveTerminalView: UIViewRepresentable {
             enqueueInput(String(decoding: data, as: UTF8.self))
         }
 
-        /// Serialized key-input queue, mirroring the scroll queue (`pendingScroll`/`scrollSendTask`):
-        /// bytes waiting to go to the PTY, drained one send at a time so a fast burst coalesces into
-        /// batched writes. Nonisolated like `emitScroll` (called on the main thread from the
-        /// delegate callback); the drain hops to the main actor for the async `sendText`.
-        private var pendingInput = ""
-        private var inputSendTask: Task<Void, Never>?
+        /// Ordered key input to the PTY (`PaneInputSender`): each batch goes out at once as a
+        /// frame on the pane's `pane.input.stream` once that is open; until then, and for a
+        /// federated pane, a mock transport or a daemon without the stream, keys keep the
+        /// stop-and-wait `pane.send_text` drain that coalesces a fast burst. Made on the first
+        /// key, so a view-only pane never builds one. Nonisolated like `emitScroll` (called on
+        /// the main thread from the delegate callback).
+        private var inputSender: PaneInputSender?
         private func enqueueInput(_ s: String) {
-            guard !viewOnly, !s.isEmpty else { return }
-            pendingInput += s
-            guard inputSendTask == nil else { return }   // a drain is running; it will pick this up
-            inputSendTask = Task { @MainActor [weak self] in
-                while let self, !self.stopped, !self.pendingInput.isEmpty {
-                    let batch = self.pendingInput
-                    self.pendingInput = ""
-                    TypingLatencyRecorder.shared.batchSent(byteCount: batch.utf8.count)
-                    // Unchanged behaviour (a failed batch is still dropped); the recorder
-                    // only counts it, so the owner's report shows lost keys.
-                    let failed = (try? await self.client.sendText(pane: self.paneID, text: batch)) == nil
-                    TypingLatencyRecorder.shared.batchAcked(failed: failed)
+            guard !viewOnly, !stopped, !s.isEmpty else { return }
+            MainActor.assumeIsolated {
+                if inputSender == nil {
+                    let client = self.client
+                    let pane = self.paneID
+                    inputSender = PaneInputSender(
+                        sendText: { text in try await client.sendText(pane: pane, text: text) },
+                        openStream: { await client.openPaneInput(pane: pane) })
                 }
-                self?.inputSendTask = nil
+                inputSender?.enqueue(s)
             }
         }
 

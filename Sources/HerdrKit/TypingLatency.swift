@@ -6,10 +6,10 @@ import Foundation
 /// left in the same batch share their send, ack and echo stamps but keep their own
 /// totals: the second key of a burst waited less.
 public struct TypingLatencySample: Sendable, Equatable {
-    /// Press to the moment its batch went to `sendText` (time spent behind the
-    /// stop-and-wait send in flight).
+    /// Press to the moment its batch went out: to `sendText` (time spent behind the
+    /// stop-and-wait send in flight) or as an input-stream frame.
     public let queueWait: TimeInterval
-    /// Press to `sendText` returning (the server's reply to the batch).
+    /// Press to the server's reply to the batch: `sendText` returning, or the frame's ack.
     public let keyToAck: TimeInterval
     /// Press to the first stream output after the batch was sent.
     public let keyToEcho: TimeInterval
@@ -54,15 +54,16 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public let count: Int
     /// Keys given up on: no output within the attribution window, or never finished.
     public let dropped: Int
-    /// Keys whose send failed and were never delivered (the app drops a failed batch).
+    /// Keys whose send failed, or whose input-stream frame was never acked; neither is
+    /// resent (the app drops the batch rather than risk typing it twice).
     public let lost: Int
     public let queueWait: TypingLatencyStats?
     public let keyToAck: TypingLatencyStats?
     public let keyToEcho: TypingLatencyStats?
     public let keyToPaint: TypingLatencyStats?
-    /// Mean keys per `sendText` over the measured keys (0 without samples).
+    /// Mean keys per send over the measured keys (0 without samples).
     public let meanBatchSize: Double
-    /// Mean bytes per `sendText` over the measured keys (0 without samples).
+    /// Mean bytes per send over the measured keys (0 without samples).
     public let meanBatchBytes: Double
     /// Requests to this host that went over the held `api-bridge --multi` channel.
     public let heldRequests: Int
@@ -70,11 +71,21 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public let perRequestRequests: Int
     /// Times the held channel failed to open although the host advertised it.
     public let heldOpenFailures: Int
+    /// Keys typed to this host that went out as `pane.input.stream` frames.
+    public let streamKeys: Int
+    /// Keys typed to this host that went out through `pane.send_text`.
+    public let sendTextKeys: Int
 
     /// Share of this host's requests that used the held channel, nil before any request.
     public var heldShare: Double? {
         let total = heldRequests + perRequestRequests
         return total == 0 ? nil : Double(heldRequests) / Double(total)
+    }
+
+    /// Share of this host's keys sent on the input stream, nil before any key was sent.
+    public var inputStreamShare: Double? {
+        let total = streamKeys + sendTextKeys
+        return total == 0 ? nil : Double(streamKeys) / Double(total)
     }
 
     /// The block in plain words, one line each; shared by Settings and the copied report.
@@ -94,6 +105,11 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
             lines.append("Held channel failed to open \(heldOpenFailures) time\(heldOpenFailures == 1 ? "" : "s"): the herdr command "
                 + "on this machine is probably older than its server. Update or remove the old "
                 + "copy (`command -v herdr` on that machine).")
+        }
+        if let share = inputStreamShare {
+            lines.append("Input stream: \(Int((share * 100).rounded()))% of \(streamKeys + sendTextKeys) keys")
+        } else {
+            lines.append("Input stream: no keys sent")
         }
         lines.append("\(count) keys measured, \(dropped) not attributable, "
             + String(format: "%.1f keys (%.1f bytes) per send", meanBatchSize, meanBatchBytes))
@@ -150,6 +166,8 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         var paint: TimeInterval?
         var batchSize = 0
         var batchBytes = 0
+        /// The number `batchSent` gave the batch this key went out in.
+        var batch: UInt64?
     }
 
     private struct Ring {
@@ -170,15 +188,27 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         var held = 0
         var perRequest = 0
         var openFailures = 0
+        var streamKeys = 0
+        var sendTextKeys = 0
+    }
+
+    /// How a batch of keys left for the PTY.
+    public enum InputRoute: Sendable {
+        /// One `pane.send_text` request, stop-and-wait.
+        case sendText
+        /// A frame on the pane's `pane.input.stream`, several in flight at once.
+        case inputStream
     }
 
     private let clock: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private var context = Context(host: "unknown host", network: "unknown")
     private var pending: [PendingKey] = []
+    /// Number of the last batch `batchSent` stamped.
+    private var batchCount: UInt64 = 0
     private var rings: [Context: Ring] = [:]
     private var dropped: [Context: Int] = [:]
-    /// Keys whose send failed: the app drops those batches, so they never reached the host.
+    /// Keys whose send failed or whose stream frame was never acked; never resent.
     private var lost: [Context: Int] = [:]
     private var routes: [String: Routes] = [:]
     /// Transport host (address) → the label `begin(host:)` uses for it.
@@ -227,34 +257,52 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         }
     }
 
-    /// The pending keys without a send time just went out as one batch of `byteCount` bytes.
-    public func batchSent(byteCount: Int) {
+    /// The pending keys without a send time just went out as one batch of `byteCount`
+    /// bytes over `route`. Returns the batch's number, increasing per call, for
+    /// `batchAcked(through:)`.
+    @discardableResult
+    public func batchSent(byteCount: Int, route: InputRoute = .sendText) -> UInt64 {
         let now = clock()
-        locked {
+        return locked {
+            batchCount &+= 1
             let keys = pending.reduce(0) { $1.sent == nil ? $0 + 1 : $0 }
-            guard keys > 0 else { return }
+            guard keys > 0 else { return batchCount }
             for index in pending.indices where pending[index].sent == nil {
                 pending[index].sent = now
                 pending[index].batchSize = keys
                 pending[index].batchBytes = byteCount
+                pending[index].batch = batchCount
+                switch route {
+                case .sendText: routes[pending[index].context.host, default: Routes()].sendTextKeys += 1
+                case .inputStream: routes[pending[index].context.host, default: Routes()].streamKeys += 1
+                }
             }
+            return batchCount
         }
     }
 
-    /// The send in flight returned. A `failed` batch never reached the terminal (the app
-    /// drops it); its keys are counted as lost instead of measured.
-    public func batchAcked(failed: Bool = false) {
+    /// The server answered. Without `through`, every sent key not yet acked (the one
+    /// `sendText` in flight); with it, only keys of batches numbered up to `through`:
+    /// the input stream acks frames cumulatively while later frames are still out, and
+    /// those must not be stamped early. A `failed` batch's keys (a failed send, or stream
+    /// frames that were never acked) are counted as lost instead of measured.
+    public func batchAcked(failed: Bool = false, through batch: UInt64? = nil) {
         let now = clock()
         locked {
+            func covered(_ key: PendingKey) -> Bool {
+                guard key.sent != nil, key.ack == nil else { return false }
+                guard let batch else { return true }
+                return (key.batch ?? 0) <= batch
+            }
             if failed {
                 pending.removeAll { key in
-                    guard key.sent != nil, key.ack == nil else { return false }
+                    guard covered(key) else { return false }
                     lost[key.context, default: 0] += 1
                     return true
                 }
                 return
             }
-            for index in pending.indices where pending[index].sent != nil && pending[index].ack == nil {
+            for index in pending.indices where covered(pending[index]) {
                 pending[index].ack = now
             }
             finalize()
@@ -327,7 +375,8 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
                     meanBatchSize: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchSize }) / n,
                     meanBatchBytes: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchBytes }) / n,
                     heldRequests: route.held, perRequestRequests: route.perRequest,
-                    heldOpenFailures: route.openFailures)
+                    heldOpenFailures: route.openFailures,
+                    streamKeys: route.streamKeys, sendTextKeys: route.sendTextKeys)
             }
         }
     }
