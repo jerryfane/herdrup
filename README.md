@@ -167,8 +167,9 @@ voice and a proportional sans is the app voice.
 
 Live agent rows use system text, equal-height previews and a name-based avatar with a stable
 colour; the badge still carries status. Archive entries share the name colour but keep their
-archive icon. Gram-feed and guest-view identity styling is unchanged. Previews omit leading
-CLI prompt/spinner marks. Search is a plain field; Clear appears while text is present.
+archive icon. The Gram feed uses the same avatars; guest-view identity styling is unchanged.
+Previews omit leading CLI prompt/spinner marks. Search is a plain field; Clear appears while
+text is present.
 Agents, Gram and Settings share one compact bar with a small centred title on iPhone, iPad and
 Designed-for-iPad Mac. Back sits on the left on iPhone, Mac and a full-screen iPad. In an
 iPad window, whose controls take the top-left corner, Back joins the actions and sidebar
@@ -180,6 +181,14 @@ the visual reading order. The sidebar rail and ⌘K remain available.
 Settings builds its compact index in a separate view body, keeping the large section tuple
 off the adaptive navigation stack. CI checks resize/resume in an optimized simulator build
 with a device-sized 1008 KiB main stack, and rejects attached crashes even if XCTest reports a pass.
+
+Gram reads like iMessage in herdr's colours: your messages are violet bubbles on the right,
+agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
+time separators, an amber unread rule and green/grey Grabbed/Delivered lines. Long reports
+fold to four lines with Show more; fenced code sits in a monospaced box with its own Copy;
+images and files are cards with name, size and Open / Save to Files. On iPad and Mac the
+sidebar holds Gram's search field (⌘F; no mic, the composer keeps dictation) and its two
+conversations, Gram and Saved, as Messages rows, with Read all and Refresh in the bar.
 
 ## License
 

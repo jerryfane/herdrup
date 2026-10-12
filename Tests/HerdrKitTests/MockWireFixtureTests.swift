@@ -308,9 +308,9 @@ final class MockWireFixtureTests: XCTestCase {
     }
 
     /// The `gram.list` fixture must decode through the real client path, and the
-    /// GramMessage flags the Gram page renders on (unread, open-queue, grabbed,
-    /// direct) must resolve correctly. Optional fields (`to`, `grabbed_by`) are
-    /// omitted in JSON when absent — decoding must yield nil, not fail.
+    /// GramMessage flags the Gram page renders on (unread, grabbed, direct, federated
+    /// sender) must resolve correctly. Optional fields (`to`, `grabbed_by`,
+    /// `machine_label`) are omitted in JSON when absent — decoding must yield nil, not fail.
     func testMockGramListDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         // `messages` is optional now (an unchanged conditional answer omits it); a
@@ -318,37 +318,53 @@ final class MockWireFixtureTests: XCTestCase {
         // Bound before unwrapping: XCTUnwrap's autoclosure cannot contain an `await`.
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
-        XCTAssertEqual(messages.count, 5, "gram.list fixture did not decode to 5 messages")
+        XCTAssertEqual(messages.count, 9, "gram.list fixture did not decode to 9 messages")
+        XCTAssertEqual(messages.map(\.createdUnixMs), messages.map(\.createdUnixMs).sorted(by: >),
+                       "the daemon answers newest first")
 
-        // Newest first: the unread agent->owner digest leads.
+        // Newest first: the owner's direct reply leads, and a direct message carries `to`.
         let first = try XCTUnwrap(messages.first)
         XCTAssertEqual(first.id, "g1")
-        XCTAssertEqual(first.direction, .agentToOwner)
-        XCTAssertEqual(first.from, "trend-scout")
-        XCTAssertTrue(first.isFromAgent)
-        XCTAssertTrue(first.isUnread, "an agent->owner message with read_by_owner:false is unread")
-        XCTAssertNil(first.to)
+        XCTAssertEqual(first.direction, .ownerToAgent)
+        XCTAssertEqual(first.from, "owner")
+        XCTAssertFalse(first.isFromAgent)
+        XCTAssertEqual(first.to, "vetrina")
         XCTAssertNil(first.grabbedBy)
+        XCTAssertFalse(first.isOpenQueueItem, "a direct message is not a queue item")
 
-        // An unclaimed shared queue post (no `to`, no `grabbed_by`).
-        let queue = try XCTUnwrap(messages.first { $0.id == "g2" })
-        XCTAssertEqual(queue.direction, .ownerToAgent)
-        XCTAssertNil(queue.to)
-        XCTAssertNil(queue.grabbedBy)
-        XCTAssertTrue(queue.isOpenQueueItem)
+        // A federated sender: the bare name and the machine label read separately.
+        let federated = try XCTUnwrap(messages.first { $0.id == "g2" })
+        XCTAssertTrue(federated.isFromAgent)
+        XCTAssertTrue(federated.isUnread, "an agent->owner message with read_by_owner:false is unread")
+        XCTAssertEqual(federated.from, "4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop")
+        XCTAssertEqual(federated.machineLabel, "hetzner-1")
+        XCTAssertEqual(federated.senderAgentName, "clientloop")
+        XCTAssertEqual(federated.senderMachine, "hetzner-1")
+        XCTAssertNil(federated.to)
+        XCTAssertNil(federated.grabbedBy)
+        // Its text carries a one-line code fence, which the page draws as a code block.
+        XCTAssertEqual(GramText.segments(federated.text), [
+            .text("Scaffold is up. Run it with:"),
+            .code("cd ~/src/amigo-poc && pnpm dev", language: nil),
+        ])
 
-        // A grabbed queue item is no longer open.
-        let grabbed = try XCTUnwrap(messages.first { $0.id == "g3" })
-        XCTAssertEqual(grabbed.grabbedBy, "herdr-app")
+        // A local sender has no machine of its own on the wire.
+        let local = try XCTUnwrap(messages.first { $0.id == "g4" })
+        XCTAssertEqual(local.senderAgentName, "vetrina")
+        XCTAssertNil(local.machineLabel)
+        XCTAssertNil(local.senderMachine)
+        XCTAssertGreaterThan(local.text.split(separator: "\n").count, 4,
+                             "the long report must be long enough to fold")
+
+        // A grabbed shared-queue post (no `to`) is no longer open.
+        let grabbed = try XCTUnwrap(messages.first { $0.id == "g5" })
+        XCTAssertEqual(grabbed.direction, .ownerToAgent)
+        XCTAssertNil(grabbed.to)
+        XCTAssertEqual(grabbed.grabbedBy, "ci-watch")
         XCTAssertFalse(grabbed.isOpenQueueItem)
 
-        // A direct message carries `to`.
-        let direct = try XCTUnwrap(messages.first { $0.id == "g4" })
-        XCTAssertEqual(direct.to, "clientloop")
-        XCTAssertNil(direct.grabbedBy)
-
-        // Exactly one unread → the header badge shows 1.
-        XCTAssertEqual(messages.filter { $0.isUnread }.count, 1)
+        // Today's three agent messages are unread → the header badge shows 3.
+        XCTAssertEqual(messages.filter { $0.isUnread }.map(\.id), ["g2", "g3", "g4"])
     }
 
     /// `gram.post` echoes the stored message (`type: gram_sent`) — the composer
@@ -362,17 +378,25 @@ final class MockWireFixtureTests: XCTestCase {
     }
 
     /// A message may carry a file (`file` object); one without it decodes to nil,
-    /// not a failure — so the row shows a chip only when there is one.
+    /// not a failure — so the row shows a card only when there is one. A file may come
+    /// with no caption at all (an image on its own).
     func testMockGramListDecodesFileAttachment() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
 
-        let withFile = try XCTUnwrap(messages.first { $0.id == "g5" })
-        let file = try XCTUnwrap(withFile.file, "g5 should carry a file")
+        let image = try XCTUnwrap(messages.first { $0.id == "g3" })
+        let file = try XCTUnwrap(image.file, "g3 should carry a file")
         XCTAssertEqual(file.name, "vetrina-live.png")
         XCTAssertEqual(file.mime, "image/png")
-        XCTAssertEqual(file.size, 48213)
+        XCTAssertEqual(file.size, 421888)
+        XCTAssertEqual(file.displaySize, "412 KB")
+        XCTAssertEqual(image.text, "", "an image may arrive without a caption")
+
+        let zip = try XCTUnwrap(messages.first { $0.id == "g2" }?.file, "g2 should carry a file")
+        XCTAssertEqual(zip.name, "amigo-poc-scaffold.zip")
+        XCTAssertEqual(zip.mime, "application/zip")
+        XCTAssertEqual(zip.displaySize, "1.3 MB")
 
         let noFile = try XCTUnwrap(messages.first { $0.id == "g1" })
         XCTAssertNil(noFile.file, "a message without a file must decode to nil")
@@ -381,7 +405,7 @@ final class MockWireFixtureTests: XCTestCase {
     /// `gram.get_file` returns the bytes inline (base64); the client decodes them.
     func testMockGramGetFileDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
-        let (name, mime, data) = try await client.gramGetFile(id: "g5")
+        let (name, mime, data) = try await client.gramGetFile(id: "g3")
         XCTAssertEqual(name, "vetrina-live.png")
         XCTAssertEqual(mime, "image/png")
         XCTAssertEqual(String(decoding: data, as: UTF8.self), "hello world")
@@ -696,23 +720,28 @@ enum MockWireFixtures {
     ]}}
     """#
 
-    /// A `gram.list` owner view: unread + read agent->owner messages, an unclaimed
-    /// shared queue post, a grabbed one, and a direct message — newest first. Keep in
+    /// A `gram.list` owner view, newest first: direct owner posts, a grabbed shared-queue
+    /// post, read and unread agent->owner messages, federated senders with a machine label,
+    /// a code fence with a zip attachment, an image-only message and a long report. Keep in
     /// sync with the App's MockTransport.gramList.
     static let gramList = #"""
     {"id":"mock","result":{"type":"gram_list","messages":[
-      {"id":"g1","direction":"agent_to_owner","from":"trend-scout","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1723000005000,"read_by_owner":false},
-      {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
-      {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
-      {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
+      {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
+      {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
+      {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
+      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\nRollback is one command away.","created_unix_ms":1723041130000,"read_by_owner":false},
+      {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
+      {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
+      {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
+      {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}
     ]}}
     """#
 
     /// A canned `gram.post` echo (`type: gram_sent`). Keep in sync with the App's
     /// MockTransport.gramPosted.
     static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
 
     /// A canned `gram.get_file` reply (`type: gram_file_content`); the bytes decode
     /// to "hello world". Keep in sync with the App's MockTransport.gramFileContent.

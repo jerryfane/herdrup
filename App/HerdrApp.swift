@@ -2035,10 +2035,12 @@ struct TerminalHomeView: View {
     /// One-shot signal for the sidebar's Read-all button, same reason as `gramRefreshToken`:
     /// a sidebar button cannot call `GramView`'s async mark-read pass directly.
     @State private var gramReadAllToken = 0
-    /// Observed, not read statically: the Gram sidebar shows the Saved count as a badge, and
-    /// `SavedGramStore.shared.saved.count` read directly would only refresh when some unrelated
-    /// state re-rendered this view — so saving or removing a gram would leave a stale number.
-    @ObservedObject private var savedGrams = SavedGramStore.shared
+    /// The Gram search on regular width. The field sits at the top of the sidebar (a sibling
+    /// column of the page it filters), so the text lives here and reaches `GramView` as a
+    /// binding; the phone keeps the page's own search toggle instead.
+    @State private var gramSearch = ""
+    /// Focus of the sidebar's Gram search, so ⌘F can put the cursor in it.
+    @FocusState private var gramSearchFocused: Bool
     /// First launch shows the gestures tutorial once; the "Gestures" tab reopens it.
     @AppStorage("hasSeenGesturesHelp") private var hasSeenGesturesHelp = false
 
@@ -2528,7 +2530,8 @@ struct TerminalHomeView: View {
                     GramView(client: client, agents: agents, unread: gramUnread,
                              showingSaved: $gramShowingSaved,
                              refreshToken: gramRefreshToken,
-                             readAllToken: gramReadAllToken)
+                             readAllToken: gramReadAllToken,
+                             searchText: $gramSearch)
                 case .settings:
                     SettingsView(
                         client: client,
@@ -2557,7 +2560,8 @@ struct TerminalHomeView: View {
         }
     }
 
-    /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ with the responder chain.
+    /// Zero-opacity buttons that exist only to register ⌘K / ⌘/ (and ⌘F on Gram) with the
+    /// responder chain.
     private var keyboardShortcuts: some View {
         ZStack {
             Button("Toggle sidebar") { toggleSidebar() }
@@ -2572,6 +2576,13 @@ struct TerminalHomeView: View {
                 .keyboardShortcut("-", modifiers: .command)
             Button("Reset zoom") { terminalFontSize = 12.5 }
                 .keyboardShortcut("0", modifiers: .command)
+            // ⌘F on Gram puts the cursor in the sidebar search. Registered only while Gram is
+            // the section: the terminal's own ⌘F lives on the front pane, which is not
+            // presented then, so the two bindings never compete.
+            if selectedTab == .gram {
+                Button("Search Gram") { focusGramSearch() }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -2614,71 +2625,160 @@ struct TerminalHomeView: View {
         Spacer(minLength: 0)
     }
 
-    /// Gram's sidebar column: a header matching the agents header's shape (title, one-number
-    /// subtitle, a trailing circle action) over the two "conversations" this channel has.
+    /// Gram's sidebar column, as the design draws it: the shared section bar (Back, the small
+    /// centred title with the amber unread count, and the sidebar toggle / Read all / Refresh
+    /// capsule), a mic-less search field, and the channel's two conversations as Messages rows.
     ///
     /// This is the SAME column the agents list uses. Gram previously drew its own rail inside the
     /// detail pane while this column rendered a blank `Spacer()`, so the reader saw two sidebars
-    /// and the left one was empty. Selecting a row writes `gramShowingSaved`, which the page
-    /// reads as a binding, so the detail pane's content swaps in place with no navigation.
+    /// and the left one was empty. Selecting a row writes `gramShowingSaved` and typing writes
+    /// `gramSearch`; the page reads both as bindings, so the detail pane filters and swaps in
+    /// place with no navigation, and the page shows no search control of its own.
     private var gramSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionTopBar(title: "Gram", count: gramUnread.count) {
+            SectionTopBar(title: "Gram", count: gramUnread.count, leading: {
+                SectionBackSlot(.leading) { sectionBackButton }
+            }) {
                 hideSidebarButton
+                SectionBackSlot(.trailing) { sectionBackButton }
                 if !gramShowingSaved, gramUnread.count > 0 {
                     SectionBarButton(icon: "envelope.open", label: "Read all") { gramReadAllToken += 1 }
                 }
                 SectionBarButton(icon: "arrow.clockwise", label: "Refresh") { gramRefreshToken += 1 }
             }
-            Divider().overlay(Palette.hairlineQuiet)
-            VStack(spacing: 4) {
-                gramSidebarRow(title: "Inbox", icon: "tray", selected: !gramShowingSaved,
-                               badge: gramUnread.count) { gramShowingSaved = false }
-                gramSidebarRow(title: "Saved", icon: "bookmark", selected: gramShowingSaved,
-                               badge: savedGrams.saved.count,
-                               badgeMuted: true) { gramShowingSaved = true }
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
+            sidebarSearchField(text: $gramSearch, focus: $gramSearchFocused,
+                               identifier: "gram-search-field", height: 40, outlined: true)
+                .padding(.top, 2)
+            GramSidebarConversations(showingSaved: $gramShowingSaved, unreadCount: gramUnread.count)
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
             Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// ⌘F on Gram: the cursor goes to the sidebar search. A minimised sidebar is opened first;
+    /// the field only mounts with its column, so the focus waits out the column's animation.
+    private func focusGramSearch() {
+        guard columnVisibility == .detailOnly else {
+            gramSearchFocused = true
+            return
+        }
+        toggleSidebar()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { gramSearchFocused = true }
+    }
 
-    /// One selectable row in the Gram sidebar. `badgeMuted` renders the count as a quiet pill
-    /// (Saved) rather than the attention-coloured unread pill (Inbox).
-    private func gramSidebarRow(title: String, icon: String, selected: Bool, badge: Int,
-                                badgeMuted: Bool = false,
-                                action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: selected && icon == "bookmark" ? "bookmark.fill" : icon)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(selected ? Palette.brand : Palette.textDim)
-                    .frame(width: 20)
-                Text(title)
-                    .font(Typography.app(15, selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? Palette.text : Palette.textDim)
-                Spacer(minLength: 0)
-                if badge > 0 {
-                    Text("\(badge)")
-                        .font(Typography.machine(11, .semibold))
-                        .foregroundStyle(badgeMuted ? Palette.textDim : Palette.ground)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(badgeMuted ? Palette.surfaceRaised : Palette.waiting))
+    /// Gram's two conversations in the sidebar, as Messages rows. "Gram" is the channel: the two
+    /// most recent agent senders' avatars, the newest message as the preview and its time, and
+    /// the amber dot while anything is unread. "Saved" is the local bookmarks: the newest saved
+    /// message and its time. Selecting a row writes `showingSaved`, which the page reads.
+    ///
+    /// Its own view, observing the two stores itself, so a poll or a bookmark re-renders these
+    /// two rows rather than the whole home view.
+    private struct GramSidebarConversations: View {
+        @Binding var showingSaved: Bool
+        let unreadCount: Int
+        @ObservedObject private var inboxStore = GramInboxStore.shared
+        @ObservedObject private var savedStore = SavedGramStore.shared
+
+        var body: some View {
+            let messages = inboxStore.inbox.messages   // newest first
+            let senders = Self.recentAgentSenders(in: messages)
+            let newestSaved = savedStore.saved.first   // newest first
+            VStack(spacing: 2) {
+                conversation(identifier: "gram-conversation-gram", selected: !showingSaved,
+                             select: { showingSaved = false }) {
+                    GramConversationRow(
+                        title: "Gram",
+                        avatarNames: senders,
+                        // No agent has written yet: the channel's own symbol in place of faces.
+                        systemImage: senders.isEmpty ? "bubble.left.and.bubble.right.fill" : nil,
+                        preview: messages.first.map { Self.preview(of: $0) } ?? AttributedString(),
+                        time: messages.first?.createdAt,
+                        unread: unreadCount > 0,
+                        selected: !showingSaved)
+                }
+                conversation(identifier: "gram-conversation-saved", selected: showingSaved,
+                             select: { showingSaved = true }) {
+                    GramConversationRow(
+                        title: "Saved",
+                        avatarNames: [],
+                        systemImage: "bookmark.fill",
+                        preview: newestSaved.map { Self.preview(of: $0) }
+                            ?? AttributedString("No saved messages yet"),
+                        time: newestSaved?.createdAt,
+                        unread: false,
+                        selected: showingSaved)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(selected ? Palette.surfaceRaised : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .hoverEffect(.highlight)
+
+        /// The row as a plain button carrying the id tests and VoiceOver use, with the
+        /// selected trait on the current conversation.
+        private func conversation<Row: View>(identifier: String, selected: Bool,
+                                             select: @escaping () -> Void,
+                                             @ViewBuilder row: () -> Row) -> some View {
+            Button(action: select, label: row)
+                .buttonStyle(.plain)
+                .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 14))
+                .hoverEffect(.highlight)
+                .accessibilityIdentifier(identifier)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+        }
+
+        /// The two most recent distinct agents that wrote, by bare name, newest first.
+        private static func recentAgentSenders(in messages: [GramMessage]) -> [String] {
+            var names: [String] = []
+            for message in messages where message.isFromAgent {
+                let name = message.senderAgentName
+                if !names.contains(name) { names.append(name) }
+                if names.count == 2 { break }
+            }
+            return names
+        }
+
+        /// "You: **vetrina** great, ship it." for the owner's posts (the addressee in bold;
+        /// a shared-queue post has none), "clientloop: Scaffold is up…" for an agent's.
+        private static func preview(of message: GramMessage) -> AttributedString {
+            let body = summary(message.text, fileName: message.file?.name)
+            guard !message.isFromAgent else {
+                return AttributedString("\(message.senderAgentName): \(body)")
+            }
+            var line = AttributedString("You: ")
+            if let to = message.to {
+                var name = AttributedString(GramMessage.agentName(from: to))
+                name.inlinePresentationIntent = .stronglyEmphasized
+                line += name
+                line += AttributedString(" ")
+            }
+            line += AttributedString(body)
+            return line
+        }
+
+        /// A saved copy keeps the sender as displayed (`hetzner-1/clientloop`); the row shows
+        /// the bare name, like the channel row.
+        private static func preview(of saved: SavedGram) -> AttributedString {
+            let body = summary(saved.text, fileName: saved.file?.name)
+            let sender = saved.fromAgent ? GramMessage.agentName(from: saved.from) : "You"
+            return AttributedString("\(sender): \(body)")
+        }
+
+        /// The message as one line of prose: fences dropped (their code kept), runs of
+        /// whitespace and newlines collapsed. A file with no caption reads as its name.
+        private static func summary(_ text: String, fileName: String?) -> String {
+            let pieces = GramText.segments(text).map { segment -> String in
+                switch segment {
+                case .text(let prose): return prose
+                case .code(let code, _): return code
+                }
+            }
+            let flat = pieces.joined(separator: " ")
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+            return flat.isEmpty ? (fileName ?? "") : flat
+        }
     }
+
     private var hideSidebarButton: some View {
         SectionBarButton(icon: "sidebar.leading", label: "Minimise sidebar",
                          identifier: "terminal-sidebar-toggle", action: toggleSidebar)
@@ -3450,18 +3550,28 @@ struct TerminalHomeView: View {
     /// The agent search: a plain text field with Clear once there is text. No mic: the
     /// owner found dictating a name to filter the list useless.
     private var searchField: some View {
+        sidebarSearchField(text: $search, focus: $searchFocused, identifier: "agent-search")
+    }
+
+    /// A sidebar search field: magnifier, text, and Clear once there is text. Shared by the
+    /// agents list and Gram's sidebar. Deliberately no mic on either (owner rule): dictating a
+    /// filter was useless, and the Gram composer below keeps dictation where it helps.
+    /// `outlined` adds the 1 pt hairline the Gram design draws around its field.
+    private func sidebarSearchField(text: Binding<String>, focus: FocusState<Bool>.Binding,
+                                    identifier: String, height: CGFloat = 42,
+                                    outlined: Bool = false) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Palette.textDim)
                 .accessibilityHidden(true)
-            TextField("Search", text: $search)
+            TextField("Search", text: text)
                 .font(Typography.app(16)).foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .focused($searchFocused)
-                .accessibilityIdentifier("agent-search")
-            if !search.isEmpty {
-                Button { search = "" } label: {
+                .focused(focus)
+                .accessibilityIdentifier(identifier)
+            if !text.wrappedValue.isEmpty {
+                Button { text.wrappedValue = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
                         .foregroundStyle(Palette.textFaint)
@@ -3471,10 +3581,13 @@ struct TerminalHomeView: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 42)
+        .frame(height: height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.surface)
         .clipShape(Capsule())
+        .overlay {
+            if outlined { Capsule().strokeBorder(Palette.hairline, lineWidth: 1) }
+        }
         .padding(.horizontal, 16).padding(.bottom, 6)
     }
 
@@ -6862,6 +6975,7 @@ struct ShortcutsSheet: View {
     private let rows: [(keys: String, label: String)] = [
         ("⌘ K", "Show or hide the sidebar"),
         ("⌘ /", "This shortcut list"),
+        ("⌘ F", "Search Gram (in Gram)"),
         ("⌘ +", "Increase terminal font size"),
         ("⌘ −", "Decrease terminal font size"),
         ("⌘ 0", "Reset terminal font size"),
@@ -9138,8 +9252,11 @@ struct GramScreenshotHarness: View {
 
     var body: some View {
         // Empty `agents` keeps the recipient picker to the shared queue; `onClose` nil hides the
-        // close X (there is nothing to dismiss to in a standalone render).
+        // close X (there is nothing to dismiss to in a standalone render). The machine label is
+        // the one the design's sample conversation names for local senders ("vetrina ·
+        // mac-studio"); a live session gets it from its connection.
         GramView(client: client, agents: [], onClose: nil, showingSaved: $showingSaved)
+            .environment(\.guestMachineLabel, "mac-studio")
     }
 }
 
@@ -9658,21 +9775,29 @@ struct MockTransport: HerdrTransport {
     {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
     """#
 
-    /// `gram.list` owner view for the Gram-page mock render. Byte-identical to
-    /// MockWireFixtures.gramList in the tests, where it is machine-checked to decode.
+    /// `gram.list` owner view for the Gram-page mock render: the sample conversation of the
+    /// approved design (you, vetrina and ci-watch on this machine, clientloop and trend-scout
+    /// relayed from hetzner-1), newest first. Yesterday's thread is read; today's three agent
+    /// messages are unread: a long report that folds, an image, and a code fence with a zip.
+    /// Byte-identical to MockWireFixtures.gramList in the tests, where it is machine-checked
+    /// to decode.
     static let gramList = #"""
     {"id":"mock","result":{"type":"gram_list","messages":[
-      {"id":"g1","direction":"agent_to_owner","from":"trend-scout","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1723000005000,"read_by_owner":false},
-      {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
-      {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
-      {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev, it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
+      {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
+      {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
+      {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
+      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\nRollback is one command away.","created_unix_ms":1723041130000,"read_by_owner":false},
+      {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
+      {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
+      {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
+      {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}
     ]}}
     """#
 
     /// A canned `gram.post` echo, so the mock composer's send path resolves.
     static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
 
     /// A canned `gram.get_file` reply; the bytes decode to "hello world".
     /// Byte-identical to MockWireFixtures.gramFileContent.

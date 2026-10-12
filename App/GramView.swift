@@ -1,6 +1,7 @@
 import HerdrKit
 import QuickLook
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
 
 /// The unread-gram count, lifted out of `GramView` so the tab bar can badge it
@@ -48,6 +49,10 @@ struct GramView: View {
     /// `refreshToken`: a sibling column cannot call this view's async `markAllRead` directly.
     /// Defaulted so the phone call site (which has its own header button) omits it.
     var readAllToken: Int = 0
+    /// The host's search text (the iPad/Mac sidebar field). When set, the feed filters by it
+    /// and the page draws no search control of its own. Declared after `readAllToken` so the
+    /// memberwise init keeps its order (see the sidebar call site).
+    var searchText: Binding<String>? = nil
 
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
@@ -121,15 +126,36 @@ struct GramView: View {
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
-    /// Free-text filter over the visible section. Local to the page: it is a transient view
-    /// concern, unlike `showingSaved`, which the sidebar owns (a sibling column drives that).
-    @State private var search = ""
-    /// Whether the header's search field is showing. Gram's search used to be a box
-    /// pinned permanently above the list; it is now the same magnifier-then-field the
-    /// terminal header uses (`InlineSearchField`), so the list keeps that vertical space
-    /// until someone actually searches.
+    /// Free-text filter over the visible section, when the host does not own it (iPhone).
+    /// A transient view concern, unlike `showingSaved`, which the sidebar owns.
+    @State private var localSearch = ""
+    /// The filter in force: the host's sidebar field when it passes `searchText` (iPad and
+    /// Mac), else this page's own header field.
+    private var search: String {
+        get { searchText?.wrappedValue ?? localSearch }
+        nonmutating set {
+            if let searchText { searchText.wrappedValue = newValue } else { localSearch = newValue }
+        }
+    }
+    private var searchBinding: Binding<String> { searchText ?? $localSearch }
+    /// Whether the header's search field is showing (iPhone, or a host without a sidebar
+    /// field): the magnifier-then-field the terminal header uses (`InlineSearchField`).
     @State private var searchOpen = false
     @FocusState private var searchFocused: Bool
+    /// The "N unread" rule: where it sits (the oldest unread message) and how many there
+    /// were. Captured ONCE, before the first mark-read, so reading the messages does not
+    /// pull the rule away from under the reader.
+    @State private var unreadRule: UnreadRule?
+    @State private var unreadRuleCaptured = false
+    /// Text segments opened with "Show more" (`<message id>#<segment>`). Here rather than in
+    /// the row so a LazyVStack rebuilding a row does not fold it again.
+    @State private var expandedTexts: Set<String> = []
+    /// The "Gram ›" pill's sheet: Read all, the agents seen in Gram, and the shared queue.
+    @State private var showingAgentsSheet = false
+    /// The composer's recipient chip width, handed to the composer's wrap measure.
+    @State private var recipientChipWidth: CGFloat = 0
+    /// This device's machine label, for a local agent's "name · machine" line.
+    @Environment(\.guestMachineLabel) private var localMachine
     /// True while a Read-all pass is running, so the button disables rather than stacking passes.
     @State private var markingAllRead = false
     /// A partial-failure report from a Read-all pass. Its OWN slot rather than `refreshNote`,
@@ -263,6 +289,53 @@ struct GramView: View {
         }
     }
 
+    /// Where the "N unread" rule sits and the count it shows (see `unreadRule`).
+    private struct UnreadRule: Equatable {
+        let messageID: String
+        let count: Int
+    }
+
+    /// One feed row with what draws around it: a time separator, the unread rule, and
+    /// whether it opens or closes a sender group.
+    private struct FeedEntry: Identifiable {
+        let message: GramMessage
+        /// The time separator above the row, when the gap from the previous one is over an
+        /// hour or the day changed (and above the first row).
+        let separator: Date?
+        /// The unread rule above the row.
+        let unreadCount: Int?
+        let startsGroup: Bool
+        let endsGroup: Bool
+        var id: String { message.id }
+        var startsAfterMarker: Bool { separator != nil || unreadCount != nil }
+    }
+
+    /// The visible messages oldest first, as the feed draws them. A separator or the unread
+    /// rule also breaks a sender group, so the next bubble gets its own sender line.
+    private var feedEntries: [FeedEntry] {
+        let rows = Array(visibleMessages.reversed())
+        let calendar = Calendar.current
+        let markers: [(separator: Date?, unread: Int?)] = rows.indices.map { index in
+            let date = rows[index].createdAt
+            let separates = index == 0
+                || date.timeIntervalSince(rows[index - 1].createdAt) > 3600
+                || !calendar.isDate(date, inSameDayAs: rows[index - 1].createdAt)
+            let unread = unreadRule?.messageID == rows[index].id ? unreadRule?.count : nil
+            return (separates ? date : nil, unread)
+        }
+        func breaks(_ index: Int) -> Bool { markers[index].separator != nil || markers[index].unread != nil }
+        return rows.indices.map { index in
+            let next = index + 1
+            return FeedEntry(
+                message: rows[index],
+                separator: markers[index].separator,
+                unreadCount: markers[index].unread,
+                startsGroup: index == 0 || breaks(index) || !GramRow.sameRun(rows[index - 1], rows[index]),
+                endsGroup: next == rows.count || breaks(next) || !GramRow.sameRun(rows[index], rows[next])
+            )
+        }
+    }
+
     private enum LoadPhase: Equatable {
         case loading
         case loaded
@@ -281,10 +354,14 @@ struct GramView: View {
             case .agent(let name): return name
             }
         }
-        var label: String {
+        /// The composer chip's text: "Queue", or the agent's bare name cut to 10 characters
+        /// so the chip never crowds the text off the send row.
+        var chipLabel: String {
             switch self {
-            case .queue: return "Shared queue"
-            case .agent(let name): return name
+            case .queue: return "Queue"
+            case .agent(let name):
+                let bare = GramMessage.agentName(from: name)
+                return bare.count > 10 ? String(bare.prefix(9)) + "…" : bare
             }
         }
     }
@@ -332,9 +409,11 @@ struct GramView: View {
             Task { await markAllRead() }
         }
         // A filter typed in Inbox has no meaning in Saved, and leaving it set would greet the
-        // just-selected section with "No matches", which reads as a bug. `showingSaved` is the
-        // host's binding, so this fires for both the phone toggle and the sidebar rows.
-        .onChange(of: showingSaved) { _, _ in search = "" }
+        // just-selected section with "No matches", which reads as a bug. Only the page's OWN
+        // field: a host's sidebar search (`searchText`) is the reader's and outlives the switch.
+        .onChange(of: showingSaved) { _, _ in localSearch = "" }
+        // The "Gram ›" pill: Read all, the agents seen in Gram, and the shared queue.
+        .sheet(isPresented: $showingAgentsSheet) { agentsSheet }
         // Paperclip → the shared attach sheet and pickers; picks stage straight into
         // `attachedFiles` under the shared size and count limits.
         .composerAttachPicker(
@@ -433,14 +512,14 @@ struct GramView: View {
 
     // MARK: - Layout roots
 
-    /// iPhone / compact width: the original single column — header (with the All/Saved toggle),
-    /// the message feed, banner, and composer stacked top to bottom. Unchanged from before.
+    /// iPhone / compact width: a single column — the nav bar (back, the senders' avatar
+    /// group over the "Gram ›" pill, search and Saved), the message feed, banner, and
+    /// composer stacked top to bottom.
     private var phoneBody: some View {
         VStack(spacing: 0) {
             header
                 .background(Palette.ground)
                 .zIndex(1)
-            Divider().overlay(Palette.hairlineQuiet)
             content
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
             bannerView
@@ -468,9 +547,9 @@ struct GramView: View {
         }
     }
 
-    /// Regular width: the message feed + composer ONLY. The Inbox/Saved selector and the refresh
-    /// action are rendered by the host in the app's real `NavigationSplitView` sidebar, beside
-    /// the section picker, exactly like the agents list.
+    /// Regular width: the avatar-group header, the message feed and the composer. The
+    /// Inbox/Saved selector, search, Read all and refresh are rendered by the host in the
+    /// app's real `NavigationSplitView` sidebar, exactly like the agents list.
     ///
     /// This page used to draw its OWN 260pt rail here, which on iPad and Mac put a second
     /// sidebar next to the split view's own column — and that column was rendering an empty
@@ -479,7 +558,8 @@ struct GramView: View {
     /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
         VStack(spacing: 0) {
-            iPadSearchRow
+            iPadHeader
+                .readableColumn(GramBubble.columnCap)
                 .layoutPriority(1)
                 .zIndex(1)
             content
@@ -495,25 +575,28 @@ struct GramView: View {
         }
     }
 
-    /// The message filter, pinned ABOVE the scroll in both layouts (it must not scroll away),
-    /// copying the agents list's field verbatim except for the binding and placeholder so the
-    /// two search surfaces in the app look and behave identically.
-    /// iPad/regular width has no header of its own — the host renders Gram's section
-    /// controls in the app's real sidebar — so the magnifier needs a home here. A slim
-    /// right-aligned row: one icon when closed, the field when open. Still far less
-    /// vertical space than the permanent box this replaced.
-    @ViewBuilder
-    private var iPadSearchRow: some View {
-        if canFilter {
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                if searchOpen { searchField.frame(maxWidth: 420) }
-                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search") { toggleSearch() }
+    /// iPad / Mac: the same avatar group and "Gram ›" pill as the phone, centred at the top
+    /// of the column. Search lives in the host's sidebar when it passes `searchText`; a host
+    /// that does not gets the magnifier (and its field) at the right of this row.
+    private var iPadHeader: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                headerIdentity
+                if offersOwnSearch {
+                    HStack {
+                        Spacer(minLength: 0)
+                        InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
+                                           target: CGSize(width: 40, height: 44)) { toggleSearch() }
+                    }
+                }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
-            .background(Palette.ground)
+            if offersOwnSearch, searchOpen { searchField.frame(maxWidth: 420) }
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
+        .background(Palette.ground)
     }
 
     /// The header's inline field, shared with the terminal pane (`InlineSearchField`).
@@ -522,7 +605,7 @@ struct GramView: View {
     private var searchField: some View {
         InlineSearchField(
             placeholder: "Search messages",
-            text: $search,
+            text: searchBinding,
             focus: $searchFocused,
             matches: nil,
             onNext: nil,
@@ -531,13 +614,14 @@ struct GramView: View {
         )
     }
 
-    /// Search is offered only where there is something to filter. `content` shows a
-    /// spinner while loading and an error card when the daemon has no gram, and a search
-    /// control over either is a live control over nothing.
     /// The feed's width cap: `GramBubble.columnCap` at regular width, none on iPhone.
     private var feedCap: CGFloat { hSizeClass == .regular ? GramBubble.columnCap : .infinity }
 
     private var canFilter: Bool { showingSaved || phase == .loaded }
+
+    /// Whether this page draws its own search control: only where there is something to
+    /// filter, and never when the host's sidebar owns the search (`searchText`).
+    private var offersOwnSearch: Bool { canFilter && searchText == nil }
 
     /// Opens the field and takes focus, or closes it and clears the term — clearing is
     /// what restores the unfiltered list, so a hidden field can never leave the list
@@ -555,7 +639,8 @@ struct GramView: View {
 
     /// Gram is the active page whenever this view is mounted, so one hidden responder
     /// command is enough. Reuses the terminal's shortcut pattern: Command-F opens search,
-    /// or moves focus back into an already-open field.
+    /// or moves focus back into an already-open field. A host that owns the search field
+    /// (`searchText`) owns Command-F too.
     private var gramKeyboardShortcuts: some View {
         Button("Find in Gram") {
             if searchOpen { searchFocused = true } else { toggleSearch() }
@@ -564,7 +649,7 @@ struct GramView: View {
         .frame(width: 0, height: 0)
         .opacity(0)
         .accessibilityHidden(true)
-        .disabled(!canFilter)
+        .disabled(!offersOwnSearch)
     }
 
     /// A load error / send error, shown ABOVE the composer in every phase — the
@@ -584,76 +669,229 @@ struct GramView: View {
 
     // MARK: - Header
 
-    /// The shared small centred title with the amber unread count, and today's controls in
-    /// one capsule on the right (search, Saved, Read all, Refresh, close). The search field
-    /// opens as its own row under the bar, so the title never disappears while filtering.
+    /// The phone's nav bar: a glass back capsule with the amber unread count on the left
+    /// (the count alone when this is a tab rather than a cover), the senders' avatar group
+    /// over the "Gram ›" pill in the middle, and one glass capsule with search and Saved on
+    /// the right. The search field opens as its own row under the bar.
     private var header: some View {
-        VStack(spacing: 10) {
-            SectionTopBar(title: showingSaved ? "Saved" : "Gram",
-                          count: showingSaved ? 0 : unreadCount) { headerActions }
-            if searchOpen { searchField.padding(.horizontal, 16).padding(.bottom, 10) }
+        VStack(spacing: 8) {
+            ZStack {
+                headerIdentity
+                HStack(alignment: .center) {
+                    headerLeading
+                    Spacer(minLength: 0)
+                    headerTrailing
+                }
+            }
+            if searchOpen { searchField }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
+    }
+
+    /// Back (with the unread count) when the page is a cover, else just the count.
+    @ViewBuilder
+    private var headerLeading: some View {
+        if let onClose {
+            Button(action: onClose) {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                    if unreadCount > 0 { unreadCountText }
+                }
+                .padding(.leading, 11)
+                .padding(.trailing, unreadCount > 0 ? 13 : 11)
+                .frame(minWidth: 44, minHeight: 44)
+                .gramGlass(Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+            .accessibilityValue(unreadCount > 0 ? "\(unreadCount) unread" : "")
+        } else if unreadCount > 0 {
+            unreadCountText
+                .padding(.horizontal, 13)
+                .frame(minWidth: 44, minHeight: 44)
+                .gramGlass(Capsule())
+                .accessibilityLabel("\(unreadCount) unread")
         }
     }
 
-    private var headerActions: some View {
+    private var unreadCountText: some View {
+        Text(verbatim: "\(unreadCount)")
+            .font(Typography.app(17, .medium))
+            .monospacedDigit()
+            .foregroundStyle(Palette.waiting)
+    }
+
+    /// Search (when there is something to filter) and the Inbox / Saved toggle.
+    private var headerTrailing: some View {
         HStack(spacing: 0) {
-            if canFilter {
+            if offersOwnSearch {
                 InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
-                                   inSectionBar: true) { toggleSearch() }
+                                   target: CGSize(width: 40, height: 44)) { toggleSearch() }
             }
-            // All / Saved toggle — a filled bookmark means the Saved section is showing.
+            // A filled bookmark means the Saved section is showing.
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { showingSaved.toggle() }
             } label: {
-                headerGlyph(showingSaved ? "bookmark.fill" : "bookmark",
-                            color: showingSaved ? Palette.brand : Palette.text)
+                Image(systemName: showingSaved ? "bookmark.fill" : "bookmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(showingSaved ? Palette.brand : Palette.text)
+                    .frame(width: 40, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .hoverEffect(.highlight)
             .accessibilityLabel("Saved")
-            // Read all — only while the Inbox is showing (Saved has no unread concept) and
-            // something is actually unread, so it never sits there as a no-op control.
-            if !showingSaved, unreadCount > 0 {
-                Button {
-                    Task { await markAllRead() }
-                } label: {
-                    headerGlyph("envelope.open")
-                }
-                .buttonStyle(.plain)
-                .disabled(markingAllRead)
-                .accessibilityLabel("Read all")
-            }
-            if !showingSaved {
-                Button {
-                    Task { await manualRefresh() }
-                } label: {
-                    // The spinner is the acknowledgement: without it a refresh over an
-                    // unchanged store changes nothing on screen.
-                    if manualRefreshing {
-                        ProgressView().controlSize(.small).tint(Palette.textDim)
-                            .sectionBarSlot()
-                    } else {
-                        headerGlyph("arrow.clockwise")
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(manualRefreshing)
-                .accessibilityLabel("Refresh")
-            }
-            if let onClose {
-                Button(action: onClose) { headerGlyph("xmark") }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close")
-            }
+            .accessibilityAddTraits(showingSaved ? .isSelected : [])
         }
+        .padding(.horizontal, 2)
+        .gramGlass(Capsule())
     }
 
-    private func headerGlyph(_ name: String, color: Color = Palette.text) -> some View {
-        Image(systemName: name)
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(color)
-            .sectionBarSlot()
-            // The pointer highlight covers the segment, matching the shared section bar.
-            .hoverEffect(.highlight)
+    /// The most recent distinct agent senders' avatars over the "Gram ›" pill, which opens
+    /// the agents sheet (Read all, the agents seen in Gram, the shared queue).
+    private var headerIdentity: some View {
+        Button { showingAgentsSheet = true } label: {
+            VStack(spacing: -6) {
+                GramAvatarCluster(names: messages.filter(\.isFromAgent).map(\.from))
+                    .accessibilityHidden(true)
+                HStack(spacing: 2) {
+                    Text("Gram")
+                        .font(Typography.app(13, .semibold))
+                        .foregroundStyle(Palette.text)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Palette.textFaint)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .gramGlass(Capsule())
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // The Button stays the accessibility element (button trait, label "Gram"); hiding
+        // the avatars and chevron keeps the label to the pill's word.
+        .accessibilityLabel("Gram")
+        .accessibilityHint("Shows the agents in Gram and Read all")
+        .accessibilityIdentifier("gram-header-pill")
+    }
+
+    /// An agent seen in Gram, for the pill's sheet.
+    private struct GramAgent: Identifiable {
+        /// The raw `from`, which is also the address a reply goes to.
+        let from: String
+        let name: String
+        let machine: String?
+        var id: String { from }
+    }
+
+    /// The agents seen in Gram, most recent first.
+    private var gramAgents: [GramAgent] {
+        var seen = Set<String>()
+        var result: [GramAgent] = []
+        for message in messages where message.isFromAgent {
+            guard seen.insert(message.from).inserted else { continue }
+            result.append(GramAgent(from: message.from, name: message.senderAgentName,
+                                    machine: message.senderMachine ?? (localMachine.isEmpty ? nil : localMachine)))
+        }
+        return result
+    }
+
+    /// The pill's sheet: Read all (and Refresh), then who to write to — an agent seen in
+    /// Gram or the shared queue. Choosing one sets the composer's recipient and closes it.
+    private var agentsSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        Task { await markAllRead() }
+                    } label: {
+                        Label("Read all", systemImage: "envelope.open")
+                    }
+                    .disabled(markingAllRead || unreadCount == 0)
+                    .accessibilityLabel("Read all")
+                    Button {
+                        Task { await manualRefresh() }
+                    } label: {
+                        HStack {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                            Spacer(minLength: 0)
+                            if manualRefreshing { ProgressView().controlSize(.small) }
+                        }
+                    }
+                    .disabled(manualRefreshing)
+                    .accessibilityLabel("Refresh")
+                }
+                Section("Write to") {
+                    ForEach(gramAgents) { agent in
+                        Button {
+                            recipient = .agent(agent.from)
+                            showingAgentsSheet = false
+                        } label: {
+                            HStack(spacing: 12) {
+                                GramAvatar(name: agent.from, size: 32)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(verbatim: agent.name)
+                                        .font(Typography.app(16, .semibold))
+                                        .foregroundStyle(Palette.text)
+                                    if let machine = agent.machine {
+                                        Text(verbatim: machine)
+                                            .font(Typography.app(13))
+                                            .foregroundStyle(Palette.textDim)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                if recipient == .agent(agent.from) {
+                                    Image(systemName: "checkmark").foregroundStyle(Palette.brand)
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("gram-recipient-\(agent.name)")
+                    }
+                    Button {
+                        recipient = .queue
+                        showingAgentsSheet = false
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "tray.and.arrow.down")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Palette.textDim)
+                                .frame(width: 32, height: 32)
+                                .background(Palette.surfaceRaised, in: Circle())
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Shared queue")
+                                    .font(Typography.app(16, .semibold))
+                                    .foregroundStyle(Palette.text)
+                                Text("Any agent can grab it")
+                                    .font(Typography.app(13))
+                                    .foregroundStyle(Palette.textDim)
+                            }
+                            Spacer(minLength: 0)
+                            if recipient == .queue {
+                                Image(systemName: "checkmark").foregroundStyle(Palette.brand)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("gram-recipient-queue")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Palette.ground)
+            .navigationTitle("Gram")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showingAgentsSheet = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     /// The badge and the Read-all control read the WHOLE store's count, which the
@@ -852,37 +1090,36 @@ struct GramView: View {
             noMatches(stillLoading: inboxStore.inbox.hasMore && pageError == nil,
                       loadedCount: messages.count, failure: pageError)
         case .loaded:
+            ScrollViewReader { feed in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    if shouldShowSetupCard { setupCard.padding(.bottom, 10) }
-                    // #354: bubbles join into runs (same side, same peer). 3 pt inside a run,
-                    // 14 pt between runs.
-                    let rows = visibleMessages
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, message in
-                        let joinsAbove = index > 0 && GramRow.sameRun(rows[index - 1], message)
-                        let joinsBelow = index + 1 < rows.count && GramRow.sameRun(message, rows[index + 1])
-                        GramRow(
-                            message: message,
-                            isDownloadingFile: downloadingFileFor == message.id,
-                            downloadProgress: downloadingFileFor == message.id ? downloadBytes : nil,
-                            isSaved: savedGrams.isSaved(message.id),
-                            onOpenFile: { openFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
-                            onSaveFile: { saveFile(id: message.id, expectedBytes: Self.expectedReplyBytes(for: message.file?.size ?? 0)) },
-                            onToggleSave: { savedGrams.toggle(message) },
-                            onDelete: { delete(message) },
-                            showsName: !joinsAbove,
-                            showsAvatar: !joinsBelow
-                        )
-                        .padding(.top, index == 0 ? 0 : (joinsAbove ? 3 : 14))
-                        .onAppear { markReadIfNeeded(message) }
+                    // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
+                    // already on screen otherwise look like the whole answer, which is
+                    // the same lie the empty state was fixed for. Older matches arrive
+                    // above, so the note sits at the top.
+                    if !search.isEmpty, inboxStore.inbox.hasMore {
+                        HStack(spacing: 8) {
+                            if let pageError {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("\(pageError) These matches may be incomplete.")
+                            } else {
+                                ProgressView().controlSize(.small)
+                                Text("Searching older messages…")
+                            }
+                        }
+                        .font(Typography.app(12))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("gram-searching-older")
                     }
-                    // The sentinel. In a LazyVStack it is only built when the reader
-                    // actually reaches the end of the loaded messages, which is exactly
-                    // when the next page is worth fetching.
-                    //
-                    // Keyed on the cursor, so each new page arms the next fetch; a failed
-                    // page says so and becomes a tap target, instead of spinning forever
-                    // with nothing left to re-trigger it.
+                    // The sentinel, at the TOP: the feed is oldest-first and opens at the
+                    // bottom, so a LazyVStack only builds this when the reader scrolls up
+                    // past the oldest loaded message, which is exactly when the next page is
+                    // worth fetching. Keyed on the cursor, so each new page arms the next
+                    // fetch; a failed page says so and becomes a tap target, instead of
+                    // spinning forever with nothing left to re-trigger it.
                     if let cursor = inboxStore.inbox.nextCursor, search.isEmpty {
                         Button {
                             Task { await loadMore() }
@@ -907,35 +1144,54 @@ struct GramView: View {
                         .accessibilityIdentifier("gram-loading-older")
                         .task(id: cursor) { await loadMore() }
                     }
-                    // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
-                    // already on screen otherwise look like the whole answer, which is
-                    // the same lie the empty state was fixed for.
-                    if !search.isEmpty, inboxStore.inbox.hasMore {
-                        HStack(spacing: 8) {
-                            if let pageError {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("\(pageError) These matches may be incomplete.")
-                            } else {
-                                ProgressView().controlSize(.small)
-                                Text("Searching older messages…")
+                    ForEach(Array(feedEntries.enumerated()), id: \.element.id) { index, entry in
+                        VStack(spacing: 0) {
+                            if let date = entry.separator {
+                                GramTimeSeparator(date: date)
+                                    .padding(.top, index == 0 ? 0 : 16)
                             }
+                            if let count = entry.unreadCount {
+                                GramUnreadRule(count: count)
+                                    .padding(.top, index == 0 && entry.separator == nil ? 0 : 12)
+                            }
+                            GramRow(
+                                message: entry.message,
+                                isDownloadingFile: downloadingFileFor == entry.message.id,
+                                downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
+                                isSaved: savedGrams.isSaved(entry.message.id),
+                                onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
+                                onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
+                                onToggleSave: { savedGrams.toggle(entry.message) },
+                                onDelete: { delete(entry.message) },
+                                startsGroup: entry.startsGroup,
+                                endsGroup: entry.endsGroup,
+                                expandedTexts: $expandedTexts,
+                                localMachine: localMachine
+                            )
+                            // 2 pt inside a group, 10 pt between groups.
+                            .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
                         }
-                        .font(Typography.app(12))
-                        .foregroundStyle(Palette.textFaint)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .accessibilityIdentifier("gram-searching-older")
+                        .onAppear { markReadIfNeeded(entry.message) }
                     }
+                    if shouldShowSetupCard { setupCard.padding(.top, 14) }
+                    Color.clear.frame(height: 1).id(Self.feedBottomID)
                 }
                 .padding(16)
                 .readableColumn(feedCap)
             }
+            // Oldest at the top, newest at the bottom: open at the newest, and follow a new
+            // message in. NOT `.defaultScrollAnchor(.bottom)`: with it, growing the composer
+            // (which shrinks the feed) re-anchored the feed every frame, a redraw loop that
+            // pinned the CPU and hung the composer's UI test.
+            .task(id: feedEntries.last?.id) { feed.scrollTo(Self.feedBottomID, anchor: .bottom) }
             // Same path as the buttons: a pull that lands inside a poll must not be
             // swallowed either.
             .refreshable { await manualRefresh() }
+            }
         }
     }
+
+    private static let feedBottomID = "gram-feed-bottom"
 
     private func centered<V: View>(@ViewBuilder _ inner: () -> V) -> some View {
         VStack { Spacer(); inner(); Spacer() }
@@ -1009,64 +1265,42 @@ struct GramView: View {
 
     // MARK: - Composer
 
+    /// A glass + on the left, then the field: the recipient chip, the text, the mic and a
+    /// round violet send. The chip lives INSIDE the field, so its width is handed to the
+    /// composer's wrap measure (`fieldPrefixWidth`) to keep one-row-at-rest honest.
     private var composer: some View {
-        VStack(spacing: 8) {
-            Divider().overlay(Palette.hairlineQuiet)
-            HStack(spacing: 8) {
-                Text("To")
-                    .font(Typography.machine(11, .semibold))
-                    .foregroundStyle(Palette.textFaint)
-                Menu {
-                    Button { recipient = .queue } label: {
-                        Label("Shared queue (any agent)", systemImage: "tray.and.arrow.down")
-                    }
-                    if !addressableAgents.isEmpty {
-                        Divider()
-                        ForEach(addressableAgents, id: \.self) { name in
-                            Button { recipient = .agent(name) } label: { Text(name) }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(recipient.label)
-                            .font(Typography.app(13, .medium))
-                            .foregroundStyle(Palette.text)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Palette.textFaint)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Palette.surface))
-                }
-                .disabled(sending)
-                Spacer(minLength: 0)
-                ComposerAttachButton(busy: loadingPhoto) { showAttachSheet = true }
-                    .disabled(sending || loadingPhoto)
-            }
+        HStack(alignment: .bottom, spacing: 8) {
+            attachButton
+                // Centred on the composer's resting row (its surface padding plus half
+                // the gap between the 40 pt circle and the 44 pt action row).
+                .padding(.bottom, ComposerStyle.surfacePadding + (ComposerStyle.actionSize - 40) / 2)
             AdaptiveComposer(
                 text: draft,
                 isFocused: composerFocused,
                 hasAccessory: !attachedFiles.isEmpty,
                 showsLeading: composerKeyboard.isVisible && composerFocused,
-                isRecording: draftDictating
+                isRecording: draftDictating,
+                fieldPrefixWidth: recipientChipWidth + Self.recipientChipGap
             ) { editorHeight in
-                ComposerTextField(
-                    text: $draft,
-                    isEnabled: !draftDictating,
-                    isFocused: composerFocused,
-                    onFocusChange: { composerFocused = $0 },
-                    placeholder: "Message an agent…",
-                    accessibilityIdentifier: "gram-composer-input",
-                    capitalization: .sentences,
-                    autocorrection: .default,
-                    onCommandReturn: {
-                        guard canSend else { return }
-                        Task { await send() }
-                    },
-                    fixedHeight: editorHeight
-                )
-                .frame(minWidth: 0, maxWidth: .infinity)
+                HStack(alignment: .top, spacing: Self.recipientChipGap) {
+                    recipientChip
+                    ComposerTextField(
+                        text: $draft,
+                        isEnabled: !draftDictating,
+                        isFocused: composerFocused,
+                        onFocusChange: { composerFocused = $0 },
+                        placeholder: "Message an agent…",
+                        accessibilityIdentifier: "gram-composer-input",
+                        capitalization: .sentences,
+                        autocorrection: .default,
+                        onCommandReturn: {
+                            guard canSend else { return }
+                            Task { await send() }
+                        },
+                        fixedHeight: editorHeight
+                    )
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                }
             } accessory: {
                 if !attachedFiles.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -1101,7 +1335,7 @@ struct GramView: View {
                         Button {
                             Task { await send() }
                         } label: {
-                            ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                            sendLabel
                         }
                         .fixedSize()
                         .accessibilityLabel("Send gram")
@@ -1115,9 +1349,88 @@ struct GramView: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
         .background(Palette.ground)
+    }
+
+    /// Space between the recipient chip and the text.
+    private static let recipientChipGap: CGFloat = 6
+
+    /// The + that opens the attach sheet: a 40 pt glass circle beside the field.
+    private var attachButton: some View {
+        Button { showAttachSheet = true } label: {
+            ZStack {
+                if loadingPhoto {
+                    ProgressView().controlSize(.small).tint(Palette.textDim)
+                } else {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                }
+            }
+            .frame(width: 40, height: 40)
+            .gramGlass(Circle())
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(sending || loadingPhoto)
+        .opacity(sending ? 0.45 : 1)
+        .accessibilityLabel("Attach file")
+    }
+
+    /// The recipient picker as a chip at the start of the field: the shared queue or one
+    /// live agent. Kept short ("Queue", a name capped by `Recipient.chipLabel`): the chip
+    /// shares the resting row with the text, the mic, send and the keyboard button, and a
+    /// wide chip would leave a one-word message no room and drop it off the send row.
+    private var recipientChip: some View {
+        Menu {
+            Button { recipient = .queue } label: {
+                Label("Shared queue (any agent)", systemImage: "tray.and.arrow.down")
+            }
+            if !addressableAgents.isEmpty {
+                Divider()
+                ForEach(addressableAgents, id: \.self) { name in
+                    Button { recipient = .agent(name) } label: { Text(name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(verbatim: recipient.chipLabel)
+                    .font(Typography.app(15, .semibold))
+                    .foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Palette.textDim)
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 8)
+            .frame(height: 26)
+            .background(Palette.surfaceRaised, in: Capsule())
+            .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
+        }
+        .disabled(sending)
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { recipientChipWidth = $0 }
+    }
+
+    /// Send: a round violet button in the 44 pt action slot.
+    private var sendLabel: some View {
+        ZStack {
+            Circle().fill(GramBubble.outFill).frame(width: 34, height: 34)
+            if sending {
+                ProgressView().controlSize(.small).tint(.white)
+            } else {
+                Image("ComposerSend")
+                    .resizable().renderingMode(.template).scaledToFit()
+                    .frame(width: 16, height: 16)
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: ComposerStyle.actionSize, height: ComposerStyle.actionSize)
+        .contentShape(Circle())
+        .opacity(canSend || sending ? 1 : 0.45)
     }
 
     private var canSend: Bool {
@@ -2007,6 +2320,15 @@ struct GramView: View {
     }
 
     private func markReadIfNeeded(_ message: GramMessage) {
+        // Anchor the "N unread" rule on the oldest unread message BEFORE anything is marked
+        // read, once per visit, so reading does not move or erase it under the reader.
+        if !unreadRuleCaptured {
+            unreadRuleCaptured = true
+            let unread = messages.filter(\.isUnread)
+            if let oldest = unread.last {
+                unreadRule = UnreadRule(messageID: oldest.id, count: unread.count)
+            }
+        }
         // Skip if already read or a mark-read is already in flight for it (onAppear
         // re-fires on scroll).
         guard message.isUnread, !markingRead.contains(message.id) else { return }
@@ -2097,8 +2419,6 @@ struct GramView: View {
     }
 }
 
-/// One message row. Agent->owner shows the sender's identity chip; owner->agent
-/// shows the recipient and the claim state of a queued item.
 /// A Gram file staged for export, plus the temp dir holding it (removed once the
 /// export picker finishes copying it to the chosen location).
 private struct ExportFile: Identifiable {
@@ -2132,6 +2452,13 @@ private struct FileExportPicker: UIViewControllerRepresentable {
     }
 }
 
+/// One message in the feed: option D's iMessage layout in herdr's colours (round 3).
+///
+/// An agent's group opens with a "name · machine" line and carries the sender's avatar
+/// beside its last bubble; the owner's own posts sit on the right with a status line
+/// ("Grabbed by …" / "Delivered to …"). Prose folds past four lines, fenced code draws in a
+/// monospaced inset with Copy, an image attachment shows as a picture card and any other
+/// file as a file card, sharing one card with the text when the message has both.
 struct GramRow: View {
     let message: GramMessage
     var isDownloadingFile: Bool
@@ -2144,114 +2471,264 @@ struct GramRow: View {
     var onSaveFile: () -> Void
     var onToggleSave: () -> Void
     var onDelete: () -> Void
-    /// #354 joined runs: back-to-back posts from the same side and peer share one name
-    /// (on the top bubble) and one avatar + tail (on the bottom bubble).
-    var showsName = true
-    var showsAvatar = true
+    /// The first message of a sender group: draws the sender line.
+    var startsGroup = true
+    /// The last message of a group: draws the avatar and the bubble tail.
+    var endsGroup = true
+    /// Text segments the reader opened with "Show more", keyed `<message id>#<segment>`.
+    /// Owned by the page, so a LazyVStack rebuilding this row does not fold the text again.
+    @Binding var expandedTexts: Set<String>
+    /// This device's own machine label, for a local sender's "name · machine" line (a
+    /// federated sender carries its own). Empty when unknown: the line shows the name only.
+    var localMachine = ""
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The image attachment's picture, read from the download cache once it is there.
+    @State private var thumbnail: UIImage?
 
     private var mine: Bool { !message.isFromAgent }
+    private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
+    private var ink: Color { mine ? .white : Palette.text }
+    private var bubbleShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
+    }
+    private var maxWidth: CGFloat { GramCardMetrics.cardWidth(sizeClass) }
+    private var imageFile: GramFile? {
+        guard let file = message.file, file.mime.lowercased().hasPrefix("image/") else { return nil }
+        return file
+    }
+    private var documentFile: GramFile? {
+        guard let file = message.file, !file.mime.lowercased().hasPrefix("image/") else { return nil }
+        return file
+    }
 
     var body: some View {
-        VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
-            metaLine
-                .padding(mine ? .trailing : .leading, GramBubble.avatarSlot)
-            HStack(alignment: .bottom, spacing: GramBubble.avatarGap) {
-                if mine { Spacer(minLength: GramBubble.oppositeInset) } else { avatarSlot }
-                bubble
-                if mine { avatarSlot } else { Spacer(minLength: GramBubble.oppositeInset) }
+        let segments = GramText.segments(message.text)
+        let hasTextPart = !segments.isEmpty || documentFile != nil
+        VStack(alignment: mine ? .trailing : .leading, spacing: 0) {
+            if startsGroup && !mine {
+                senderLine
+                    .padding(.leading, GramBubble.groupIndent + 12)
+                    .padding(.bottom, 2)
+            }
+            HStack(alignment: .bottom, spacing: GramBubble.groupIndent - GramBubble.avatarSize) {
+                if !mine {
+                    if endsGroup {
+                        GramAvatar(name: message.from, size: GramBubble.avatarSize)
+                    } else {
+                        Color.clear.frame(width: GramBubble.avatarSize, height: GramBubble.avatarSize)
+                    }
+                }
+                VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+                    if hasTextPart {
+                        chrome(textPart(segments), first: true, last: imageFile == nil)
+                    }
+                    if let image = imageFile {
+                        chrome(imageCard(image), first: !hasTextPart, last: true)
+                    }
+                }
+                // The message's drawn bubble(s), for UI tests that measure it (a line-limited
+                // Text's own frame is not its drawn height). Children stay accessible.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("gram-bubble-\(message.id)")
+            }
+            if let file = message.file, isDownloadingFile {
+                downloadLine(file)
+                    .padding(.top, 3)
+                    .padding(mine ? .trailing : .leading, mine ? 2 : GramBubble.groupIndent + 12)
             }
             if let status = statusLine {
-                Text(status)
-                    .font(Typography.machine(11))
-                    .foregroundStyle(statusColor)
-                    .padding(.trailing, GramBubble.avatarSlot)
+                status
+                    .font(Typography.app(11, .medium))
+                    .foregroundStyle(message.grabbedBy != nil ? Palette.done : Palette.textFaint)
+                    .padding(.top, 3)
+                    .padding(.trailing, 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+        // Room for the saved badge, which sits above the bubble's top edge.
+        .padding(.top, isSaved ? 12 : 0)
+        // Re-checked when a download finishes: opening an image is what caches it.
+        .task(id: isDownloadingFile) { await loadThumbnail() }
     }
 
-    /// Name (top of a run only), unread dot, age and bookmark, as small text above the bubble.
-    private var metaLine: some View {
-        HStack(spacing: 6) {
-            if showsName {
-                Text(title)
-                    .font(Typography.app(12, .semibold))
-                    .foregroundStyle(Palette.textDim)
+    /// "name · machine": the bare name is its own Text (UI tests find it by its label) and
+    /// the machine part is a separate span at 75 % opacity.
+    private var senderLine: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: message.senderAgentName)
+            if let machine = message.senderMachine ?? (localMachine.isEmpty ? nil : localMachine) {
+                Text(verbatim: " · \(machine)")
+                    .opacity(0.75)
             }
-            if message.isUnread {
-                Circle().fill(Palette.waiting).frame(width: 7, height: 7)
-            }
-            Text(age)
-                .font(Typography.machine(11))
-                .foregroundStyle(Palette.textFaint)
-            // Small save/unsave tap target (the same action is also in the long-press menu).
-            Button(action: onToggleSave) {
-                Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(isSaved ? Palette.brand : Palette.textFaint)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
         }
+        .font(Typography.app(11))
+        .foregroundStyle(Palette.textDim)
+        .lineLimit(1)
+    }
+
+    /// One part of the message (its text card, or its picture) with what every part
+    /// shares: the tail on the group's last part, the saved badge on the first part,
+    /// the context menu, and the width cap. The cap is applied AFTER the background so
+    /// a short bubble still hugs its text.
+    private func chrome<Content: View>(_ content: Content, first: Bool, last: Bool) -> some View {
+        content
+            .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                if last && endsGroup {
+                    BubbleTail()
+                        .fill(fill)
+                        .frame(width: 24, height: 22)
+                        .scaleEffect(x: mine ? -1 : 1, y: 1)
+                        .offset(x: mine ? 6 : -6)
+                        .accessibilityHidden(true)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if first && isSaved {
+                    GramSavedBadge().offset(x: 15, y: -17)
+                }
+            }
+            .contentShape(.contextMenuPreview, bubbleShape)
+            .contextMenu { menu }
+            .frame(maxWidth: maxWidth, alignment: mine ? .trailing : .leading)
     }
 
     @ViewBuilder
-    private var avatarSlot: some View {
-        if showsAvatar { avatar } else { Color.clear.frame(width: 30, height: 30) }
+    private var menu: some View {
+        if !message.text.isEmpty {
+            Button {
+                UIPasteboard.general.string = message.text
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+        Button(action: onToggleSave) {
+            Label(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark")
+        }
+        Button(role: .destructive, action: onDelete) {
+            Label("Delete", systemImage: "trash")
+        }
     }
 
-    private var bubble: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !message.text.isEmpty {
-                Text(linkified(message.text, tint: mine ? .white : Palette.brand))
-                    .font(Typography.app(15))
-                    .foregroundStyle(mine ? Color.white : Palette.text)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let file = message.file {
-                fileChip(file)
-            }
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
-            .fill(mine ? GramBubble.outFill : GramBubble.inFill))
-        .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
-            if showsAvatar {
-                BubbleTail()
-                    .fill(mine ? GramBubble.outFill : GramBubble.inFill)
-                    .frame(width: 24, height: 22)
-                    .scaleEffect(x: mine ? -1 : 1, y: 1)
-                    .offset(x: mine ? 6 : -6)
-                    .accessibilityHidden(true)
-            }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
-        // Long-press for the message actions. Copy the text (when there is any) —
-        // a file's bytes are reached via the chip's preview + system share sheet, so
-        // we don't add a second, weaker file-copy path here. Delete is destructive,
-        // pinned last.
-        .contextMenu {
-            if !message.text.isEmpty {
-                Button {
-                    UIPasteboard.general.string = message.text
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+    /// The text and any non-image file: a plain bubble for prose alone, a card (fixed card
+    /// width) once there is code or a file, and the bare file card for a file with no text.
+    @ViewBuilder
+    private func textPart(_ segments: [GramTextSegment]) -> some View {
+        let hasCode = segments.contains { if case .code = $0 { return true } else { return false } }
+        if segments.isEmpty, let file = documentFile {
+            fileCard(file, embedded: false)
+        } else if hasCode || documentFile != nil {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                    switch segment {
+                    case .text(let text):
+                        foldingText(text, index: index)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 7)
+                    case .code(let code, let language):
+                        GramCodeBlock(code: code, language: language)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 7)
+                    }
+                }
+                if let file = documentFile {
+                    fileCard(file, embedded: true)
+                        .padding(.top, 9)
+                } else {
+                    Color.clear.frame(height: 8)
                 }
             }
-            Button(action: onToggleSave) {
-                Label(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark")
+            .frame(width: maxWidth, alignment: .leading)
+            .background(fill)
+            .clipShape(bubbleShape)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                    if case .text(let text) = segment {
+                        foldingText(text, index: index)
+                    }
+                }
             }
-            Button(role: .destructive, action: onDelete) {
-                Label("Delete", systemImage: "trash")
-            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .background(fill, in: bubbleShape)
         }
     }
 
-    /// While downloading with a real byte count, the size line becomes progress. The
-    /// received figure is SCALED back from base64 (the wire carries about 4/3 of the
-    /// file) so the numbers the reader sees are file bytes, not transport bytes.
+    private func foldingText(_ text: String, index: Int) -> some View {
+        let key = "\(message.id)#\(index)"
+        return GramFoldingText(
+            text: linkified(text, tint: mine ? .white : Palette.brand),
+            isExpanded: Binding(
+                get: { expandedTexts.contains(key) },
+                set: { open in
+                    if open { expandedTexts.insert(key) } else { expandedTexts.remove(key) }
+                }
+            ),
+            fill: fill
+        )
+        .foregroundStyle(ink)
+    }
+
+    private func fileCard(_ file: GramFile, embedded: Bool) -> some View {
+        GramFileCard(
+            name: file.name,
+            kind: Self.kindLabel(for: file),
+            byteCount: Int(clamping: file.size),
+            onOpen: onOpenFile,
+            onSave: onSaveFile,
+            embedded: embedded
+        )
+        .disabled(isDownloadingFile)
+    }
+
+    private func imageCard(_ file: GramFile) -> some View {
+        GramImageCard(
+            name: file.name,
+            byteCount: Int(clamping: file.size),
+            thumbnail: thumbnail,
+            onOpen: onOpenFile,
+            onSave: onSaveFile
+        )
+        .disabled(isDownloadingFile)
+    }
+
+    /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
+    private static func kindLabel(for file: GramFile) -> String {
+        let type = UTType(filenameExtension: (file.name as NSString).pathExtension)
+            ?? UTType(mimeType: file.mime)
+        return type?.localizedDescription ?? ""
+    }
+
+    /// The image attachment's picture once its bytes are in the download cache (opening
+    /// the image is what fetches them). Decoded off the main thread.
+    private func loadThumbnail() async {
+        guard imageFile != nil, thumbnail == nil, !isDownloadingFile,
+              let cached = GramView.Downloads.cached(id: message.id),
+              let image = UIImage(contentsOfFile: cached.url.path)
+        else { return }
+        thumbnail = await image.byPreparingForDisplay() ?? image
+    }
+
+    /// Download progress under the card while the file's bytes come over SSH.
+    private func downloadLine(_ file: GramFile) -> some View {
+        HStack(spacing: 6) {
+            if let p = downloadProgress, p.total > 0 {
+                ProgressView(value: Double(p.received), total: Double(p.total))
+                    .progressViewStyle(.linear)
+                    .tint(Palette.brand)
+                    .frame(width: 72)
+            } else {
+                ProgressView().controlSize(.mini).tint(Palette.textDim)
+            }
+            Text("Downloading… \(downloadLabel(file))")
+                .font(Typography.app(11))
+                .foregroundStyle(Palette.textFaint)
+        }
+    }
+
+    /// "1.2 MB of 3.4 MB" while a measured download runs, else the file size. The reply
+    /// is base64, so received channel bytes are scaled by 3/4 to approximate file bytes.
     private func downloadLabel(_ file: GramFile) -> String {
         guard isDownloadingFile, let p = downloadProgress, p.total > 0 else {
             return file.displaySize
@@ -2260,122 +2737,29 @@ struct GramRow: View {
         return "\(GramFile.displaySize(of: done)) of \(file.displaySize)"
     }
 
-    /// A tappable chip for an attached file: tap to download + preview it.
-    private func fileChip(_ file: GramFile) -> some View {
-        Button(action: onOpenFile) {
-            HStack(spacing: 8) {
-                Image(systemName: FileGlyph.name(for: file.mime, fileName: file.name))
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(file.name)
-                        .font(Typography.app(13, .medium))
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(downloadLabel(file))
-                        .font(Typography.machine(11))
-                        .foregroundStyle(Palette.textFaint)
-                    // The BAR, shown only while this row is downloading and only when
-                    // the byte count is real. A 40 MB video over SSH takes long enough
-                    // that a bare spinner reads as a hang.
-                    if isDownloadingFile, let p = downloadProgress, p.total > 0 {
-                        ProgressView(value: Double(p.received), total: Double(p.total))
-                            .progressViewStyle(.linear)
-                            .tint(Palette.brand)
-                            .frame(height: 2)
-                            .padding(.top, 3)
-                    }
-                }
-                Spacer(minLength: 0)
-                if isDownloadingFile {
-                    ProgressView().tint(Palette.textDim)
-                } else {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
-        }
-        .buttonStyle(.plain)
-        .disabled(isDownloadingFile)
-        .contextMenu {
-            Button { onOpenFile() } label: { Label("Open", systemImage: "eye") }
-            Button { onSaveFile() } label: { Label("Save to Files…", systemImage: "square.and.arrow.down") }
-        }
-        .padding(.top, 2)
-    }
-
-    @ViewBuilder
-    private var avatar: some View {
-        if message.isFromAgent {
-            Text(AgentIdentity.glyph(for: message.senderName))
-                .font(Typography.app(14, .bold))
-                .foregroundStyle(Palette.text)
-                .frame(width: 30, height: 30)
-                .background(AgentIdentity.gradient(for: message.senderName), in: RoundedRectangle(cornerRadius: 8))
-        } else if let to = message.to {
-            // Option B: your post shows WHO it went to, with a small "sent" arrow badge.
-            Text(AgentIdentity.glyph(for: to))
-                .font(Typography.app(14, .bold))
-                .foregroundStyle(Palette.text)
-                .frame(width: 30, height: 30)
-                .background(AgentIdentity.gradient(for: to), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "arrow.up.forward")
-                        .font(.system(size: 7, weight: .heavy))
-                        .foregroundStyle(Palette.text)
-                        .frame(width: 14, height: 14)
-                        .background(Circle().fill(GramBubble.outFill))
-                        .overlay(Circle().stroke(Palette.ground, lineWidth: 1.5))
-                        .offset(x: 4, y: 4)
-                }
-                .accessibilityHidden(true)
-        } else {
-            Image(systemName: "arrow.up.forward")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(Palette.textDim)
-                .frame(width: 30, height: 30)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
-        }
-    }
-
-    private var title: String {
-        if message.isFromAgent {
-            return message.senderName
-        }
-        if let to = message.to {
-            return "To \(to)"
-        }
-        return "To queue"
-    }
-
-    /// Whether two neighbouring messages belong to one joined run: same side, same peer.
+    /// Whether two messages (oldest first) belong to one group: the same side, and the same
+    /// agent (theirs) or the same recipient (yours).
     static func sameRun(_ a: GramMessage, _ b: GramMessage) -> Bool {
         guard a.isFromAgent == b.isFromAgent else { return false }
-        return a.isFromAgent ? a.senderName == b.senderName : a.to == b.to
+        return a.isFromAgent ? a.from == b.from : a.to == b.to
     }
 
-    /// Claim state for the owner's queue posts.
-    private var statusLine: String? {
-        guard !message.isFromAgent else { return nil }
+    /// Your post's state, first word semibold: who grabbed a queue item, whom a direct
+    /// post went to, or that a queue item is still waiting.
+    private var statusLine: Text? {
+        guard mine else { return nil }
         if let grabber = message.grabbedBy {
-            return "grabbed by \(grabber)"
+            return status("Grabbed", "by \(GramMessage.agentName(from: grabber))")
         }
-        if message.to == nil {
-            return "unclaimed"
+        if let to = message.to {
+            return status("Delivered", "to \(GramMessage.agentName(from: to))")
         }
-        return nil
+        return status("Unclaimed", "in the shared queue")
     }
 
-    private var statusColor: Color {
-        message.grabbedBy != nil ? Palette.done : Palette.textFaint
+    private func status(_ verb: String, _ rest: String) -> Text {
+        Text("\(Text(verbatim: verb).fontWeight(.semibold)) \(rest)")
     }
-
-    private var age: String { Self.age(from: message.createdAt) }
 
     static func age(from date: Date) -> String {
         let seconds = max(0, Date().timeIntervalSince(date))
@@ -2388,15 +2772,19 @@ struct GramRow: View {
     }
 }
 
-/// Metrics for Gram's message bubbles (#354, layout C "iMessage, joined").
+/// Metrics for Gram's message bubbles (round 3: option D's layout in herdr's colours).
 enum GramBubble {
-    static let radius: CGFloat = 19
+    static let radius: CGFloat = 18
     /// Agents' bubbles: surfaceRaised.
     static let inFill = Palette.surfaceRaised
     /// Your bubbles: the brand violet darkened so white text passes contrast.
     static let outFill = Color(hex: 0x5A4ED6)
+    /// The sender's avatar beside an agent group's last bubble.
+    static let avatarSize: CGFloat = 28
+    /// How far an agent group sits in from the feed's edge: the avatar plus an 8 pt gap.
+    static let groupIndent: CGFloat = 36
+    /// The saved-message list's avatar gap and slot (avatar 30 + gap).
     static let avatarGap: CGFloat = 12
-    /// Avatar (30) + gap: where the meta line and status line indent to line up with the bubble.
     static let avatarSlot: CGFloat = 42
     /// The minimum empty space on the side opposite the sender.
     static let oppositeInset: CGFloat = 48
@@ -2424,8 +2812,7 @@ struct BubbleTail: Shape {
     }
 }
 
-/// Picks an SF Symbol for a file from its MIME type. Shared by the composer's
-/// staged-attachment chip and a received message's file chip.
+/// Picks an SF Symbol for a file from its MIME type, for the guest Gram page's file chip.
 enum FileGlyph {
     static func name(for mime: String, fileName: String) -> String {
         let mime = mime.lowercased()
@@ -2437,5 +2824,17 @@ enum FileGlyph {
         if mime == "application/json" { return "curlybraces" }
         if mime.hasPrefix("text/") { return "doc.text" }
         return "doc"
+    }
+}
+
+extension View {
+    /// The spec's glass for Gram's floating controls (nav capsules, the pill, the + button):
+    /// surfaceRaised at 72 % over a blur, with a hairline edge.
+    func gramGlass<S: InsettableShape>(_ shape: S) -> some View {
+        background {
+            shape.fill(Palette.surfaceRaised.opacity(0.72))
+                .background(.ultraThinMaterial, in: shape)
+        }
+        .overlay(shape.strokeBorder(Palette.hairline, lineWidth: 1).allowsHitTesting(false))
     }
 }

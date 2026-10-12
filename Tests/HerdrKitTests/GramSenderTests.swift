@@ -63,4 +63,34 @@ final class GramSenderTests: XCTestCase {
             message("g1", from: "\(alias)/llm-opt", extra: #","machine_label":"Mac Studio""#))
         XCTAssertEqual(messages[0].senderName, agents[0].displayName)
     }
+
+    /// The redesigned sender line is "<bare name> · <machine>", and avatars colour by the
+    /// bare name, so a federated sender must split into both halves.
+    func testSenderSplitsIntoBareAgentNameAndMachine() async throws {
+        let messages = try await list([
+            message("g1", from: "\(alias)/llm-opt", extra: #","machine_label":"hetzner-1""#),
+            // Slashes inside the remainder: the bare name is the LAST part, the machine the first.
+            message("g2", from: "\(alias)/w1:p2/scout", extra: #","machine_label":"hetzner-1""#),
+            // No label: the alias stands in for the machine.
+            message("g3", from: "\(alias)/llm-opt"),
+            // A blank label is no label.
+            message("g4", from: "\(alias)/llm-opt", extra: #","machine_label":"""#),
+            // A local sender has no machine of its own on the wire...
+            message("g5", from: "trend-scout"),
+            // ...unless the daemon labels it.
+            message("g6", from: "trend-scout", extra: #","machine_label":"mac-studio""#),
+        ].joined(separator: ","))
+
+        XCTAssertEqual(messages.map(\.senderAgentName),
+                       ["llm-opt", "scout", "llm-opt", "llm-opt", "trend-scout", "trend-scout"])
+        XCTAssertEqual(messages.map(\.senderMachine),
+                       ["hetzner-1", "hetzner-1", alias, alias, nil, "mac-studio"])
+    }
+
+    func testAgentNameOfARoutingName() {
+        XCTAssertEqual(GramMessage.agentName(from: "vetrina"), "vetrina")
+        XCTAssertEqual(GramMessage.agentName(from: "\(alias)/clientloop"), "clientloop")
+        XCTAssertEqual(GramMessage.agentName(from: "a/b/c"), "c")
+        XCTAssertEqual(GramMessage.agentName(from: "odd/"), "odd/", "never an empty name")
+    }
 }
