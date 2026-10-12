@@ -599,7 +599,7 @@ struct GramView: View {
         HStack(spacing: 0) {
             if canFilter {
                 InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
-                                   target: CGSize(width: 40, height: 44)) { toggleSearch() }
+                                   inSectionBar: true) { toggleSearch() }
             }
             // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
@@ -630,7 +630,7 @@ struct GramView: View {
                     // unchanged store changes nothing on screen.
                     if manualRefreshing {
                         ProgressView().controlSize(.small).tint(Palette.textDim)
-                            .frame(width: 40, height: 44)
+                            .sectionBarSlot()
                     } else {
                         headerGlyph("arrow.clockwise")
                     }
@@ -651,8 +651,7 @@ struct GramView: View {
         Image(systemName: name)
             .font(.system(size: 15, weight: .medium))
             .foregroundStyle(color)
-            .frame(width: 40, height: 44)
-            .contentShape(Rectangle())
+            .sectionBarSlot()
             // The pointer highlight covers the segment, matching the shared section bar.
             .hoverEffect(.highlight)
     }

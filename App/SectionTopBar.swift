@@ -180,21 +180,43 @@ struct SectionBarButton: View {
     let label: String
     var identifier: String = ""
     var action: () -> Void
-    @Environment(\.sectionBarRowHeight) private var rowHeight
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Palette.text)
-                .frame(width: 40, height: rowHeight)
-                // The capsule may shrink to the window controls' row; the tap target keeps
-                // at least 44 pt.
-                .contentShape(Rectangle().inset(by: -max(0, (44 - rowHeight) / 2)))
+                .sectionBarSlot()
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
         .accessibilityLabel(label)
         .accessibilityIdentifier(identifier)
     }
+}
+
+extension View {
+    /// Sizes one control in a `SectionTopBar` capsule: 40 pt wide and as tall as the bar's
+    /// row, which an iPad window shrinks to its controls' height. Apply it INSIDE a
+    /// Button's label: that is what hit-tests.
+    func sectionBarSlot() -> some View { modifier(SectionBarSlot()) }
+}
+
+/// Read here, where the control sits in the bar, not in the view that built it: the bar
+/// sets the row height on its own content.
+private struct SectionBarSlot: ViewModifier {
+    @Environment(\.sectionBarRowHeight) private var rowHeight
+
+    func body(content: Content) -> some View {
+        content
+            .frame(width: 40, height: rowHeight)
+            // A short row keeps a 44 pt tap target by growing it up and down only;
+            // growing sideways would hand a neighbour's taps to this control.
+            .contentShape(VerticalBand(extra: max(0, (44 - rowHeight) / 2)))
+    }
+}
+
+private struct VerticalBand: Shape {
+    let extra: CGFloat
+    func path(in rect: CGRect) -> Path { Path(rect.insetBy(dx: 0, dy: -extra)) }
 }

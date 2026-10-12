@@ -51,11 +51,22 @@ final class AgentListChromeTests: XCTestCase {
         }
         XCTAssertTrue(window.frame.minX > 0 || window.frame.minY > 0, "must be in a window")
         XCTAssertTrue(back.waitForExistence(timeout: 5))
+        waitForSettledFrame(window)
         attach("ipad-window-back-right", app)
         XCTAssertGreaterThan(back.frame.minX, title.frame.maxX, "window: Back joins the right-hand capsule")
         XCTAssertGreaterThan(newAgent.frame.minY, window.frame.minY + 4,
                              "window: the bar must not touch the window's top edge")
         XCTAssertTrue(back.isHittable)
+        // Gram's header is built from the same bar: it must sit inside the edge too.
+        let refresh = app.buttons["Refresh"].firstMatch
+        for _ in 0..<3 where !refresh.exists {
+            app.buttons["Gram"].firstMatch.tap()
+            _ = refresh.waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(refresh.exists, "Gram should open with its header")
+        attach("ipad-window-gram", app)
+        XCTAssertGreaterThan(refresh.frame.minY, window.frame.minY + 4,
+                             "window: Gram's bar must not touch the window's top edge")
         if !startedFullScreen {
             // The window survived from an earlier run; the window case above still ran.
             throw XCTSkip("started in a restored window: the full-screen half was not exercised")
@@ -67,6 +78,18 @@ final class AgentListChromeTests: XCTestCase {
         shot.name = name
         shot.lifetime = .keepAlways
         add(shot)
+    }
+
+    /// iPadOS animates a restored or resized window into place; frames read during that
+    /// animation, and taps aimed with them, are wrong.
+    private func waitForSettledFrame(_ element: XCUIElement) {
+        var last = element.frame
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.3)
+            let now = element.frame
+            if now == last { return }
+            last = now
+        }
     }
 
     func testSearchFiltersAndClearsWithoutLosingMic() {
