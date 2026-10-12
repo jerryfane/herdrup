@@ -117,6 +117,9 @@ targets:
       # ActivityKit backs the agent-session Live Activity (#90) — `LiveActivityController`
       # starts/updates/ends it. Linked explicitly for the same reason as the others.
       - sdk: ActivityKit.framework
+      # Network backs the typing-latency diagnostics' Wi-Fi/cellular label
+      # (`TypingLatencyContext`, NWPathMonitor). Linked explicitly like the others.
+      - sdk: Network.framework
       # The widget extension that renders the Live Activity. Declared as a dependency so
       # xcodegen embeds it in the app's PlugIns (ActivityKit needs the host app to carry
       # the extension). INERT for the buildbox sim build's signing (never signed); the

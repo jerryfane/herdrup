@@ -584,59 +584,15 @@ struct GramView: View {
 
     // MARK: - Header
 
-    /// #355: a large left-aligned title with the amber unread count, and today's controls in
-    /// one capsule on the right (search, Saved, Read all, Refresh, close). Same controls and
-    /// visibility rules as before. The search field opens as its own row under the title,
-    /// so the title never disappears while filtering.
-    @ViewBuilder
+    /// The shared small centred title with the amber unread count, and today's controls in
+    /// one capsule on the right (search, Saved, Read all, Refresh, close). The search field
+    /// opens as its own row under the bar, so the title never disappears while filtering.
     private var header: some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            VStack(spacing: 10) {
-                SectionTopBar(title: showingSaved ? "Saved" : "Gram",
-                              count: showingSaved ? 0 : unreadCount) { headerActions }
-                if searchOpen { searchField.padding(.horizontal, 16).padding(.bottom, 10) }
-            }
-        } else {
-            phoneHeader
+        VStack(spacing: 10) {
+            SectionTopBar(title: showingSaved ? "Saved" : "Gram",
+                          count: showingSaved ? 0 : unreadCount) { headerActions }
+            if searchOpen { searchField.padding(.horizontal, 16).padding(.bottom, 10) }
         }
-    }
-
-    private var phoneHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(showingSaved ? "Saved" : "Gram")
-                        .font(Typography.app(34, .bold))
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                        .accessibilityAddTraits(.isHeader)
-                    if !showingSaved, unreadCount > 0 {
-                        Text("\(unreadCount)")
-                            .font(Typography.machine(11, .semibold))
-                            .foregroundStyle(Palette.ground)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Palette.waiting))
-                            .accessibilityLabel("\(unreadCount) unread")
-                    }
-                }
-                Spacer(minLength: 0)
-                headerButtons
-            }
-            if searchOpen {
-                searchField
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-    }
-
-    /// The header's controls in one capsule, each a 44 pt-tall target.
-    private var headerButtons: some View {
-        headerActions
-            .padding(.horizontal, 2)
-            .background(Capsule().fill(Palette.surfaceRaised))
     }
 
     private var headerActions: some View {

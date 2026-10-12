@@ -386,7 +386,10 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     }
 
     public func roundTrip(_ requestLine: String, inSession session: String?) async throws -> String {
-        if let reply = try await requestChannels.send(requestLine, session: session) { return reply }
+        let reply = try await requestChannels.send(requestLine, session: session)
+        // Typing-latency diagnostics: which route this request took (held channel or exec).
+        TypingLatencyRecorder.shared.noteRoute(host: credentials.host, held: reply != nil)
+        if let reply { return reply }
         return try await Self.perRequestRoundTrip(
             requestLine, session: session, host: credentials.host, backend: backend)
     }

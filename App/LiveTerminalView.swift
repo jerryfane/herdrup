@@ -1282,6 +1282,8 @@ struct LiveTerminalView: UIViewRepresentable {
             }
             view.displayCompletedHandler = { [weak self] complete in
                 self?.noteDisplayCompleted(complete: complete)
+                // Typing-latency diagnostics: a complete frame of the pane being typed into.
+                if complete, self?.foreground == true { TypingLatencyRecorder.shared.painted() }
                 #if DEBUG
                 if let self, let view = self.view {
                     MainActor.assumeIsolated {
@@ -2252,6 +2254,12 @@ struct LiveTerminalView: UIViewRepresentable {
             lastStreamActivity = Date()
             streamRunID &+= 1
             let myRun = streamRunID
+            // Typing-latency diagnostics: keys typed from here on belong to this machine
+            // and the network the phone is on now (a later switch is followed by the monitor).
+            if !viewOnly {
+                TypingLatencyRecorder.shared.begin(host: TypingLatencyContext.shared.hostLabel,
+                                                   network: TypingLatencyContext.shared.network)
+            }
             startWatchdog()
             startHeartbeat()
             streamTask = Task { [weak self] in
@@ -2432,6 +2440,8 @@ struct LiveTerminalView: UIViewRepresentable {
                     publishTopRowProbe()
                 case .data(_, _, let data):
                     noteStreamData()
+                    // Typing-latency diagnostics: only the pane being typed into can echo.
+                    if foreground, !data.isEmpty { TypingLatencyRecorder.shared.outputArrived() }
                     if !data.isEmpty { feedFiltered(data, into: view) }
                     publishTopRowProbe()   // a repaint (after a resize, say) moves the top row too
                 case .resize(_, _, let cols, let rows):
@@ -3075,6 +3085,7 @@ struct LiveTerminalView: UIViewRepresentable {
             guard !stopped, !viewOnly, foreground, directFocusIntended,
                   let v = view, v.isFirstResponder else { return }
             userTookControl()
+            TypingLatencyRecorder.shared.keyPressed()
             enqueueInput(String(decoding: data, as: UTF8.self))
         }
 
@@ -3092,7 +3103,11 @@ struct LiveTerminalView: UIViewRepresentable {
                 while let self, !self.stopped, !self.pendingInput.isEmpty {
                     let batch = self.pendingInput
                     self.pendingInput = ""
-                    _ = try? await self.client.sendText(pane: self.paneID, text: batch)
+                    TypingLatencyRecorder.shared.batchSent(byteCount: batch.utf8.count)
+                    // Unchanged behaviour (a failed batch is still dropped); the recorder
+                    // only counts it, so the owner's report shows lost keys.
+                    let failed = (try? await self.client.sendText(pane: self.paneID, text: batch)) == nil
+                    TypingLatencyRecorder.shared.batchAcked(failed: failed)
                 }
                 self?.inputSendTask = nil
             }
