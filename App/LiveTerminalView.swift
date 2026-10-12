@@ -2019,6 +2019,7 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollSendTask = nil
             inputSendTask?.cancel()         // no forwarded keystroke can reach an exited/replaced pane
             inputSendTask = nil
+            if !viewOnly { TypingLatencyRecorder.shared.abandonUnsent() }  // queued keys never go out
             for token in keyboardObservers { NotificationCenter.default.removeObserver(token) }
             keyboardObservers.removeAll()
             keyboardSweepActive = false

@@ -343,6 +343,19 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         }
     }
 
+    /// The pane being typed into stopped: keys still queued behind its send will never be
+    /// sent, so they are dropped and counted now instead of being claimed by the next
+    /// pane's first batch.
+    public func abandonUnsent() {
+        locked {
+            pending.removeAll { key in
+                guard key.sent == nil else { return false }
+                count(dropped: key)
+                return true
+            }
+        }
+    }
+
     // MARK: Internals (call with the lock held)
 
     private func prune(now: TimeInterval) {

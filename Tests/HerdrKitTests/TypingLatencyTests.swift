@@ -173,6 +173,30 @@ final class TypingLatencyTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(report.queueWait).max, 2_300, accuracy: 0.5)
     }
 
+    func testKeysQueuedInAStoppedPaneAreNotClaimedByTheNextPane() throws {
+        let (recorder, clock) = makeRecorder()
+        recorder.keyPressed()               // in flight when the pane stops
+        recorder.batchSent(byteCount: 1)
+        clock.advance(ms: 500)
+        recorder.keyPressed()               // queued behind it, never sent
+        clock.advance(ms: 500)
+        recorder.batchAcked(failed: true)   // the cancelled send
+        recorder.abandonUnsent()            // the pane stopped
+        clock.advance(ms: 29_000)
+        recorder.keyPressed()               // next pane
+        recorder.batchSent(byteCount: 1)
+        clock.advance(ms: 100)
+        recorder.outputArrived()
+        recorder.batchAcked()
+        recorder.painted()
+
+        let report = try only(recorder)
+        XCTAssertEqual(report.count, 1)
+        XCTAssertEqual(report.dropped, 1)
+        XCTAssertEqual(report.lost, 1)
+        XCTAssertEqual(try XCTUnwrap(report.keyToPaint).max, 100, accuracy: 0.5)
+    }
+
     func testFailedSendCountsItsKeysAsLostNotMeasured() throws {
         let (recorder, clock) = makeRecorder()
         recorder.keyPressed()
