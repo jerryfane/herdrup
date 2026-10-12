@@ -110,12 +110,31 @@ jobs:
           /tmp/fontenv/bin/python Tools/subset-symbols-font.py \
             Tools/upstream/SymbolsNerdFontMono-Regular.ttf --check
 
-  build-and-uitest:
+  # THE DEVICE SUITE, AS PARALLEL SIMULATOR JOBS. It used to be one serial job: the
+  # iPhone suite (~45 min of tests), then the iPad rounds (~25 min) waiting behind it,
+  # ~90 min per green run and 2-3 h whenever a failure triggered a whole-suite rerun.
+  # Each shard builds for itself, which is cheaper than shipping DerivedData between
+  # jobs. Booting the simulator during the build was measured to slow both on the
+  # 3-CPU runner (build 11-14 min against 3 min), so the boot waits for the build.
+  # Tools/ci/ui-shard.sh defines what each shard runs. The settings-stack shard builds
+  # its own optimized Distribution app instead (herdrup#416). Four macOS jobs stay under
+  # the account's limit of five concurrent macOS jobs, which other repos share.
+  uitest:
+    name: ui (${{ matrix.shard }})
     runs-on: macos-latest
-    # First-run caps total 210 min: font 10, iPhone 70, iPad resize 25, controls 15,
-    # select-agent 5, agent chrome 5, optimized Settings build/test 40,
-    # SwiftTerm build 10 + 2 x 15. Keep 20 min for setup and receipt upload.
-    timeout-minutes: 230
+    strategy:
+      # Every shard reports its own evidence even when another shard fails.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-stack"]' || '["focused"]') }}
+    # Worst shard (iPhone app): font 10 + app 40 + SwiftTerm build 10 + test 15, plus
+    # 10-min failed-only diagnostic reruns for font, app and SwiftTerm = 105 min;
+    # setup and the build come on top. A green run of this shard takes ~45 min.
+    timeout-minutes: 120
+    env:
+      SHARD: ${{ matrix.shard }}
+      ONLY_SUITE: ${{ github.event.inputs.only_suite }}
+      ONLY_DEVICE: ${{ github.event.inputs.only_device }}
     steps:
       - uses: actions/checkout@v4
 
@@ -188,6 +207,7 @@ jobs:
           PY
 
       - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
+        if: matrix.shard != 'settings-stack'
         run: |
           set -o pipefail
           xcodebuild build-for-testing \
@@ -203,6 +223,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Check the built bundle version
+        if: matrix.shard != 'settings-stack'
         # READS THE BUILT PRODUCT, not the generated source plist. That distinction is
         # the whole point: xcodegen writes the literal "$(MARKETING_VERSION)" into
         # App/Info.plist and Xcode substitutes it during the build, so a source-plist
@@ -231,225 +252,8 @@ jobs:
             exit 1
           fi
 
-      - name: Verify bundled Nerd Font cascade
-        run: |
-          set -o pipefail
-          mkdir -p TestReceipts
-          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
-          if [ -z "$TIMEOUT_BIN" ]; then
-            echo "::error::no timeout binary; font test budget would be unenforceable"
-            exit 1
-          fi
-          "$TIMEOUT_BIN" --signal=INT 10m xcodebuild test \
-            -project Herdr.xcodeproj -scheme Herdr \
-            -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
-            -parallel-testing-enabled NO \
-            -only-testing:HerdrFontTests \
-            -derivedDataPath .build-dd \
-            -clonedSourcePackagesDirPath SourcePackages \
-            -resultBundlePath TestReceipts/font-contract.xcresult \
-            CODE_SIGNING_ALLOWED=NO | xcbeautify
-
-      - name: Run shared-terminal UI tests on iPhone and iPad
-        run: |
-          set -o pipefail
-          mkdir -p TestReceipts
-          failed=0
-          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
-          if [ -z "$TIMEOUT_BIN" ]; then
-            echo "::error::no timeout binary; per-suite budgets would be unenforceable"
-            exit 1
-          fi
-          recorder=
-          stop_recording() {
-            if [ -n "$recorder" ]; then
-              kill -INT "$recorder" 2>/dev/null || true
-              wait "$recorder" || true
-              recorder=
-            fi
-          }
-          trap stop_recording EXIT
-          run_suite() {
-            local label="$1" udid="$2" budget="$3"
-            shift 3
-            local status=0
-            # Keep simulator startup and compilation outside the test deadline,
-            # as in the SwiftTerm API suite below. The compile step built the test bundles.
-            xcrun simctl bootstatus "$udid" -b || return
-            # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the
-            # whole job budget and take the receipt upload down with it: that is
-            # exactly how the first run of this workflow ended with a cancelled step
-            # and no artifacts at all. Per-case allowances make xcodebuild itself
-            # fail a stuck test with diagnostics instead of blocking to the deadline.
-            "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
-                -project Herdr.xcodeproj -scheme Herdr \
-                -destination "platform=iOS Simulator,id=$udid" \
-                -parallel-testing-enabled NO \
-                -test-timeouts-enabled YES \
-                -default-test-execution-time-allowance 300 \
-                -maximum-test-execution-time-allowance 600 \
-                -derivedDataPath .build-dd \
-                -clonedSourcePackagesDirPath SourcePackages \
-                -resultBundlePath "TestReceipts/$label-first.xcresult" \
-                "$@" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "TestReceipts/$label-first.log" | xcbeautify || status=$?
-            if [ "$status" -ne 0 ]; then
-              stop_recording
-              if [ "$status" -eq 124 ] || [ "$status" -eq 130 ]; then
-                # A timeout is a failure on its own evidence; a warm rerun would
-                # only spend the same budget again.
-                echo "::error::$label exceeded its ${budget} budget; see TestReceipts/$label-first.log"
-                return 1
-              fi
-              echo "::error::$label first run failed; preserving it and collecting raw diagnostics"
-              "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building \
-                -project Herdr.xcodeproj -scheme Herdr \
-                -destination "platform=iOS Simulator,id=$udid" \
-                -parallel-testing-enabled NO \
-                -test-timeouts-enabled YES \
-                -default-test-execution-time-allowance 300 \
-                -maximum-test-execution-time-allowance 600 \
-                -derivedDataPath .build-dd \
-                -clonedSourcePackagesDirPath SourcePackages \
-                -resultBundlePath "TestReceipts/$label-diagnostic.xcresult" \
-                "$@" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "TestReceipts/$label-diagnostic.log" || true
-              return 1
-            fi
-          }
-          FOCUS="${{ github.event.inputs.only_suite }}"
-          if [ -n "$FOCUS" ]; then
-            case "${{ github.event.inputs.only_device }}" in
-              ipad) label=iPad; udid="$IPAD_UDID"; xcrun simctl bootstatus "$IPAD_UDID" -b ;;
-              *)    label=iPhone; udid="$IPHONE_UDID" ;;
-            esac
-            echo "::notice::focused dispatch: HerdrUITests/$FOCUS on $label only"
-            run_suite "$label-$FOCUS" "$udid" 25m "-only-testing:HerdrUITests/$FOCUS" || failed=1
-            exit "$failed"
-          fi
-          # Whole iPhone UI suite: Scroll, Selection, Paging, and terminal interactions.
-          # 70m: the suite now spends ~45-50 min in tests alone on a hosted runner (guest
-          # Gram, push and attachment suites added 2026-10-01); 50m cut it off mid-run with
-          # every test passing. The job timeout above is sized to these caps.
-          run_suite iPhone "$IPHONE_UDID" 70m -only-testing:HerdrUITests || failed=1
-
-          xcrun simctl boot "$IPAD_UDID" || true
-          xcrun simctl bootstatus "$IPAD_UDID" -b
-          # Disable parallel test clones above so this records the tested device.
-          xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad.mp4 \
-            > TestReceipts/terminal-resize-iPad-video.log 2>&1 &
-          recorder=$!
-          run_suite iPadResize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
-          stop_recording
-          if [ ! -s TestReceipts/terminal-resize-iPad.mp4 ]; then
-            echo "::warning::iPad video unavailable; consult recording log and xcresult screenshots"
-          fi
-          # Existing coordinate/keyboard receipts keep their iPhone destination.
-          # The new suites explicitly handle iPad's hardware-keyboard prerequisite.
-          run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
-          # The empty detail column (and its glyph field) exists only in the iPad layout.
-          run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
-          run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
-          exit "$failed"
-
-      - name: Run optimized Settings with the device stack budget
-        if: ${{ !cancelled() && steps.simulators.outcome == 'success' && github.event.inputs.only_suite == '' }}
-        run: |
-          set -o pipefail
-          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
-          if [ -z "$TIMEOUT_BIN" ]; then
-            echo "::error::no timeout binary; Settings budget would be unenforceable"
-            exit 1
-          fi
-          xcrun simctl bootstatus "$IPAD_UDID" -b
-          xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr
-          xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner
-          "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test \
-            -project Herdr.xcodeproj -scheme Herdr -configuration Distribution \
-            -destination "platform=iOS Simulator,id=${IPAD_UDID}" \
-            -derivedDataPath .build-dd-settings-stack \
-            -clonedSourcePackagesDirPath SourcePackages \
-            -resultBundlePath TestReceipts/settings-device-stack.xcresult \
-            -parallel-testing-enabled NO \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 \
-            -maximum-test-execution-time-allowance 600 \
-            -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
-            ENABLE_TESTABILITY=YES 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG' \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify
-          # XCTest activation can restart a crashed app and still report a pass.
-          xcrun xcresulttool export attachments \
-            --path TestReceipts/settings-device-stack.xcresult \
-            --output-path TestReceipts/settings-device-stack-crash-check
-          python3 - <<'PY'
-          from pathlib import Path
-          crashes = list(Path("TestReceipts/settings-device-stack-crash-check").rglob("*.ips"))
-          if crashes:
-              raise SystemExit("Crashes attached to the Settings regression: " + ", ".join(p.name for p in crashes))
-          print("Settings device-stack regression: no crash reports attached")
-          PY
-
-      - name: Run UIKit SwiftTerm API regressions on both devices
-        # Still collect API evidence when an interaction assertion failed.
-        if: ${{ !cancelled() && steps.simulators.outcome == 'success' && github.event.inputs.only_suite == '' }}
-        working-directory: Vendor/SwiftTerm
-        run: |
-          set -o pipefail
-          mkdir -p ../../TestReceipts
-          xcodebuild -list -json > ../../TestReceipts/SwiftTermSchemes.json
-          SCHEME=$(python3 - <<'PY'
-          import json
-          with open("../../TestReceipts/SwiftTermSchemes.json") as source:
-              result = json.load(source)
-          schemes = next((result[key]["schemes"] for key in ("workspace", "project") if key in result), [])
-          for candidate in ("SwiftTerm", "SwiftTerm-Package"):
-              if candidate in schemes:
-                  print(candidate)
-                  break
-          else:
-              raise SystemExit("::error::SwiftTerm package test scheme unavailable")
-          PY
-          )
-          failed=0
-          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout)
-          # BUILD OUTSIDE THE TIMED TEST WINDOW. Building inside `xcodebuild test` spent
-          # ~2.5 of the round's 15 minutes, and a round whose tests had already passed was
-          # killed before xcodebuild exited. Both simulators share one build product.
-          if ! "$TIMEOUT_BIN" --signal=INT 10m xcodebuild build-for-testing -scheme "$SCHEME" \
-              -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
-              -derivedDataPath ../../.build-dd-swiftterm \
-              CODE_SIGNING_ALLOWED=NO 2>&1 | tee ../../TestReceipts/SwiftTermUIKit-build.log | xcbeautify; then
-            echo "::error::SwiftTerm test build failed; see TestReceipts/SwiftTermUIKit-build.log"
-            exit 1
-          fi
-          for device in iPhone iPad; do
-            if [ "$device" = iPhone ]; then udid="$IPHONE_UDID"; else udid="$IPAD_UDID"; fi
-            label="SwiftTermUIKit-$device"
-            # Earlier xcodebuild runs shut the simulator down, so the next one boots it
-            # itself. Boot it here and let boot finish before the timed run starts.
-            xcrun simctl boot "$udid" || true
-            xcrun simctl bootstatus "$udid" -b
-            if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$SCHEME" \
-                -destination "platform=iOS Simulator,id=$udid" \
-                -parallel-testing-enabled NO \
-                -test-timeouts-enabled YES \
-                -only-testing:SwiftTermTests/TerminalViewGeometryTests \
-                -derivedDataPath ../../.build-dd-swiftterm \
-                -resultBundlePath "../../TestReceipts/$label-first.xcresult" \
-                CODE_SIGNING_ALLOWED=NO 2>&1 | tee "../../TestReceipts/$label-first.log" | xcbeautify; then
-              failed=1
-              echo "::error::$label first run failed; collecting raw diagnostics without erasing failure"
-              xcrun simctl boot "$udid" || true
-              xcrun simctl bootstatus "$udid" -b
-              "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$SCHEME" \
-                -destination "platform=iOS Simulator,id=$udid" \
-                -parallel-testing-enabled NO \
-                -test-timeouts-enabled YES \
-                -only-testing:SwiftTermTests/TerminalViewGeometryTests \
-                -derivedDataPath ../../.build-dd-swiftterm \
-                -resultBundlePath "../../TestReceipts/$label-diagnostic.xcresult" \
-                CODE_SIGNING_ALLOWED=NO 2>&1 | tee "../../TestReceipts/$label-diagnostic.log" || true
-            fi
-          done
-          exit "$failed"
+      - name: Run the ${{ matrix.shard }} device shard
+        run: Tools/ci/ui-shard.sh "$SHARD"
 
       - name: Export simulator screenshots
         if: always()
@@ -464,8 +268,23 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terminal-test-results
+          name: terminal-test-results-${{ matrix.shard }}
           path: |
             TestReceipts/
             SimulatorDevices.json
           if-no-files-found: ignore
+
+  # The required status check on main. It keeps the name the branch protection rule
+  # already requires, and passes only if every device shard passed.
+  build-and-uitest:
+    needs: uitest
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every device shard to pass
+        run: |
+          if [ "${{ needs.uitest.result }}" != success ]; then
+            echo "::error::device shards: ${{ needs.uitest.result }}"
+            exit 1
+          fi
+          echo "all device shards passed"
