@@ -68,6 +68,8 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
     public let heldRequests: Int
     /// Requests to this host that took the per-request exec path.
     public let perRequestRequests: Int
+    /// Times the held channel failed to open although the host advertised it.
+    public let heldOpenFailures: Int
 
     /// Share of this host's requests that used the held channel, nil before any request.
     public var heldShare: Double? {
@@ -87,6 +89,11 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
             lines.append("Held channel: \(Int((share * 100).rounded()))% of \(total) requests")
         } else {
             lines.append("Held channel: no requests seen")
+        }
+        if heldOpenFailures > 0 {
+            lines.append("Held channel failed to open \(heldOpenFailures) time\(heldOpenFailures == 1 ? "" : "s"): the herdr command "
+                + "on this machine is probably older than its server. Update or remove the old "
+                + "copy (`command -v herdr` on that machine).")
         }
         lines.append("\(count) keys measured, \(dropped) not attributable, "
             + String(format: "%.1f keys (%.1f bytes) per send", meanBatchSize, meanBatchBytes))
@@ -162,6 +169,7 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
     private struct Routes {
         var held = 0
         var perRequest = 0
+        var openFailures = 0
     }
 
     private let clock: @Sendable () -> TimeInterval
@@ -285,6 +293,19 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
         }
     }
 
+    /// The held channel to `host` failed to open even though the host advertised it.
+    public func noteHeldChannelOpenFailed(host: String) {
+        locked { routes[labels[host] ?? host, default: Routes()].openFailures += 1 }
+    }
+
+    /// Route counts for one host (its label when one is set), nil before any request.
+    public func routeReport(host: String) -> (held: Int, perRequest: Int, openFailures: Int)? {
+        locked {
+            guard let route = routes[labels[host] ?? host] else { return nil }
+            return (route.held, route.perRequest, route.openFailures)
+        }
+    }
+
     // MARK: Reports
 
     /// One report per (host, network) seen, ordered by host then network.
@@ -305,7 +326,8 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
                     keyToPaint: TypingLatencyStats(seconds: samples.map(\.keyToPaint)),
                     meanBatchSize: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchSize }) / n,
                     meanBatchBytes: n == 0 ? 0 : Double(samples.reduce(0) { $0 + $1.batchBytes }) / n,
-                    heldRequests: route.held, perRequestRequests: route.perRequest)
+                    heldRequests: route.held, perRequestRequests: route.perRequest,
+                    heldOpenFailures: route.openFailures)
             }
         }
     }

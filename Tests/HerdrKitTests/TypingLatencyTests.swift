@@ -155,6 +155,22 @@ final class TypingLatencyTests: XCTestCase {
         XCTAssertNil(report.keyToPaint)
     }
 
+    func testHeldChannelOpenFailureIsExplainedInTheHostsReport() throws {
+        let (recorder, clock) = makeRecorder()
+        recorder.noteHeldChannelOpenFailed(host: "mac-mini")
+        recorder.noteRoute(host: "mac-mini", held: false)
+        recorder.keyPressed()
+        recorder.batchSent(byteCount: 1)
+        clock.advance(ms: 10)
+        recorder.outputArrived()
+        recorder.batchAcked()
+        recorder.painted()
+
+        let report = try only(recorder)
+        XCTAssertEqual(report.heldOpenFailures, 1)
+        XCTAssertTrue(report.plainLines().contains { $0.hasPrefix("Held channel failed to open 1 time:") })
+    }
+
     func testKeyQueuedLongBehindASlowSendIsStillMeasured() throws {
         let (recorder, clock) = makeRecorder()
         recorder.keyPressed()               // sits in the queue behind a 2.3 s send
