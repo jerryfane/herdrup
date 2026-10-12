@@ -110,17 +110,20 @@ public struct TypingLatencyReport: Sendable, Equatable, Identifiable {
 /// still in flight, under one lock; nothing here changes what is sent or when.
 ///
 /// Attribution is deliberately simple: output arriving after a batch was sent is taken as
-/// that batch's echo. A key that sees no output within `attributionWindow` (a key the
-/// program never echoes, a lost key) is dropped and counted rather than guessed at, and
-/// output before a key's batch is sent never counts for it (it is the agent's own output).
+/// that batch's echo. A key whose batch sees no output within `attributionWindow` of being
+/// SENT (a key the program never echoes, a lost key) is dropped and counted rather than
+/// guessed at. Waiting in the queue is never held against a key, so slow sends still show
+/// up in the numbers instead of vanishing. Output before a key's batch is sent never
+/// counts for it (it is the agent's own output).
 public final class TypingLatencyRecorder: @unchecked Sendable {
     public static let shared = TypingLatencyRecorder()
 
-    /// Keys still without output after this long are unattributable.
+    /// Keys whose batch has had no output this long after being sent are unattributable.
     public static let attributionWindow: TimeInterval = 2
-    /// Keys echoed but never painted or acked (the pane went to the background, the send
-    /// never returned) are given up after this long so they cannot pile up.
-    static let finishWindow: TimeInterval = 10
+    /// Keys never finished this long after the press (the pane went to the background, a
+    /// send never returned) are given up so they cannot pile up. Longer than a request's
+    /// 60 s timeout, so a stalled send is still measured when it finally goes through.
+    static let finishWindow: TimeInterval = 90
     /// Samples kept per (host, network).
     public static let ringCapacity = 1000
     /// Upper bound on keys in flight; the oldest beyond it is dropped.
@@ -345,8 +348,8 @@ public final class TypingLatencyRecorder: @unchecked Sendable {
     private func prune(now: TimeInterval) {
         guard !pending.isEmpty else { return }
         pending.removeAll { key in
-            let age = now - key.t0
-            let stale = (key.echo == nil && age > Self.attributionWindow) || age > Self.finishWindow
+            let unechoed = key.sent.map { key.echo == nil && now - $0 > Self.attributionWindow } ?? false
+            let stale = unechoed || now - key.t0 > Self.finishWindow
             if stale { count(dropped: key) }
             return stale
         }

@@ -220,6 +220,7 @@ case "$shard" in
     # iPad's hardware-keyboard prerequisite and the iPad-only detail column.
     run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
+    run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
     ;;
   settings-stack)
@@ -244,15 +245,20 @@ case "$shard" in
         ENABLE_TESTABILITY=YES 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG' \
         CODE_SIGNING_ALLOWED=NO 2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
     # XCTest activation can restart a crashed app and still report a pass.
-    xcrun xcresulttool export attachments \
+    # Without a readable export the guard cannot tell, so that fails the shard too.
+    if ! xcrun xcresulttool export attachments \
         --path TestReceipts/settings-device-stack.xcresult \
-        --output-path TestReceipts/settings-device-stack-crash-check >/dev/null || true
-    crashes=$(find TestReceipts/settings-device-stack-crash-check -name '*.ips' 2>/dev/null)
-    if [ -n "$crashes" ]; then
-      echo "::error::Crashes attached to the Settings regression: $crashes"
+        --output-path TestReceipts/settings-device-stack-crash-check >/dev/null; then
+      echo "::error::could not export the Settings regression's attachments to check for crashes"
       failed=1
     else
-      echo "Settings device-stack regression: no crash reports attached"
+      crashes=$(find TestReceipts/settings-device-stack-crash-check -name '*.ips')
+      if [ -n "$crashes" ]; then
+        echo "::error::Crashes attached to the Settings regression: $crashes"
+        failed=1
+      else
+        echo "Settings device-stack regression: no crash reports attached"
+      fi
     fi
     ;;
   focused)

@@ -155,6 +155,24 @@ final class TypingLatencyTests: XCTestCase {
         XCTAssertNil(report.keyToPaint)
     }
 
+    func testKeyQueuedLongBehindASlowSendIsStillMeasured() throws {
+        let (recorder, clock) = makeRecorder()
+        recorder.keyPressed()               // sits in the queue behind a 2.3 s send
+        clock.advance(ms: 2_300)
+        recorder.outputArrived()            // the earlier batch's echo: not this key's
+        recorder.batchSent(byteCount: 1)
+        clock.advance(ms: 100)
+        recorder.outputArrived()
+        recorder.batchAcked()
+        recorder.painted()
+
+        let report = try only(recorder)
+        XCTAssertEqual(report.dropped, 0)
+        XCTAssertEqual(report.count, 1)
+        XCTAssertEqual(try XCTUnwrap(report.keyToPaint).max, 2_400, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap(report.queueWait).max, 2_300, accuracy: 0.5)
+    }
+
     func testFailedSendCountsItsKeysAsLostNotMeasured() throws {
         let (recorder, clock) = makeRecorder()
         recorder.keyPressed()
