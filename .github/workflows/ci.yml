@@ -116,7 +116,8 @@ jobs:
   # Each shard builds for itself, which is cheaper than shipping DerivedData between
   # jobs. Booting the simulator during the build was measured to slow both on the
   # 3-CPU runner (build 11-14 min against 3 min), so the boot waits for the build.
-  # Tools/ci/ui-shard.sh defines what each shard runs. Three macOS jobs stay under
+  # Tools/ci/ui-shard.sh defines what each shard runs. The settings-stack shard builds
+  # its own optimized Distribution app instead (herdrup#416). Four macOS jobs stay under
   # the account's limit of five concurrent macOS jobs, which other repos share.
   uitest:
     name: ui (${{ matrix.shard }})
@@ -125,7 +126,7 @@ jobs:
       # Every shard reports its own evidence even when another shard fails.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad"]' || '["focused"]') }}
+        shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-stack"]' || '["focused"]') }}
     # Worst shard (iPhone app): font 10 + app 40 + SwiftTerm build 10 + test 15, plus
     # 10-min failed-only diagnostic reruns for font, app and SwiftTerm = 105 min;
     # setup and the build come on top. A green run of this shard takes ~45 min.
@@ -206,6 +207,7 @@ jobs:
           PY
 
       - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
+        if: matrix.shard != 'settings-stack'
         run: |
           set -o pipefail
           xcodebuild build-for-testing \
@@ -221,6 +223,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Check the built bundle version
+        if: matrix.shard != 'settings-stack'
         # READS THE BUILT PRODUCT, not the generated source plist. That distinction is
         # the whole point: xcodegen writes the literal "$(MARKETING_VERSION)" into
         # App/Info.plist and Xcode substitutes it during the build, so a source-plist

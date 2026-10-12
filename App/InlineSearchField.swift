@@ -92,15 +92,22 @@ struct InlineSearchToggle: View {
     /// widen what it hit-tests, so a toggle inside a header capsule passes its slot here.
     /// nil keeps the bare glyph (the iPad search row and the pre-#358 terminal header).
     var target: CGSize? = nil
+    /// Sized as a `SectionTopBar` control (`sectionBarSlot`) instead of `target`.
+    var inSectionBar = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "magnifyingglass")
+            let glyph = Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(isOpen ? Palette.text : Palette.textDim)
-                .frame(width: target?.width, height: target?.height)
-                .contentShape(Rectangle())
+            if inSectionBar {
+                glyph.sectionBarSlot()
+            } else {
+                glyph
+                    .frame(width: target?.width, height: target?.height)
+                    .contentShape(Rectangle())
+            }
         }
         .hoverEffect(.highlight)
         .accessibilityIdentifier(identifier)

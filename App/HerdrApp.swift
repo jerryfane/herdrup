@@ -193,6 +193,9 @@ struct RootView: View {
     @State private var transport: CitadelTransport?
     @State private var client: HerdrClient?
     @State private var credentials: SSHCredentials?
+    #if DEBUG
+    @State private var mockDisconnected = false
+    #endif
     @State private var session = 0   // bumped to force a fresh load on reconnect
     /// The connected machine's sessions as last seen, so a session switch starts from them (#386).
     @State private var sessionCache = SessionSwitchCache()
@@ -444,8 +447,12 @@ struct RootView: View {
         case .forkNotice:
             ForkNoticeView(onDismiss: {})
         case .list:
-            TerminalHomeView(client: mockClient, onDisconnect: {}, onTrustHostKey: { _ in false },
-                             livePaneIDs: MockTransport.demoLivePaneIDs)
+            if mockDisconnected {
+                ConnectView { _ in mockDisconnected = false }
+            } else {
+                TerminalHomeView(client: mockClient, onDisconnect: { mockDisconnected = true },
+                                 onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
+            }
         case .archivedClose:
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
@@ -625,6 +632,9 @@ struct RootView: View {
         // Bring up the session Live Activity (#90) in a "connecting" state; the home
         // view's onChange pushes real agent status the moment the first list arrives.
         LiveActivityController.shared.start(hostLabel: Self.hostLabel(for: creds), state: LiveActivityController.connecting)
+        // Typing-latency diagnostics (Settings > Typing latency) label this machine by its
+        // nickname, and join the transport's address-keyed route counts to that name.
+        TypingLatencyContext.shared.connected(host: creds.host, label: Self.hostLabel(for: creds))
         // PRE-WARM: start the SSH handshake + first agent fetch the instant Connect
         // is tapped, so it overlaps the ConnectView→TerminalHomeView transition
         // instead of following it. The transport dedups concurrent connects, so this
@@ -1866,6 +1876,8 @@ struct TerminalHomeView: View {
     /// Latches the "Copied ✓" state on the install-command copy button.
     @State private var installCmdCopied = false
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
+    @State private var searchDictating = false
     /// The agent a pending "Restart agent" confirmation is about (nil = no
     /// dialog). Set from the agent card's context menu; a restart interrupts a
     /// busy agent's turn, so it is confirmed before firing.
@@ -1920,6 +1932,8 @@ struct TerminalHomeView: View {
     /// On iPad (regular width) the app becomes a NavigationSplitView (sidebar + detail);
     /// on iPhone / narrow it stays the tab bar + terminal-over layout. Same views either way.
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    /// Row separators are one device pixel, like the system's and Messages'.
+    @Environment(\.displayScale) private var displayScale
     /// BORN IN THE FINAL CONFIGURATION, not flipped after the first layout pass.
     ///
     /// This was `.all` unconditionally, with `.onChange(of: sidebarMinimized, initial: true)`
@@ -1993,9 +2007,9 @@ struct TerminalHomeView: View {
     /// longer than the split view's own column animation, so a minimise/expand sweep
     /// commits once, at the width it ended on.
     private static let sidebarWidthSettle: UInt64 = 500_000_000
-    /// The bounds the modifier enforces. Kept as one constant so the stored width, the
-    /// clamp and the modifier cannot drift apart.
-    private static let sidebarWidthRange: ClosedRange<CGFloat> = 250...460
+    /// Four 40 pt actions, the title and the system window corner must fit together.
+    /// Keep the stored width, clamp and split-view modifier on the same bounds.
+    private static let sidebarWidthRange: ClosedRange<CGFloat> = 320...460
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -2115,9 +2129,6 @@ struct TerminalHomeView: View {
     /// The Archived section (issue #173) starts collapsed too — archived agents are
     /// the least-active thing on screen, so they stay tucked behind an ARCHIVED · N row.
     @State private var archivedCollapsed = true
-    /// The roster's large "Agents" title has scrolled out of view, so the header shows its
-    /// small centred title instead (#353).
-    @State private var agentsTitleCollapsed = false
     /// The sidebar section bar's selected pill, shared so it slides between tabs.
     @Namespace private var sidebarTabSelection
     /// Sidebar-row hover → the empty detail column's glyph field. A reference, never
@@ -2290,17 +2301,39 @@ struct TerminalHomeView: View {
         return AgentList(agents: filtered, livePaneIDs: livePaneIDs).sections
     }
 
+    /// The on-screen item directly above the open sidebar row: its bottom separator would
+    /// touch the open row's highlight, so it is hidden (Messages does the same). A row is
+    /// identified by its pane ID, a group's disclosure row ("Idle  4 ›") by `disclosureKey`.
+    private func itemAboveOpenRow(_ sections: [(group: AgentGroup, rows: [AgentRow])]) -> String? {
+        guard hSizeClass == .regular, let frontID else { return nil }
+        var previous: String?
+        for section in sections {
+            let isCollapsed = search.isEmpty && collapsed.contains(section.group)
+            if section.group.startsCollapsed && search.isEmpty {
+                previous = Self.disclosureKey(section.group)
+            }
+            guard !isCollapsed else { continue }
+            for row in section.rows {
+                if row.info.paneID == frontID { return previous }
+                previous = row.info.paneID
+            }
+        }
+        return nil
+    }
+
+    private static func disclosureKey(_ group: AgentGroup) -> String { "disclosure:\(group)" }
+
     /// The iPad (regular-width) layout: a two-column `NavigationSplitView`. Sidebar = the section
     /// pill + the agents list; detail = the selected agent's LIVE TERMINAL (or Gram / Settings for
     /// those sections). Reuses the SAME views + terminal machinery as the phone layout — only the
     /// arrangement differs. iPhone / narrow width keeps the tab-bar-with-terminal-over layout.
     private var iPadLayout: some View {
+        GeometryReader { geometry in
         agentActions(
         NavigationSplitView(columnVisibility: $columnVisibility) {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    sidebarTopRow
                     switch selectedTab {
                     case .agents:
                         header
@@ -2312,6 +2345,7 @@ struct TerminalHomeView: View {
                             agentList
                         }
                     case .settings:
+                        SectionTopBar(title: "Settings") { hideSidebarButton }
                         settingsIndex   // the section index; each jumps the detail pane
                     case .gram:
                         // Gram's Inbox/Saved selector belongs in THIS column, beside the section
@@ -2473,6 +2507,10 @@ struct TerminalHomeView: View {
                 .presentationDragIndicator(.visible)
         }
         )
+        // NavigationSplitView consumes corner insets before passing its environment
+        // to the sidebar; retain window presence for the shared bar's vertical alignment.
+        .environment(\.sectionHasWindowControls, sectionWindowHasControls(geometry))
+        }
     }
 
     /// The detail column's content, factored out so the rail can sit beside it.
@@ -2586,37 +2624,13 @@ struct TerminalHomeView: View {
     /// reads as a binding, so the detail pane's content swaps in place with no navigation.
     private var gramSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // #355: the phone header's shape — a large left-aligned title with the amber unread
-            // count, and the actions in one capsule. No subtitle line: the count carries it.
-            HStack(alignment: .center, spacing: 8) {
-                Text("Gram").font(Typography.app(34, .bold)).foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                    .accessibilityAddTraits(.isHeader)
-                if gramUnread.count > 0 {
-                    Text("\(gramUnread.count)")
-                        .font(Typography.machine(11, .semibold))
-                        .foregroundStyle(Palette.ground)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Palette.waiting))
-                        .accessibilityLabel("\(gramUnread.count) unread")
+            SectionTopBar(title: "Gram", count: gramUnread.count) {
+                hideSidebarButton
+                if !gramShowingSaved, gramUnread.count > 0 {
+                    SectionBarButton(icon: "envelope.open", label: "Read all") { gramReadAllToken += 1 }
                 }
-                Spacer(minLength: 0)
-                HStack(spacing: 0) {
-                    // Read all, beside refresh. Gated exactly like the phone header's copy: only
-                    // on the Inbox (Saved has no unread concept, so it would be a no-op control
-                    // there) and only while something is unread. The count comes from the ambient
-                    // poll this view already owns, so the button needs nothing from the page.
-                    if !gramShowingSaved, gramUnread.count > 0 {
-                        gramHeaderButton("envelope.open") { gramReadAllToken += 1 }
-                            .accessibilityLabel("Read all")
-                    }
-                    gramHeaderButton("arrow.clockwise") { gramRefreshToken += 1 }
-                        .accessibilityLabel("Refresh")
-                }
-                .padding(.horizontal, 2)
-                .background(Capsule().fill(Palette.surfaceRaised))
+                SectionBarButton(icon: "arrow.clockwise", label: "Refresh") { gramRefreshToken += 1 }
             }
-            .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
             Divider().overlay(Palette.hairlineQuiet)
             VStack(spacing: 4) {
                 gramSidebarRow(title: "Inbox", icon: "tray", selected: !gramShowingSaved,
@@ -2632,18 +2646,6 @@ struct TerminalHomeView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// One segment of the Gram sidebar header's capsule: a 40 x 44 glyph target.
-    private func gramHeaderButton(_ icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Palette.text)
-                .frame(width: 40, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .hoverEffect(.highlight)
-    }
 
     /// One selectable row in the Gram sidebar. `badgeMuted` renders the count as a quiet pill
     /// (Saved) rather than the attention-coloured unread pill (Inbox).
@@ -2678,18 +2680,11 @@ struct TerminalHomeView: View {
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
     }
-
-    /// The sidebar's top row (#360): only the minimise toggle, now that the sections moved to
-    /// the bar at the bottom. Leading, where the system puts a sidebar toggle.
-    private var sidebarTopRow: some View {
-        HStack {
-            sidebarToggleButton(
-                icon: "sidebar.leading", hint: "Minimise sidebar (⌘K)", minimize: true)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 2)
+    private var hideSidebarButton: some View {
+        SectionBarButton(icon: "sidebar.leading", label: "Minimise sidebar",
+                         identifier: "terminal-sidebar-toggle", action: toggleSidebar)
+            .help("Minimise sidebar (⌘K)")
     }
-
     /// The sections as the iPhone tab bar, at the bottom of the sidebar (#360): the same
     /// items, `.fill` symbols, 10 pt labels, white selected tab (`.tint(Palette.text)` on
     /// iPhone) and the system red Gram count. iPadOS has no system tab bar inside a split
@@ -3345,73 +3340,35 @@ struct TerminalHomeView: View {
 
     // MARK: chrome
 
-    /// #353: a round Back button and New terminal / New agent in one capsule. The large
-    /// "Agents" title lives at the top of the roster's scroll content (`rosterTitleBlock`) and
-    /// scrolls away with it; once it has, a small centred title fades into this bar, as a
-    /// system large title collapses. Without a roster on screen (first load, error) the bar
-    /// keeps the large title itself. The old "N need you" subtitle is gone: the rows' amber
-    /// marks and the minimised rail's counts carry it.
+    /// One bar on every device: a small centred "Agents" title, Back and the New terminal /
+    /// New agent actions. Back sits on the left on iPhone, Mac and a full-screen iPad; in an
+    /// iPad window the system window controls take the left corner, so it joins the
+    /// right-hand capsule (`SectionBackSlot`). The old "N need you" subtitle is gone: the
+    /// rows' amber marks and the minimised rail's counts carry it.
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            circleButton("chevron.left") { onDisconnect() }
-                .accessibilityLabel("Back")
-            if !rosterShowsTitle {
-                largeAgentsTitle
+        SectionTopBar(title: "Agents", leading: {
+            SectionBackSlot(.leading) { sectionBackButton }
+        }) {
+            if hSizeClass == .regular { hideSidebarButton }
+            SectionBackSlot(.trailing) { sectionBackButton }
+            // A plain shell terminal: a small icon so agents stay the priority (the
+            // re-entry guard in createTerminal absorbs an eager double-tap).
+            SectionBarButton(icon: "terminal", label: "New terminal") {
+                Task { await createTerminal() }
             }
-            Spacer(minLength: 0)
-            HStack(spacing: 0) {
-                // Open a plain shell terminal — a small icon so agents stay the priority
-                // (the re-entry guard in createTerminal absorbs an eager double-tap).
-                capsuleButton("terminal") { Task { await createTerminal() } }
-                    .accessibilityLabel("New terminal")
-                capsuleButton("plus") { activeCover = .newAgent }
-                    .accessibilityLabel("New agent")
-            }
-            .padding(.horizontal, 2)
-            .background(Capsule().fill(Palette.surfaceRaised))
+            SectionBarButton(icon: "plus", label: "New agent") { activeCover = .newAgent }
         }
-        .overlay {
-            if rosterShowsTitle {
-                let shown = agentsTitleCollapsed
-                Text("Agents")
-                    .font(Typography.app(17, .semibold))
-                    .foregroundStyle(Palette.text)
-                    .opacity(shown ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.15), value: shown)
-                    .accessibilityHidden(!shown)
-                    .accessibilityAddTraits(.isHeader)
-                    .allowsHitTesting(false)
-            }
-        }
-        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
     }
 
-    private var largeAgentsTitle: some View {
-        Text("Agents")
-            .font(Typography.app(34, .bold))
-            .foregroundStyle(Palette.text)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-            .accessibilityAddTraits(.isHeader)
+    private var sectionBackButton: some View {
+        SectionBarButton(icon: "chevron.left", label: "Back",
+                         identifier: "agents-back", action: onDisconnect)
     }
 
-    /// Whether the roster (and with it the scrolling large title) is what's on screen.
-    private var rosterShowsTitle: Bool {
-        error == nil && !(loading && agents.isEmpty)
-    }
-
-    /// The top of the roster's scroll content: the large title, then the search field. Both
-    /// scroll away with the list (#353); the title reports when it has left the viewport.
+    /// The top of the roster's scroll content: the search field and session pills, which
+    /// scroll away with the list.
     private var rosterTitleBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
-            largeAgentsTitle
-                .padding(.horizontal, 16)
-                .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 8 } action: {
-                    agentsTitleCollapsed = $0
-                }
-                // A remounted roster starts at the top with the large title visible; reset
-                // here so a stale "collapsed" never shows both titles before the first scroll.
-                .onAppear { agentsTitleCollapsed = false }
             VStack(spacing: 0) {
                 searchField
                 if runningSessions.count >= 2 {
@@ -3491,34 +3448,7 @@ struct TerminalHomeView: View {
         }
     }
 
-    /// A 44 pt round header control (Back, and the iPad Gram sidebar's actions).
-    private func circleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Palette.text)
-                .frame(width: 44, height: 44)
-                .background(Circle().fill(Palette.surfaceRaised))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .hoverEffect(.highlight)
-    }
-
-    /// One segment of a header capsule: a 40 x 44 glyph target.
-    private func capsuleButton(_ system: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Palette.text)
-                .frame(width: 40, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .hoverEffect(.highlight)
-    }
-
-    /// The native-style search field: magnifier, 36 pt, rounded.
+    /// Search shares the composer's speech pipeline and stops recording off-screen.
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
@@ -3528,7 +3458,9 @@ struct TerminalHomeView: View {
             TextField("Search", text: $search)
                 .font(Typography.app(16)).foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-            if !search.isEmpty {
+                .focused($searchFocused)
+                .accessibilityIdentifier("agent-search")
+            if !search.isEmpty && !searchDictating {
                 Button { search = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
@@ -3536,13 +3468,17 @@ struct TerminalHomeView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
+            } else {
+                MicButton(text: $search, isActive: searchFocused,
+                          recording: $searchDictating, onStart: { searchFocused = true })
+                    .accessibilityIdentifier("agent-search-mic")
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 36)
+        .frame(height: 42)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(Capsule())
         .padding(.horizontal, 16).padding(.bottom, 6)
     }
 
@@ -3620,8 +3556,9 @@ struct TerminalHomeView: View {
             // than leave a blank scroll that reads as "no agents".
             emptyLine("no matches")
         } else {
+            let aboveOpen = itemAboveOpenRow(visibleSections)
             ForEach(visibleSections, id: \.group) { section in
-                sectionView(section.group, section.rows)
+                sectionView(section.group, section.rows, aboveOpen: aboveOpen)
             }
         }
         // Archived agents sit below the live herd (above terminals) and only
@@ -3870,7 +3807,7 @@ struct TerminalHomeView: View {
     private func archivedCard(_ row: AgentRow) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row.info.agent))
+                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(forName: row.title))
                     .frame(width: 40, height: 40).opacity(0.5)
                 Image(systemName: "archivebox.fill")
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
@@ -3947,7 +3884,7 @@ struct TerminalHomeView: View {
         }
     }
 
-    private func sectionView(_ group: AgentGroup, _ rows: [AgentRow]) -> some View {
+    private func sectionView(_ group: AgentGroup, _ rows: [AgentRow], aboveOpen: String?) -> some View {
         // An active search overrides collapse — a match inside IDLE must not stay
         // hidden behind a shut section the user did not open.
         let isCollapsed = search.isEmpty && collapsed.contains(group)
@@ -3961,7 +3898,8 @@ struct TerminalHomeView: View {
             // ("Idle  4 ›") that opens its rows underneath. An active search shows the rows
             // without the disclosure, as before.
             if group.startsCollapsed && search.isEmpty {
-                disclosureRow(group.sectionTitle.capitalized, count: rows.count, open: !isCollapsed) {
+                disclosureRow(group.sectionTitle.capitalized, count: rows.count, open: !isCollapsed,
+                              separator: aboveOpen != Self.disclosureKey(group)) {
                     if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
                 }
             }
@@ -3972,7 +3910,7 @@ struct TerminalHomeView: View {
                         open(PaneSlot(paneID: row.info.paneID, title: row.title,
                                       agent: row.info, initialReply: "", siblings: siblings))
                     } label: {
-                        card(row)
+                        card(row, separator: aboveOpen != row.info.paneID)
                     }
                     .buttonStyle(.plain)
                     // Over the sidebar on iPad / Mac, the hovered agent speaks in the empty
@@ -4114,7 +4052,7 @@ struct TerminalHomeView: View {
 
     /// A plain roster row that opens or closes a group (#352): label, count and a chevron,
     /// on the ground with an inset divider like the agent rows.
-    private func disclosureRow(_ title: String, count: Int, open: Bool,
+    private func disclosureRow(_ title: String, count: Int, open: Bool, separator: Bool = true,
                                _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -4128,7 +4066,10 @@ struct TerminalHomeView: View {
             .padding(.leading, 20).padding(.trailing, 16)
             .frame(minHeight: 48)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5).padding(.leading, 20)
+                if separator {
+                    Rectangle().fill(Palette.hairlineQuiet).frame(height: 1 / displayScale)
+                        .padding(.leading, 20).padding(.trailing, 16)
+                }
             }
             .contentShape(Rectangle())
         }
@@ -4142,19 +4083,19 @@ struct TerminalHomeView: View {
     /// divider. A waiting agent is marked by its "!" badge and a bright preview only; the old
     /// amber dot left of the avatar duplicated the badge and was removed at the owner's request.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
-    private func card(_ row: AgentRow) -> some View {
-        // iPad / Mac sidebar (#352): 44 pt avatar, 72 pt row, 16 / 14 pt text; and the
-        // agent open in the detail column gets a rounded highlight, like Messages' sidebar.
+    private func card(_ row: AgentRow, separator: Bool = true) -> some View {
+        // Fixed two-line rows; scale the text area with the app's text-size setting.
+        // The selected sidebar row retains its rounded highlight.
         let sidebar = hSizeClass == .regular
         let avatar: CGFloat = sidebar ? 44 : 52
         let isOpen = sidebar && frontID == row.info.paneID
-        return HStack(alignment: .top, spacing: 0) {
+        return HStack(alignment: .center, spacing: 0) {
             // The row's leading inset (where the needs-you dot used to sit).
             Color.clear.frame(width: 20, height: 1)
             ZStack(alignment: .bottomTrailing) {
-                Circle().fill(AgentIdentity.gradient(for: row.info.agent))
+                Circle().fill(AgentIdentity.gradient(forName: row.title))
                     .frame(width: avatar, height: avatar)
-                    .overlay(Text(AgentIdentity.glyph(for: row.info.agent))
+                    .overlay(Text(AgentIdentity.glyph(forName: row.title))
                         .font(Typography.app(sidebar ? 19 : 22, .bold)).foregroundStyle(.white))
                 Group {
                     if row.info.isUnreachable {
@@ -4165,11 +4106,10 @@ struct TerminalHomeView: View {
                 }
                 .offset(x: 4, y: 4)
             }
-            .padding(.top, 12)
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(row.title).font(Typography.app(sidebar ? 16 : 17, .semibold)).foregroundStyle(Palette.text)
+                    Text(row.title).font(.system(size: (sidebar ? 16 : 17) * Typography.scale, weight: .semibold)).foregroundStyle(Palette.text)
                         .lineLimit(1)
                     rowMarkers(row)
                     Spacer(minLength: 6)
@@ -4195,7 +4135,7 @@ struct TerminalHomeView: View {
                 // The preview: what it is doing (folder · activity). A waiting agent's reads in
                 // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(Typography.app(sidebar ? 14 : 15))
+                    .font(.system(size: (sidebar ? 14 : 15) * Typography.scale))
                     .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -4213,12 +4153,17 @@ struct TerminalHomeView: View {
                         .lineLimit(1)
                 }
             }
-            .padding(.top, 13).padding(.bottom, 12).padding(.trailing, 16)
-            .frame(maxWidth: .infinity, minHeight: sidebar ? 72 : 76, alignment: .topLeading)
-            // The divider starts where the text starts, not under the avatar. The open
-            // row's highlight replaces it.
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: (sidebar ? 80 : 86) * max(1, Typography.scale), alignment: .center)
+            // The divider starts where the text starts, not under the avatar, and is one
+            // device pixel. The open row's highlight replaces it, and the row above the open
+            // row drops its own so no line touches the highlight.
             .overlay(alignment: .bottom) {
-                if !isOpen { Rectangle().fill(Palette.hairlineQuiet).frame(height: 0.5) }
+                if !isOpen && separator {
+                    Rectangle().fill(Palette.hairline).frame(height: 1 / displayScale)
+                        .padding(.trailing, 16)
+                }
             }
         }
         .background {
@@ -4271,7 +4216,7 @@ struct TerminalHomeView: View {
         let folder = info.cwd
             .map { URL(fileURLWithPath: $0).lastPathComponent }
             .flatMap { $0.isEmpty || $0 == "/" ? nil : $0 }
-        switch (folder, info.terminalTitleStripped) {
+        switch (folder, info.activityText) {
         case let (f?, a?): return "\(f) · \(a)"
         case let (f?, nil): return f
         case let (nil, a?): return a
@@ -5186,6 +5131,8 @@ struct TerminalPaneContent: View {
     /// drive `LiveTerminalView.fontSize` (applied in-place, no view recreation) and
     /// mutated by ⌘± and the ⋯ "Text size" control. Clamped to [9, 24].
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    /// Settings › Typing › Instant typing, handed to `LiveTerminalView.predictiveEcho`.
+    @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
     /// App foreground/background phase. On return to `.active` the front pane's
     /// live `pane.stream` has stalled (no network while backgrounded) and
     /// reconnects from the live tail, missing output produced while away — so we
@@ -5378,6 +5325,7 @@ struct TerminalPaneContent: View {
                                  // fresh Coordinator instead of replaying the last jump.
                                  isAtTail: terminalAtTail,
                                  fontSize: CGFloat(terminalFontSize),
+                                 predictiveEcho: predictiveEcho,
                                  // Read on foreground to tell a suspended stream from a
                                  // still-running one; see the scenePhase handler below.
                                  liveness: terminalLiveness,
@@ -6895,7 +6843,7 @@ enum SettingsSection: Hashable, CaseIterable {
         case .notifications: return "Notifications"
         case .sharedAccess:  return "Shared access"
         case .about:         return "App & About"
-        case .appearance:    return "Text size"
+        case .appearance:    return "Text & typing"
         }
     }
 
@@ -6976,16 +6924,7 @@ struct ShortcutsSheet: View {
 private struct SettingsBackButton: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
-        Button { dismiss() } label: {
-            ZStack {
-                Circle().fill(Palette.surfaceRaised).frame(width: 32, height: 32)
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text("Back"))
+        SectionBarButton(icon: "chevron.left", label: "Back") { dismiss() }
     }
 }
 
@@ -6999,6 +6938,18 @@ private struct DetailSwipeBack: View {
     var body: some View {
         EdgeSwipeBack { dismiss() }
     }
+}
+
+/// Store a builder, not the large Settings tuple, in the navigation tree.
+/// SwiftUI evaluates this body separately when a resize mounts the compact index.
+private struct SettingsIndexContent<Content: View>: View {
+    private let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View { content() }
 }
 
 struct SettingsView: View {
@@ -7052,6 +7003,13 @@ struct SettingsView: View {
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
+    /// Trouble → Typing latency: pushed on the iPhone index, a sheet over the iPad split
+    /// (whose detail column has no NavigationStack to push onto).
+    @State private var showTypingLatency = false
+    /// The recorder's per-(machine, network) numbers as of the page's last refresh.
+    @State private var latencyReports: [TypingLatencyReport] = []
+    /// "Copied ✓" feedback on the Typing latency page's Copy report row.
+    @State private var latencyCopied = false
     /// The "add a machine" federation setup guide, opened from the Federation
     /// section's "How to add a machine" row. A child sheet over Settings.
     @State private var showFederationSetup = false
@@ -7097,6 +7055,12 @@ struct SettingsView: View {
                 // iPad split: the sidebar is the index, so render ONLY the selected
                 // group's detail here (no NavigationStack — the split view IS the nav).
                 detailColumn(detail)
+                    // Typing latency has no sidebar entry: it opens over the split.
+                    .sheet(isPresented: $showTypingLatency) {
+                        typingLatencyDetail(showBack: true)
+                            .presentationDetents([.large])
+                            .presentationDragIndicator(.visible)
+                    }
             } else {
                 // iPhone (and the screenshot mock): the index → detail flow. A
                 // NavigationStack whose root is the AT A GLANCE / MANAGE index; the
@@ -7280,30 +7244,38 @@ struct SettingsView: View {
                     header
                     Divider().overlay(Palette.hairlineQuiet)
                     ScrollView {
-                        // Grouped subviews keep this builder under SwiftUI's 10-child
-                        // ViewBuilder ceiling (8 children + the footers Group = 9, so
-                        // one slot left: the next section needs its own Group).
-                        VStack(alignment: .leading, spacing: 0) {
-                            atAGlanceSection
-                            manageSection
-                            appearanceSection
-                            previewsSection
-                            troubleSection
-                            helpSection
-                            supportSection
-                            aboutSection
-                            Group {
-                                versionFooter
-                                githubFooter
+                        SettingsIndexContent {
+                            // Grouped subviews keep this builder under SwiftUI's 10-child
+                            // ViewBuilder ceiling (8 children + the footers Group = 9, so
+                            // one slot left: the next section needs its own Group).
+                            VStack(alignment: .leading, spacing: 0) {
+                                atAGlanceSection
+                                manageSection
+                                Group {
+                                    appearanceSection
+                                    typingSection
+                                }
+                                previewsSection
+                                troubleSection
+                                helpSection
+                                supportSection
+                                aboutSection
+                                Group {
+                                    versionFooter
+                                    githubFooter
+                                }
                             }
+                            .padding(.bottom, 16)
                         }
-                        .padding(.bottom, 16)
                     }
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: SettingsSection.self) { section in
                 detailScreen(section, showBack: true)
+            }
+            .navigationDestination(isPresented: $showTypingLatency) {
+                typingLatencyDetail(showBack: true)
             }
         }
     }
@@ -7333,11 +7305,12 @@ struct SettingsView: View {
         }
     }
 
-    /// iPad/Mac "Text size": the same control the iPhone index shows inline, given its
-    /// own split-view detail so the setting is reachable on regular-width layouts.
+    /// iPad/Mac "Text & typing": the same controls the iPhone index shows inline, given
+    /// their own split-view detail so the settings are reachable on regular-width layouts.
     private func appearanceDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "Text size", subtitle: "App & terminal text", showBack: showBack) {
+        detailScaffold(title: "Text & typing", subtitle: "Text size and instant typing", showBack: showBack) {
             appearanceControls
+            typingSection
         }
     }
 
@@ -7508,22 +7481,22 @@ struct SettingsView: View {
         .overlay { if showBack { DetailSwipeBack() } }
     }
 
-    /// The detail header: an optional circular back button, then a title in the app
-    /// voice with a machine-voice subtitle beneath it.
+    /// The detail header: the shared small centred title, with the summary line beneath it.
+    /// Back follows the bar's rule (`SectionBackSlot`): left on iPhone, Mac and a
+    /// full-screen iPad, the right-hand capsule in an iPad window.
     private func detailHeader(_ title: String, subtitle: String, tint: Color, showBack: Bool) -> some View {
-        HStack(spacing: 12) {
-            if showBack { SettingsBackButton() }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(Typography.app(34, .bold)).foregroundStyle(Palette.text)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                    .accessibilityAddTraits(.isHeader)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint).lineLimit(1)
-                }
+        VStack(spacing: 1) {
+            SectionTopBar(title: title, leading: {
+                if showBack { SectionBackSlot(.leading) { SettingsBackButton() } }
+            }) {
+                if showBack { SectionBackSlot(.trailing) { SettingsBackButton() } }
             }
-            Spacer(minLength: 0)
+            if !subtitle.isEmpty {
+                Text(subtitle).font(Typography.machine(12)).foregroundStyle(tint)
+                    .lineLimit(1).frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16).padding(.bottom, 12)
+            }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
     // MARK: AT A GLANCE (index status card)
@@ -7753,28 +7726,14 @@ struct SettingsView: View {
     }
     private var notifyManageTint: Color { notifyBlocked ? Palette.waiting : Palette.textDim }
 
-    // Matches the Gram/Gestures header exactly: a left-aligned title in the app
-    // voice at .semibold, a bare xmark close on the right, and NO baked-in hairline
-    // (the body draws a separate Divider under it, like its sibling sheets). This is
-    // a sheet, not a nav push — xmark and swipe-down both dismiss, so there's no back.
+    // The shared small centred title. This is a sheet or a tab, not a nav push: only a
+    // modal presentation gets the close button, and swipe-down also dismisses it.
     private var header: some View {
-        HStack(spacing: 10) {
-            Text("Settings")
-                .font(Typography.app(34, .bold))
-                .foregroundStyle(Palette.text)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
-            // Only a modal presentation gets a close button; as a tab there is none.
+        SectionTopBar(title: "Settings") {
             if let onClose {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
+                SectionBarButton(icon: "xmark", label: "Close", action: onClose)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
     }
 
     private var connectionSection: some View {
@@ -8522,6 +8481,9 @@ struct SettingsView: View {
     /// `Typography.scale`). Writing it here re-renders the whole app at the new
     /// size — the terminal is unaffected (it has its own font control below).
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+    /// Instant typing (`PredictionEngine.Mode` raw value); every open terminal reads the
+    /// same key, so a change applies to the next key typed.
+    @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
 
     /// The terminal font size (points), the same app-wide pref the per-agent ⋯ menu
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
@@ -8568,6 +8530,36 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("TEXT SIZE")
             appearanceControls
+        }
+    }
+
+    /// "Typing": instant typing (predictive local echo, `PredictionEngine`).
+    private var typingSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("TYPING")
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("Instant typing").font(Typography.app(17)).foregroundStyle(Palette.text)
+                    Spacer(minLength: 8)
+                    Picker("Instant typing", selection: $predictiveEcho) {
+                        Text("Auto").tag(PredictionEngine.Mode.auto.rawValue)
+                        Text("Always").tag(PredictionEngine.Mode.always.rawValue)
+                        Text("Off").tag(PredictionEngine.Mode.off.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                .padding(.horizontal, 18).padding(.vertical, 8)
+                .frame(minHeight: 52)
+                rowDivider
+                Text("Shows what you type at once and checks it against the server. Off: wait for the server's echo.")
+                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+            }
+            .settingsGroup()
+            .padding(.horizontal, 16).padding(.top, 10)
         }
     }
 
@@ -8664,7 +8656,61 @@ struct SettingsView: View {
             actionRow("Reconnect now", enabled: canReconnect,
                       note: "verify the host key first") { onReconnect() }
             actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+            actionRow("Typing latency") { showTypingLatency = true }
         }
+    }
+
+    // MARK: Typing latency (Trouble → Typing latency)
+
+    /// Key-to-screen numbers from `TypingLatencyRecorder`, one block per machine and
+    /// network, with the report the owner pastes back. Refreshed every second while open
+    /// so it follows typing done in a terminal behind it (iPad).
+    private func typingLatencyDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Typing latency", subtitle: "Key press to screen, on this phone",
+                       showBack: showBack) {
+            Text("Type normally in a terminal, then come back here.")
+                .font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 34).padding(.top, 14)
+            if latencyReports.isEmpty {
+                Text("No typing measured yet.")
+                    .font(Typography.app(15)).foregroundStyle(Palette.textFaint)
+                    .settingsRowShell()
+                    .padding(.horizontal, 16).padding(.top, 10)
+            }
+            ForEach(latencyReports) { report in
+                sectionLabel("\(report.host) · \(report.network)".uppercased())
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(report.plainLines(), id: \.self) { line in
+                        Text(line).font(Typography.app(15)).foregroundStyle(Palette.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .settingsRowShell()
+                .padding(.horizontal, 16).padding(.top, 10)
+            }
+            sectionLabel("REPORT")
+            actionRow(latencyCopied ? "Copied ✓" : "Copy report") { copyLatencyReport() }
+            actionRow("Reset") {
+                TypingLatencyRecorder.shared.reset()
+                latencyReports = TypingLatencyRecorder.shared.report()
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                latencyReports = TypingLatencyRecorder.shared.report()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func copyLatencyReport() {
+        let info = Bundle.main.infoDictionary
+        UIPasteboard.general.string = TypingLatencyRecorder.shared.reportText(
+            appVersion: info?["CFBundleShortVersionString"] as? String,
+            build: info?["CFBundleVersion"] as? String)
+        latencyCopied = true
+        Task { try? await Task.sleep(nanoseconds: 2_000_000_000); latencyCopied = false }
     }
 
     private var helpSection: some View {

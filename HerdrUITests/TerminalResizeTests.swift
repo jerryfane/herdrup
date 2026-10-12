@@ -275,8 +275,11 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertTrue((panned["visible"] as? String ?? "").contains("RIGHTEND │"))
         attach("original-width-history-right-edge")
 
+        // Establish a different local target before asking the wider-viewer host.
+        // A natural window can already fit 80x24, so repeating that fit is a no-op.
+        command("80x24", until: fixtureFit("80x24")); settled(cols: 80, rows: 24)
         command("wider")
-        command("80x24")
+        command("120x24", until: fixtureFit("120x24"))
         let shared = wait { ($0["cols"] as? Int) == 140 && ($0["covered"] as? Bool) == false }
         XCTAssertEqual(shared["fontPoints"] as? Double, font)
         XCTAssertGreaterThan(try XCTUnwrap(shared["contentWidth"] as? Double),

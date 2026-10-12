@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Receipts for the Settings switches that change how the app treats data it did not
 /// author. The DEFAULT of the JavaScript switch is pinned on Linux
@@ -6,6 +7,56 @@ import XCTest
 /// `@AppStorage` survives between simulator launches, so a UI test cannot honestly
 /// claim to observe a fresh install.
 final class SettingsTests: XCTestCase {
+    func testCompactSettingsSurviveResizeAndResume() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Exercises the iPad split-to-compact transition")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
+        app.launch()
+        XCTAssertTrue(app.buttons["Settings"].firstMatch.waitForExistence(timeout: 15))
+        let window = app.windows.firstMatch
+        let initialSize = window.frame.size
+        if window.frame.width > 600 {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+                .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.65)))
+        }
+        // Check process state before queries/activate can relaunch a crashed app.
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        XCTAssertLessThan(window.frame.width, 600, "The regression must exercise compact Settings")
+        let compactWidth = window.frame.width
+        app.buttons["Settings"].firstMatch.tap()
+        let machines = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Machines")).firstMatch
+        XCTAssertTrue(machines.waitForExistence(timeout: 5))
+        XCTAssertTrue(machines.isHittable)
+        XCUIDevice.shared.press(.home)
+        XCTAssertNotEqual(app.state, .notRunning, "Settings must not crash during the Home transition")
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        XCTAssertTrue(machines.waitForExistence(timeout: 5))
+        XCTAssertTrue(machines.isHittable)
+        machines.tap()
+        let back = app.buttons["Back"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        XCTAssertTrue(machines.waitForExistence(timeout: 5))
+        XCTAssertTrue(machines.isHittable)
+        // Expanding also remounts the adaptive host; shrinking alone misses #416.
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+            .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: max(initialSize.width, 800) - 50,
+                                     dy: max(initialSize.height, 700) - 50)))
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        XCTAssertGreaterThan(window.frame.width, compactWidth + 100, "The regression must expand the window")
+        let settings = app.buttons["Settings"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.isHittable)
+        XCTAssertTrue(machines.waitForExistence(timeout: 5))
+        XCTAssertTrue(machines.isHittable)
+    }
+
 
     /// The switch exists and its explanation tracks it: with script ON the row must say
     /// scripts will run, with it OFF that they are ignored. A reader flipping this is

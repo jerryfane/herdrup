@@ -7,6 +7,8 @@
 #   iphone-app       HerdrFontTests, then every other HerdrUITests class on iPhone,
 #                    then the SwiftTerm UIKit API tests on iPhone
 #   ipad             iPad-specific rounds, then the SwiftTerm UIKit API tests on iPad
+#   settings-stack   optimized Distribution build with the device-sized stack, then the
+#                    iPad Settings resize/resume regression (herdrup#416)
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
 # The two iPhone shards are complementary BY CONSTRUCTION: one runs exactly
@@ -218,7 +220,46 @@ case "$shard" in
     # iPad's hardware-keyboard prerequisite and the iPad-only detail column.
     run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
+    run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
+    ;;
+  settings-stack)
+    # Distribution, so the optimizer produces the frame sizes that overflowed a
+    # device's 1008 KiB main stack; project.yml gives simulator builds that stack.
+    # DEBUG keeps the screenshot fixtures; testability lets the UI tests attach.
+    xcrun simctl boot "$IPAD_UDID" 2>/dev/null || true
+    xcrun simctl bootstatus "$IPAD_UDID" -b >/dev/null
+    xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
+    xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
+    "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test \
+        -project Herdr.xcodeproj -scheme Herdr -configuration Distribution \
+        -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+        -derivedDataPath .build-dd-settings-stack \
+        -clonedSourcePackagesDirPath SourcePackages \
+        -parallel-testing-enabled NO \
+        -test-timeouts-enabled YES \
+        -default-test-execution-time-allowance 300 \
+        -maximum-test-execution-time-allowance 600 \
+        -resultBundlePath TestReceipts/settings-device-stack.xcresult \
+        -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
+        ENABLE_TESTABILITY=YES 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG' \
+        CODE_SIGNING_ALLOWED=NO 2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
+    # XCTest activation can restart a crashed app and still report a pass.
+    # Without a readable export the guard cannot tell, so that fails the shard too.
+    if ! xcrun xcresulttool export attachments \
+        --path TestReceipts/settings-device-stack.xcresult \
+        --output-path TestReceipts/settings-device-stack-crash-check >/dev/null; then
+      echo "::error::could not export the Settings regression's attachments to check for crashes"
+      failed=1
+    else
+      crashes=$(find TestReceipts/settings-device-stack-crash-check -name '*.ips')
+      if [ -n "$crashes" ]; then
+        echo "::error::Crashes attached to the Settings regression: $crashes"
+        failed=1
+      else
+        echo "Settings device-stack regression: no crash reports attached"
+      fi
+    fi
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in

@@ -77,9 +77,10 @@ final class ScriptedHost: @unchecked Sendable {
 
 final class RequestChannelRoutingTests: XCTestCase {
     private func makeTransport(
-        _ host: ScriptedHost, settings: RequestChannelSettings = testSettings(), session: String? = nil
+        _ host: ScriptedHost, settings: RequestChannelSettings = testSettings(), session: String? = nil,
+        hostName: String = "box"
     ) -> CitadelTransport {
-        var credentials = SSHCredentials(host: "box", username: "u", password: "p", remoteSocketPath: "")
+        var credentials = SSHCredentials(host: hostName, username: "u", password: "p", remoteSocketPath: "")
         credentials.session = session
         let connection = SSHConnectionCore(
             credentials: credentials, hostKeyValidator: .acceptAnything(), connectTimeoutNanoseconds: 1_000 * ms)
@@ -185,6 +186,23 @@ final class RequestChannelRoutingTests: XCTestCase {
         let later = try await transport.roundTrip(requestLine("retried"))
         XCTAssertEqual(via(later), "channel")
         XCTAssertEqual(host.opened.count, 1)
+    }
+
+    /// Settings > Typing latency must say why a host is slow when its held channel cannot
+    /// open (herdrup: hetzner-ts ran an old `herdr` first on PATH: 0% held).
+    func testFailedOpenOnAnAdvertisingHostIsReportedForThatHost() async throws {
+        let clock = ManualClock()
+        let host = ScriptedHost(multi: true)
+        let name = "open-failure-\(UUID().uuidString)"
+        let transport = makeTransport(host, settings: testSettings(clock: clock), hostName: name)
+        host.failNextOpens(1)
+        try await warmUp(transport)
+        _ = try await transport.roundTrip(requestLine("slow"))
+
+        let report = try XCTUnwrap(TypingLatencyRecorder.shared.routeReport(host: name))
+        XCTAssertEqual(report.openFailures, 1)
+        XCTAssertEqual(report.held, 0)
+        XCTAssertGreaterThan(report.perRequest, 0)
     }
 
     func testEachSessionGetsItsOwnChannelAndCloseClosesThemAll() async throws {

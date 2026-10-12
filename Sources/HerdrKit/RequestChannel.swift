@@ -618,6 +618,10 @@ actor RequestChannelPool {
                 slots[key]?.channel = nil
                 slots[key]?.retryOpenAt = settings.now() &+ settings.openRetryAfter
             }
+            // The host advertised api_bridge_multi but the bridge would not answer:
+            // usually the `herdr` found first on that machine's PATH is older than its
+            // server. Every request is now on the slow path, so say so in the report.
+            TypingLatencyRecorder.shared.noteHeldChannelOpenFailed(host: host)
             return nil
         }
         guard generation == self.generation else {

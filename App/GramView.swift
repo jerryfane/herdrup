@@ -584,47 +584,22 @@ struct GramView: View {
 
     // MARK: - Header
 
-    /// #355: a large left-aligned title with the amber unread count, and today's controls in
-    /// one capsule on the right (search, Saved, Read all, Refresh, close). Same controls and
-    /// visibility rules as before. The search field opens as its own row under the title,
-    /// so the title never disappears while filtering.
+    /// The shared small centred title with the amber unread count, and today's controls in
+    /// one capsule on the right (search, Saved, Read all, Refresh, close). The search field
+    /// opens as its own row under the bar, so the title never disappears while filtering.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(showingSaved ? "Saved" : "Gram")
-                        .font(Typography.app(34, .bold))
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                        .accessibilityAddTraits(.isHeader)
-                    if !showingSaved, unreadCount > 0 {
-                        Text("\(unreadCount)")
-                            .font(Typography.machine(11, .semibold))
-                            .foregroundStyle(Palette.ground)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Palette.waiting))
-                            .accessibilityLabel("\(unreadCount) unread")
-                    }
-                }
-                Spacer(minLength: 0)
-                headerButtons
-            }
-            if searchOpen {
-                searchField
-            }
+        VStack(spacing: 10) {
+            SectionTopBar(title: showingSaved ? "Saved" : "Gram",
+                          count: showingSaved ? 0 : unreadCount) { headerActions }
+            if searchOpen { searchField.padding(.horizontal, 16).padding(.bottom, 10) }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
     }
 
-    /// The header's controls in one capsule, each a 44 pt-tall target.
-    private var headerButtons: some View {
+    private var headerActions: some View {
         HStack(spacing: 0) {
             if canFilter {
                 InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
-                                   target: CGSize(width: 40, height: 44)) { toggleSearch() }
+                                   inSectionBar: true) { toggleSearch() }
             }
             // All / Saved toggle — a filled bookmark means the Saved section is showing.
             Button {
@@ -655,7 +630,7 @@ struct GramView: View {
                     // unchanged store changes nothing on screen.
                     if manualRefreshing {
                         ProgressView().controlSize(.small).tint(Palette.textDim)
-                            .frame(width: 40, height: 44)
+                            .sectionBarSlot()
                     } else {
                         headerGlyph("arrow.clockwise")
                     }
@@ -670,18 +645,14 @@ struct GramView: View {
                     .accessibilityLabel("Close")
             }
         }
-        .padding(.horizontal, 2)
-        .background(Capsule().fill(Palette.surfaceRaised))
     }
 
     private func headerGlyph(_ name: String, color: Color = Palette.text) -> some View {
         Image(systemName: name)
             .font(.system(size: 15, weight: .medium))
             .foregroundStyle(color)
-            .frame(width: 40, height: 44)
-            .contentShape(Rectangle())
-            // Inside the Button's label, so the pointer highlight covers the whole segment,
-            // matching the iPad sidebar capsule's `gramHeaderButton`.
+            .sectionBarSlot()
+            // The pointer highlight covers the segment, matching the shared section bar.
             .hoverEffect(.highlight)
     }
 

@@ -31,6 +31,9 @@ public actor HerdrClient {
         case unsupported
     }
     private var streamCapability: StreamCapability = .unknown
+    /// Whether this daemon serves `pane.input.stream` (`pane_input_stream`), with the
+    /// same three states and caching rules as `streamCapability`.
+    private var inputStreamCapability: StreamCapability = .unknown
 
     public init(transport: HerdrTransport) {
         self.transport = transport
@@ -335,6 +338,34 @@ public actor HerdrClient {
     /// separate call, so nothing executes without a deliberate second action.
     public func sendText(pane: String, text: String) async throws {
         _ = try await call("pane.send_text", SendTextParams(paneID: pane, text: text), as: JSONNull.self)
+    }
+
+    /// Opens an ordered, fire-and-forget `pane.input.stream` to a local pane, or nil
+    /// when it cannot be had: a federated pane (`<alias>/…`, which the home daemon
+    /// cannot proxy the stream to), a transport that is not SSH, a daemon without the
+    /// `pane_input_stream` capability, or an open the daemon refuses or that fails.
+    /// The caller then keeps `sendText`.
+    public func openPaneInput(pane: String) async -> PaneInputChannel? {
+        guard PaneInputChannel.canStream(pane: pane),
+              let citadel = transport as? CitadelTransport else { return nil }
+        // Probed once per client like `gramOpenUploadChannel`: a failed ping stays
+        // `unknown` and is retried on the next open.
+        if case .unknown = inputStreamCapability {
+            do {
+                let probed = try await serverCapabilities()
+                inputStreamCapability = probed?.paneInputStream == true ? .supported : .unsupported
+            } catch {
+                return nil
+            }
+        }
+        guard case .supported = inputStreamCapability else { return nil }
+        let openLine: String
+        do {
+            openLine = try encodeRequest("pane.input.stream", PaneInputStreamParams(paneID: pane))
+        } catch {
+            return nil
+        }
+        return await citadel.openPaneInput(openLine: openLine)
     }
 
     struct RegisterDeviceParams: Encodable {

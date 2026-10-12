@@ -32,6 +32,19 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   Resizing preserves your reading position, including after a momentum scroll; live followers
   stay at the tail. The on-screen Ctrl key arms one native terminal chord in direct input,
   or a control character in the reply field.
+  Keys typed into a pane on the connected machine go out the moment you type them, in order,
+  on one held `pane.input.stream` channel per pane (herdr 0.9.3+) instead of waiting for the
+  previous key's reply; federated panes and older herdr builds keep using `pane.send_text`.
+  Settings → Typing latency measures how long your own keys take to reach the screen, per
+  machine and per network (Wi-Fi or cellular): the wait to send, the server's reply, the echo
+  and the painted frame, typical and slow (90%). Type in a terminal, then open it; Copy report
+  gives plain text to paste into an issue. It is always on and keeps the last 1000 keys each.
+  Instant typing (Settings → Typing; Auto, Always or Off) draws what you type at once, mosh-style,
+  then checks each guess against the machine's own screen once it has the key: a right guess
+  stays, a wrong one disappears. Nothing shows until the pane has echoed a key once, so a
+  password prompt never shows your typing. Auto shows guesses only on a slow link (round trip
+  over 30 ms) and underlines unconfirmed ones over 80 ms. Typing latency also reports key to
+  prediction and how many guesses were shown, confirmed and wrong.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
@@ -111,6 +124,10 @@ geometry only from ordered stream frames; a short retained frame covers resize t
 stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
+The app and test bundles are built before the timed UI runs, and each simulator is booted
+before its test deadline starts. Debug resize receipts are per pane, so a background
+terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
+The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
 
 ## Architecture
 
@@ -147,6 +164,23 @@ Dark, deep-desaturated navy — never black. The design system (`App/DesignSyste
 Claude Design kit (design: [jerryfane/herdr#28](https://github.com/jerryfane/herdr/issues/28)): colour is
 *meaning* (amber = waiting on you, red = died, blue = working, green = done), monospace is the machine
 voice and a proportional sans is the app voice.
+
+Live agent rows use system text, equal-height previews and a name-based avatar with a stable
+colour; the badge still carries status. Archive entries share the name colour but keep their
+archive icon. Gram-feed and guest-view identity styling is unchanged. Previews omit leading
+CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
+Clear replaces the mic, and clearing restores it.
+Agents, Gram and Settings share one compact bar with a small centred title on iPhone, iPad and
+Designed-for-iPad Mac. Back sits on the left on iPhone, Mac and a full-screen iPad. In an
+iPad window, whose controls take the top-left corner, Back joins the actions and sidebar
+toggle on the right, and the bar's capsules line up with the window controls inside the
+window's top edge. On Mac, Back sits below the separate system window-title row; other
+actions stay on the right. Pushed Settings pages follow the same Back placement. The leading
+control is declared before the title, matching
+the visual reading order. The sidebar rail and ⌘K remain available.
+Settings builds its compact index in a separate view body, keeping the large section tuple
+off the adaptive navigation stack. CI checks resize/resume in an optimized simulator build
+with a device-sized 1008 KiB main stack, and rejects attached crashes even if XCTest reports a pass.
 
 ## License
 
