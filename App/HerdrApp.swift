@@ -1877,7 +1877,6 @@ struct TerminalHomeView: View {
     @State private var installCmdCopied = false
     @State private var search = ""
     @FocusState private var searchFocused: Bool
-    @State private var searchDictating = false
     /// The agent a pending "Restart agent" confirmation is about (nil = no
     /// dialog). Set from the agent card's context menu; a restart interrupts a
     /// busy agent's turn, so it is confirmed before firing.
@@ -2508,8 +2507,8 @@ struct TerminalHomeView: View {
         }
         )
         // NavigationSplitView consumes corner insets before passing its environment
-        // to the sidebar; retain window presence for the shared bar's vertical alignment.
-        .environment(\.sectionHasWindowControls, sectionWindowHasControls(geometry))
+        // to the sidebar; pass the window controls' corner on for the shared bar.
+        .environment(\.sectionWindowControls, sectionWindowControls(geometry))
         }
     }
 
@@ -3448,7 +3447,8 @@ struct TerminalHomeView: View {
         }
     }
 
-    /// Search shares the composer's speech pipeline and stops recording off-screen.
+    /// The agent search: a plain text field with Clear once there is text. No mic: the
+    /// owner found dictating a name to filter the list useless.
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
@@ -3460,7 +3460,7 @@ struct TerminalHomeView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .focused($searchFocused)
                 .accessibilityIdentifier("agent-search")
-            if !search.isEmpty && !searchDictating {
+            if !search.isEmpty {
                 Button { search = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
@@ -3468,10 +3468,6 @@ struct TerminalHomeView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
-            } else {
-                MicButton(text: $search, isActive: searchFocused,
-                          recording: $searchDictating, onStart: { searchFocused = true })
-                    .accessibilityIdentifier("agent-search-mic")
             }
         }
         .padding(.horizontal, 10)

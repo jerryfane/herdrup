@@ -168,8 +168,7 @@ voice and a proportional sans is the app voice.
 Live agent rows use system text, equal-height previews and a name-based avatar with a stable
 colour; the badge still carries status. Archive entries share the name colour but keep their
 archive icon. Gram-feed and guest-view identity styling is unchanged. Previews omit leading
-CLI prompt/spinner marks. Search uses the composer's dictation pipeline; while text is present,
-Clear replaces the mic, and clearing restores it.
+CLI prompt/spinner marks. Search is a plain field; Clear appears while text is present.
 Agents, Gram and Settings share one compact bar with a small centred title on iPhone, iPad and
 Designed-for-iPad Mac. Back sits on the left on iPhone, Mac and a full-screen iPad. In an
 iPad window, whose controls take the top-left corner, Back joins the actions and sidebar
