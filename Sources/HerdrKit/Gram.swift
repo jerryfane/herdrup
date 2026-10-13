@@ -37,6 +37,9 @@ public struct GramFile: Decodable, Sendable, Equatable {
     /// A human-readable size, e.g. "12 KB" or "1.3 MB".
     public var displaySize: String { Self.displaySize(of: size) }
 
+    /// An `image/*` attachment: the feed draws it as a picture card.
+    public var isImage: Bool { mime.lowercased().hasPrefix("image/") }
+
     /// Format a byte count for display. Static so a not-yet-uploaded local file
     /// (which has no `GramFile` yet) can use the same rendering.
     public static func displaySize(of size: UInt64) -> String {

@@ -600,6 +600,68 @@ final class GramTests: XCTestCase {
         }
     }
 
+    /// The attachment card of message `id`: the whole card is its Open button.
+    private func attachmentCard(_ app: XCUIApplication, message id: String) -> XCUIElement {
+        app.descendants(matching: .any)["gram-bubble-\(id)"]
+            .descendants(matching: .button)["gram-attachment-open"].firstMatch
+    }
+
+    /// clientloop's zip (g2): tapping anywhere on its card opens it, and the card carries no
+    /// Open / Save to Files bar of its own.
+    func testTappingAFileCardOpensIt() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g2")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the zip should draw as a file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+        XCTAssertEqual(card.label, "Open amigo-poc-scaffold.zip", "the card is one button that opens the file")
+        let bubble = app.descendants(matching: .any)["gram-bubble-g2"]
+        XCTAssertEqual(bubble.descendants(matching: .button).matching(identifier: "gram-attachment-open").count, 1,
+                       "one Open target: the card itself")
+        XCTAssertFalse(app.descendants(matching: .any)["gram-attachment-save"].exists,
+                       "Save to Files is no longer a button on the card")
+        XCTAssertFalse(bubble.buttons["Open"].exists, "no separate Open button")
+
+        card.tap()
+        let probe = app.descendants(matching: .any)["gram-opened-file"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG opened-file probe should be present")
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "opened:"),
+                                               object: probe)
+        XCTAssertEqual(XCTWaiter().wait(for: [opened], timeout: 10), .completed,
+                       "tapping the card should download the file and hand it to a viewer; probe says \(probe.label)")
+    }
+
+    /// Long-pressing the file card offers Save to Files in the message's menu, beside the
+    /// message's own actions (one menu, not two).
+    func testLongPressingAFileCardOffersSaveToFiles() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g2")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the zip should draw as a file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+
+        card.press(forDuration: 1.2)
+        let save = app.buttons["Save to Files"].firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 5), "the card's menu should offer Save to Files")
+        XCTAssertTrue(app.buttons["Delete"].firstMatch.exists, "the same menu keeps the message's actions")
+    }
+
+    /// vetrina's image (g3) shows its picture without a tap: the card fetches it through the
+    /// download cache while on screen and decodes a preview (`accessibilityValue` is the
+    /// DEBUG "placeholder" / "preview").
+    func testImageCardShowsAPreviewWithoutOpening() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g3")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the image should draw as an image card")
+        XCTAssertEqual(card.label, "Open vetrina-live.png")
+        let preview = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "preview"),
+                                                object: card)
+        XCTAssertEqual(XCTWaiter().wait(for: [preview], timeout: 8), .completed,
+                       "the image card should decode its preview on its own; value is \(String(describing: card.value))")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "gram-image-preview"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     /// clientloop's command sits in a code block with its own Copy. Tapping it says "Copied".
     /// The pasteboard is deliberately NOT read back: a programmatic read raises the system
     /// paste prompt, which hung CI before (TerminalSelectionTests).

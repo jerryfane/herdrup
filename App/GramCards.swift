@@ -1,4 +1,5 @@
 import HerdrKit
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -347,39 +348,56 @@ private func sizeLabel(_ byteCount: Int?) -> String? {
     byteCount.map { GramFile.displaySize(of: UInt64(max(0, $0))) }
 }
 
-/// An attached image: the picture (top-aligned, filled) with a caption bar over its foot
-/// holding the name and size. On iPad/Mac the bar carries "Open" and "Save to Files"; the
-/// phone's narrower card has the name as the Open control and a save glyph. Tapping the
-/// picture opens it too. `thumbnail` is nil until the file is cached.
+/// A download the owner asked for (an open or a save), drawn on its card as the composer's
+/// upload ring. `fraction` is nil while the size is unknown, and the ring spins.
+struct GramCardDownload: Equatable {
+    var fraction: Double?
+}
+
+/// An attached image: the picture once the feed has fetched it, else a placeholder naming
+/// the file. The whole card is the Open button; Save to Files is in the message's context
+/// menu and the card's accessibility actions. The card keeps the spec's shape until the
+/// picture is known, then takes the picture's (see `GramThumbnails.boxSize`).
 struct GramImageCard: View {
     let name: String
     let byteCount: Int?
     let thumbnail: UIImage?
+    let download: GramCardDownload?
     let onOpen: () -> Void
     let onSave: () -> Void
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        let size = GramCardMetrics.imageSize(sizeClass)
-        let regular = sizeClass == .regular
-        // min(spec width, available width), with the height following the spec's aspect
-        // ratio: the clear base takes the proposed width (capped below) and the picture fills
-        // it from the top.
-        Color.clear
-            .aspectRatio(size.width / size.height, contentMode: .fit)
-            .overlay(alignment: .top) {
-                picture.accessibilityHidden(true)
-            }
-            .clipped()
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onOpen)
-            .overlay(alignment: .bottom) {
-                caption(regular: regular)
-                    .padding(8)
-            }
-            .frame(maxWidth: size.width)
-            .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
+        let box = GramThumbnails.boxSize(for: thumbnail?.size, in: GramCardMetrics.imageSize(sizeClass))
+        let shape = RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
+        Button(action: onOpen) {
+            // min(box width, available width), with the height following the box's aspect
+            // ratio: the clear base takes the proposed width (capped below) and the picture
+            // fills it from the top.
+            Color.clear
+                .aspectRatio(box.width / box.height, contentMode: .fit)
+                .overlay(alignment: .top) { picture }
+                .clipped()
+                .overlay {
+                    // The placeholder draws its own ring in place of its glyph.
+                    if let download, thumbnail != nil {
+                        ring(download)
+                            .padding(9)
+                            .background(Palette.surface.opacity(0.82), in: Circle())
+                    }
+                }
+                .frame(maxWidth: box.width)
+                .clipShape(shape)
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Open \(name)")
+        #if DEBUG
+        .accessibilityValue(thumbnail == nil ? "placeholder" : "preview")
+        #endif
+        .accessibilityIdentifier("gram-attachment-open")
+        .accessibilityAction(named: "Save to Files", onSave)
     }
 
     @ViewBuilder
@@ -391,85 +409,124 @@ struct GramImageCard: View {
         } else {
             ZStack {
                 Palette.surfaceRaised
-                Image(systemName: "photo")
-                    .font(.system(size: 28))
-                    .foregroundStyle(Palette.textFaint)
+                VStack(spacing: 8) {
+                    if let download {
+                        ring(download)
+                    } else {
+                        Image(systemName: "photo")
+                            .font(.system(size: 28))
+                            .foregroundStyle(Palette.textFaint)
+                    }
+                    (Text(name).foregroundStyle(Palette.textDim)
+                        + Text(sizeLabel(byteCount).map { " · \($0)" } ?? "").foregroundStyle(Palette.textFaint))
+                        .font(Typography.app(13))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 12)
+                }
             }
         }
     }
 
-    private var spokenName: String {
-        [name, sizeLabel(byteCount)].compactMap { $0 }.joined(separator: ", ")
-    }
-
-    private var nameLabel: some View {
-        (Text(name).foregroundStyle(Palette.text)
-            + Text(sizeLabel(byteCount).map { " · \($0)" } ?? "").foregroundStyle(Palette.textDim))
-            .font(Typography.app(13))
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func caption(regular: Bool) -> some View {
-        HStack(spacing: regular ? 4 : 6) {
-            if regular {
-                nameLabel
-                    .accessibilityLabel(spokenName)
-                captionButton("Open", id: "gram-attachment-open", action: onOpen)
-                captionButton("Save to Files", id: "gram-attachment-save", action: onSave)
-            } else {
-                Button(action: onOpen) {
-                    nameLabel.contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Open")
-                .accessibilityValue(spokenName)
-                .accessibilityIdentifier("gram-attachment-open")
-                Button(action: onSave) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 18))
-                        .foregroundStyle(Palette.text)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Save to Files")
-                .accessibilityIdentifier("gram-attachment-save")
-            }
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, regular ? 4 : 1)
-        .frame(height: 30)
-        .background(Palette.surface.opacity(0.82), in: Capsule())
-    }
-
-    private func captionButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(Typography.app(13, .semibold))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .fixedSize()
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(Palette.surfaceRaised, in: Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(id)
+    private func ring(_ download: GramCardDownload) -> some View {
+        TransferRing(progress: download.fraction).frame(width: 28, height: 28)
     }
 }
 
-/// An attached file: a document icon labelled with the extension, the name, "<kind> · <size>",
-/// and an "Open" | "Save to Files" action row. On its own it is an agent card (bubble fill,
-/// card radius, card width); `embedded` draws it inside a card that has text above it, so it
-/// has no background or corners of its own and opens with the hairline that divides the two
-/// (the caller leaves 9 pt between its text and this).
+/// Image cards' decoded pictures, kept in memory by message id so a row the feed rebuilds
+/// draws its picture on its first frame instead of decoding it again.
+enum GramThumbnails {
+    /// The narrowest and widest shapes a picture card takes; a picture beyond them is
+    /// cropped, so a tall screenshot or a panorama never draws as a sliver.
+    static let minAspect: CGFloat = 3.0 / 4.0
+    static let maxAspect: CGFloat = 4
+
+    private static let memory: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
+
+    static func cached(id: String) -> UIImage? {
+        memory.object(forKey: id as NSString)
+    }
+
+    static func remove(id: String) {
+        memory.removeObject(forKey: id as NSString)
+    }
+
+    static func removeAll() {
+        memory.removeAllObjects()
+    }
+
+    /// The card's size cap for a picture of `size`: the spec while the picture is unknown,
+    /// then the picture's shape (clamped to `minAspect`...`maxAspect`) as large as fits in
+    /// the spec's width and height.
+    static func boxSize(for size: CGSize?, in spec: CGSize) -> CGSize {
+        guard let size, size.width > 0, size.height > 0 else { return spec }
+        let aspect = min(max(size.width / size.height, minAspect), maxAspect)
+        let width = min(spec.width, spec.height * aspect)
+        return CGSize(width: width, height: width / aspect)
+    }
+
+    /// The picture in the file at `url`, decoded off the main thread at the pixel size a
+    /// card of at most `spec` points shows it at, and kept under `id`. nil when the file is
+    /// not a decodable image, or the session ended while decoding (sign-out wipes this
+    /// cache with the downloads, and a late decode must not refill it).
+    static func load(id: String, url: URL, spec: CGSize, scale: CGFloat) async -> UIImage? {
+        if let hit = cached(id: id) { return hit }
+        let epoch = GramView.Downloads.currentEpoch
+        let image = await Task.detached(priority: .userInitiated) {
+            decode(url: url, spec: spec, scale: scale)
+        }.value
+        guard let image, GramView.Downloads.currentEpoch == epoch else { return nil }
+        memory.setObject(image, forKey: id as NSString,
+                         cost: image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0)
+        return image
+    }
+
+    /// Downsampled with ImageIO, so a large photo is never decoded at full size: the
+    /// longest side is what filling the picture's card box needs, never more than the
+    /// file's own.
+    private static func decode(url: URL, spec: CGSize, scale: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let pixelHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              pixelWidth > 0, pixelHeight > 0
+        else { return nil }
+        // EXIF orientations 5-8 turn the picture a quarter: it draws with its sides swapped.
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        let drawn = (5...8).contains(orientation)
+            ? CGSize(width: pixelHeight, height: pixelWidth)
+            : CGSize(width: pixelWidth, height: pixelHeight)
+        let box = boxSize(for: drawn, in: spec)
+        let fill = max(box.width / drawn.width, box.height / drawn.height)
+        let longest = max(drawn.width, drawn.height)
+        let maxPixels = max(1, min(longest, (longest * fill * scale).rounded(.up)))
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
+}
+
+/// An attached file: a document icon labelled with the extension, the name and
+/// "<kind> · <size>". The whole card is the Open button; Save to Files is in the message's
+/// context menu and the card's accessibility actions. A download the owner started draws
+/// as a ring on the icon. On its own it is an agent card (bubble fill, card radius, card
+/// width); `embedded` draws it inside a card that has text above it, so it has no
+/// background or corners of its own and opens with the hairline that divides the two (the
+/// caller leaves 9 pt between its text and this).
 struct GramFileCard: View {
     let name: String
     let kind: String
     let byteCount: Int?
+    let download: GramCardDownload?
     let onOpen: () -> Void
     let onSave: () -> Void
     var embedded = false
@@ -478,9 +535,9 @@ struct GramFileCard: View {
 
     var body: some View {
         if embedded {
-            content
+            card
         } else {
-            content
+            card
                 .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass))
                 .background(GramBubble.inFill)
                 .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
@@ -491,57 +548,50 @@ struct GramFileCard: View {
         [kind.isEmpty ? nil : kind, sizeLabel(byteCount)].compactMap { $0 }.joined(separator: " · ")
     }
 
-    private var content: some View {
-        VStack(spacing: 0) {
-            if embedded { rule }
-            HStack(spacing: 10) {
-                GramDocumentIcon(label: String((name as NSString).pathExtension.uppercased().prefix(4)))
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(name)
-                        .font(Typography.app(15, .semibold))
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if !detail.isEmpty {
-                        Text(detail)
-                            .font(Typography.app(13))
-                            .foregroundStyle(Palette.textDim)
+    private var card: some View {
+        Button(action: onOpen) {
+            VStack(spacing: 0) {
+                if embedded { rule }
+                HStack(spacing: 10) {
+                    GramDocumentIcon(label: String((name as NSString).pathExtension.uppercased().prefix(4)))
+                        .overlay {
+                            if let download {
+                                TransferRing(progress: download.fraction)
+                                    .frame(width: 22, height: 22)
+                                    .padding(4)
+                                    .background(Palette.surfaceRaised, in: Circle())
+                            }
+                        }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(name)
+                            .font(Typography.app(15, .semibold))
+                            .foregroundStyle(Palette.text)
                             .lineLimit(1)
+                            .truncationMode(.middle)
+                        if !detail.isEmpty {
+                            Text(detail)
+                                .font(Typography.app(13))
+                                .foregroundStyle(Palette.textDim)
+                                .lineLimit(1)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.top, 9)
+                .padding(.bottom, 10)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 9)
-            .padding(.bottom, 10)
-            .accessibilityElement(children: .combine)
-            rule
-            HStack(spacing: 0) {
-                actionButton("Open", id: "gram-attachment-open", action: onOpen)
-                Rectangle().fill(Palette.hairline).frame(width: 1)
-                actionButton("Save to Files", id: "gram-attachment-save", action: onSave)
-            }
-            .fixedSize(horizontal: false, vertical: true)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Open \(name)")
+        .accessibilityValue(detail)
+        .accessibilityIdentifier("gram-attachment-open")
+        .accessibilityAction(named: "Save to Files", onSave)
     }
 
     private var rule: some View {
         Rectangle().fill(Palette.hairline).frame(height: 1)
-    }
-
-    private func actionButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(Typography.app(15, .semibold))
-                .foregroundStyle(Palette.text)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 9)
-                .padding(.bottom, 10)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(id)
     }
 }
 

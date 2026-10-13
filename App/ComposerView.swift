@@ -621,20 +621,13 @@ struct ComposerAttachmentChip: View {
     let canRemove: Bool
     let onRemove: () -> Void
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hoveringRemove = false
 
     var body: some View {
         HStack(spacing: 9) {
             ZStack {
-                if let progress = state.progress {
-                    Circle().stroke(Palette.hairline, lineWidth: 2)
-                    Circle().trim(from: 0, to: progress)
-                        .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(reduceMotion ? nil : .linear(duration: 0.2), value: progress)
-                } else if state.isIndeterminate {
-                    ComposerProgressRing()
+                if state.progress != nil || state.isIndeterminate {
+                    TransferRing(progress: state.progress)
                 }
                 Image(state.isSent ? "ComposerCheck" : state.isFailed ? "ComposerAlert" : isImage ? "ComposerPhoto" : "ComposerFile")
                     .resizable().renderingMode(.template).frame(width: 19, height: 19)
@@ -679,17 +672,28 @@ struct ComposerAttachmentChip: View {
     }
 }
 
-private struct ComposerProgressRing: View {
+/// The composer's upload ring, also Gram's download ring: a hairline track with the
+/// progress arc from 12 o'clock, or a clock-spun arc while the total is unknown.
+struct TransferRing: View {
+    /// 0...1, or nil for the indeterminate spin.
+    let progress: Double?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             Circle().stroke(Palette.hairline, lineWidth: 2)
-            TimelineView(.animation(paused: reduceMotion)) { timeline in
-                Circle().trim(from: 0, to: 0.23)
+            if let progress {
+                Circle().trim(from: 0, to: progress)
                     .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .rotationEffect(reduceMotion ? .degrees(-90)
-                                    : ClockSpin.angle(at: timeline.date, period: 1.3, from: -90))
+                    .rotationEffect(.degrees(-90))
+                    .animation(reduceMotion ? nil : .linear(duration: 0.2), value: progress)
+            } else {
+                TimelineView(.animation(paused: reduceMotion)) { timeline in
+                    Circle().trim(from: 0, to: 0.23)
+                        .stroke(Palette.text, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(reduceMotion ? .degrees(-90)
+                                        : ClockSpin.angle(at: timeline.date, period: 1.3, from: -90))
+                }
             }
         }
     }

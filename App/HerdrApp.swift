@@ -23,6 +23,11 @@ struct HerdrApp: App {
         // transaction that completes outside a purchase() call — e.g. an Ask-to-Buy
         // approved later — is finished promptly instead of waiting for Settings to open.
         _ = TipStore.shared
+        #if DEBUG
+        // A mock run starts with no downloaded gram files, so what a test sees (the image
+        // card's fetched preview) comes from this run's canned replies, not an earlier one's.
+        if ScreenshotMock.mode != nil { GramView.Downloads.invalidate() }
+        #endif
     }
 
     var body: some Scene {
@@ -9615,7 +9620,10 @@ struct MockTransport: HerdrTransport {
             Self.recordGramPost(requestLine)
             return Self.gramPosted
         }
-        if requestLine.contains("gram.get_file") { return Self.gramFileContent }
+        if requestLine.contains("gram.get_file") {
+            // g3 is the list fixture's image: a real PNG, so its card decodes a preview.
+            return requestLine.contains(#""g3""#) ? Self.gramImageContent : Self.gramFileContent
+        }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
         if requestLine.contains("agent.prompt") { return Self.agentPrompted }
@@ -9978,6 +9986,11 @@ struct MockTransport: HerdrTransport {
     /// Byte-identical to MockWireFixtures.gramFileContent.
     static let gramFileContent =
         #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":11,"data_base64":"aGVsbG8gd29ybGQ="}}"#
+
+    /// The `gram.get_file` reply for the list fixture's image (g3): a 32 x 18 gradient PNG,
+    /// small enough to inline, real enough for the card's ImageIO decode.
+    static let gramImageContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":413,"data_base64":"iVBORw0KGgoAAAANSUhEUgAAACAAAAASCAIAAAC1qksFAAABZElEQVR42o2SPUsDQRCGZ+b+lkUKkQgKKQIKYhpLO4lIAgqmsrK0UBC0sLVXRMTCwsLCwsb/st5tbvfma3NCCHOz7zvPzOzixtovYaiaH1RkAgxEbVDlgAmIKSurJMDNwU+ytU7Kn8TyyeZ0I5UkWgm4vf5N6BQSBlWuhBTsBBgNv7QNA2m1h0QP2axUZHC89akrGltPRc/SAXZGH05FsIZegUFCBOyN38UEYGxghgCNjDxJShmc7L7abOwR3HyM2cWKIzZBBhzsP7dZtyLwHjuADUgtIE2J08On9kOe6YoKCektmbxoFwLeXLwlABttBVIIugx5lgZwd/li1U0G4sXqIzZBgdS1u3xF57PHfExKLQNibDFlCbkETI8e/IqQ3pKty5GOl01Qr+jk+J6LiPMNkjhAKXM30oLz2a1sTU1Qrgh5LUwgATUSz06vxcWqir1IGaSVsgkWiysqqP+DXO2t//8AaXuKJu4OmmAAAAAASUVORK5CYII="}}"#
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
