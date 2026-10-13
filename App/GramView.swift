@@ -16,7 +16,7 @@ final class GramUnreadTracker: ObservableObject {
 ///
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
 /// sent, plus the owner's own posts and their claim state) newest-first, and a
-/// composer to post to the shared grab-queue or one agent directly, with an
+/// composer to post to the shared grab-queue or, with an "@name", one agent directly, with an
 /// optional file attachment. A received file shows a chip that downloads and
 /// previews it (QuickLook); long-pressing a message deletes it — and its file
 /// bytes — for good, which is what makes gram safe for a short-lived secret like
@@ -27,9 +27,6 @@ final class GramUnreadTracker: ObservableObject {
 /// It owns its polling and never blocks the caller.
 struct GramView: View {
     let client: HerdrClient
-    /// Live agents, for the direct-recipient picker. Only named agents can be
-    /// addressed directly (the server validates `to` against a live agent name).
-    let agents: [AgentInfo]
     var onClose: (() -> Void)?
     /// Shared unread count for the tab-bar badge. Optional (defaulted) so existing
     /// call sites (and the DEBUG harness) compile unchanged; written on load and
@@ -69,7 +66,6 @@ struct GramView: View {
     private var serverMessages: [GramMessage] { inboxStore.inbox.messages }
     @State private var pendingPosts: [GramMessage] = []
     @State private var phase: LoadPhase = .loading
-    @State private var recipient: Recipient = .queue
     @State private var draft: String = ""
     /// UIKit owns the multiline field; focus is mirrored through its delegate.
     @State private var composerFocused = false
@@ -77,14 +73,28 @@ struct GramView: View {
     /// True while dictating into the composer, so the field is disabled (typing can't be
     /// overwritten by the next partial) while the live transcript still appends.
     @State private var draftDictating = false
-    /// The message feed's height: the room the composer's pull-to-expand editor may take.
-    @State private var feedHeight: CGFloat = 0
+    /// The feed's bottom edge in `feedPageSpace`. The feed runs up under the floating header,
+    /// so its frame is not the room the reader sees: that is `feedHeight`.
+    @State private var feedBottom: CGFloat = 0
+    /// The feed's VISIBLE height, from the floating header's bottom edge to its own, less
+    /// `feedRoomCushion`: the room the composer's pull-to-expand editor may take. The feed's
+    /// frame runs up under the header, so it is not room: counting it let the open editor
+    /// leave less feed visible below the header than the 48 pt the editor promises (logged
+    /// on iPhone: 45 pt under a 78 pt header, and layout then never settled).
+    private var feedHeight: CGFloat { max(0, feedBottom - headerBottom - Self.feedRoomCushion) }
+    /// Kept out of the editor's room on top of the 48 pt it already leaves: the card grows by
+    /// a few points more than the editor's text height (its handle row and paddings), so the
+    /// visible feed below the header must not be budgeted to the point.
+    private static let feedRoomCushion: CGFloat = 12
     /// The composer card's height. Added back to the feed's so the room the composer
     /// grows into does not shrink as the composer grows (see `composerEditorRoom`).
     @State private var composerCardHeight: CGFloat = 0
     private var composerRoom: CGFloat {
         feedHeight + max(0, composerCardHeight - ComposerStyle.restingHeight)
     }
+    /// The composer is one row (not wrapped, no editor open): only then does a shrinking feed
+    /// follow the reader to the bottom.
+    private var composerAtRest: Bool { composerCardHeight <= ComposerStyle.restingHeight + 1 }
     @State private var sending = false
     /// A send failure. Kept SEPARATE from load state so a successful background poll
     /// never clears it before the owner sees it.
@@ -167,13 +177,18 @@ struct GramView: View {
     /// without this nothing would say the bottom or the rows are on screen again until the
     /// reader scrolled. See `onFeedPlacementChange` and the bottom/sentinel trackers.
     @State private var feedAppearance = 0
-    /// Text segments opened with "Show more" (`<message id>#<segment>`). Here rather than in
+    /// Text segments opened with "Read more" (`<message id>#<segment>`). Here rather than in
     /// the row so a LazyVStack rebuilding a row does not fold it again.
     @State private var expandedTexts: Set<String> = []
     /// The "Gram ›" pill's sheet: Read all, the agents seen in Gram, and the shared queue.
     @State private var showingAgentsSheet = false
-    /// The composer's recipient chip width, handed to the composer's wrap measure.
-    @State private var recipientChipWidth: CGFloat = 0
+    /// The floating header's bottom edge in the page's coordinate space (`feedPageSpace`):
+    /// the visible top of the feed, which scrolls on under the header.
+    @State private var headerBottom: CGFloat = 0
+    #if DEBUG
+    /// The mock transport's recorded `gram.post` calls, for the `gram-post-calls` probe.
+    @State private var postCallsProbe = ""
+    #endif
     /// This device's machine label, for a local agent's "name · machine" line.
     @Environment(\.guestMachineLabel) private var localMachine
     /// True while a Read-all pass is running, so the button disables rather than stacking passes.
@@ -357,6 +372,10 @@ struct GramView: View {
         /// The feed's visible height at the bottom marker's last report, so a shrink (keyboard
         /// up, composer grown) can be told from the reader scrolling away. 0 = not known yet.
         var viewportHeight: CGFloat = 0
+        /// The pending "stay at the bottom" scroll after a shrink. Re-scheduled on every frame
+        /// of the resize and run once it settles: a `scrollTo` on every animation frame of a
+        /// growing editor locked the lazy feed's layout (main thread busy, UI test hung).
+        var shrinkJump: Task<Void, Never>?
         /// The search text the feed last showed, so a CHANGE of it (not the feed's first
         /// appearance) scrolls to the newest match. nil until the feed has appeared.
         var shownSearch: String?
@@ -407,40 +426,6 @@ struct GramView: View {
         case unavailable(String)
     }
 
-    /// Where a composed message goes.
-    private enum Recipient: Hashable {
-        case queue
-        case agent(String)
-
-        var wireTo: String? {
-            switch self {
-            case .queue: return nil
-            case .agent(let name): return name
-            }
-        }
-        /// The composer chip's text: "Queue", or the agent's bare name cut to 10 characters
-        /// so the chip never crowds the text off the send row.
-        var chipLabel: String {
-            switch self {
-            case .queue: return "Queue"
-            case .agent(let name):
-                let bare = GramMessage.agentName(from: name)
-                return bare.count > 10 ? String(bare.prefix(9)) + "…" : bare
-            }
-        }
-    }
-
-    /// Named agents, de-duplicated, sorted — the addressable direct recipients.
-    private var addressableAgents: [String] {
-        var seen = Set<String>()
-        var names: [String] = []
-        for agent in agents {
-            guard let name = agent.name, !name.isEmpty, seen.insert(name).inserted else { continue }
-            names.append(name)
-        }
-        return names.sorted()
-    }
-
     var body: some View {
         // Observe the text-size setting so Gram re-renders at the new Typography.scale.
         let _ = uiFontScale
@@ -453,6 +438,9 @@ struct GramView: View {
         }
         .background(Palette.ground.ignoresSafeArea())
         .background { gramKeyboardShortcuts }
+        #if DEBUG
+        .overlay(alignment: .topLeading) { postCallsProbeView }
+        #endif
         // Poll while the page is open so new agent messages appear without a manual
         // refresh (the gram store has no event stream); the loop ends when the view
         // goes away (task cancellation).
@@ -584,16 +572,25 @@ struct GramView: View {
 
     // MARK: - Layout roots
 
-    /// iPhone / compact width: a single column — the nav bar (back, the senders' avatar
-    /// group over the "Gram ›" pill, search and Saved), the message feed, banner, and
-    /// composer stacked top to bottom.
+    /// The page's coordinate space: the floating header's bottom edge and the feed's rows are
+    /// compared in it (`onFeedPlacementChange(visibleTop:)`).
+    static let feedPageSpace = "gram-page"
+
+    /// iPhone / compact width: a single column — the feed with the nav bar (back, the senders'
+    /// avatar group over the "Gram ›" pill, search and Saved) floating over its top, then the
+    /// banner and the composer.
     private var phoneBody: some View {
         VStack(spacing: 0) {
-            header
-                .background(Palette.ground)
-                .zIndex(1)
             content
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.frame(in: .named(Self.feedPageSpace)).maxY
+                } action: { if abs($0 - feedBottom) > 0.5 { feedBottom = $0 } }
+                .gramFloatingHeader {
+                    header
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .named(Self.feedPageSpace)).maxY
+                        } action: { if abs($0 - headerBottom) > 0.5 { headerBottom = $0 } }
+                }
             bannerView
             composer
                 .environment(\.composerEditorRoom, composerRoom)
@@ -616,12 +613,15 @@ struct GramView: View {
                 // re-anchored it. Cited by SYMBOL deliberately: the line number was stale
                 // on the day it was written and shifted again twice since.
                 .layoutPriority(1)
+                // Above the feed: the @-mention list floats up over the messages.
+                .zIndex(1)
         }
+        .coordinateSpace(.named(Self.feedPageSpace))
     }
 
-    /// Regular width: the avatar-group header, the message feed and the composer. The
-    /// Inbox/Saved selector, search, Read all and refresh are rendered by the host in the
-    /// app's real `NavigationSplitView` sidebar, exactly like the agents list.
+    /// Regular width: the message feed with the avatar-group header floating over its top,
+    /// then the composer. The Inbox/Saved selector, search, Read all and refresh are rendered
+    /// by the host in the app's real `NavigationSplitView` sidebar, exactly like the agents list.
     ///
     /// This page used to draw its OWN 260pt rail here, which on iPad and Mac put a second
     /// sidebar next to the split view's own column — and that column was rendering an empty
@@ -630,12 +630,17 @@ struct GramView: View {
     /// every send/attach/poll behaviour is identical.
     private var iPadBody: some View {
         VStack(spacing: 0) {
-            iPadHeader
-                .readableColumn(GramBubble.columnCap)
-                .layoutPriority(1)
-                .zIndex(1)
             content
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { feedHeight = $0 }
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.frame(in: .named(Self.feedPageSpace)).maxY
+                } action: { if abs($0 - feedBottom) > 0.5 { feedBottom = $0 } }
+                .gramFloatingHeader {
+                    iPadHeader
+                        .readableColumn(GramBubble.columnCap)
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .named(Self.feedPageSpace)).maxY
+                        } action: { if abs($0 - headerBottom) > 0.5 { headerBottom = $0 } }
+                }
             // The banner and composer share the feed's capped column, so the field lines up
             // under the messages instead of spanning the whole detail pane.
             bannerView
@@ -644,22 +649,21 @@ struct GramView: View {
                 .environment(\.composerEditorRoom, composerRoom)
                 .readableColumn(GramBubble.columnCap)
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
+                .zIndex(1)           // see phoneBody: the @-mention list floats over the feed
         }
+        .coordinateSpace(.named(Self.feedPageSpace))
     }
 
     /// iPad / Mac: the same avatar group and "Gram ›" pill as the phone, centred at the top
-    /// of the column. Search lives in the host's sidebar when it passes `searchText`; a host
-    /// that does not gets the magnifier (and its field) at the right of this row.
+    /// of the column, and at the right the phone's glass capsule: Saved alone while the
+    /// host's sidebar owns search (`searchText`), search and Saved for a host that does not.
     private var iPadHeader: some View {
         VStack(spacing: 8) {
             ZStack {
                 headerIdentity
-                if offersOwnSearch {
-                    HStack {
-                        Spacer(minLength: 0)
-                        InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
-                                           target: CGSize(width: 40, height: 44)) { toggleSearch() }
-                    }
+                HStack {
+                    Spacer(minLength: 0)
+                    headerTrailing
                 }
             }
             if offersOwnSearch, searchOpen { searchField.frame(maxWidth: 420) }
@@ -668,7 +672,6 @@ struct GramView: View {
         .padding(.top, 8)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
-        .background(Palette.ground)
     }
 
     /// The header's inline field, shared with the terminal pane (`InlineSearchField`).
@@ -884,7 +887,8 @@ struct GramView: View {
     }
 
     /// The pill's sheet: Read all (and Refresh), then who to write to — an agent seen in
-    /// Gram or the shared queue. Choosing one sets the composer's recipient and closes it.
+    /// Gram or the shared queue. Choosing one puts that agent's "@name" at the start of the
+    /// draft (or takes it off, for the queue) and closes it.
     private var agentsSheet: some View {
         NavigationStack {
             List {
@@ -912,7 +916,7 @@ struct GramView: View {
                 Section("Write to") {
                     ForEach(gramAgents) { agent in
                         Button {
-                            recipient = .agent(agent.from)
+                            address(agent.name)
                             showingAgentsSheet = false
                         } label: {
                             HStack(spacing: 12) {
@@ -928,7 +932,7 @@ struct GramView: View {
                                     }
                                 }
                                 Spacer(minLength: 0)
-                                if recipient == .agent(agent.from) {
+                                if draftAddress.recipient?.from == agent.from {
                                     Image(systemName: "checkmark").foregroundStyle(Palette.brand)
                                 }
                             }
@@ -936,7 +940,7 @@ struct GramView: View {
                         .accessibilityIdentifier("gram-recipient-\(agent.name)")
                     }
                     Button {
-                        recipient = .queue
+                        address(nil)
                         showingAgentsSheet = false
                     } label: {
                         HStack(spacing: 12) {
@@ -954,7 +958,7 @@ struct GramView: View {
                                     .foregroundStyle(Palette.textDim)
                             }
                             Spacer(minLength: 0)
-                            if recipient == .queue {
+                            if draftAddress.recipient == nil {
                                 Image(systemName: "checkmark").foregroundStyle(Palette.brand)
                             }
                         }
@@ -1286,7 +1290,8 @@ struct GramView: View {
                         // `feedAppearance` is part of the reported value, so a row still on
                         // screen when the tab comes back reports again (rows are not
                         // re-identified: that would rebuild every bubble).
-                        .onFeedPlacementChange(appearance: feedAppearance) { placement in
+                        .onFeedPlacementChange(appearance: feedAppearance,
+                                               visibleTop: headerBottom > 0 ? headerBottom : nil) { placement in
                             if placement.onScreen {
                                 feedVisibility.rows.insert(entry.id)
                                 if didInitialScroll { markReadIfNeeded(entry.message) }
@@ -1322,17 +1327,26 @@ struct GramView: View {
                                         feedVisibility.viewportHeight = bottom.viewportHeight
                                     }
                                     // The feed's VISIBLE HEIGHT got smaller under a reader at the
-                                    // bottom (the keyboard came up, the composer grew): the scroll
-                                    // view keeps its top offset, so the newest rows slid under the
-                                    // composer. Keep the reader at the bottom, as Messages does.
-                                    // Only a real viewport decrease counts: content inserted or
-                                    // removed (an older page, a filter) leaves the height alone.
-                                    // One jump per resize, never a standing anchor (see `.task`).
+                                    // bottom because the keyboard came up: the scroll view keeps its
+                                    // top offset, so the newest rows slid under the composer. Keep
+                                    // the reader at the bottom, as Messages does. Only a real
+                                    // viewport decrease counts (an older page or a filter leaves the
+                                    // height alone), one jump after the resize settles.
+                                    // Not while the composer has grown (wrapped text, the pull-up
+                                    // editor): a scroll to the bottom while the editor opened locked
+                                    // the feed's layout on iPhone (main thread busy, UI test hung),
+                                    // and the tall editor is for writing, not for following.
                                     let shrank = previousHeight > 0 && bottom.viewportHeight > 0
                                         && bottom.viewportHeight < previousHeight - 0.5
-                                    if shrank, wasAtBottom, didInitialScroll, !feedVisibility.anchoring {
+                                    if shrank, wasAtBottom, didInitialScroll, !feedVisibility.anchoring,
+                                       composerAtRest {
                                         feedVisibility.atBottom = true
-                                        feed.scrollTo(Self.feedBottomID, anchor: .bottom)
+                                        feedVisibility.shrinkJump?.cancel()
+                                        feedVisibility.shrinkJump = Task { @MainActor in
+                                            try? await Task.sleep(nanoseconds: Self.shrinkJumpSettleNanos)
+                                            guard !Task.isCancelled, composerAtRest else { return }
+                                            feed.scrollTo(Self.feedBottomID, anchor: .bottom)
+                                        }
                                         return
                                     }
                                     feedVisibility.atBottom = bottom.onScreen
@@ -1342,6 +1356,9 @@ struct GramView: View {
                                 }
                                 .id(feedAppearance)
                         }
+                        // Not the pending shrink jump: a lazy stack drops this marker as soon
+                        // as the shrink pushes it off screen, which is exactly when the jump
+                        // must still run. The feed's own onDisappear cancels it.
                         .onDisappear { feedVisibility.atBottom = false }
                 }
                 .padding(16)
@@ -1404,6 +1421,7 @@ struct GramView: View {
                 feedVisibility.anchoring = false
                 feedVisibility.shownSearch = nil
                 showingNewMessages = false
+                feedVisibility.shrinkJump?.cancel()
             }
             // Follow a NEW message in only when the reader is at the bottom or just sent it;
             // otherwise offer the "New messages" button. Keyed on the unfiltered newest
@@ -1490,6 +1508,9 @@ struct GramView: View {
     }
 
     private static let feedBottomID = "gram-feed-bottom"
+    /// How long a shrinking feed must stay still before the reader is kept at the bottom:
+    /// longer than one frame, short enough to read as part of the keyboard/editor motion.
+    private static let shrinkJumpSettleNanos: UInt64 = 150_000_000
 
     private func centered<V: View>(@ViewBuilder _ inner: () -> V) -> some View {
         VStack { Spacer(); inner(); Spacer() }
@@ -1563,172 +1584,204 @@ struct GramView: View {
 
     // MARK: - Composer
 
-    /// A glass + on the left, then the field: the recipient chip, the text, the mic and a
-    /// round violet send. The chip lives INSIDE the field, so its width is handed to the
-    /// composer's wrap measure (`fieldPrefixWidth`) to keep one-row-at-rest honest.
+    /// The agent terminal's composer (`TerminalHomeView.replyBar`): one card holding the
+    /// field, the paperclip, the mic and saved prompts, with send taking the saved-prompts
+    /// place once there is something to send; same paddings. Mirrored rather than shared:
+    /// the terminal's controls are woven into its own send, Ctrl and collapse state in
+    /// HerdrApp.swift, so a common builder would have to change the terminal's behaviour.
+    ///
+    /// The recipient is in the text (mock D): "@name" sends to one agent, no "@" goes to the
+    /// shared queue (`GramMention`). While an "@" is being typed, the matching agents are
+    /// listed above the card. The field is plain text (`ComposerTextField` takes no
+    /// attributes), so a mention is not tinted inside it.
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            attachButton
-                // Centred on the composer's resting row (its surface padding plus half
-                // the gap between the 40 pt circle and the 44 pt action row).
-                .padding(.bottom, ComposerStyle.surfacePadding + (ComposerStyle.actionSize - 40) / 2)
-            AdaptiveComposer(
-                text: draft,
+        AdaptiveComposer(
+            text: draft,
+            isFocused: composerFocused,
+            hasAccessory: !attachedFiles.isEmpty,
+            showsLeading: composerKeyboard.isVisible && composerFocused,
+            isRecording: draftDictating
+        ) { editorHeight in
+            ComposerTextField(
+                text: $draft,
+                isEnabled: !draftDictating,
                 isFocused: composerFocused,
-                hasAccessory: !attachedFiles.isEmpty,
-                showsLeading: composerKeyboard.isVisible && composerFocused,
-                isRecording: draftDictating,
-                fieldPrefixWidth: recipientChipWidth + Self.recipientChipGap
-            ) { editorHeight in
-                HStack(alignment: .top, spacing: Self.recipientChipGap) {
-                    recipientChip
-                    ComposerTextField(
-                        text: $draft,
-                        isEnabled: !draftDictating,
-                        isFocused: composerFocused,
-                        onFocusChange: { composerFocused = $0 },
-                        placeholder: "Message an agent…",
-                        accessibilityIdentifier: "gram-composer-input",
-                        capitalization: .sentences,
-                        autocorrection: .default,
-                        onCommandReturn: {
-                            guard canSend else { return }
-                            Task { await send() }
-                        },
-                        fixedHeight: editorHeight
-                    )
-                    .frame(minWidth: 0, maxWidth: .infinity)
-                }
-            } accessory: {
-                if !attachedFiles.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(attachedFiles) { file in attachmentChip(file) }
-                        }
-                        .padding(.horizontal, 7)
+                onFocusChange: { composerFocused = $0 },
+                placeholder: "Queue, or @ an agent…",
+                accessibilityIdentifier: "gram-composer-input",
+                capitalization: .sentences,
+                autocorrection: .default,
+                onCommandReturn: {
+                    guard canSend else { return }
+                    Task { await send() }
+                },
+                fixedHeight: editorHeight
+            )
+            .frame(minWidth: 0, maxWidth: .infinity)
+        } accessory: {
+            if !attachedFiles.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachedFiles) { file in attachmentChip(file) }
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 7)
                 }
-            } leading: {
-                Button {
-                    composerFocused = false
-                } label: {
-                    ComposerActionIcon(image: Image("ComposerKeyboard"))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Collapse keyboard")
-            } actions: {
-                HStack(spacing: 4) {
-                    MicButton(text: $draft, recording: $draftDictating)
-                        .fixedSize()
-                        .disabled(sending || loadingPhoto)
-                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachedFiles.isEmpty {
-                        SavedPromptsMenu { prompt in
-                            draft = prompt.text
-                            Task { await send() }
-                        }
-                        .disabled(sending || loadingPhoto || draftDictating)
-                        .accessibilityIdentifier("gram-saved-prompts")
-                    } else {
-                        Button {
-                            Task { await send() }
-                        } label: {
-                            sendLabel
-                        }
-                        .fixedSize()
-                        .accessibilityLabel("Send gram")
-                        .accessibilityIdentifier("gram-send-button")
-                        .disabled(!canSend)
-                        .keyboardShortcut(.return, modifiers: .command)
-                    }
-                }
-                .buttonStyle(.plain)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
+        } leading: {
+            Button {
+                composerFocused = false
+            } label: {
+                ComposerActionIcon(image: Image("ComposerKeyboard"))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Collapse keyboard")
+        } actions: {
+            HStack(spacing: 4) {
+                ComposerAttachButton(busy: loadingPhoto) { showAttachSheet = true }
+                    .disabled(sending || loadingPhoto)
+                    .accessibilityIdentifier("gram-attach-button")
+                MicButton(text: $draft, recording: $draftDictating)
+                    .fixedSize()
+                    .disabled(sending || loadingPhoto)
+                if !hasDraftContent {
+                    SavedPromptsMenu { prompt in
+                        draft = prompt.text
+                        Task { await send() }
+                    }
+                    .disabled(sending || loadingPhoto || draftDictating)
+                    .accessibilityIdentifier("gram-saved-prompts")
+                } else {
+                    Button {
+                        Task { await send() }
+                    } label: {
+                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                    }
+                    .disabled(!canSend)
+                    .fixedSize()
+                    .accessibilityLabel("Send gram")
+                    .accessibilityIdentifier("gram-send-button")
+                    .keyboardShortcut(.return, modifiers: .command)
+                }
+            }
+            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
         .padding(.bottom, 8)
         .background(Palette.ground)
+        // The @-mention list floats 8 pt above the card, over the feed, without moving it.
+        .overlay(alignment: .topLeading) {
+            let matches = mentionMatches
+            if !matches.isEmpty {
+                mentionList(matches)
+                    .padding(.leading, 12)
+                    .alignmentGuide(.top) { $0[.bottom] + 8 }
+            }
+        }
     }
 
-    /// Space between the recipient chip and the text.
-    private static let recipientChipGap: CGFloat = 6
-
-    /// The + that opens the attach sheet: a 40 pt glass circle beside the field.
-    private var attachButton: some View {
-        Button { showAttachSheet = true } label: {
-            ZStack {
-                if loadingPhoto {
-                    ProgressView().controlSize(.small).tint(Palette.textDim)
-                } else {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Palette.text)
+    /// Mock D's list: "Send to one agent", the agents matching the "@" being typed (avatar,
+    /// name, machine), and the reminder that no "@" means the shared queue.
+    private func mentionList(_ agents: [GramAgent]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Send to one agent")
+                .font(Typography.app(12, .semibold))
+                .foregroundStyle(Palette.textDim)
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .padding(.bottom, 4)
+            ForEach(agents) { agent in
+                Button { pickMention(agent.name) } label: {
+                    HStack(spacing: 12) {
+                        GramAvatar(name: agent.from, size: 32)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(verbatim: agent.name)
+                                .font(Typography.app(15, .semibold))
+                                .foregroundStyle(Palette.text)
+                            if let machine = agent.machine {
+                                Text(verbatim: machine)
+                                    .font(Typography.app(13))
+                                    .foregroundStyle(Palette.textDim)
+                            }
+                        }
+                        .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 50)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gram-mention-\(agent.name)")
             }
-            .frame(width: 40, height: 40)
-            .gramGlass(Circle())
-            .contentShape(Circle())
+            Text("No @ and it goes to the shared queue.")
+                .font(Typography.app(13))
+                .foregroundStyle(Palette.textDim)
+                .padding(.horizontal, 16)
+                .padding(.top, 9)
+                .padding(.bottom, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+                .padding(.top, 4)
         }
-        .buttonStyle(.plain)
-        .disabled(sending || loadingPhoto)
-        .opacity(sending ? 0.45 : 1)
-        .accessibilityLabel("Attach file")
+        .padding(.vertical, 6)
+        .frame(width: 300)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Palette.surfaceRaised))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Palette.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 17, y: 14)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("gram-mention-list")
     }
 
-    /// The recipient picker as a chip at the start of the field: the shared queue or one
-    /// live agent. Kept short ("Queue", a name capped by `Recipient.chipLabel`): the chip
-    /// shares the resting row with the text, the mic, send and the keyboard button, and a
-    /// wide chip would leave a one-word message no room and drop it off the send row.
-    private var recipientChip: some View {
-        Menu {
-            Button { recipient = .queue } label: {
-                Label("Shared queue (any agent)", systemImage: "tray.and.arrow.down")
-            }
-            if !addressableAgents.isEmpty {
-                Divider()
-                ForEach(addressableAgents, id: \.self) { name in
-                    Button { recipient = .agent(name) } label: { Text(name) }
-                }
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Text(verbatim: recipient.chipLabel)
-                    .font(Typography.app(15, .semibold))
-                    .foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Palette.textDim)
-            }
-            .padding(.leading, 9)
-            .padding(.trailing, 8)
-            .frame(height: 26)
-            .background(Palette.surfaceRaised, in: Capsule())
-            .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
-        }
-        .disabled(sending)
-        .fixedSize()
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { recipientChipWidth = $0 }
+    /// The bare names an "@" can address: the agents seen in Gram, once each.
+    private var mentionNames: [String] {
+        var seen = Set<String>()
+        return gramAgents.map(\.name).filter { seen.insert($0).inserted }
     }
 
-    /// Send: a round violet button in the 44 pt action slot.
-    private var sendLabel: some View {
-        ZStack {
-            Circle().fill(GramBubble.outFill).frame(width: 34, height: 34)
-            if sending {
-                ProgressView().controlSize(.small).tint(Palette.onAccent)
-            } else {
-                Image("ComposerSend")
-                    .resizable().renderingMode(.template).scaledToFit()
-                    .frame(width: 16, height: 16)
-                    .foregroundStyle(Palette.onAccent)
-            }
+    /// The agents matching the "@" being typed at the end of the draft, names starting with
+    /// the query first; empty when no "@" is being typed (or nothing matches).
+    private var mentionMatches: [GramAgent] {
+        guard let active = GramMention.activeQuery(in: draft) else { return [] }
+        var seen = Set<String>()
+        let agents = gramAgents.filter { seen.insert($0.name).inserted }
+        let query = active.query.lowercased()
+        guard !query.isEmpty else { return agents }
+        let starting = agents.filter { $0.name.lowercased().hasPrefix(query) }
+        let containing = agents.filter {
+            !$0.name.lowercased().hasPrefix(query) && $0.name.lowercased().contains(query)
         }
-        .frame(width: ComposerStyle.actionSize, height: ComposerStyle.actionSize)
-        .contentShape(Circle())
-        .opacity(canSend || sending ? 1 : 0.45)
+        return starting + containing
+    }
+
+    /// Replaces the "@" being typed with the picked agent's "@name ".
+    private func pickMention(_ name: String) {
+        guard let active = GramMention.activeQuery(in: draft) else { return }
+        draft = GramMention.complete(draft, replacing: active.range, with: name)
+    }
+
+    /// Where the draft goes and what it says (`GramMention.resolve`): the agent its first
+    /// "@name" addresses (nil: the shared queue), and the text with a leading mention taken off.
+    /// The agent's raw `from` is the wire `to`.
+    private var draftAddress: (recipient: GramAgent?, body: String) {
+        let resolved = GramMention.resolve(draft, knownNames: mentionNames)
+        let agent = resolved.recipient.flatMap { name in gramAgents.first { $0.name == name } }
+        return (agent, resolved.body)
+    }
+
+    /// The pill sheet's "Write to": puts `name`'s "@name " at the start of the draft in place
+    /// of a leading mention already there; nil takes a leading mention off (the shared queue).
+    private func address(_ name: String?) {
+        let resolved = GramMention.resolve(draft, knownNames: mentionNames)
+        let rest = resolved.recipient != nil && resolved.body != draft ? resolved.body : draft
+        draft = name.map { "@\($0) " + rest } ?? rest
+    }
+
+    /// Something typed or attached: send takes the saved-prompts place.
+    private var hasDraftContent: Bool {
+        !attachedFiles.isEmpty || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var canSend: Bool {
@@ -1737,9 +1790,28 @@ struct GramView: View {
         // (see MicButton): sending mid-dictation would clear the field, then the next
         // recognition partial would restore the just-sent text and re-enable a duplicate.
         guard !sending, !loadingPhoto, !draftDictating else { return false }
+        // A bare "@vetrina" has no message: the body without the mention must say something.
         return !attachedFiles.isEmpty
-            || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !draftAddress.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    #if DEBUG
+    /// For the UI tests: the `gram.post` calls the mock transport answered, one
+    /// `to=<name|queue> text=<text>` per line (`MockTransport.gramPostLogSummary`), as the
+    /// LABEL of `gram-post-calls` (the GuestPaneView probes' pattern). Not the value: on the
+    /// iPhone tab an element with an empty value reads back the tab's badge ("3").
+    /// Refreshed after each send.
+    private var postCallsProbeView: some View {
+        ZStack {
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("gram-post-calls")
+                .accessibilityLabel(postCallsProbe.isEmpty ? "none" : postCallsProbe)
+        }
+        .frame(width: 1, height: 1)
+        .allowsHitTesting(false)
+    }
+    #endif
 
     private func attachmentChip(_ file: PickedAttachment) -> some View {
         ComposerAttachmentChip(
@@ -2040,13 +2112,14 @@ struct GramView: View {
 
 
     private func send() async {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = draftAddress
+        let text = address.body.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachedFiles
-        // Capture the destination BEFORE any await. Otherwise the recipient picker
-        // could change mid-upload and a file (possibly a secret) would post to a
-        // different agent than the one chosen when Send was tapped. The picker is
-        // also disabled while sending, but capturing is the real guarantee.
-        let to = recipient.wireTo
+        // Capture the destination BEFORE any await. Otherwise the draft's "@name" could
+        // change mid-upload and a file (possibly a secret) would post to a different agent
+        // than the one addressed when Send was tapped. The field is also disabled while
+        // sending, but capturing is the real guarantee.
+        let to = address.recipient?.from
         // A file with no caption is fine; an empty text-only message is not.
         guard (!text.isEmpty || !files.isEmpty), !sending else { return }
         sending = true
@@ -2057,6 +2130,9 @@ struct GramView: View {
             sending = false
             sendProgress = nil
             uploadBytes = nil
+            #if DEBUG
+            postCallsProbe = MockTransport.gramPostLogSummary
+            #endif
         }
         sendError = nil
         failedAttachmentID = nil
@@ -2814,7 +2890,7 @@ struct GramRow: View {
     var startsGroup = true
     /// The last message of a group: draws the avatar and the bubble tail.
     var endsGroup = true
-    /// Text segments the reader opened with "Show more", keyed `<message id>#<segment>`.
+    /// Text segments the reader opened with "Read more", keyed `<message id>#<segment>`.
     /// Owned by the page, so a LazyVStack rebuilding this row does not fold the text again.
     @Binding var expandedTexts: Set<String>
     /// This device's own machine label, for a local sender's "name · machine" line (a
@@ -2859,12 +2935,14 @@ struct GramRow: View {
                     }
                 }
                 VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+                    // The tail goes only on a part that ENDS IN TEXT: never on a picture, a
+                    // bare file card, or a text + document card (the document comes last).
                     if hasTextPart {
-                        chrome(textPart(segments), first: true, last: imageFile == nil,
-                               tailFill: segments.isEmpty ? GramBubble.inFill : fill)
+                        chrome(textPart(segments), first: true,
+                               tail: !segments.isEmpty && documentFile == nil && imageFile == nil)
                     }
                     if let image = imageFile {
-                        chrome(imageCard(image), first: !hasTextPart, last: true, tailFill: GramBubble.inFill)
+                        chrome(imageCard(image), first: !hasTextPart, tail: false)
                     }
                 }
                 // The message's drawn bubble(s), for UI tests that measure it (a line-limited
@@ -2908,18 +2986,17 @@ struct GramRow: View {
     }
 
     /// One part of the message (its text card, or its picture) with what every part
-    /// shares: the tail on the group's last part, the saved badge on the first part,
+    /// shares: the tail on the group's last text part, the saved badge on the first part,
     /// the context menu, and the width cap. The cap is applied AFTER the background so
     /// a short bubble still hugs its text.
-    /// `tailFill` is the fill of the part the tail joins: the bubble's own fill, except that a
-    /// bare file card and an image card are grey for everyone (the spec draws no owner variant),
-    /// so an owner's tail there is grey too rather than violet against a grey card.
-    private func chrome<Content: View>(_ content: Content, first: Bool, last: Bool, tailFill: Color) -> some View {
+    /// `tail` says the part ends in text and is the message's last part; the tail then
+    /// shows on the group's last message only, in the bubble's own fill.
+    private func chrome<Content: View>(_ content: Content, first: Bool, tail: Bool) -> some View {
         content
             .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
-                if last && endsGroup {
+                if tail && endsGroup {
                     BubbleTail()
-                        .fill(tailFill)
+                        .fill(fill)
                         .frame(width: 24, height: 22)
                         .scaleEffect(x: mine ? -1 : 1, y: 1)
                         .offset(x: mine ? 6 : -6)
@@ -3009,7 +3086,7 @@ struct GramRow: View {
                     if open { expandedTexts.insert(key) } else { expandedTexts.remove(key) }
                 }
             ),
-            fill: fill
+            toggleTint: mine ? Palette.onAccent : Palette.brand
         )
         .foregroundStyle(ink)
     }
@@ -3172,18 +3249,62 @@ enum FileGlyph {
 }
 
 extension View {
-    /// The spec's glass for Gram's floating controls (nav capsules, the pill, the + button):
-    /// surfaceRaised at 72 % over a blur, with a hairline edge.
+    /// The spec's glass for Gram's floating controls (nav capsules, the pill): Liquid Glass on
+    /// iOS 26; before it, surfaceRaised at 72 % over a blur, with a hairline edge.
+    @ViewBuilder
     func gramGlass<S: InsettableShape>(_ shape: S) -> some View {
-        background {
-            shape.fill(Palette.surfaceRaised.opacity(0.72))
-                .background(.ultraThinMaterial, in: shape)
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular.interactive(), in: shape)
+        } else {
+            background {
+                shape.fill(Palette.surfaceRaised.opacity(0.72))
+                    .background(.ultraThinMaterial, in: shape)
+            }
+            .overlay(shape.strokeBorder(Palette.hairline, lineWidth: 1).allowsHitTesting(false))
         }
-        .overlay(shape.strokeBorder(Palette.hairline, lineWidth: 1).allowsHitTesting(false))
+    }
+}
+
+/// Gram's header floating over the feed: no band, the messages scroll on up under its glass
+/// controls, over a ground fade that covers the status bar and the controls only. An OVERLAY,
+/// not a safe-area bar or inset: the scroll view's safe area stays the page's own, so the
+/// header cannot feed back into the feed's layout (with a safe-area bar, a feed squeezed
+/// to about the bar's height on iPhone never finished laying out). The scroll CONTENT gets a
+/// top margin of the header's height instead, so the feed opens and pages with its rows
+/// below the controls, and the top of the history is never under them.
+private struct GramFloatingHeader<Bar: View>: ViewModifier {
+    let bar: Bar
+    /// The header's height, as the scroll content's top margin. Only the bar's own content
+    /// sets it (the overlay is proposed the feed's size but never moves with it).
+    @State private var barHeight: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .contentMargins(.top, barHeight, for: .scrollContent)
+            .overlay(alignment: .top) {
+                bar
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        if abs(height - barHeight) > 0.5 { barHeight = height }
+                    }
+                    .background {
+                        LinearGradient(stops: [.init(color: Palette.ground, location: 0),
+                                               .init(color: Palette.ground.opacity(0.85), location: 0.55),
+                                               .init(color: Palette.ground.opacity(0), location: 1)],
+                                       startPoint: .top, endPoint: .bottom)
+                            .ignoresSafeArea(edges: .top)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+            }
     }
 }
 
 private extension View {
+    /// See `GramFloatingHeader`.
+    func gramFloatingHeader<Bar: View>(@ViewBuilder _ bar: () -> Bar) -> some View {
+        modifier(GramFloatingHeader(bar: bar()))
+    }
+
     /// Calls `action` with whether this view is inside the nearest scroll view's visible
     /// bounds (grown by `slack` points above and below), whenever that changes. Geometry,
     /// not `onAppear`: a LazyVStack builds rows a little beyond the visible bounds, so
@@ -3196,7 +3317,12 @@ private extension View {
     /// the visible bounds (within a few points), where `scrollTo(_, anchor: .top)` puts it.
     /// Reports transitions only, not every scrolled point. `appearance` rides in the value so
     /// a new appearance reports again although the geometry is unchanged.
-    func onFeedPlacementChange(slack: CGFloat = 0, appearance: Int = 0,
+    ///
+    /// `visibleTop` is the floating header's bottom edge in `GramView.feedPageSpace`. The feed
+    /// scrolls on under the header, and its content has a top margin of the header's height,
+    /// so a row anchored at the top may land at the header's bottom edge rather than at the scroll
+    /// view's own top: either counts as the top, or the paging anchor would never land.
+    func onFeedPlacementChange(slack: CGFloat = 0, appearance: Int = 0, visibleTop: CGFloat? = nil,
                                _ action: @escaping (FeedPlacement) -> Void) -> some View {
         onGeometryChange(for: FeedPlacement.self) { proxy in
             guard let viewport = proxy.bounds(of: .scrollView) else {
@@ -3206,7 +3332,11 @@ private extension View {
                 .intersects(CGRect(origin: .zero, size: proxy.size))
             // `viewport` is in this view's own coordinates, so its minY is how far the visible
             // top lies below this view's top.
-            return FeedPlacement(onScreen: onScreen, atTop: abs(viewport.minY) <= 8, appearance: appearance)
+            var atTop = abs(viewport.minY) <= 8
+            if !atTop, let visibleTop {
+                atTop = abs(proxy.frame(in: .named(GramView.feedPageSpace)).minY - visibleTop) <= 8
+            }
+            return FeedPlacement(onScreen: onScreen, atTop: atTop, appearance: appearance)
         } action: { action($0) }
     }
 

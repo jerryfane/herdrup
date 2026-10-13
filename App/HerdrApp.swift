@@ -2527,7 +2527,7 @@ struct TerminalHomeView: View {
                         SelectAgentPlaceholder(lines: glyphFieldLines, spotlight: glyphFieldSpotlight)
                     }
                 case .gram:
-                    GramView(client: client, agents: agents, unread: gramUnread,
+                    GramView(client: client, unread: gramUnread,
                              showingSaved: $gramShowingSaved,
                              refreshToken: gramRefreshToken,
                              readAllToken: gramReadAllToken,
@@ -3042,7 +3042,7 @@ struct TerminalHomeView: View {
 
                 // Gram and Settings were modal covers; they are persistent tabs now.
                 // Both are nav-agnostic and take no onClose as tabs (no close button).
-                GramView(client: client, agents: agents, unread: gramUnread,
+                GramView(client: client, unread: gramUnread,
                          showingSaved: $gramShowingSaved)
                     .tag(HomeTab.gram)
                     .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
@@ -9261,7 +9261,7 @@ struct GramScreenshotHarness: View {
         // close X (there is nothing to dismiss to in a standalone render). The machine label is
         // the one the design's sample conversation names for local senders ("vetrina ·
         // mac-studio"); a live session gets it from its connection.
-        GramView(client: client, agents: [], onClose: nil, showingSaved: $showingSaved)
+        GramView(client: client, onClose: nil, showingSaved: $showingSaved)
             .environment(\.guestMachineLabel, "mac-studio")
     }
 }
@@ -9537,7 +9537,10 @@ struct MockTransport: HerdrTransport {
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") { return Self.gramPaged ? Self.gramPagedList(requestLine) : Self.gramList }
-        if requestLine.contains("gram.post") { return Self.gramPosted }
+        if requestLine.contains("gram.post") {
+            Self.recordGramPost(requestLine)
+            return Self.gramPosted
+        }
         if requestLine.contains("gram.get_file") { return Self.gramFileContent }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
@@ -9792,7 +9795,7 @@ struct MockTransport: HerdrTransport {
       {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
       {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
       {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
-      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\nRollback is one command away.","created_unix_ms":1723041130000,"read_by_owner":false},
+      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
@@ -9877,6 +9880,24 @@ struct MockTransport: HerdrTransport {
     static let gramPosted =
         #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
 
+    /// Every `gram.post` the app sent, in order: its `to` (nil for the shared queue) and
+    /// its `text`. Read by the Gram UI tests via GramView's DEBUG `gram-post-calls` probe.
+    static var gramPostLog: [(to: String?, text: String)] { gramPostRecorder.posts }
+
+    /// `gramPostLog` as the probe's accessibility value: one `to=<name|queue> text=<text>`
+    /// per post, separated by newlines.
+    static var gramPostLogSummary: String {
+        gramPostLog.map { "to=\($0.to ?? "queue") text=\($0.text)" }.joined(separator: "\n")
+    }
+
+    private static let gramPostRecorder = GramPostRecorder()
+
+    private static func recordGramPost(_ requestLine: String) {
+        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+        let params = object?["params"] as? [String: Any] ?? [:]
+        gramPostRecorder.append(to: params["to"] as? String, text: params["text"] as? String ?? "")
+    }
+
     /// A canned `gram.get_file` reply; the bytes decode to "hello world".
     /// Byte-identical to MockWireFixtures.gramFileContent.
     static let gramFileContent =
@@ -9921,6 +9942,19 @@ struct MockTransport: HerdrTransport {
     static func pagingAgent(kind: String, pane: String) -> AgentInfo {
         try! JSONDecoder().decode(AgentInfo.self, from: Data(
             #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
+    }
+}
+
+/// The `gram.post` calls MockTransport answered (`to`, `text`), in order, shared across
+/// the transport values the app builds. Read through `MockTransport.gramPostLog`.
+final class GramPostRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [(to: String?, text: String)] = []
+
+    var posts: [(to: String?, text: String)] { lock.withLock { stored } }
+
+    func append(to: String?, text: String) {
+        lock.withLock { stored.append((to: to, text: text)) }
     }
 }
 

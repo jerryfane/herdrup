@@ -372,8 +372,11 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(local.senderAgentName, "vetrina")
         XCTAssertNil(local.machineLabel)
         XCTAssertNil(local.senderMachine)
-        XCTAssertGreaterThan(local.text.split(separator: "\n").count, 4,
-                             "the long report must be long enough to fold")
+        // The deploy report is 11 lines, past the 8-line clamp, so it folds behind Read more.
+        XCTAssertEqual(local.text.split(separator: "\n", omittingEmptySubsequences: false).count, 11,
+                       "the long report must be 11 lines")
+        XCTAssertGreaterThan(local.text.split(separator: "\n").count, 8,
+                             "the long report must be long enough to fold at 8 lines")
 
         // A grabbed shared-queue post (no `to`) is no longer open.
         let grabbed = try XCTUnwrap(messages.first { $0.id == "g5" })
@@ -780,7 +783,7 @@ enum MockWireFixtures {
       {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
       {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
       {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
-      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\nRollback is one command away.","created_unix_ms":1723041130000,"read_by_owner":false},
+      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},

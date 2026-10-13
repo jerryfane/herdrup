@@ -27,16 +27,21 @@ enum GramCardMetrics {
     }
 }
 
-/// Gram's type roles with the spec's line heights (body 17/22, code 13/18, row preview
+/// Gram's type roles with their line heights (body 15/20, code 13/18, row preview
 /// 14/18). SwiftUI has no line-height modifier, so the spacing is the line height minus
 /// the bundled font's own, at the current `Typography.scale`.
 enum GramType {
-    static var body: Font { Typography.app(17) }
-    static var bodyLineSpacing: CGFloat { lineSpacing("Geist-Regular", size: 17, lineHeight: 22) }
+    /// Message text: the app's 15 pt body size (as Gram before the redesign), not iMessage's
+    /// 17 pt, which read about 13% larger than every other screen at the same text size.
+    static var body: Font { Typography.app(15) }
+    static var bodyLineSpacing: CGFloat { lineSpacing("Geist-Regular", size: 15, lineHeight: 20) }
     static var code: Font { Typography.machine(13) }
     static var codeLineSpacing: CGFloat { lineSpacing("IBMPlexMono", size: 13, lineHeight: 18) }
     static var preview: Font { Typography.app(14) }
     static var previewLineSpacing: CGFloat { lineSpacing("Geist-Regular", size: 14, lineHeight: 18) }
+    /// A folded message's "Read more" / "Show less" line: 15 pt semibold on a 20 pt line.
+    static var foldToggle: Font { Typography.app(15, .semibold) }
+    static var foldToggleLineHeight: CGFloat { 20 * Typography.scale }
 
     private static func lineSpacing(_ postScriptName: String, size: CGFloat, lineHeight: CGFloat) -> CGFloat {
         let scale = Typography.scale
@@ -171,19 +176,20 @@ struct GramAvatarCluster: View {
 
 // MARK: - Text
 
-/// A long message folded to four lines, with "Show more" laid over the end of the fourth
-/// line on a fade into the bubble (the spec's `.clamp` + `.more`). No button when the text
-/// fits. Expanding is one-way, like Messages; the caller holds `isExpanded` so the state
-/// survives the row being recycled.
+/// A long message shown whole up to eight lines. Past that, the eighth line ends in "…" and
+/// a separate "Read more" line sits under the text inside the bubble; once open, "Show less"
+/// takes the same place. No overlay and no fade (gram-fixes). The caller holds `isExpanded`
+/// so the state survives the row being recycled.
 ///
-/// The font is the 17/22 body; the colour is inherited, so the caller tints it for its side.
-/// `fill` is the bubble's fill, which the fade runs into.
+/// The body font is the 15/20 body and its colour is inherited, so the caller tints it for its
+/// side. `toggleTint` colours the Read more / Show less line: brand violet in an agent's
+/// bubble, `onAccent` in the owner's violet one.
 struct GramFoldingText: View {
     let text: AttributedString
     @Binding var isExpanded: Bool
-    var fill: Color = GramBubble.inFill
+    var toggleTint: Color = Palette.brand
 
-    static let foldedLineLimit = 4
+    static let foldedLineLimit = 8
 
     @State private var fullHeight: CGFloat = 0
     @State private var foldedHeight: CGFloat = 0
@@ -191,14 +197,15 @@ struct GramFoldingText: View {
     private var folds: Bool { fullHeight > foldedHeight + 0.5 }
 
     var body: some View {
-        bodyText
-            .lineLimit(isExpanded ? nil : Self.foldedLineLimit)
-            .fixedSize(horizontal: false, vertical: true)
-            // Measured at the shown text's width: the whole text, and four lines of it.
-            .background(alignment: .topLeading) { probes }
-            .overlay(alignment: .bottomTrailing) {
-                if folds && !isExpanded { showMore }
-            }
+        VStack(alignment: .leading, spacing: 4) {
+            bodyText
+                .lineLimit(isExpanded ? nil : Self.foldedLineLimit)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                // Measured at the shown text's width: the whole text, and eight lines of it.
+                .background(alignment: .topLeading) { probes }
+            if folds { foldToggle }
+        }
     }
 
     private var bodyText: some View {
@@ -207,28 +214,19 @@ struct GramFoldingText: View {
             .lineSpacing(GramType.bodyLineSpacing)
     }
 
-    private var showMore: some View {
+    private var foldToggle: some View {
         Button {
-            withAnimation(.easeOut(duration: 0.2)) { isExpanded = true }
+            withAnimation(.easeOut(duration: 0.2)) { isExpanded.toggle() }
         } label: {
-            HStack(spacing: 0) {
-                // 28 pt lead-in, opaque from 26 pt: the line under it fades out, not cuts off.
-                LinearGradient(stops: [.init(color: fill.opacity(0), location: 0),
-                                       .init(color: fill, location: 26.0 / 28.0)],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 28)
-                Text("Show more")
-                    .font(Typography.app(17, .semibold))
-                    .foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .background(fill)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .contentShape(Rectangle())
+            Text(isExpanded ? "Show less" : "Read more")
+                .font(GramType.foldToggle)
+                .foregroundStyle(toggleTint)
+                .lineLimit(1)
+                .frame(minHeight: GramType.foldToggleLineHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("gram-show-more")
+        .accessibilityIdentifier(isExpanded ? "gram-show-less" : "gram-read-more")
     }
 
     private var probes: some View {
