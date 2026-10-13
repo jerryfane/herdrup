@@ -161,6 +161,12 @@ struct GramView: View {
     /// Which feed rows (and whether the bottom marker) are on screen. A reference box: it is
     /// read only from callbacks, so updating it on every scroll must not re-render the page.
     @State private var feedVisibility = FeedVisibility()
+    /// Bumped each time the feed comes on screen. On iPhone Gram is a persistent tab: leaving
+    /// it fires every tracker's `onDisappear` (clearing what is on screen), but coming back
+    /// lays the feed out exactly as before, and `onGeometryChange` reports only CHANGES, so
+    /// without this nothing would say the bottom or the rows are on screen again until the
+    /// reader scrolled. See `onFeedPlacementChange` and the bottom/sentinel trackers.
+    @State private var feedAppearance = 0
     /// Text segments opened with "Show more" (`<message id>#<segment>`). Here rather than in
     /// the row so a LazyVStack rebuilding a row does not fold it again.
     @State private var expandedTexts: Set<String> = []
@@ -348,6 +354,12 @@ struct GramView: View {
         var anchoring = false
         /// The initial scroll to the bottom has been asked for on this appearance.
         var initialScrollIssued = false
+        /// The feed's visible height at the bottom marker's last report, so a shrink (keyboard
+        /// up, composer grown) can be told from the reader scrolling away. 0 = not known yet.
+        var viewportHeight: CGFloat = 0
+        /// The search text the feed last showed, so a CHANGE of it (not the feed's first
+        /// appearance) scrolls to the newest match. nil until the feed has appeared.
+        var shownSearch: String?
     }
 
     /// The newest message in the whole loaded list (not the search-filtered one): what the
@@ -1218,13 +1230,20 @@ struct GramView: View {
                         // never saw it. One arrival, one page: the fetch disarms it, and only
                         // scrolling it away again (or the anchor-restore check) re-arms it, so a
                         // page landing while it is still in view cannot chain into the next.
-                        .onFeedVisibilityChange { onScreen in
-                            feedVisibility.sentinelOnScreen = onScreen
-                            if onScreen {
-                                requestOlderPage()
-                            } else if !feedVisibility.anchoring, !feedVisibility.pageRequested {
-                                feedVisibility.pageArmed = true
-                            }
+                        // The tracker is a background view re-identified on every appearance:
+                        // a NEW view reports its geometry at once, so coming back to the tab
+                        // re-reports the sentinel even though nothing moved.
+                        .background {
+                            Color.clear
+                                .onFeedVisibilityChange { onScreen in
+                                    feedVisibility.sentinelOnScreen = onScreen
+                                    if onScreen {
+                                        requestOlderPage()
+                                    } else if !feedVisibility.anchoring, !feedVisibility.pageRequested {
+                                        feedVisibility.pageArmed = true
+                                    }
+                                }
+                                .id(feedAppearance)
                         }
                         .onDisappear {
                             feedVisibility.sentinelOnScreen = false
@@ -1264,7 +1283,10 @@ struct GramView: View {
                         // edges, and before the initial scroll the first layout sits at the
                         // top, which the reader never sees (`finishInitialScroll` reads what is
                         // on screen once the feed has landed on the newest message).
-                        .onFeedPlacementChange { placement in
+                        // `feedAppearance` is part of the reported value, so a row still on
+                        // screen when the tab comes back reports again (rows are not
+                        // re-identified: that would rebuild every bubble).
+                        .onFeedPlacementChange(appearance: feedAppearance) { placement in
                             if placement.onScreen {
                                 feedVisibility.rows.insert(entry.id)
                                 if didInitialScroll { markReadIfNeeded(entry.message) }
@@ -1285,12 +1307,40 @@ struct GramView: View {
                     if shouldShowSetupCard { setupCard.padding(.top, 14) }
                     Color.clear.frame(height: 1).id(Self.feedBottomID)
                         // The reader is at the bottom while this marker is on screen (within a
-                        // few points): new messages are followed in only then.
-                        .onFeedVisibilityChange(slack: 24) { onScreen in
-                            feedVisibility.atBottom = onScreen
-                            guard onScreen else { return }
-                            showingNewMessages = false
-                            finishInitialScroll()
+                        // few points): new messages are followed in only then. Tracked by a
+                        // background view re-identified on every appearance, like the sentinel,
+                        // so returning to the tab says "at the bottom" again (and finishes the
+                        // initial scroll) without the reader having to scroll.
+                        .background {
+                            Color.clear
+                                .onFeedBottomChange(slack: 24) { bottom in
+                                    let wasAtBottom = feedVisibility.atBottom
+                                    let previousHeight = feedVisibility.viewportHeight
+                                    // A marker leaving the hierarchy reports no scroll view (height
+                                    // 0): that is not a resize, and must not count as one later.
+                                    if bottom.viewportHeight > 0 {
+                                        feedVisibility.viewportHeight = bottom.viewportHeight
+                                    }
+                                    // The feed's VISIBLE HEIGHT got smaller under a reader at the
+                                    // bottom (the keyboard came up, the composer grew): the scroll
+                                    // view keeps its top offset, so the newest rows slid under the
+                                    // composer. Keep the reader at the bottom, as Messages does.
+                                    // Only a real viewport decrease counts: content inserted or
+                                    // removed (an older page, a filter) leaves the height alone.
+                                    // One jump per resize, never a standing anchor (see `.task`).
+                                    let shrank = previousHeight > 0 && bottom.viewportHeight > 0
+                                        && bottom.viewportHeight < previousHeight - 0.5
+                                    if shrank, wasAtBottom, didInitialScroll, !feedVisibility.anchoring {
+                                        feedVisibility.atBottom = true
+                                        feed.scrollTo(Self.feedBottomID, anchor: .bottom)
+                                        return
+                                    }
+                                    feedVisibility.atBottom = bottom.onScreen
+                                    guard bottom.onScreen else { return }
+                                    showingNewMessages = false
+                                    finishInitialScroll()
+                                }
+                                .id(feedAppearance)
                         }
                         .onDisappear { feedVisibility.atBottom = false }
                 }
@@ -1305,6 +1355,8 @@ struct GramView: View {
                 .readableColumn(feedCap)
             }
             .accessibilityIdentifier("gram-feed")
+            // Before the `.task` below, so the scroll loop already sees fresh reports.
+            .onAppear { feedAppearance += 1 }
             // Oldest at the top, newest at the bottom: open at the newest. NOT
             // `.defaultScrollAnchor(.bottom)`: with it, growing the composer (which shrinks the
             // feed) re-anchored the feed every frame, a redraw loop that pinned the CPU and
@@ -1323,17 +1375,40 @@ struct GramView: View {
                 }
                 if feedVisibility.atBottom { finishInitialScroll() }
             }
+            // A change of the search text is a deliberate change of view: once the filtered rows
+            // are laid out, show the newest match at the bottom (clearing the search returns to
+            // the newest message). Keyed on the text, so each change scrolls once and a newer
+            // keystroke cancels the older one's scroll; the feed's first appearance only records
+            // the text (the `.task` above opens it at the bottom).
+            .task(id: search) {
+                guard let shown = feedVisibility.shownSearch else {
+                    feedVisibility.shownSearch = search
+                    return
+                }
+                guard shown != search else { return }
+                feedVisibility.shownSearch = search
+                // Same bounded settle loop as the initial scroll: estimated row heights can make
+                // one jump land short.
+                for _ in 0..<8 {
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    guard !Task.isCancelled else { return }
+                    feed.scrollTo(Self.feedBottomID, anchor: .bottom)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if feedVisibility.atBottom { break }
+                }
+            }
             .onDisappear {
                 didInitialScroll = false
                 feedVisibility.initialScrollIssued = false
                 feedVisibility.pageArmed = true
                 feedVisibility.anchoring = false
+                feedVisibility.shownSearch = nil
                 showingNewMessages = false
             }
             // Follow a NEW message in only when the reader is at the bottom or just sent it;
             // otherwise offer the "New messages" button. Keyed on the unfiltered newest
-            // message, and only when it is newer than the last one, so a search keystroke, a
-            // delete or an older page never moves the reader.
+            // message, and only when it is newer than the last one, so a delete or an older
+            // page never moves the reader (a search change scrolls on its own, above).
             .onChange(of: feedTip) { old, new in
                 guard didInitialScroll, let new, new.createdUnixMs > (old?.createdUnixMs ?? 0) else { return }
                 if feedVisibility.atBottom || pendingPosts.contains(where: { $0.id == new.id }) {
@@ -1353,13 +1428,15 @@ struct GramView: View {
                 Task { @MainActor in
                     // A lazy stack lays the inserted rows out with ESTIMATED heights, so one
                     // jump lands short (on iPhone the feed stayed at the top of the new page,
-                    // sentinel in view). Jump again after each layout pass until the row has
-                    // really landed at the top; bounded so a feed that cannot get there (it
-                    // fits on screen) never spins.
+                    // sentinel in view). Jump FIRST, then check after the layout pass, and
+                    // jump again until the row has really landed at the top: checking before
+                    // the first jump read the row's placement from BEFORE the insert, which
+                    // could end the restore without moving the feed. Bounded so a feed that
+                    // cannot get there (it fits on screen) never spins.
                     for _ in 0..<10 {
-                        try? await Task.sleep(nanoseconds: 50_000_000)
-                        if feedVisibility.rowsAtTop.contains(id) { break }
                         feed.scrollTo(id, anchor: .top)
+                        try? await Task.sleep(nanoseconds: 60_000_000)
+                        if feedVisibility.rowsAtTop.contains(id) { break }
                     }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     feedVisibility.anchoring = false
@@ -3117,17 +3194,32 @@ private extension View {
 
     /// As `onFeedVisibilityChange`, also reporting whether the view's top sits at the top of
     /// the visible bounds (within a few points), where `scrollTo(_, anchor: .top)` puts it.
-    /// Reports transitions only, not every scrolled point.
-    func onFeedPlacementChange(slack: CGFloat = 0, _ action: @escaping (FeedPlacement) -> Void) -> some View {
+    /// Reports transitions only, not every scrolled point. `appearance` rides in the value so
+    /// a new appearance reports again although the geometry is unchanged.
+    func onFeedPlacementChange(slack: CGFloat = 0, appearance: Int = 0,
+                               _ action: @escaping (FeedPlacement) -> Void) -> some View {
         onGeometryChange(for: FeedPlacement.self) { proxy in
             guard let viewport = proxy.bounds(of: .scrollView) else {
-                return FeedPlacement(onScreen: false, atTop: false)
+                return FeedPlacement(onScreen: false, atTop: false, appearance: appearance)
             }
             let onScreen = viewport.insetBy(dx: 0, dy: -slack)
                 .intersects(CGRect(origin: .zero, size: proxy.size))
             // `viewport` is in this view's own coordinates, so its minY is how far the visible
             // top lies below this view's top.
-            return FeedPlacement(onScreen: onScreen, atTop: abs(viewport.minY) <= 8)
+            return FeedPlacement(onScreen: onScreen, atTop: abs(viewport.minY) <= 8, appearance: appearance)
+        } action: { action($0) }
+    }
+
+    /// The bottom marker's tracker: on screen (within `slack`) and the feed's visible height,
+    /// so a resize under the reader is reported apart from a scroll.
+    func onFeedBottomChange(slack: CGFloat, _ action: @escaping (FeedBottom) -> Void) -> some View {
+        onGeometryChange(for: FeedBottom.self) { proxy in
+            guard let viewport = proxy.bounds(of: .scrollView) else {
+                return FeedBottom(onScreen: false, viewportHeight: 0)
+            }
+            let onScreen = viewport.insetBy(dx: 0, dy: -slack)
+                .intersects(CGRect(origin: .zero, size: proxy.size))
+            return FeedBottom(onScreen: onScreen, viewportHeight: viewport.height)
         } action: { action($0) }
     }
 }
@@ -3136,4 +3228,11 @@ private extension View {
 private struct FeedPlacement: Equatable {
     let onScreen: Bool
     let atTop: Bool
+    let appearance: Int
+}
+
+/// The bottom marker's report (`onFeedBottomChange`).
+private struct FeedBottom: Equatable {
+    let onScreen: Bool
+    let viewportHeight: CGFloat
 }

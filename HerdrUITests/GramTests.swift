@@ -111,10 +111,20 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5),
                       "a filter matching no message should say so")
 
-        // Clearing the field restores the full list.
+        // Clearing the field restores the full list, back at the newest message: the deletes
+        // pass through "z", which matches a short list (the hetzner-1 senders and the zip), and the feed must not be left
+        // scrolled to that short list's top, where the restored rows near the bottom are not
+        // even laid out. Checked ON SCREEN (hittable), not merely present: the newest bubble
+        // (g1, "Great, ship it.") and its neighbour's sender, clientloop. With the iPhone
+        // keyboard up the feed is short, so clientloop's label is checked for existence and the
+        // newest bubble for being on screen.
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
         XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
                       "clearing the search should bring the filtered-out messages back")
+        let newest = app.descendants(matching: .any)["gram-bubble-g1"]
+        let onScreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
+        XCTAssertEqual(XCTWaiter().wait(for: [onScreen], timeout: 5), .completed,
+                       "clearing the search should return the feed to the newest message, on screen")
 
         // CLOSING must also clear. A hidden field that is still filtering would leave the
         // list silently short with nothing on screen to explain it - the failure mode a
@@ -275,6 +285,56 @@ final class GramTests: XCTestCase {
         let olderOldest = label("Older page: release planning starts here.")
         for _ in 0..<10 where !olderOldest.isHittable { feed.swipeDown(velocity: .slow) }
         XCTAssertTrue(olderOldest.isHittable, "the older page's oldest message should appear")
+    }
+
+    /// iPhone: Gram is a persistent tab, so leaving it and coming back keeps the feed's layout
+    /// exactly as it was. Leaving clears what the feed knows is on screen; coming back must
+    /// re-learn it without the reader scrolling, or the initial scroll never finishes and the
+    /// top sentinel never fetches (nor do rows mark read or new messages follow). After the
+    /// round trip, reaching the top loads exactly one older page, as on first open.
+    func testGramStillPagesAfterATabRoundTrip() throws {
+        try XCTSkipIf(hasSidebar, "iPad/Mac show Gram in the split view, not a tab")
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        let messages = app.otherElements["gram-feed-messages"]
+        XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
+        func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
+            let loaded = NSPredicate(format: "value == %@", "\(count) messages")
+            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
+                                    timeout: timeout) == .completed
+        }
+        XCTAssertTrue(waitForCount(9, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
+        let newest = app.staticTexts["Great, ship it."]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
+                      "the feed opens at the newest message")
+
+        let tabs = app.tabBars.firstMatch
+        let agentsTab = tabs.buttons["Agents"]
+        XCTAssertTrue(agentsTab.waitForExistence(timeout: 5))
+        agentsTab.tap()
+        XCTAssertTrue(newest.waitForNonExistence(timeout: 5) || !newest.isHittable,
+                      "the Agents tab should cover Gram")
+        let gramTab = tabs.buttons["Gram"]
+        XCTAssertTrue(gramTab.waitForExistence(timeout: 5))
+        gramTab.tap()
+        XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
+                      "back on Gram, the feed is still at the newest message")
+        XCTAssertTrue(waitForCount(9, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
+
+        var paged = waitForCount(33, timeout: 2)
+        for _ in 0..<8 where !paged {
+            feed.swipeDown(velocity: .slow)
+            paged = waitForCount(33, timeout: 3)
+        }
+        XCTAssertTrue(paged, "after a tab round trip, reaching the top should still load the older page; feed says \(messages.value ?? "nil")")
+        let previousTop = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Picked up the deploy ticket.")).firstMatch
+        XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
+                      "the message that was on top should stay on screen after the older page lands")
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(messages.value as? String, "33 messages", "exactly one older page should load")
     }
 
     /// vetrina's report runs past four lines, so it folds with "Show more"; tapping it shows
