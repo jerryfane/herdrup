@@ -193,7 +193,7 @@ struct GramView: View {
     /// reader scrolled. See `onFeedPlacementChange` and the bottom/sentinel trackers.
     @State private var feedAppearance = 0
     /// Text segments opened with "Read more" (`<message id>#<segment>`). Here rather than in
-    /// the row so a LazyVStack rebuilding a row does not fold it again.
+    /// the row so a row that is rebuilt (a new window, a search) does not fold it again.
     @State private var expandedTexts: Set<String> = []
     /// The "Gram ›" pill's sheet: Read all, the agents seen in Gram, and the shared queue.
     @State private var showingAgentsSheet = false
@@ -408,10 +408,24 @@ struct GramView: View {
             .map { FeedTip(id: $0.id, createdUnixMs: $0.createdUnixMs) }
     }
 
-    /// The visible messages oldest first, as the feed draws them. A separator or the unread
-    /// rule also breaks a sender group, so the next bubble gets its own sender line.
+    /// How many of the newest visible messages the feed draws (see `feedEntries`). Grows by
+    /// a window each time the reader reaches the top; a new search starts it over.
+    @State private var renderLimit = GramView.renderWindow
+    /// 80 messages: two pages and change, a few screens of history, cheap to lay out.
+    static var renderWindow: Int {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["HERDR_GRAM_RENDER_WINDOW"].flatMap(Int.init),
+           override > 0 { return override }
+        #endif
+        return 80
+    }
+    /// Loaded messages older than the drawn window: the top sentinel reveals them, no fetch.
+    private var hasHiddenOlder: Bool { visibleMessages.count > renderLimit }
+
+    /// The newest `renderLimit` of the visible messages, oldest first, with their separators,
+    /// unread rule and groups. Everything the feed draws comes from here.
     private var feedEntries: [FeedEntry] {
-        let rows = Array(visibleMessages.reversed())
+        let rows = Array(visibleMessages.prefix(renderLimit).reversed())
         let calendar = Calendar.current
         let markers: [(separator: Date?, unread: Int?)] = rows.indices.map { index in
             let date = rows[index].createdAt
@@ -1101,8 +1115,7 @@ struct GramView: View {
             noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
-                // Eager, not lazy: see the inbox feed below.
-                VStack(spacing: 14) {
+                LazyVStack(spacing: 14) {
                     ForEach(visibleSaved) { s in
                         SavedGramRow(
                             saved: s,
@@ -1196,11 +1209,13 @@ struct GramView: View {
         case .loaded:
             ScrollViewReader { feed in
             ScrollView {
-                // EAGER, NOT LAZY. A LazyVStack here never settled while the composer's
-                // pull-up editor shrank the feed: main thread at 100% in layout, the composer
-                // UI test hung on CI's iPhone and, with image previews added, 2/2 on a local
-                // simulator; the same build with this stack passed 2/2 in 18 s. The loaded
-                // messages are a page or a few (40 each), so laying them all out is cheap.
+                // EAGER, NOT LAZY, AND WINDOWED. A LazyVStack here never settled while the
+                // composer's pull-up editor shrank the feed: main thread at 100% in layout,
+                // the composer UI test hung on CI's iPhone (also with no other change) and 2/2
+                // locally; with this stack it passes on CI and 3/3 locally in 18 s. An eager
+                // stack draws every row it is given, and a search walk loads the whole store,
+                // so it is given only the newest `renderLimit` messages (`feedEntries`); older
+                // loaded ones are revealed by the top sentinel without a fetch.
                 VStack(spacing: 0) {
                     // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
                     // already on screen otherwise look like the whole answer, which is
@@ -1228,7 +1243,7 @@ struct GramView: View {
                     // oldest loaded message, which is exactly when the next page is worth
                     // fetching (see `requestOlderPage`). A failed page says so and becomes a tap
                     // target, instead of spinning forever with nothing left to re-trigger it.
-                    if inboxStore.inbox.nextCursor != nil, search.isEmpty {
+                    if hasHiddenOlder || (inboxStore.inbox.nextCursor != nil && search.isEmpty) {
                         Button {
                             // A tap retries a failed page: a fresh, reader-asked fetch.
                             pageError = nil
@@ -1307,8 +1322,8 @@ struct GramView: View {
                             // 2 pt inside a group, 10 pt between groups.
                             .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
                         }
-                        // Read when it is ON SCREEN: a LazyVStack also builds rows beyond the
-                        // edges, and before the initial scroll the first layout sits at the
+                        // Read when it is ON SCREEN: every drawn row exists, on screen or not,
+                        // and before the initial scroll the first layout sits at the
                         // top, which the reader never sees (`finishInitialScroll` reads what is
                         // on screen once the feed has landed on the newest message).
                         // `feedAppearance` is part of the reported value, so a row still on
@@ -1380,9 +1395,9 @@ struct GramView: View {
                                 }
                                 .id(feedAppearance)
                         }
-                        // Not the pending shrink jump: a lazy stack drops this marker as soon
-                        // as the shrink pushes it off screen, which is exactly when the jump
-                        // must still run. The feed's own onDisappear cancels it.
+                        // Not the pending shrink jump: the feed's own onDisappear cancels it
+                        // (this marker leaves only with the feed, but a jump scheduled just
+                        // before must still run while the feed stays).
                         .onDisappear { feedVisibility.atBottom = false }
                 }
                 .padding(16)
@@ -1405,8 +1420,8 @@ struct GramView: View {
             .task {
                 if !unreadRuleCaptured { captureUnreadRule() }
                 feedVisibility.initialScrollIssued = true
-                // A lazy stack estimates the heights of rows it has not drawn yet, so the first
-                // jump can land short (on iPhone it opened mid-history). Jump again after each
+                // The first jump can land short of the bottom while rows (images, folded
+                // text) still settle their heights (on iPhone it opened mid-history). Jump again after each
                 // layout pass until the bottom marker is really on screen; bounded so a feed
                 // that cannot reach it never spins.
                 for _ in 0..<8 {
@@ -1428,6 +1443,9 @@ struct GramView: View {
                 }
                 guard shown != search else { return }
                 feedVisibility.shownSearch = search
+                // A new search (or clearing it) starts from the newest window again: the walk
+                // may have loaded the whole store, and the reader is taken to the bottom.
+                renderLimit = Self.renderWindow
                 // Same bounded settle loop as the initial scroll: estimated row heights can make
                 // one jump land short.
                 for _ in 0..<8 {
@@ -1468,8 +1486,8 @@ struct GramView: View {
                 pageAnchorID = nil
                 feedVisibility.anchoring = true
                 Task { @MainActor in
-                    // A lazy stack lays the inserted rows out with ESTIMATED heights, so one
-                    // jump lands short (on iPhone the feed stayed at the top of the new page,
+                    // The inserted rows may still be settling their heights, so one
+                    // jump can land short (on iPhone the feed stayed at the top of the new page,
                     // sentinel in view). Jump FIRST, then check after the layout pass, and
                     // jump again until the row has really landed at the top: checking before
                     // the first jump read the row's placement from BEFORE the insert, which
@@ -2933,11 +2951,18 @@ struct GramView: View {
         }
     }
 
-    /// One older page, then the previously-top message is scrolled back to the top so the
-    /// reader keeps their place (see `pageAnchorID`). Returns whether the list grew.
+    /// One older window: loaded messages above the drawn window first (no fetch), else the
+    /// next page from the daemon, drawn whole. Then the previously-top message is scrolled
+    /// back to the top so the reader keeps their place (see `pageAnchorID`). Returns whether
+    /// the feed grew.
     private func loadOlderPage() async -> Bool {
         let top = feedEntries.first?.id
-        guard await loadMore() else { return false }
+        if hasHiddenOlder {
+            renderLimit += Self.renderWindow
+        } else {
+            guard await loadMore() else { return false }
+            renderLimit = max(renderLimit, visibleMessages.count)
+        }
         if let top { pageAnchorID = top }
         return true
     }
@@ -3091,7 +3116,7 @@ struct GramRow: View {
     /// The last message of a group: draws the avatar and the bubble tail.
     var endsGroup = true
     /// Text segments the reader opened with "Read more", keyed `<message id>#<segment>`.
-    /// Owned by the page, so a LazyVStack rebuilding this row does not fold the text again.
+    /// Owned by the page, so a rebuilt row does not fold the text again.
     @Binding var expandedTexts: Set<String>
     /// This device's own machine label, for a local sender's "name · machine" line (a
     /// federated sender carries its own). Empty when unknown: the line shows the name only.
@@ -3517,7 +3542,7 @@ private extension View {
 
     /// Calls `action` with whether this view is inside the nearest scroll view's visible
     /// bounds (grown by `slack` points above and below), whenever that changes. Geometry,
-    /// not `onAppear`: a LazyVStack builds rows a little beyond the visible bounds, so
+    /// not `onAppear`: a drawn row is not necessarily on screen, so
     /// "built" is not "on screen".
     func onFeedVisibilityChange(slack: CGFloat = 0, _ action: @escaping (Bool) -> Void) -> some View {
         onFeedPlacementChange(slack: slack) { action($0.onScreen) }

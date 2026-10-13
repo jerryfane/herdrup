@@ -288,6 +288,30 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(olderOldest.isHittable, "the older page's oldest message should appear")
     }
 
+    /// The feed draws only the newest window of the loaded messages (a search walk can load
+    /// the whole store). Reaching the top reveals the older LOADED ones first, without asking
+    /// the daemon for another page. A 6-message window over the 10-message first page. iPhone
+    /// only: an iPad screen fits the 6 rows, so the sentinel is on screen at once and reveals
+    /// them before anything can be observed (the same code path, correctly).
+    func testOlderLoadedMessagesAreRevealedWithoutFetching() throws {
+        try XCTSkipIf(hasSidebar, "the window fits the iPad screen: revealed at once")
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1", "HERDR_GRAM_RENDER_WINDOW": "6"])
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 5),
+                      "the feed opens at the newest message")
+        let messages = app.otherElements["gram-feed-messages"]
+        XCTAssertTrue(messages.waitForExistence(timeout: 5))
+        XCTAssertEqual(messages.value as? String, "10 messages", "one page is loaded")
+        let oldest = app.descendants(matching: .any)["gram-bubble-g9"]
+        XCTAssertFalse(oldest.exists, "the oldest loaded message is outside the drawn window")
+
+        for _ in 0..<8 where !oldest.exists { feed.swipeDown(velocity: .slow); Thread.sleep(forTimeInterval: 0.5) }
+        XCTAssertTrue(oldest.waitForExistence(timeout: 3), "reaching the top should draw the older loaded messages")
+        // The revealed rows push the sentinel off screen again: no fetch.
+        XCTAssertEqual(messages.value as? String, "10 messages", "revealing loaded rows fetches no page")
+    }
+
     /// iPhone: Gram is a persistent tab, so leaving it and coming back keeps the feed's layout
     /// exactly as it was. Leaving clears what the feed knows is on screen; coming back must
     /// re-learn it without the reader scrolling, or the initial scroll never finishes and the
