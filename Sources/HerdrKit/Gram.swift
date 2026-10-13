@@ -88,6 +88,27 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
         return FederatedName.display(from, machineID: String(from[..<slash]), machineLabel: machineLabel)
     }
 
+    /// The sender's bare agent name, as avatars and the sender line show it: the part of a
+    /// federated `from` after its last "/" (`<alias>/w1:p2/scout` → `scout`), else `from`.
+    public var senderAgentName: String { Self.agentName(from: from) }
+
+    /// The machine the sender runs on, for the "name · machine" sender line: the daemon's
+    /// `machine_label`, else a federated `from`'s alias prefix, else nil (a local sender;
+    /// the app knows its own machine's label).
+    public var senderMachine: String? {
+        if let machineLabel, !machineLabel.isEmpty { return machineLabel }
+        guard let slash = from.firstIndex(of: "/"), slash != from.startIndex else { return nil }
+        return String(from[..<slash])
+    }
+
+    /// The bare agent name of any routing name (`from`, `to`, `grabbedBy`): the part after
+    /// the last "/". A name ending in "/" keeps itself rather than reading as empty.
+    public static func agentName(from raw: String) -> String {
+        guard let slash = raw.lastIndex(of: "/") else { return raw }
+        let name = raw[raw.index(after: slash)...]
+        return name.isEmpty ? raw : String(name)
+    }
+
     /// A message an agent sent the owner (vs one the owner posted).
     public var isFromAgent: Bool { direction == .agentToOwner }
 

@@ -1,19 +1,61 @@
 import XCTest
 
 /// Exercise Gram through its real tab/sidebar host. A standalone GramView deliberately
-/// omits the regular-width header: Read all and the title belong to the host's sidebar.
+/// omits the regular-width header: Read all, search and the conversations belong to the
+/// host's sidebar there.
+///
+/// Strings come from the mock `gram.list` (MockTransport.gramList), the design's sample
+/// conversation, newest first: g1 your "Great, ship it." to vetrina; g2 clientloop (relayed
+/// from hetzner-1) with a one-line code fence and a zip; g3 a vetrina image; g4 vetrina's long
+/// "Deployed." report that folds; g5 a queue post grabbed by ci-watch; g6 trend-scout's
+/// "Digest ready" (relayed); g7–g9 yesterday's vetrina thread. g2–g4 are unread.
 final class GramTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
-    private func launchGram() -> XCUIApplication {
+    /// iPad and Mac draw Gram in the split view: the sidebar holds search, the conversations
+    /// and Read all. iPhone keeps them on the page (search button, the "Gram ›" pill's sheet).
+    private var hasSidebar: Bool { UIDevice.current.userInterfaceIdiom != .phone }
+
+    private func launchGram(environment: [String: String] = [:]) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
+        app.launchEnvironment.merge(environment) { _, new in new }
         app.launch()
         let tab = app.buttons["Gram"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 10))
         tab.tap()
         return app
+    }
+
+    /// The search field: in the sidebar on iPad/Mac (always there, no toggle on the page),
+    /// behind the page's search button on iPhone.
+    private func openSearchField(_ app: XCUIApplication) -> XCUIElement {
+        let field = app.textFields["gram-search-field"]
+        if hasSidebar {
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "the sidebar should hold the Gram search")
+            XCTAssertFalse(app.buttons["gram-search"].exists,
+                           "with the sidebar's field the page shows no search toggle of its own")
+        } else {
+            let toggle = app.buttons["gram-search"]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the header should offer search")
+            XCTAssertTrue(toggle.isHittable, "the newest message must not cover the search control")
+            toggle.tap()
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "the search button should reveal the search field")
+        }
+        return field
+    }
+
+    /// Waits until Read all reports nothing unread. iPad/Mac: the sidebar button renders only
+    /// while something is unread, so gone means zero. iPhone: the sheet's button stays and
+    /// carries the count as its value ("3 unread"), which empties only at zero; disabled alone
+    /// would also match the pass still in flight, or a pass that marked nothing.
+    private func waitUntilNothingUnread(_ readAll: XCUIElement, timeout: TimeInterval) -> Bool {
+        let zero = hasSidebar
+            ? NSPredicate(format: "exists == false")
+            : NSPredicate(format: "exists == true AND NOT (value CONTAINS %@)", "unread")
+        return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: zero, object: readAll)],
+                                timeout: timeout) == .completed
     }
 
     func testGramPageRenders() {
@@ -22,9 +64,15 @@ final class GramTests: XCTestCase {
         // Give the mock gram.list a moment to load + lay out the rows.
         Thread.sleep(forTimeInterval: 2.0)
 
-        // A canned agent->owner message's sender label should appear.
-        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 5),
+        // A canned agent->owner message's sender label should appear: the bare agent name,
+        // its machine ("· hetzner-1") a separate span.
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
                       "an agent->owner message should render its sender")
+        // Like Messages, the feed opens at the NEWEST message (g1, the owner's reply), not
+        // part-way up: a lazy feed once opened mid-history on iPhone.
+        let newest = app.descendants(matching: .any)["gram-bubble-g1"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5), "the newest message should be laid out")
+        XCTAssertTrue(newest.isHittable, "the feed should open showing the newest message")
 
         let shot = app.screenshot()
         let attachment = XCTAttachment(screenshot: shot)
@@ -36,34 +84,25 @@ final class GramTests: XCTestCase {
     /// The search field filters the loaded inbox, and a filter that matches nothing says so
     /// instead of leaving a blank scroll that reads as an empty inbox.
     ///
-    /// Strings are picked from the `gram` fixture (MockTransport.gramList): "Digest" appears in
-    /// exactly one message (g1, from trend-scout), and "vetrina" is the sender label of a
-    /// DIFFERENT message (g5) — so one label surviving while the other disappears is a receipt
-    /// that rows were filtered, not merely re-laid-out.
+    /// "Digest" appears in exactly one message (g6, from trend-scout), and "clientloop" is the
+    /// sender label of a DIFFERENT message (g2), near the bottom of the feed so it is on screen
+    /// before filtering — so one label surviving while the other disappears is a receipt that
+    /// rows were filtered, not merely re-laid-out.
     func testGramSearchFiltersTheInbox() {
         let app = launchGram()
 
-        // Both senders are present before any filter: the pre-state the filter acts on. Without
-        // this the later disappearance would prove nothing (it could have never rendered).
-        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 10),
-                      "the unread agent->owner message should render before filtering")
-        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
-                      "the second agent->owner message should render before filtering")
+        // The sender that should disappear is present before any filter: the pre-state the
+        // filter acts on. Without this the later disappearance would prove nothing.
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10),
+                      "the newest agent->owner message should render before filtering")
 
-        // The search control must remain above the newest message and clickable.
-        let toggle = app.buttons["gram-search"]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the header should offer search")
-        XCTAssertTrue(toggle.isHittable, "the newest message must not cover the search control")
-        toggle.tap()
-
-        let field = app.textFields["gram-search-field"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "the search button should reveal the search field")
+        let field = openSearchField(app)
         field.tap()
         field.typeText("Digest")
 
         XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 3),
                       "the matching message should survive the filter")
-        XCTAssertTrue(app.staticTexts["vetrina"].waitForNonExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForNonExistence(timeout: 5),
                       "a message matching nothing in the search should be filtered out")
 
         // A filter that matches nothing: the "No matches" state, NOT a blank list.
@@ -72,53 +111,312 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5),
                       "a filter matching no message should say so")
 
-        // Clearing the field restores the full list.
+        // Clearing the field restores the full list, back at the newest message: the deletes
+        // pass through "z", which matches a short list (the hetzner-1 senders and the zip), and the feed must not be left
+        // scrolled to that short list's top, where the restored rows near the bottom are not
+        // even laid out. Checked ON SCREEN (hittable), not merely present: the newest bubble
+        // (g1, "Great, ship it.") and its neighbour's sender, clientloop. With the iPhone
+        // keyboard up the feed is short, so clientloop's label is checked for existence and the
+        // newest bubble for being on screen.
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
-        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
                       "clearing the search should bring the filtered-out messages back")
+        let newest = app.descendants(matching: .any)["gram-bubble-g1"]
+        let onScreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
+        XCTAssertEqual(XCTWaiter().wait(for: [onScreen], timeout: 5), .completed,
+                       "clearing the search should return the feed to the newest message, on screen")
 
         // CLOSING must also clear. A hidden field that is still filtering would leave the
         // list silently short with nothing on screen to explain it - the failure mode a
         // dismissible search box invites. Re-filter first so the close has work to undo.
         field.typeText("zzzz")
         XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
-        toggle.tap()
-        XCTAssertFalse(field.exists, "closing should dismiss the field")
-        XCTAssertTrue(app.staticTexts["vetrina"].waitForExistence(timeout: 5),
-                      "closing search should restore the unfiltered list")
+        if hasSidebar {
+            // The sidebar field stays; its Clear button is the way back.
+            app.buttons["Clear search"].firstMatch.tap()
+        } else {
+            app.buttons["gram-search"].tap()
+            XCTAssertFalse(field.exists, "closing should dismiss the field")
+        }
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
+                      "clearing or closing search should restore the unfiltered list")
     }
 
-    /// Read all marks the unread messages read: the button is present while something is unread
-    /// and gone once the pass completes (it renders only for `unreadCount > 0`).
+    /// Owner rule: search fields have no mic (the composer keeps dictation). Neither the Gram
+    /// search nor anything beside it offers dictation.
+    func testGramSearchFieldHasNoMic() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = openSearchField(app)
+
+        XCTAssertFalse(app.buttons["gram-search-mic"].exists, "the Gram search has no mic")
+        XCTAssertFalse(app.buttons["agent-search-mic"].exists, "no search field has a mic")
+        // The composer's own Dictate stays (it is far below); none may sit on the field's row.
+        let row = field.frame.insetBy(dx: -60, dy: -8)
+        let dictate = app.buttons.matching(NSPredicate(format: "label == %@ OR identifier == %@",
+                                                       "Dictate", "Dictate"))
+        for mic in dictate.allElementsBoundByIndex where mic.exists {
+            XCTAssertFalse(mic.frame.intersects(row), "a Dictate button sits beside the search field")
+        }
+    }
+
+    /// Read all marks the unread messages read: the count it reports reaches zero. On iPad/Mac
+    /// it is the capsule button in the sidebar bar, present only while something is unread; on
+    /// iPhone it is in the sheet the header's "Gram ›" pill opens, and its value is the unread
+    /// count ("3 unread", empty at zero).
     ///
     /// The button's presence is only STABLE after the first poll, and the test waits for that
-    /// deliberately: at launch the single unread message's own row marks itself read within a
+    /// deliberately: at launch the unread messages' own rows mark themselves read within a
     /// moment (`markReadIfNeeded` from `onAppear`), which drives the count to zero and removes
     /// the button — so a tap aimed at the launch-time button can miss. The mock's `gram.list` is
-    /// a CONSTANT that always reports g1 unread, so the 6-second poll restores it, and because
-    /// the row's identity is unchanged `onAppear` does not fire again: from then on the button
+    /// a CONSTANT that always reports g2–g4 unread, so the 6-second poll restores it, and because
+    /// the rows' identity is unchanged `onAppear` does not fire again: from then on the button
     /// stays up. The retry exists because the same poll also re-creates it a few seconds after a
     /// successful pass; each attempt guards `exists`/`isHittable` so a vanished button re-enters
     /// the loop instead of failing the test on an unrecoverable `tap()`.
     func testGramReadAllClearsTheUnreadCount() {
         let app = launchGram()
 
-        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 10),
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10),
                       "the Gram page should load the mock inbox")
 
-        let readAll = app.buttons["Read all"]
+        let readAll = app.buttons["Read all"].firstMatch
+        let pill = app.buttons["gram-header-pill"]
+        if !hasSidebar {
+            XCTAssertTrue(pill.waitForExistence(timeout: 5), "the header should show the Gram pill")
+            XCTAssertEqual(pill.label, "Gram")
+        }
         var cleared = false
         for _ in 0..<4 {
+            // iPhone: Read all lives in the pill's sheet; (re)open it when it is not up.
+            if !hasSidebar, !readAll.exists, pill.exists, pill.isHittable {
+                pill.tap()
+            }
             // One poll interval plus slack, so this waits out the launch-time flip described
             // above rather than racing it.
-            guard readAll.waitForExistence(timeout: 14), readAll.isHittable else {
+            guard readAll.waitForExistence(timeout: 14), readAll.isHittable, readAll.isEnabled else {
                 Thread.sleep(forTimeInterval: 1.0)
                 continue
             }
+            if !hasSidebar {
+                // The count is there to clear: the value names it before the tap.
+                guard (readAll.value as? String)?.contains("unread") == true else {
+                    Thread.sleep(forTimeInterval: 1.0)
+                    continue
+                }
+            }
             readAll.tap()
-            if readAll.waitForNonExistence(timeout: 4) { cleared = true; break }
+            if waitUntilNothingUnread(readAll, timeout: 4) { cleared = true; break }
         }
         XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
+    }
+
+    /// iPhone: with Saved showing, the header pill says so ("Saved ›", spoken "Saved"); back
+    /// on the inbox it reads "Gram" again. iPad/Mac show Saved as the sidebar's selected row.
+    func testGramHeaderPillNamesSavedOnIPhone() throws {
+        try XCTSkipIf(hasSidebar, "iPad/Mac name the Saved section in the sidebar")
+        let app = launchGram()
+        let pill = app.buttons["gram-header-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 10), "the header should show the Gram pill")
+        XCTAssertEqual(pill.label, "Gram")
+
+        let savedToggle = app.buttons["gram-saved-toggle"]
+        XCTAssertTrue(savedToggle.waitForExistence(timeout: 5))
+        savedToggle.tap()
+        XCTAssertTrue(app.staticTexts["No saved messages yet"].waitForExistence(timeout: 5),
+                      "the bookmark toggle should show the (empty) Saved list")
+        XCTAssertEqual(pill.label, "Saved", "the pill should name the Saved list")
+        XCTAssertTrue(pill.staticTexts["Saved"].exists, "the pill should read \"Saved ›\"")
+
+        savedToggle.tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.label, "Gram", "back on the inbox the pill reads Gram again")
+    }
+
+    /// Paging: the first page (`HERDR_MOCK_GRAM_PAGED`, MockTransport.gramPagedList) has more
+    /// behind it. Opening lands on the newest message; reaching the top fetches exactly ONE
+    /// older page (24 rows, go1 newest to go24 oldest, more than a screen), and the message that
+    /// was on top before (g9, "Picked up the deploy ticket.") stays on screen rather than being
+    /// pushed down by the rows inserted above it. The mock has a third page behind go24, so a
+    /// chained fetch would show as a count past 33. (A first page that fits the screen, as it
+    /// may on a large iPad, shows the top on open, so its fetch then is the reader's too.)
+    func testGramScrollingToTheTopLoadsOneOlderPage() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 5),
+                      "the feed opens at the newest message")
+        func label(_ prefix: String) -> XCUIElement {
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
+        }
+        // The loaded-message count rides on the feed's message stack (`gram-feed-messages`).
+        let messages = app.otherElements["gram-feed-messages"]
+        XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
+        func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
+            let loaded = NSPredicate(format: "value == %@", "\(count) messages")
+            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
+                                    timeout: timeout) == .completed
+        }
+        if !hasSidebar {
+            // The phone's first page overfills the screen: opening fetches nothing.
+            XCTAssertTrue(waitForCount(9, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
+        }
+
+        // Scroll up only until the page lands, so the swipes themselves cannot reach the top
+        // of the NEW page and ask for the next one.
+        var paged = waitForCount(33, timeout: 2)
+        for _ in 0..<8 where !paged {
+            feed.swipeDown(velocity: .slow)
+            paged = waitForCount(33, timeout: 3)
+        }
+        XCTAssertTrue(paged, "reaching the top should load the older page (9 + 24 messages); feed says \(messages.value ?? "nil")")
+
+        let previousTop = label("Picked up the deploy ticket.")
+        XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
+                      "the message that was on top should stay on screen after the older page lands")
+
+        // Let a chained fetch, if any, land: the count must stay at exactly one page.
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(messages.value as? String, "33 messages", "exactly one older page should load")
+
+        // The page's oldest message is at its top (reaching it may fetch the next page: the
+        // reader is at the top again).
+        let olderOldest = label("Older page: release planning starts here.")
+        for _ in 0..<10 where !olderOldest.isHittable { feed.swipeDown(velocity: .slow) }
+        XCTAssertTrue(olderOldest.isHittable, "the older page's oldest message should appear")
+    }
+
+    /// iPhone: Gram is a persistent tab, so leaving it and coming back keeps the feed's layout
+    /// exactly as it was. Leaving clears what the feed knows is on screen; coming back must
+    /// re-learn it without the reader scrolling, or the initial scroll never finishes and the
+    /// top sentinel never fetches (nor do rows mark read or new messages follow). After the
+    /// round trip, reaching the top loads exactly one older page, as on first open.
+    func testGramStillPagesAfterATabRoundTrip() throws {
+        try XCTSkipIf(hasSidebar, "iPad/Mac show Gram in the split view, not a tab")
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        let messages = app.otherElements["gram-feed-messages"]
+        XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
+        func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
+            let loaded = NSPredicate(format: "value == %@", "\(count) messages")
+            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
+                                    timeout: timeout) == .completed
+        }
+        XCTAssertTrue(waitForCount(9, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
+        let newest = app.staticTexts["Great, ship it."]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
+                      "the feed opens at the newest message")
+
+        let tabs = app.tabBars.firstMatch
+        let agentsTab = tabs.buttons["Agents"]
+        XCTAssertTrue(agentsTab.waitForExistence(timeout: 5))
+        agentsTab.tap()
+        XCTAssertTrue(newest.waitForNonExistence(timeout: 5) || !newest.isHittable,
+                      "the Agents tab should cover Gram")
+        let gramTab = tabs.buttons["Gram"]
+        XCTAssertTrue(gramTab.waitForExistence(timeout: 5))
+        gramTab.tap()
+        XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
+                      "back on Gram, the feed is still at the newest message")
+        XCTAssertTrue(waitForCount(9, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
+
+        var paged = waitForCount(33, timeout: 2)
+        for _ in 0..<8 where !paged {
+            feed.swipeDown(velocity: .slow)
+            paged = waitForCount(33, timeout: 3)
+        }
+        XCTAssertTrue(paged, "after a tab round trip, reaching the top should still load the older page; feed says \(messages.value ?? "nil")")
+        let previousTop = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Picked up the deploy ticket.")).firstMatch
+        XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
+                      "the message that was on top should stay on screen after the older page lands")
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(messages.value as? String, "33 messages", "exactly one older page should load")
+    }
+
+    /// vetrina's report runs past four lines, so it folds with "Show more"; tapping it shows
+    /// the whole message (the text grows) and the button goes away.
+    func testShowMoreExpandsALongMessage() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+
+        let showMore = app.buttons["gram-show-more"].firstMatch
+        XCTAssertTrue(showMore.waitForExistence(timeout: 5), "a long report should fold with Show more")
+        // The feed opens at the newest message; on a phone the report can sit just above it.
+        for _ in 0..<3 where !showMore.isHittable { app.swipeDown() }
+        XCTAssertTrue(showMore.isHittable, "Show more should be reachable")
+
+        // The report is exposed ONCE: the fold measures it with hidden copies, which must
+        // not reach VoiceOver (they did once, and read the report three times).
+        let prose = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Deployed."))
+        XCTAssertEqual(prose.count, 1, "VoiceOver should meet the report once")
+        let bubble = app.descendants(matching: .any)["gram-bubble-g4"]
+        XCTAssertTrue(bubble.exists, "the folded report's bubble should be on screen")
+        let folded = bubble.frame
+
+        showMore.tap()
+        XCTAssertTrue(showMore.waitForNonExistence(timeout: 3), "an expanded message has no Show more")
+        Thread.sleep(forTimeInterval: 0.4)   // the expand animates (0.2 s)
+        XCTAssertGreaterThanOrEqual(bubble.frame.height, folded.height + 18,
+                                    "the expanded report should show more than four lines")
+        // Like Messages, the bubble hugs its widest line, so it may widen; never narrower.
+        XCTAssertGreaterThanOrEqual(bubble.frame.width, folded.width - 1, "expanding never narrows the bubble")
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "gram-show-more-expanded"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// clientloop's command sits in a code block with its own Copy. Tapping it says "Copied".
+    /// The pasteboard is deliberately NOT read back: a programmatic read raises the system
+    /// paste prompt, which hung CI before (TerminalSelectionTests).
+    func testCodeBlockCopyConfirms() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+
+        let copy = app.buttons["gram-code-copy"].firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), "a code block should offer Copy")
+        for _ in 0..<3 where !copy.isHittable { app.swipeUp() }
+        XCTAssertEqual(copy.label, "Copy code")
+
+        copy.tap()
+        let copied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Copied"),
+                                               object: copy)
+        XCTAssertEqual(XCTWaiter().wait(for: [copied], timeout: 2), .completed,
+                       "Copy should confirm with \"Copied\"")
+    }
+
+    /// iPad/Mac: the sidebar lists Gram's two conversations, Gram selected, and selecting Saved
+    /// swaps the feed in place (the mock inbox's senders leave; Saved holds only local copies,
+    /// and no test saves one). Selecting Gram brings them back.
+    func testSidebarConversationsSwitchTheFeed() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .phone,
+                      "the conversation rows are the iPad/Mac sidebar's; iPhone has no sidebar")
+        let app = launchGram()
+
+        let gram = app.buttons["gram-conversation-gram"]
+        let saved = app.buttons["gram-conversation-saved"]
+        XCTAssertTrue(gram.waitForExistence(timeout: 10), "the sidebar should list the Gram conversation")
+        XCTAssertTrue(saved.exists, "the sidebar should list the Saved conversation")
+        XCTAssertTrue(gram.isSelected, "Gram is the conversation shown at first")
+        XCTAssertFalse(saved.isSelected)
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10),
+                      "the Gram feed shows the mock inbox")
+
+        saved.tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForNonExistence(timeout: 5),
+                      "selecting Saved should replace the Gram feed")
+        XCTAssertTrue(saved.isSelected, "Saved should read as selected")
+        XCTAssertFalse(gram.isSelected)
+
+        gram.tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
+                      "selecting Gram should bring the feed back")
+        XCTAssertTrue(gram.isSelected)
     }
 
     /// Reported on TestFlight 170: the keyboard could not be dismissed from the composer.

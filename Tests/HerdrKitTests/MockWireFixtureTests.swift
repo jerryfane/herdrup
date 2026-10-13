@@ -36,6 +36,25 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
+    /// MockTransport's `gram.list` under `HERDR_MOCK_GRAM_PAGED=1` (gramPagedList): the same
+    /// `before_id` matches and answers. The head answer here is the first page; the app's
+    /// head poll widens to the pages it has served, which a client-only test does not need.
+    private struct PagedGramFixtureTransport: HerdrTransport {
+        func roundTrip(_ requestLine: String) async throws -> String {
+            guard requestLine.contains("gram.list") else { return #"{"id":"x","result":{}}"# }
+            if requestLine.contains(#""before_id":"g9""#) {
+                return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOlderRows], hasMore: true)
+            }
+            if requestLine.contains(#""before_id":"go24""#) {
+                return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOldestRows], hasMore: false)
+            }
+            return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramListRows], hasMore: true)
+        }
+        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { $0.finish() }
+        }
+    }
+
     func testMockAgentListDecodesRealisticStatuses() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let agents = try await client.agentList()
@@ -308,9 +327,9 @@ final class MockWireFixtureTests: XCTestCase {
     }
 
     /// The `gram.list` fixture must decode through the real client path, and the
-    /// GramMessage flags the Gram page renders on (unread, open-queue, grabbed,
-    /// direct) must resolve correctly. Optional fields (`to`, `grabbed_by`) are
-    /// omitted in JSON when absent — decoding must yield nil, not fail.
+    /// GramMessage flags the Gram page renders on (unread, grabbed, direct, federated
+    /// sender) must resolve correctly. Optional fields (`to`, `grabbed_by`,
+    /// `machine_label`) are omitted in JSON when absent — decoding must yield nil, not fail.
     func testMockGramListDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         // `messages` is optional now (an unchanged conditional answer omits it); a
@@ -318,37 +337,85 @@ final class MockWireFixtureTests: XCTestCase {
         // Bound before unwrapping: XCTUnwrap's autoclosure cannot contain an `await`.
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
-        XCTAssertEqual(messages.count, 5, "gram.list fixture did not decode to 5 messages")
+        XCTAssertEqual(messages.count, 9, "gram.list fixture did not decode to 9 messages")
+        XCTAssertEqual(messages.map(\.createdUnixMs), messages.map(\.createdUnixMs).sorted(by: >),
+                       "the daemon answers newest first")
 
-        // Newest first: the unread agent->owner digest leads.
+        // Newest first: the owner's direct reply leads, and a direct message carries `to`.
         let first = try XCTUnwrap(messages.first)
         XCTAssertEqual(first.id, "g1")
-        XCTAssertEqual(first.direction, .agentToOwner)
-        XCTAssertEqual(first.from, "trend-scout")
-        XCTAssertTrue(first.isFromAgent)
-        XCTAssertTrue(first.isUnread, "an agent->owner message with read_by_owner:false is unread")
-        XCTAssertNil(first.to)
+        XCTAssertEqual(first.direction, .ownerToAgent)
+        XCTAssertEqual(first.from, "owner")
+        XCTAssertFalse(first.isFromAgent)
+        XCTAssertEqual(first.to, "vetrina")
         XCTAssertNil(first.grabbedBy)
+        XCTAssertFalse(first.isOpenQueueItem, "a direct message is not a queue item")
 
-        // An unclaimed shared queue post (no `to`, no `grabbed_by`).
-        let queue = try XCTUnwrap(messages.first { $0.id == "g2" })
-        XCTAssertEqual(queue.direction, .ownerToAgent)
-        XCTAssertNil(queue.to)
-        XCTAssertNil(queue.grabbedBy)
-        XCTAssertTrue(queue.isOpenQueueItem)
+        // A federated sender: the bare name and the machine label read separately.
+        let federated = try XCTUnwrap(messages.first { $0.id == "g2" })
+        XCTAssertTrue(federated.isFromAgent)
+        XCTAssertTrue(federated.isUnread, "an agent->owner message with read_by_owner:false is unread")
+        XCTAssertEqual(federated.from, "4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop")
+        XCTAssertEqual(federated.machineLabel, "hetzner-1")
+        XCTAssertEqual(federated.senderAgentName, "clientloop")
+        XCTAssertEqual(federated.senderMachine, "hetzner-1")
+        XCTAssertNil(federated.to)
+        XCTAssertNil(federated.grabbedBy)
+        // Its text carries a one-line code fence, which the page draws as a code block.
+        XCTAssertEqual(GramText.segments(federated.text), [
+            .text("Scaffold is up. Run it with:"),
+            .code("cd ~/src/amigo-poc && pnpm dev", language: nil),
+        ])
 
-        // A grabbed queue item is no longer open.
-        let grabbed = try XCTUnwrap(messages.first { $0.id == "g3" })
-        XCTAssertEqual(grabbed.grabbedBy, "herdr-app")
+        // A local sender has no machine of its own on the wire.
+        let local = try XCTUnwrap(messages.first { $0.id == "g4" })
+        XCTAssertEqual(local.senderAgentName, "vetrina")
+        XCTAssertNil(local.machineLabel)
+        XCTAssertNil(local.senderMachine)
+        XCTAssertGreaterThan(local.text.split(separator: "\n").count, 4,
+                             "the long report must be long enough to fold")
+
+        // A grabbed shared-queue post (no `to`) is no longer open.
+        let grabbed = try XCTUnwrap(messages.first { $0.id == "g5" })
+        XCTAssertEqual(grabbed.direction, .ownerToAgent)
+        XCTAssertNil(grabbed.to)
+        XCTAssertEqual(grabbed.grabbedBy, "ci-watch")
         XCTAssertFalse(grabbed.isOpenQueueItem)
 
-        // A direct message carries `to`.
-        let direct = try XCTUnwrap(messages.first { $0.id == "g4" })
-        XCTAssertEqual(direct.to, "clientloop")
-        XCTAssertNil(direct.grabbedBy)
+        // Today's three agent messages are unread → the header badge shows 3.
+        XCTAssertEqual(messages.filter { $0.isUnread }.map(\.id), ["g2", "g3", "g4"])
+    }
 
-        // Exactly one unread → the header badge shows 1.
-        XCTAssertEqual(messages.filter { $0.isUnread }.count, 1)
+    /// The paged mock (`HERDR_MOCK_GRAM_PAGED=1`, MockTransport.gramPagedList): the head page
+    /// is `gramList` with `has_more`, `before_id` g9 answers 24 older rows with `has_more`,
+    /// and `before_id` go24 answers the last row. Driven through the real client, so the
+    /// request lines it matches on are the ones the app sends, and folded through `GramInbox`
+    /// as the page does: each page lands below the last, older and contiguous.
+    func testMockGramPagedListPagesContiguously() async throws {
+        let client = HerdrClient(transport: PagedGramFixtureTransport())
+        var inbox = GramInbox()
+        inbox.apply(try await client.gramList(limit: 40))
+        XCTAssertEqual(inbox.messages.map(\.id).last, "g9")
+        XCTAssertEqual(inbox.messages.count, 9)
+        XCTAssertEqual(inbox.nextCursor, "g9", "the head page says there is more")
+
+        var generation = inbox.generation
+        let second = try await client.gramList(limit: 40, beforeID: "g9")
+        XCTAssertTrue(inbox.appendPage(second, generation: generation))
+        XCTAssertEqual(inbox.messages.count, 33, "the second page holds 24 rows")
+        XCTAssertEqual(Array(inbox.messages.map(\.id)[9...]), (1...24).map { "go\($0)" })
+        XCTAssertEqual(inbox.messages.last?.text, "Older page: release planning starts here.")
+        XCTAssertEqual(inbox.nextCursor, "go24", "the second page says there is more")
+
+        generation = inbox.generation
+        let third = try await client.gramList(limit: 40, beforeID: "go24")
+        XCTAssertTrue(inbox.appendPage(third, generation: generation))
+        XCTAssertEqual(inbox.messages.map(\.id).last, "gx1")
+        XCTAssertNil(inbox.nextCursor, "the third page is the end")
+
+        XCTAssertEqual(inbox.messages.map(\.createdUnixMs), inbox.messages.map(\.createdUnixMs).sorted(by: >),
+                       "pages run newest first, each older than the last")
+        XCTAssertEqual(Set(inbox.messages.map(\.id)).count, inbox.messages.count, "no id repeats across pages")
     }
 
     /// `gram.post` echoes the stored message (`type: gram_sent`) — the composer
@@ -362,17 +429,25 @@ final class MockWireFixtureTests: XCTestCase {
     }
 
     /// A message may carry a file (`file` object); one without it decodes to nil,
-    /// not a failure — so the row shows a chip only when there is one.
+    /// not a failure — so the row shows a card only when there is one. A file may come
+    /// with no caption at all (an image on its own).
     func testMockGramListDecodesFileAttachment() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
 
-        let withFile = try XCTUnwrap(messages.first { $0.id == "g5" })
-        let file = try XCTUnwrap(withFile.file, "g5 should carry a file")
+        let image = try XCTUnwrap(messages.first { $0.id == "g3" })
+        let file = try XCTUnwrap(image.file, "g3 should carry a file")
         XCTAssertEqual(file.name, "vetrina-live.png")
         XCTAssertEqual(file.mime, "image/png")
-        XCTAssertEqual(file.size, 48213)
+        XCTAssertEqual(file.size, 421888)
+        XCTAssertEqual(file.displaySize, "412 KB")
+        XCTAssertEqual(image.text, "", "an image may arrive without a caption")
+
+        let zip = try XCTUnwrap(messages.first { $0.id == "g2" }?.file, "g2 should carry a file")
+        XCTAssertEqual(zip.name, "amigo-poc-scaffold.zip")
+        XCTAssertEqual(zip.mime, "application/zip")
+        XCTAssertEqual(zip.displaySize, "1.3 MB")
 
         let noFile = try XCTUnwrap(messages.first { $0.id == "g1" })
         XCTAssertNil(noFile.file, "a message without a file must decode to nil")
@@ -381,7 +456,7 @@ final class MockWireFixtureTests: XCTestCase {
     /// `gram.get_file` returns the bytes inline (base64); the client decodes them.
     func testMockGramGetFileDecodes() async throws {
         let client = HerdrClient(transport: FixtureTransport())
-        let (name, mime, data) = try await client.gramGetFile(id: "g5")
+        let (name, mime, data) = try await client.gramGetFile(id: "g3")
         XCTAssertEqual(name, "vetrina-live.png")
         XCTAssertEqual(mime, "image/png")
         XCTAssertEqual(String(decoding: data, as: UTF8.self), "hello world")
@@ -696,23 +771,72 @@ enum MockWireFixtures {
     ]}}
     """#
 
-    /// A `gram.list` owner view: unread + read agent->owner messages, an unclaimed
-    /// shared queue post, a grabbed one, and a direct message — newest first. Keep in
+    /// A `gram.list` owner view, newest first: direct owner posts, a grabbed shared-queue
+    /// post, read and unread agent->owner messages, federated senders with a machine label,
+    /// a code fence with a zip attachment, an image-only message and a long report. Keep in
     /// sync with the App's MockTransport.gramList.
     static let gramList = #"""
     {"id":"mock","result":{"type":"gram_list","messages":[
-      {"id":"g1","direction":"agent_to_owner","from":"trend-scout","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1723000005000,"read_by_owner":false},
-      {"id":"g2","direction":"owner_to_agent","from":"owner","text":"Anyone free to triage the failing CI?","created_unix_ms":1723000004000,"read_by_owner":true},
-      {"id":"g3","direction":"owner_to_agent","from":"owner","text":"Rebase the vetrina branch onto main.","grabbed_by":"herdr-app","grabbed_unix_ms":1723000004500,"created_unix_ms":1723000003000,"read_by_owner":true},
-      {"id":"g4","direction":"owner_to_agent","from":"owner","to":"clientloop","text":"Ship the Amigo POC scaffold today.","created_unix_ms":1723000002000,"read_by_owner":true},
-      {"id":"g5","direction":"agent_to_owner","from":"vetrina","text":"Deployed vetrina.dev — it is live.","created_unix_ms":1723000001000,"read_by_owner":true,"file":{"name":"vetrina-live.png","size":48213,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}
+      {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
+      {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
+      {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
+      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\nRollback is one command away.","created_unix_ms":1723041130000,"read_by_owner":false},
+      {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
+      {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
+      {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
+      {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}
     ]}}
     """#
+
+    /// The paged mock's pages. Keep byte-identical to MockTransport.gramOlderRows,
+    /// gramOldestRows and gramListAnswer(rows:hasMore:) in App/HerdrApp.swift.
+    static let gramOlderRows = #"""
+      {"id":"go1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Thanks. Take the deploy ticket next.","created_unix_ms":1722884400000,"read_by_owner":true},
+      {"id":"go2","direction":"agent_to_owner","from":"vetrina","text":"Smoke tests pass on staging.\nAll 38 checks green.","created_unix_ms":1722884100000,"read_by_owner":true},
+      {"id":"go3","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Run the smoke tests too.","created_unix_ms":1722883800000,"read_by_owner":true},
+      {"id":"go4","direction":"agent_to_owner","from":"vetrina","text":"Added the rollback step.\nStaging is green.","created_unix_ms":1722883500000,"read_by_owner":true},
+      {"id":"go5","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Add a rollback step before the migration.","created_unix_ms":1722883200000,"read_by_owner":true},
+      {"id":"go6","direction":"agent_to_owner","from":"vetrina","text":"Checklist is in docs/release.md.\nEight steps, two need a sign-off.","created_unix_ms":1722882900000,"read_by_owner":true},
+      {"id":"go7","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Draft the release checklist first.","created_unix_ms":1722882600000,"read_by_owner":true},
+      {"id":"go8","direction":"agent_to_owner","from":"vetrina","text":"Bundle size is down 14 percent.\nThe image pipeline was the culprit.","created_unix_ms":1722882300000,"read_by_owner":true},
+      {"id":"go9","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Nice. Keep an eye on the cold start.","created_unix_ms":1722882000000,"read_by_owner":true},
+      {"id":"go10","direction":"agent_to_owner","from":"vetrina","text":"Cold start is 1.2 s on a mid-range phone.\nWithin budget.","created_unix_ms":1722881700000,"read_by_owner":true},
+      {"id":"go11","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"What changed in the cache layer?","created_unix_ms":1722881400000,"read_by_owner":true},
+      {"id":"go12","direction":"agent_to_owner","from":"vetrina","text":"Swapped the LRU for a size-bounded one.\nEvictions dropped by half.","created_unix_ms":1722881100000,"read_by_owner":true},
+      {"id":"go13","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Write that up for the changelog.","created_unix_ms":1722880800000,"read_by_owner":true},
+      {"id":"go14","direction":"agent_to_owner","from":"vetrina","text":"Changelog entry drafted.\nIt is in the release branch.","created_unix_ms":1722880500000,"read_by_owner":true},
+      {"id":"go15","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Did the flaky login test settle?","created_unix_ms":1722880200000,"read_by_owner":true},
+      {"id":"go16","direction":"agent_to_owner","from":"vetrina","text":"It was a timezone bug in the fixture.\nFixed and green 20 runs in a row.","created_unix_ms":1722879900000,"read_by_owner":true},
+      {"id":"go17","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great catch. Merge it.","created_unix_ms":1722879600000,"read_by_owner":true},
+      {"id":"go18","direction":"agent_to_owner","from":"vetrina","text":"Merged. CI is rebuilding main.","created_unix_ms":1722879300000,"read_by_owner":true},
+      {"id":"go19","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Ping me when main is green.","created_unix_ms":1722879000000,"read_by_owner":true},
+      {"id":"go20","direction":"agent_to_owner","from":"vetrina","text":"Main is green.\nTagging a release candidate.","created_unix_ms":1722878700000,"read_by_owner":true},
+      {"id":"go21","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Hold the tag until the docs land.","created_unix_ms":1722878400000,"read_by_owner":true},
+      {"id":"go22","direction":"agent_to_owner","from":"vetrina","text":"Docs PR is open.\nTwo screenshots still to refresh.","created_unix_ms":1722878100000,"read_by_owner":true},
+      {"id":"go23","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Start with the release planning.","created_unix_ms":1722877800000,"read_by_owner":true},
+      {"id":"go24","direction":"agent_to_owner","from":"vetrina","text":"Older page: release planning starts here.","created_unix_ms":1722877500000,"read_by_owner":true}
+    """#
+
+    static let gramOldestRows = #"""
+      {"id":"gx1","direction":"agent_to_owner","from":"vetrina","text":"Oldest page: kickoff notes are in the repo.","created_unix_ms":1722796200000,"read_by_owner":true}
+    """#
+
+    static func gramListAnswer(rows: [String], hasMore: Bool) -> String {
+        #"{"id":"mock","result":{"type":"gram_list","messages":["#
+            + rows.joined(separator: ",") + #"],"has_more":"# + (hasMore ? "true" : "false") + "}}"
+    }
+
+    static var gramListRows: String {
+        let open = gramList.range(of: #""messages":["#)!.upperBound
+        let close = gramList.range(of: "]}}", options: .backwards)!.lowerBound
+        return String(gramList[open..<close])
+    }
 
     /// A canned `gram.post` echo (`type: gram_sent`). Keep in sync with the App's
     /// MockTransport.gramPosted.
     static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723000006000,"read_by_owner":true}}}"#
+        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
 
     /// A canned `gram.get_file` reply (`type: gram_file_content`); the bytes decode
     /// to "hello world". Keep in sync with the App's MockTransport.gramFileContent.
