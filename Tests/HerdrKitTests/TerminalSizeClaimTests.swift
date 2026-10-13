@@ -9,12 +9,14 @@ final class TerminalSizeClaimTests: XCTestCase {
         XCTAssertTrue(TerminalSizeClaim.daemonTTLRangeMillis.contains(TerminalSizeClaim.leaseTTLMillis))
     }
 
-    /// Two renewals may be missed in a row (a slow link, a busy main actor) and the claim of
-    /// the pane in front still must not lapse, or another device's width takes over mid-read.
+    /// Two renewals may be missed in a row (a slow link, a busy main actor) and the third
+    /// must still land with time to spare before the claim expires, or another device's width
+    /// takes over mid-read. Equal to the TTL is not enough: it departs AT expiry.
     func testRenewalLeavesRoomForTwoMissedBeats() {
         let renewalMillis = TerminalSizeClaim.renewalNanos / 1_000_000
         XCTAssertGreaterThan(renewalMillis, 0)
-        XCTAssertLessThanOrEqual(renewalMillis * 3, TerminalSizeClaim.leaseTTLMillis)
+        XCTAssertLessThanOrEqual(renewalMillis * 3 + TerminalSizeClaim.renewalMarginMillis,
+                                 TerminalSizeClaim.leaseTTLMillis)
     }
 
     /// A claim that could not be released (crash, kill, network gone) must stop pinning the

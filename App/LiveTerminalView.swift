@@ -2423,14 +2423,19 @@ struct LiveTerminalView: UIViewRepresentable {
                           target.cols >= 4, target.rows >= 2 else { continue }
                     let task = Task { @MainActor [weak self] in
                         guard let self, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry else { return }
+                        // Set before sending: a send that times out may still have reached the
+                        // daemon, so the later release must go out. A send the gate refused
+                        // (nil) provably did not, so the previous state is restored.
+                        let held = self.holdsClaim
                         self.holdsClaim = true
                         do {
-                            _ = try await self.resizeGate.send {
+                            let sent = try await self.resizeGate.send {
                                 try await self.client.setPTYSize(
                                     pane: self.paneID, cols: target.cols, rows: target.rows,
                                     cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
                                     lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
                             }
+                            if sent == nil { self.holdsClaim = held }
                         } catch {
                             self.fallBackIfRefused()
                         }
@@ -2830,6 +2835,8 @@ struct LiveTerminalView: UIViewRepresentable {
                           self.desiredTarget == target else { continue }
                     self.inflightTarget = target
                     let generation = self.targetGeneration
+                    // See the keepalive: optimistic, undone only when provably unsent.
+                    let held = self.holdsClaim
                     self.holdsClaim = true
                     do {
                         guard let applied = try await self.resizeGate.send({
@@ -2839,6 +2846,7 @@ struct LiveTerminalView: UIViewRepresentable {
                                 lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
                         }) else {
                             self.inflightTarget = nil
+                            self.holdsClaim = held
                             self.fallBackIfRefused()
                             break
                         }

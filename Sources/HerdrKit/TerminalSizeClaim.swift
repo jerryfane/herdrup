@@ -22,9 +22,12 @@ public enum TerminalSizeClaim {
     /// stops pinning another device's width within about two minutes (TTL + shrink debounce)
     /// instead of the five minutes and twenty seconds the daemon's default allows.
     public static let leaseTTLMillis: UInt64 = 90_000
-    /// How often the pane in front re-asserts its claim: a third of the TTL, so two missed
-    /// renewals in a row still cannot let it lapse.
-    public static let renewalNanos: UInt64 = 30_000_000_000
+    /// How often the pane in front re-asserts its claim. Two renewals may be missed in a row
+    /// and the third still lands 15 s before the claim expires (25 + 25 + 25 = 75 < 90), so
+    /// timer drift or a busy main actor cannot let it lapse.
+    public static let renewalNanos: UInt64 = 25_000_000_000
+    /// The margin the third renewal must keep before expiry.
+    public static let renewalMarginMillis: UInt64 = 10_000
 
     /// How long a hidden pane (another agent fronted, or the Gram or Settings tab) keeps its
     /// claim before releasing it. A quick switch away and back inside this window sends
