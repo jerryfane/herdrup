@@ -507,6 +507,10 @@ struct GramView: View {
         // just-selected section with "No matches", which reads as a bug. Only the page's OWN
         // field: a host's sidebar search (`searchText`) is the reader's and outlives the switch.
         .onChange(of: showingSaved) { _, _ in localSearch = "" }
+        // A new search (or clearing it) starts from the newest window again: the walk may
+        // have loaded the whole store. On the page, not the feed: from "No matches" the feed
+        // is unmounted, and a reset inside it would miss the clear.
+        .onChange(of: search) { _, _ in renderLimit = Self.renderWindow }
         // The "Gram ›" pill: Read all, the agents seen in Gram, and the shared queue.
         .sheet(isPresented: $showingAgentsSheet) { agentsSheet }
         // Paperclip → the shared attach sheet and pickers; picks stage straight into
@@ -1453,9 +1457,8 @@ struct GramView: View {
                 }
                 guard shown != search else { return }
                 feedVisibility.shownSearch = search
-                // A new search (or clearing it) starts from the newest window again: the walk
-                // may have loaded the whole store, and the reader is taken to the bottom.
-                renderLimit = Self.renderWindow
+                // (The window itself is reset by the page's onChange(of: search), which also
+                // runs while the feed is swapped for "No matches".)
                 // Same bounded settle loop as the initial scroll: estimated row heights can make
                 // one jump land short.
                 for _ in 0..<8 {

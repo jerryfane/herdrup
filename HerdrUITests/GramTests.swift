@@ -308,7 +308,10 @@ final class GramTests: XCTestCase {
 
         for _ in 0..<8 where !oldest.exists { feed.swipeDown(velocity: .slow); Thread.sleep(forTimeInterval: 0.5) }
         XCTAssertTrue(oldest.waitForExistence(timeout: 3), "reaching the top should draw the older loaded messages")
-        // The revealed rows push the sentinel off screen again: no fetch.
+        // The revealed rows push the sentinel off screen again: no fetch. Wait past the anchor
+        // restore (up to ~0.7 s) and the mock's round trip, so a page fetched after the reveal
+        // would have landed.
+        Thread.sleep(forTimeInterval: 2)
         XCTAssertEqual(messages.value as? String, "10 messages", "revealing loaded rows fetches no page")
     }
 
