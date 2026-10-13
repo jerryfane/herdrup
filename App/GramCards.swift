@@ -349,9 +349,12 @@ private func sizeLabel(_ byteCount: Int?) -> String? {
 }
 
 /// A download the owner asked for (an open or a save), drawn on its card as the composer's
-/// upload ring. `fraction` is nil while the size is unknown, and the ring spins.
+/// upload ring and spoken as the card's value. `fraction` is nil while the size is unknown,
+/// and the ring spins.
 struct GramCardDownload: Equatable {
     var fraction: Double?
+    /// "Downloading, 1.2 MB of 3.4 MB", or "Downloading" while the total is unknown.
+    var spoken: String
 }
 
 /// An attached image: the picture once the feed has fetched it, else a placeholder naming
@@ -392,10 +395,8 @@ struct GramImageCard: View {
                 .contentShape(shape)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Open \(name)")
-        #if DEBUG
-        .accessibilityValue(thumbnail == nil ? "placeholder" : "preview")
-        #endif
+        .accessibilityLabel(["Open \(name)", sizeLabel(byteCount)].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityValue(download?.spoken ?? "")
         .accessibilityIdentifier("gram-attachment-open")
         .accessibilityAction(named: "Save to Files", onSave)
     }
@@ -585,7 +586,7 @@ struct GramFileCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Open \(name)")
-        .accessibilityValue(detail)
+        .accessibilityValue(download?.spoken ?? detail)
         .accessibilityIdentifier("gram-attachment-open")
         .accessibilityAction(named: "Save to Files", onSave)
     }

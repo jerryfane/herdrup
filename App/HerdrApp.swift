@@ -9615,14 +9615,21 @@ struct MockTransport: HerdrTransport {
             return Self.agentList
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
-        if requestLine.contains("gram.list") { return Self.gramPaged ? Self.gramPagedList(requestLine) : Self.gramList }
+        if requestLine.contains("gram.list") {
+            if Self.gramPaged { return Self.gramPagedList(requestLine) }
+            return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
+        }
         if requestLine.contains("gram.post") {
             Self.recordGramPost(requestLine)
             return Self.gramPosted
         }
         if requestLine.contains("gram.get_file") {
+            let id = Self.recordGramGetFile(requestLine)
+            if let delay = Self.gramFileDelay(for: id) {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
             // g3 is the list fixture's image: a real PNG, so its card decodes a preview.
-            return requestLine.contains(#""g3""#) ? Self.gramImageContent : Self.gramFileContent
+            return id == "g3" ? Self.gramImageContent : Self.gramFileContent
         }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
@@ -9976,6 +9983,55 @@ struct MockTransport: HerdrTransport {
 
     private static let gramPostRecorder = GramPostRecorder()
 
+    /// `gram.get_file` calls answered per message id, for GramView's DEBUG
+    /// `gram-get-file-calls` probe: "g2=0 g3=1", the list fixture's two files always
+    /// listed, then any other id asked for.
+    static var gramGetFileSummary: String {
+        let counts = gramGetFileRecorder.counts
+        let ids = ["g2", "g3"] + counts.keys.filter { $0 != "g2" && $0 != "g3" }.sorted()
+        return ids.map { "\($0)=\(counts[$0] ?? 0)" }.joined(separator: " ")
+    }
+
+    private static let gramGetFileRecorder = GramGetFileRecorder()
+
+    private static func recordGramGetFile(_ requestLine: String) -> String {
+        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+        let id = (object?["params"] as? [String: Any])?["id"] as? String ?? ""
+        gramGetFileRecorder.record(id)
+        return id
+    }
+
+    /// `HERDR_MOCK_GRAM_FILE_DELAY=g3=10`: seconds `gram.get_file` waits before answering
+    /// for that id (comma-separated pairs), so a UI test can hold a download in flight.
+    private static func gramFileDelay(for id: String) -> Double? {
+        guard let spec = ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_FILE_DELAY"] else { return nil }
+        for pair in spec.split(separator: ",") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, parts[0] == id, let seconds = Double(parts[1]) { return seconds }
+        }
+        return nil
+    }
+
+    /// `HERDR_MOCK_GRAM_NEWER=1`: `gram.list` answers `gramList` with `gramNewerRows` above
+    /// its newest message, so the image (g3) sits above the fold on every device when the
+    /// feed opens at the bottom.
+    static var gramNewer: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_NEWER"] == "1"
+    }
+
+    static var gramListWithNewer: String {
+        gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
+    }
+
+    /// Fourteen read five-line messages, newer than g1 and newest first: taller together
+    /// than any screen the tests run on.
+    static let gramNewerRows: String = (1...14).reversed().map { n in
+        let from = n.isMultiple(of: 2)
+            ? #""direction":"owner_to_agent","from":"owner","to":"vetrina""#
+            : #""direction":"agent_to_owner","from":"vetrina""#
+        return #"{"id":"gn\#(n)",\#(from),"text":"Status \#(n).\nLine two.\nLine three.\nLine four.\nLine five.","created_unix_ms":\#(1723041360000 + n * 60000),"read_by_owner":true}"#
+    }.joined(separator: ",")
+
     private static func recordGramPost(_ requestLine: String) {
         let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
         let params = object?["params"] as? [String: Any] ?? [:]
@@ -10044,6 +10100,19 @@ final class GramPostRecorder: @unchecked Sendable {
 
     func append(to: String?, text: String) {
         lock.withLock { stored.append((to: to, text: text)) }
+    }
+}
+
+/// The `gram.get_file` calls MockTransport answered, counted per message id. Read through
+/// `MockTransport.gramGetFileSummary`.
+final class GramGetFileRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String: Int] = [:]
+
+    var counts: [String: Int] { lock.withLock { stored } }
+
+    func record(_ id: String) {
+        lock.withLock { stored[id, default: 0] += 1 }
     }
 }
 

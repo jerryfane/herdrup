@@ -206,6 +206,9 @@ struct GramView: View {
     /// "opened:<name>" once a file has been handed to a viewer, for the `gram-opened-file`
     /// probe.
     @State private var openedFileProbe = ""
+    /// The mock's `gram.get_file` calls per id ("g2=0 g3=1"), for the `gram-get-file-calls`
+    /// probe. Polled while a mock runs: prefetches start from rows, not from a page action.
+    @State private var getFileProbe = ""
     #endif
     /// This device's machine label, for a local agent's "name · machine" line.
     @Environment(\.guestMachineLabel) private var localMachine
@@ -273,6 +276,11 @@ struct GramView: View {
     /// Every running file download by message id, so an open or save of an image the feed
     /// is prefetching joins that transfer instead of starting a second.
     @State private var fetches = Fetches()
+    /// Image rows inside the feed's visible bounds (from the rows' placement reports), so an
+    /// image card fetches its preview only while really on screen: the feed is an eager
+    /// stack, so every drawn row exists whether it is seen or not. Only image rows are
+    /// tracked, so a scroll re-renders the page only when a picture enters or leaves.
+    @State private var imageRowsOnScreen: Set<String> = []
     /// Bounds the image prefetches running at once (`GramImagePreview`).
     @State private var prefetchSlots = AsyncSlots(limit: GramImagePreview.maxConcurrentPrefetches)
     /// A Gram file downloaded and staged for export through the system document
@@ -1322,6 +1330,9 @@ struct GramView: View {
                                 message: entry.message,
                                 isDownloadingFile: downloadingFileFor == entry.message.id,
                                 downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
+                                // Not before the feed has landed on the newest message: the
+                                // first layout passes through the top rows, never seen.
+                                isOnScreen: didInitialScroll && imageRowsOnScreen.contains(entry.id),
                                 isSaved: savedGrams.isSaved(entry.message.id),
                                 onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
                                 onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
@@ -1351,6 +1362,14 @@ struct GramView: View {
                             } else {
                                 feedVisibility.rows.remove(entry.id)
                             }
+                            if entry.message.file?.isImage == true,
+                               imageRowsOnScreen.contains(entry.id) != placement.onScreen {
+                                if placement.onScreen {
+                                    imageRowsOnScreen.insert(entry.id)
+                                } else {
+                                    imageRowsOnScreen.remove(entry.id)
+                                }
+                            }
                             if placement.atTop {
                                 feedVisibility.rowsAtTop.insert(entry.id)
                             } else {
@@ -1360,6 +1379,7 @@ struct GramView: View {
                         .onDisappear {
                             feedVisibility.rows.remove(entry.id)
                             feedVisibility.rowsAtTop.remove(entry.id)
+                            if imageRowsOnScreen.contains(entry.id) { imageRowsOnScreen.remove(entry.id) }
                         }
                     }
                     if shouldShowSetupCard { setupCard.padding(.top, 14) }
@@ -2026,9 +2046,14 @@ struct GramView: View {
     /// LABEL of `gram-post-calls` (the GuestPaneView probes' pattern). Not the value: on the
     /// iPhone tab an element with an empty value reads back the tab's badge ("3").
     /// Refreshed after each send. Beside it, `gram-opened-file`: "opened:<name>" once a file
-    /// reached a viewer, "none" before.
+    /// reached a viewer, "none" before; and `gram-get-file-calls`: the mock's `gram.get_file`
+    /// calls per id (`MockTransport.gramGetFileSummary`).
     private var postCallsProbeView: some View {
         ZStack {
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("gram-get-file-calls")
+                .accessibilityLabel(getFileProbe.isEmpty ? "none" : getFileProbe)
             Color.clear
                 .accessibilityElement()
                 .accessibilityIdentifier("gram-post-calls")
@@ -2040,6 +2065,14 @@ struct GramView: View {
         }
         .frame(width: 1, height: 1)
         .allowsHitTesting(false)
+        .task {
+            guard ScreenshotMock.mode != nil else { return }
+            while !Task.isCancelled {
+                let summary = MockTransport.gramGetFileSummary
+                if summary != getFileProbe { getFileProbe = summary }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
     }
     #endif
 
@@ -3227,6 +3260,9 @@ struct GramRow: View {
     /// transport reports them. nil means no measurement — the card's ring spins rather
     /// than showing a share that is not driven by anything.
     var downloadProgress: (received: Int, total: Int)?
+    /// The row is inside the feed's visible bounds, and the feed has landed: only then does
+    /// its image card fetch a preview it does not have.
+    var isOnScreen: Bool
     var isSaved: Bool
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
@@ -3451,6 +3487,8 @@ struct GramRow: View {
             onSave: onSaveFile,
             embedded: embedded
         )
+        // A second tap while its own download runs does nothing; the value says why.
+        .disabled(isDownloadingFile)
     }
 
     private func imageCard(_ file: GramFile) -> some View {
@@ -3464,8 +3502,20 @@ struct GramRow: View {
             onOpen: onOpenFile,
             onSave: onSaveFile
         )
-        // Re-run when an open ends: an image over the prefetch cap is cached by opening it.
-        .task(id: isDownloadingFile) { await loadThumbnail() }
+        .disabled(isDownloadingFile)
+        #if DEBUG
+        // For the UI tests: "preview" once the card draws its picture, "placeholder" before.
+        // Its own element, so the card's value stays the spoken download state.
+        .background {
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("gram-image-preview-\(message.id)")
+                .accessibilityLabel((thumbnail ?? GramThumbnails.cached(id: message.id)) == nil ? "placeholder" : "preview")
+        }
+        #endif
+        // On screen (the feed has landed), and again when an open ends: an image over the
+        // prefetch cap is cached by opening it.
+        .task(id: isOnScreen && !isDownloadingFile) { await loadThumbnail() }
     }
 
     /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
@@ -3477,18 +3527,22 @@ struct GramRow: View {
 
     /// The image attachment's picture: from memory when the feed drew it before, else decoded
     /// from the download cache, which `onPrefetchImage` fills for an image under the prefetch
-    /// cap and an open fills for the rest. Runs while the card is on screen; scrolling it
-    /// away cancels a prefetch still queued or running (unless an open is waiting on it).
+    /// cap and an open fills for the rest. Runs only while the card is on screen (the task
+    /// is keyed on it); scrolling it away cancels a prefetch still queued or running (unless
+    /// an open is waiting on it). A picture already decoded shows regardless (`imageCard`).
     private func loadThumbnail() async {
         guard imageFile != nil, thumbnail == nil else { return }
         if let hit = GramThumbnails.cached(id: message.id) {
             thumbnail = hit
             return
         }
-        // An open of this file is running: this task restarts when it ends, and the file
-        // is cached by then.
-        guard !isDownloadingFile else { return }
+        // Off screen, or an open of this file is running: the task restarts when that
+        // changes (after an open the file is cached).
+        guard isOnScreen, !isDownloadingFile else { return }
         if GramView.Downloads.cached(id: message.id) == nil {
+            // A card a fling only flies past never fetches: it must stay on screen a moment.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
             await onPrefetchImage()
         }
         guard !Task.isCancelled, let cached = GramView.Downloads.cached(id: message.id) else { return }
@@ -3496,12 +3550,18 @@ struct GramRow: View {
                                               spec: GramCardMetrics.imageSize(sizeClass), scale: displayScale)
     }
 
-    /// This row's open or save as its card draws it: the share of the reply received, or
-    /// a spinning ring while there is no measurement.
+    /// This row's open or save as its card draws and speaks it: the share of the reply
+    /// received, or a spinning ring while there is no measurement. The reply is base64, so
+    /// received channel bytes are scaled by 3/4 to approximate file bytes.
     private var download: GramCardDownload? {
-        guard isDownloadingFile else { return nil }
-        guard let p = downloadProgress, p.total > 0 else { return GramCardDownload(fraction: nil) }
-        return GramCardDownload(fraction: min(1, Double(p.received) / Double(p.total)))
+        guard isDownloadingFile, let file = message.file else { return nil }
+        guard let p = downloadProgress, p.total > 0 else {
+            return GramCardDownload(fraction: nil, spoken: "Downloading")
+        }
+        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
+        return GramCardDownload(
+            fraction: min(1, Double(p.received) / Double(p.total)),
+            spoken: "Downloading, \(GramFile.displaySize(of: done)) of \(file.displaySize)")
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same
