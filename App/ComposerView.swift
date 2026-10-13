@@ -240,9 +240,6 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
     /// hidden view cannot report that its width went back to zero.
     var showsLeading = false
     var isRecording = false
-    /// Width of anything the host draws inside `field` before the text (Gram's recipient
-    /// chip), so the wrap and line measures see only the text's own width.
-    var fieldPrefixWidth: CGFloat = 0
     @ViewBuilder var field: (CGFloat?) -> Field
     @ViewBuilder var accessory: () -> Accessory
     @ViewBuilder var leading: () -> Leading
@@ -278,7 +275,7 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
 
     private var inlineTextWidth: CGFloat {
         contentWidth - actionsWidth - (showsLeading ? leadingWidth + AdaptiveComposerLayout.rowGap : 0)
-            - AdaptiveComposerLayout.rowGap - Self.fieldInsets - fieldPrefixWidth
+            - AdaptiveComposerLayout.rowGap - Self.fieldInsets
     }
 
     /// Whether the text needs more than the single row. Once wrapped it stays wrapped
@@ -292,7 +289,7 @@ struct AdaptiveComposer<Field: View, Accessory: View, Leading: View, Actions: Vi
 
     private var fullLines: Int {
         guard contentWidth > 0 else { return 1 }
-        return ComposerTextMetrics.lines(of: text, width: contentWidth - Self.fieldInsets - fieldPrefixWidth)
+        return ComposerTextMetrics.lines(of: text, width: contentWidth - Self.fieldInsets)
     }
 
     private var expanded: Bool { hasAccessory || editorOpen || wrapsNow }

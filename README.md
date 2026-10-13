@@ -188,10 +188,20 @@ with a device-sized 1008 KiB main stack, and rejects attached crashes even if XC
 Gram reads like iMessage in herdr's colours: your messages are violet bubbles on the right,
 agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
 time separators, an amber unread rule and green/grey Grabbed/Delivered lines. Long reports
-fold to four lines with Show more; fenced code sits in a monospaced box with its own Copy;
+fold to eight lines with Read more; fenced code sits in a monospaced box with its own Copy;
 images and files are cards with name, size and Open / Save to Files. On iPad and Mac the
 sidebar holds Gram's search field (⌘F; no mic, the composer keeps dictation) and its two
 conversations, Gram and Saved, as Messages rows, with Read all and Refresh in the bar.
+
+Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
+send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a
+violet @name in the text, which addresses that exact agent and, when it leads, is not sent with
+it (nor is a following “,” or “:”). Two agents with one name are listed with their machines;
+a typed name they share, or a leading @name that matches no agent in Gram, holds Send and says
+why above the composer. With no @ the message goes to the shared queue, where any agent can
+grab it. A long message shows its first eight lines and a Read more link (Show less folds it
+back). Bubble tails mark text only, never an image or file card. The header floats over the
+feed, so messages scroll under it.
 
 ## License
 
