@@ -1101,7 +1101,8 @@ struct GramView: View {
             noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
         } else {
             ScrollView {
-                LazyVStack(spacing: 14) {
+                // Eager, not lazy: see the inbox feed below.
+                VStack(spacing: 14) {
                     ForEach(visibleSaved) { s in
                         SavedGramRow(
                             saved: s,
@@ -1195,7 +1196,12 @@ struct GramView: View {
         case .loaded:
             ScrollViewReader { feed in
             ScrollView {
-                LazyVStack(spacing: 0) {
+                // EAGER, NOT LAZY. A LazyVStack here never settled while the composer's
+                // pull-up editor shrank the feed: main thread at 100% in layout, the composer
+                // UI test hung on CI's iPhone and, with image previews added, 2/2 on a local
+                // simulator; the same build with this stack passed 2/2 in 18 s. The loaded
+                // messages are a page or a few (40 each), so laying them all out is cheap.
+                VStack(spacing: 0) {
                     // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
                     // already on screen otherwise look like the whole answer, which is
                     // the same lie the empty state was fixed for. Older matches arrive
