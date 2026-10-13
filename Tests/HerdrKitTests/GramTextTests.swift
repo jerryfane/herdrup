@@ -80,6 +80,31 @@ final class GramTextTests: XCTestCase {
                        [.code("```\ninner\n```", language: "md")])
     }
 
+    func testALongerClosingFenceClosesTheBlock() {
+        // At least the opening ticks, not exactly: four ticks close a three-tick fence.
+        XCTAssertEqual(segments("```\na\n````"), [.code("a", language: nil)])
+        XCTAssertEqual(segments("```sh\nmake\n`````\nDone"), [
+            .code("make", language: "sh"),
+            .text("Done"),
+        ])
+    }
+
+    func testAnInfoStringWithABacktickIsNotAnOpeningFence() {
+        // "```inline```" is prose, so the later bare ``` OPENS a fence (which never closes)
+        // rather than closing one: the whole message stays prose.
+        XCTAssertEqual(segments("```inline```\nrest\n```"), [.text("```inline```\nrest\n```")])
+        XCTAssertEqual(segments("```js `x`\ny\n```\n"), [.text("```js `x`\ny\n```\n")])
+    }
+
+    func testWhitespaceOnlyProseIsDropped() {
+        // Spaces and tabs between, before and after the blocks draw no empty bubble.
+        XCTAssertEqual(segments("  \n```\na\n```\n \t \n```\nb\n```\n   "), [
+            .code("a", language: nil),
+            .code("b", language: nil),
+        ])
+        XCTAssertEqual(segments(" \t"), [])
+    }
+
     func testAFenceLineWithInfoDoesNotCloseABlock() {
         XCTAssertEqual(segments("```\na\n```js\nb\n```"), [.code("a\n```js\nb", language: nil)])
     }

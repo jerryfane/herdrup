@@ -10,7 +10,9 @@ import UIKit
 
 /// Sizes shared by the Gram cards.
 enum GramCardMetrics {
-    /// A card's width (code, text + file, a lone file): phone, then iPad/Mac.
+    /// A card's width CAP (code, text + file, a lone file): phone, then iPad/Mac. Cards are
+    /// `min(this, available width)`, so a narrow column (split view, Slide Over, Display
+    /// Zoom) shrinks them instead of clipping them at the right edge.
     static let compactCardWidth: CGFloat = 295
     static let regularCardWidth: CGFloat = 520
 
@@ -18,7 +20,8 @@ enum GramCardMetrics {
         sizeClass == .regular ? regularCardWidth : compactCardWidth
     }
 
-    /// An image card: 295 x 124 on a phone, 440 x 236 on iPad/Mac.
+    /// An image card's size CAP: 295 x 124 on a phone, 440 x 236 on iPad/Mac. A narrower
+    /// column scales it down at this aspect ratio.
     static func imageSize(_ sizeClass: UserInterfaceSizeClass?) -> CGSize {
         sizeClass == .regular ? CGSize(width: 440, height: 236) : CGSize(width: 295, height: 124)
     }
@@ -108,7 +111,7 @@ struct GramAvatar: View {
         let bare = GramMessage.agentName(from: name)
         Text(AgentIdentity.glyph(forName: bare))
             .font(Typography.app((size * 0.45).rounded(), .bold))
-            .foregroundStyle(Color.white)
+            .foregroundStyle(Palette.onAccent)
             .lineLimit(1)
             .minimumScaleFactor(0.5)
             .frame(width: size, height: size)
@@ -362,18 +365,23 @@ struct GramImageCard: View {
     var body: some View {
         let size = GramCardMetrics.imageSize(sizeClass)
         let regular = sizeClass == .regular
-        ZStack(alignment: .bottom) {
-            picture
-                .frame(width: size.width, height: size.height, alignment: .top)
-                .clipped()
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onOpen)
-                .accessibilityHidden(true)
-            caption(regular: regular)
-                .padding(8)
-        }
-        .frame(width: size.width, height: size.height)
-        .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
+        // min(spec width, available width), with the height following the spec's aspect
+        // ratio: the clear base takes the proposed width (capped below) and the picture fills
+        // it from the top.
+        Color.clear
+            .aspectRatio(size.width / size.height, contentMode: .fit)
+            .overlay(alignment: .top) {
+                picture.accessibilityHidden(true)
+            }
+            .clipped()
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpen)
+            .overlay(alignment: .bottom) {
+                caption(regular: regular)
+                    .padding(8)
+            }
+            .frame(maxWidth: size.width)
+            .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
     }
 
     @ViewBuilder
@@ -475,7 +483,7 @@ struct GramFileCard: View {
             content
         } else {
             content
-                .frame(width: GramCardMetrics.cardWidth(sizeClass))
+                .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass))
                 .background(GramBubble.inFill)
                 .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
         }
@@ -580,7 +588,7 @@ struct GramSavedBadge: View {
                 .offset(x: 0, y: 2)
             Image(systemName: "bookmark.fill")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.white)
+                .foregroundStyle(Palette.onAccent)
                 .frame(width: 32, height: 30)
                 .background(GramBubble.outFill, in: Capsule())
                 .background(Capsule().fill(Palette.ground).padding(-2))
@@ -646,7 +654,7 @@ struct GramConversationRow: View {
     let selected: Bool
 
     private static let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-    private var secondary: Color { selected ? Color.white.opacity(0.82) : Palette.textDim }
+    private var secondary: Color { selected ? Palette.onAccentDim : Palette.textDim }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -655,13 +663,13 @@ struct GramConversationRow: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title)
                         .font(Typography.app(16, .semibold))
-                        .foregroundStyle(selected ? Color.white : Palette.text)
+                        .foregroundStyle(selected ? Palette.onAccent : Palette.text)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     if let time {
                         Text(GramDates.rowTime(for: time))
                             .font(Typography.app(14))
-                            .foregroundStyle(selected ? Color.white.opacity(0.82) : Palette.textFaint)
+                            .foregroundStyle(selected ? Palette.onAccentDim : Palette.textFaint)
                             .lineLimit(1)
                             .fixedSize()
                     }

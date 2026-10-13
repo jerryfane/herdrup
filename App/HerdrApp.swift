@@ -9530,7 +9530,7 @@ struct MockTransport: HerdrTransport {
             return Self.agentList
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
-        if requestLine.contains("gram.list") { return Self.gramList }
+        if requestLine.contains("gram.list") { return Self.gramPaged ? Self.gramPagedList(requestLine) : Self.gramList }
         if requestLine.contains("gram.post") { return Self.gramPosted }
         if requestLine.contains("gram.get_file") { return Self.gramFileContent }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
@@ -9795,6 +9795,78 @@ struct MockTransport: HerdrTransport {
     ]}}
     """#
 
+    /// `HERDR_MOCK_GRAM_PAGED=1`: `gram.list` answers as a store two pages deeper than
+    /// `gramList`, so the Gram paging UI test can scroll to the top. The first page is
+    /// `gramList`'s rows with `has_more`, so its oldest row (g9) is the cursor; `before_id`
+    /// g9 answers `gramOlderRows` (24 rows, more than a screen, `has_more`), and `before_id` go24 answers
+    /// `gramOldestRows` (one row, the end). Mirrored in MockWireFixtureTests, where every
+    /// answer is machine-checked to decode and page contiguously.
+    static var gramPaged: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_PAGED"] == "1"
+    }
+
+    static func gramPagedList(_ requestLine: String) -> String {
+        if requestLine.contains(#""before_id":"g9""#) {
+            GramPagingMock.shared.served(1)
+            return gramListAnswer(rows: [gramOlderRows], hasMore: true)
+        }
+        if requestLine.contains(#""before_id":"go24""#) {
+            GramPagingMock.shared.served(2)
+            return gramListAnswer(rows: [gramOldestRows], hasMore: false)
+        }
+        // A head poll asks for max(page, loaded) rows, so a daemon's answer covers every page
+        // the client already holds. Answering with the first page alone would cut the older
+        // rows off the list on the next poll.
+        let pages = [gramListRows, gramOlderRows, gramOldestRows].prefix(GramPagingMock.shared.depth + 1)
+        return gramListAnswer(rows: Array(pages), hasMore: pages.count < 3)
+    }
+
+    /// A `gram.list` answer from comma-joined row blocks.
+    static func gramListAnswer(rows: [String], hasMore: Bool) -> String {
+        #"{"id":"mock","result":{"type":"gram_list","messages":["#
+            + rows.joined(separator: ",") + #"],"has_more":"# + (hasMore ? "true" : "false") + "}}"
+    }
+
+    /// `gramList`'s message rows, without the envelope.
+    static var gramListRows: String {
+        let open = gramList.range(of: #""messages":["#)!.upperBound
+        let close = gramList.range(of: "]}}", options: .backwards)!.lowerBound
+        return String(gramList[open..<close])
+    }
+
+    /// The paged mock's second page, newest first, all older than g9.
+    static let gramOlderRows = #"""
+      {"id":"go1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Thanks. Take the deploy ticket next.","created_unix_ms":1722884400000,"read_by_owner":true},
+      {"id":"go2","direction":"agent_to_owner","from":"vetrina","text":"Smoke tests pass on staging.\nAll 38 checks green.","created_unix_ms":1722884100000,"read_by_owner":true},
+      {"id":"go3","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Run the smoke tests too.","created_unix_ms":1722883800000,"read_by_owner":true},
+      {"id":"go4","direction":"agent_to_owner","from":"vetrina","text":"Added the rollback step.\nStaging is green.","created_unix_ms":1722883500000,"read_by_owner":true},
+      {"id":"go5","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Add a rollback step before the migration.","created_unix_ms":1722883200000,"read_by_owner":true},
+      {"id":"go6","direction":"agent_to_owner","from":"vetrina","text":"Checklist is in docs/release.md.\nEight steps, two need a sign-off.","created_unix_ms":1722882900000,"read_by_owner":true},
+      {"id":"go7","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Draft the release checklist first.","created_unix_ms":1722882600000,"read_by_owner":true},
+      {"id":"go8","direction":"agent_to_owner","from":"vetrina","text":"Bundle size is down 14 percent.\nThe image pipeline was the culprit.","created_unix_ms":1722882300000,"read_by_owner":true},
+      {"id":"go9","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Nice. Keep an eye on the cold start.","created_unix_ms":1722882000000,"read_by_owner":true},
+      {"id":"go10","direction":"agent_to_owner","from":"vetrina","text":"Cold start is 1.2 s on a mid-range phone.\nWithin budget.","created_unix_ms":1722881700000,"read_by_owner":true},
+      {"id":"go11","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"What changed in the cache layer?","created_unix_ms":1722881400000,"read_by_owner":true},
+      {"id":"go12","direction":"agent_to_owner","from":"vetrina","text":"Swapped the LRU for a size-bounded one.\nEvictions dropped by half.","created_unix_ms":1722881100000,"read_by_owner":true},
+      {"id":"go13","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Write that up for the changelog.","created_unix_ms":1722880800000,"read_by_owner":true},
+      {"id":"go14","direction":"agent_to_owner","from":"vetrina","text":"Changelog entry drafted.\nIt is in the release branch.","created_unix_ms":1722880500000,"read_by_owner":true},
+      {"id":"go15","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Did the flaky login test settle?","created_unix_ms":1722880200000,"read_by_owner":true},
+      {"id":"go16","direction":"agent_to_owner","from":"vetrina","text":"It was a timezone bug in the fixture.\nFixed and green 20 runs in a row.","created_unix_ms":1722879900000,"read_by_owner":true},
+      {"id":"go17","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great catch. Merge it.","created_unix_ms":1722879600000,"read_by_owner":true},
+      {"id":"go18","direction":"agent_to_owner","from":"vetrina","text":"Merged. CI is rebuilding main.","created_unix_ms":1722879300000,"read_by_owner":true},
+      {"id":"go19","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Ping me when main is green.","created_unix_ms":1722879000000,"read_by_owner":true},
+      {"id":"go20","direction":"agent_to_owner","from":"vetrina","text":"Main is green.\nTagging a release candidate.","created_unix_ms":1722878700000,"read_by_owner":true},
+      {"id":"go21","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Hold the tag until the docs land.","created_unix_ms":1722878400000,"read_by_owner":true},
+      {"id":"go22","direction":"agent_to_owner","from":"vetrina","text":"Docs PR is open.\nTwo screenshots still to refresh.","created_unix_ms":1722878100000,"read_by_owner":true},
+      {"id":"go23","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Start with the release planning.","created_unix_ms":1722877800000,"read_by_owner":true},
+      {"id":"go24","direction":"agent_to_owner","from":"vetrina","text":"Older page: release planning starts here.","created_unix_ms":1722877500000,"read_by_owner":true}
+    """#
+
+    /// The paged mock's last page: one row, older than go24.
+    static let gramOldestRows = #"""
+      {"id":"gx1","direction":"agent_to_owner","from":"vetrina","text":"Oldest page: kickoff notes are in the repo.","created_unix_ms":1722796200000,"read_by_owner":true}
+    """#
+
     /// A canned `gram.post` echo, so the mock composer's send path resolves.
     static let gramPosted =
         #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
@@ -9843,6 +9915,20 @@ struct MockTransport: HerdrTransport {
     static func pagingAgent(kind: String, pane: String) -> AgentInfo {
         try! JSONDecoder().decode(AgentInfo.self, from: Data(
             #"{"pane_id":"\#(pane)","name":"\#(kind)","agent":"\#(kind)","agent_status":"idle","cwd":"/root/\#(kind)"}"#.utf8))
+    }
+}
+
+/// The paged Gram mock's server side (`HERDR_MOCK_GRAM_PAGED=1`): how many older pages it
+/// has served, so a head poll answers with everything the client has loaded.
+final class GramPagingMock: @unchecked Sendable {
+    static let shared = GramPagingMock()
+    private let lock = NSLock()
+    private var servedPages = 0
+
+    var depth: Int { lock.withLock { servedPages } }
+
+    func served(_ page: Int) {
+        lock.withLock { servedPages = max(servedPages, page) }
     }
 }
 

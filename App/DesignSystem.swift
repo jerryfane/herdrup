@@ -36,6 +36,11 @@ enum Palette {
     // with `text` (ink). `brand` (violet) is retired per-screen in the layout slices;
     // kept here unchanged until those call sites migrate to the ink fill.
     static let brand = Color(hex: 0x7A6FF0)
+    /// Text and glyphs ON a coloured fill (Gram's violet bubble, its send button, the selected
+    /// conversation row, an agent avatar's gradient): pure white (spec #FFFFFF).
+    static let onAccent = Color.white
+    /// Secondary text on the same fills (a selected row's preview and time): white at 82 %.
+    static let onAccentDim = onAccent.opacity(0.82)
 
     // Status = meaning. The ONLY palette that carries colour.
     static let waiting = Color(hex: 0xE9A63C)       // amber — an agent is asking you

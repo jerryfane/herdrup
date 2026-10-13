@@ -36,6 +36,25 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
+    /// MockTransport's `gram.list` under `HERDR_MOCK_GRAM_PAGED=1` (gramPagedList): the same
+    /// `before_id` matches and answers. The head answer here is the first page; the app's
+    /// head poll widens to the pages it has served, which a client-only test does not need.
+    private struct PagedGramFixtureTransport: HerdrTransport {
+        func roundTrip(_ requestLine: String) async throws -> String {
+            guard requestLine.contains("gram.list") else { return #"{"id":"x","result":{}}"# }
+            if requestLine.contains(#""before_id":"g9""#) {
+                return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOlderRows], hasMore: true)
+            }
+            if requestLine.contains(#""before_id":"go24""#) {
+                return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOldestRows], hasMore: false)
+            }
+            return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramListRows], hasMore: true)
+        }
+        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { $0.finish() }
+        }
+    }
+
     func testMockAgentListDecodesRealisticStatuses() async throws {
         let client = HerdrClient(transport: FixtureTransport())
         let agents = try await client.agentList()
@@ -365,6 +384,38 @@ final class MockWireFixtureTests: XCTestCase {
 
         // Today's three agent messages are unread → the header badge shows 3.
         XCTAssertEqual(messages.filter { $0.isUnread }.map(\.id), ["g2", "g3", "g4"])
+    }
+
+    /// The paged mock (`HERDR_MOCK_GRAM_PAGED=1`, MockTransport.gramPagedList): the head page
+    /// is `gramList` with `has_more`, `before_id` g9 answers 24 older rows with `has_more`,
+    /// and `before_id` go24 answers the last row. Driven through the real client, so the
+    /// request lines it matches on are the ones the app sends, and folded through `GramInbox`
+    /// as the page does: each page lands below the last, older and contiguous.
+    func testMockGramPagedListPagesContiguously() async throws {
+        let client = HerdrClient(transport: PagedGramFixtureTransport())
+        var inbox = GramInbox()
+        inbox.apply(try await client.gramList(limit: 40))
+        XCTAssertEqual(inbox.messages.map(\.id).last, "g9")
+        XCTAssertEqual(inbox.messages.count, 9)
+        XCTAssertEqual(inbox.nextCursor, "g9", "the head page says there is more")
+
+        var generation = inbox.generation
+        let second = try await client.gramList(limit: 40, beforeID: "g9")
+        XCTAssertTrue(inbox.appendPage(second, generation: generation))
+        XCTAssertEqual(inbox.messages.count, 33, "the second page holds 24 rows")
+        XCTAssertEqual(Array(inbox.messages.map(\.id)[9...]), (1...24).map { "go\($0)" })
+        XCTAssertEqual(inbox.messages.last?.text, "Older page: release planning starts here.")
+        XCTAssertEqual(inbox.nextCursor, "go24", "the second page says there is more")
+
+        generation = inbox.generation
+        let third = try await client.gramList(limit: 40, beforeID: "go24")
+        XCTAssertTrue(inbox.appendPage(third, generation: generation))
+        XCTAssertEqual(inbox.messages.map(\.id).last, "gx1")
+        XCTAssertNil(inbox.nextCursor, "the third page is the end")
+
+        XCTAssertEqual(inbox.messages.map(\.createdUnixMs), inbox.messages.map(\.createdUnixMs).sorted(by: >),
+                       "pages run newest first, each older than the last")
+        XCTAssertEqual(Set(inbox.messages.map(\.id)).count, inbox.messages.count, "no id repeats across pages")
     }
 
     /// `gram.post` echoes the stored message (`type: gram_sent`) — the composer
@@ -737,6 +788,50 @@ enum MockWireFixtures {
       {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}
     ]}}
     """#
+
+    /// The paged mock's pages. Keep byte-identical to MockTransport.gramOlderRows,
+    /// gramOldestRows and gramListAnswer(rows:hasMore:) in App/HerdrApp.swift.
+    static let gramOlderRows = #"""
+      {"id":"go1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Thanks. Take the deploy ticket next.","created_unix_ms":1722884400000,"read_by_owner":true},
+      {"id":"go2","direction":"agent_to_owner","from":"vetrina","text":"Smoke tests pass on staging.\nAll 38 checks green.","created_unix_ms":1722884100000,"read_by_owner":true},
+      {"id":"go3","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Run the smoke tests too.","created_unix_ms":1722883800000,"read_by_owner":true},
+      {"id":"go4","direction":"agent_to_owner","from":"vetrina","text":"Added the rollback step.\nStaging is green.","created_unix_ms":1722883500000,"read_by_owner":true},
+      {"id":"go5","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Add a rollback step before the migration.","created_unix_ms":1722883200000,"read_by_owner":true},
+      {"id":"go6","direction":"agent_to_owner","from":"vetrina","text":"Checklist is in docs/release.md.\nEight steps, two need a sign-off.","created_unix_ms":1722882900000,"read_by_owner":true},
+      {"id":"go7","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Draft the release checklist first.","created_unix_ms":1722882600000,"read_by_owner":true},
+      {"id":"go8","direction":"agent_to_owner","from":"vetrina","text":"Bundle size is down 14 percent.\nThe image pipeline was the culprit.","created_unix_ms":1722882300000,"read_by_owner":true},
+      {"id":"go9","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Nice. Keep an eye on the cold start.","created_unix_ms":1722882000000,"read_by_owner":true},
+      {"id":"go10","direction":"agent_to_owner","from":"vetrina","text":"Cold start is 1.2 s on a mid-range phone.\nWithin budget.","created_unix_ms":1722881700000,"read_by_owner":true},
+      {"id":"go11","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"What changed in the cache layer?","created_unix_ms":1722881400000,"read_by_owner":true},
+      {"id":"go12","direction":"agent_to_owner","from":"vetrina","text":"Swapped the LRU for a size-bounded one.\nEvictions dropped by half.","created_unix_ms":1722881100000,"read_by_owner":true},
+      {"id":"go13","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Write that up for the changelog.","created_unix_ms":1722880800000,"read_by_owner":true},
+      {"id":"go14","direction":"agent_to_owner","from":"vetrina","text":"Changelog entry drafted.\nIt is in the release branch.","created_unix_ms":1722880500000,"read_by_owner":true},
+      {"id":"go15","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Did the flaky login test settle?","created_unix_ms":1722880200000,"read_by_owner":true},
+      {"id":"go16","direction":"agent_to_owner","from":"vetrina","text":"It was a timezone bug in the fixture.\nFixed and green 20 runs in a row.","created_unix_ms":1722879900000,"read_by_owner":true},
+      {"id":"go17","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great catch. Merge it.","created_unix_ms":1722879600000,"read_by_owner":true},
+      {"id":"go18","direction":"agent_to_owner","from":"vetrina","text":"Merged. CI is rebuilding main.","created_unix_ms":1722879300000,"read_by_owner":true},
+      {"id":"go19","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Ping me when main is green.","created_unix_ms":1722879000000,"read_by_owner":true},
+      {"id":"go20","direction":"agent_to_owner","from":"vetrina","text":"Main is green.\nTagging a release candidate.","created_unix_ms":1722878700000,"read_by_owner":true},
+      {"id":"go21","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Hold the tag until the docs land.","created_unix_ms":1722878400000,"read_by_owner":true},
+      {"id":"go22","direction":"agent_to_owner","from":"vetrina","text":"Docs PR is open.\nTwo screenshots still to refresh.","created_unix_ms":1722878100000,"read_by_owner":true},
+      {"id":"go23","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Start with the release planning.","created_unix_ms":1722877800000,"read_by_owner":true},
+      {"id":"go24","direction":"agent_to_owner","from":"vetrina","text":"Older page: release planning starts here.","created_unix_ms":1722877500000,"read_by_owner":true}
+    """#
+
+    static let gramOldestRows = #"""
+      {"id":"gx1","direction":"agent_to_owner","from":"vetrina","text":"Oldest page: kickoff notes are in the repo.","created_unix_ms":1722796200000,"read_by_owner":true}
+    """#
+
+    static func gramListAnswer(rows: [String], hasMore: Bool) -> String {
+        #"{"id":"mock","result":{"type":"gram_list","messages":["#
+            + rows.joined(separator: ",") + #"],"has_more":"# + (hasMore ? "true" : "false") + "}}"
+    }
+
+    static var gramListRows: String {
+        let open = gramList.range(of: #""messages":["#)!.upperBound
+        let close = gramList.range(of: "]}}", options: .backwards)!.lowerBound
+        return String(gramList[open..<close])
+    }
 
     /// A canned `gram.post` echo (`type: gram_sent`). Keep in sync with the App's
     /// MockTransport.gramPosted.
