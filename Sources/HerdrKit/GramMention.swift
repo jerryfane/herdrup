@@ -51,9 +51,9 @@ public enum GramMention {
     }
 
     /// Who a composed message goes to and what it says. The first known mention gives the
-    /// recipient, spelled as in `knownNames`; a leading one is stripped from the body with
-    /// the run of whitespace and separators after it (and any whitespace before it). No known
-    /// mention: the recipient is nil (the shared queue) and the body is `text` unchanged.
+    /// recipient, spelled as in `knownNames`; a leading one is stripped from the body with the
+    /// space and at most ONE separator after it on the same line (and any whitespace before
+    /// it). No known mention: the recipient is nil (the shared queue) and `text` unchanged.
     public static func resolve(
         _ text: String, knownNames: [String]
     ) -> (recipient: String?, body: String) {
@@ -62,15 +62,34 @@ public enum GramMention {
             return (first.name, text)
         }
         var bodyStart = first.range.upperBound
-        while bodyStart < text.endIndex, text[bodyStart].isWhitespace || separators.contains(text[bodyStart]) {
+        func skip(while keep: (Character) -> Bool) {
+            while bodyStart < text.endIndex, keep(text[bodyStart]) { bodyStart = text.index(after: bodyStart) }
+        }
+        skip { $0.isWhitespace && !$0.isNewline }
+        // A separator only on the mention's own line: on the next line it is the message's
+        // ("@vetrina\n- item one" keeps its bullet).
+        if bodyStart < text.endIndex, !text[bodyStart].isNewline, isSeparator(at: bodyStart, in: text) {
             bodyStart = text.index(after: bodyStart)
         }
+        skip(while: \.isWhitespace)
         return (first.name, String(text[bodyStart...]))
     }
 
     /// What may sit between a leading mention and the message: "@vetrina, ship it",
-    /// "@vetrina: go", "@vetrina - go", "@vetrina; go".
-    private static let separators: Set<Character> = [",", ":", ";", "-", "–", "—"]
+    /// "@vetrina: go", "@vetrina;go", "@vetrina - go". A dash counts only when a space (or
+    /// nothing) follows it, so the message's own "-v", "--dry-run" or "-5%" stays; a comma,
+    /// colon or semicolon only before a space, letter or digit, so ":)" stays.
+    private static func isSeparator(at index: String.Index, in text: String) -> Bool {
+        let next = text.index(after: index) < text.endIndex ? text[text.index(after: index)] : nil
+        switch text[index] {
+        case "-", "–", "—":
+            return next.map(\.isWhitespace) ?? true
+        case ",", ":", ";":
+            return next.map { $0.isWhitespace || $0.isLetter || $0.isNumber } ?? true
+        default:
+            return false
+        }
+    }
 
     /// The token after a LEADING `@` (nothing but whitespace before it), up to where a name
     /// may end: "vetrna" for "@vetrna hi", "" for "@ hi" or "@". Nil when the text does not

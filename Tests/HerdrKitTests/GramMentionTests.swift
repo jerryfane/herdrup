@@ -140,6 +140,17 @@ final class GramMentionTests: XCTestCase {
                        "a mention later in the text keeps its punctuation")
     }
 
+    /// Only the separator after the mention goes: the message's own leading dash, colon or
+    /// bullet is content (CLI flags, negative numbers, markdown lists, smileys).
+    func testLeadingMentionKeepsTheMessagesOwnPunctuation() {
+        XCTAssertEqual(resolve("@vetrina -v deploy").body, "-v deploy")
+        XCTAssertEqual(resolve("@vetrina --dry-run deploy").body, "--dry-run deploy")
+        XCTAssertEqual(resolve("@vetrina -5% is fine").body, "-5% is fine")
+        XCTAssertEqual(resolve("@vetrina\n- item one\n- item two").body, "- item one\n- item two")
+        XCTAssertEqual(resolve("@vetrina :) thanks").body, ":) thanks")
+        XCTAssertEqual(resolve("@vetrina: - item").body, "- item", "one separator, then the content")
+    }
+
     func testAKnownNameMustEndTheToken() {
         XCTAssertNil(resolve("@vetrina2 ship it").recipient)
         XCTAssertNil(resolve("@trend-scoutx hi").recipient)
