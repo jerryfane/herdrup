@@ -82,24 +82,30 @@ struct GramView: View {
     /// True while dictating into the composer, so the field is disabled (typing can't be
     /// overwritten by the next partial) while the live transcript still appends.
     @State private var draftDictating = false
-    /// The feed's bottom edge in `feedPageSpace`. The feed runs up under the floating header,
-    /// so its frame is not the room the reader sees: that is `feedHeight`.
-    @State private var feedBottom: CGFloat = 0
-    /// The feed's VISIBLE height, from the floating header's bottom edge to its own, less
-    /// `feedRoomCushion`: the room the composer's pull-to-expand editor may take. The feed's
-    /// frame runs up under the header, so it is not room: counting it let the open editor
-    /// leave less feed visible below the header than the 48 pt the editor promises (logged
-    /// on iPhone: 45 pt under a 78 pt header, and layout then never settled).
-    private var feedHeight: CGFloat { max(0, feedBottom - headerBottom - Self.feedRoomCushion) }
+    /// The Gram page's height (feed, banner and composer together, above the keyboard). The
+    /// composer cannot change it: its growth only moves space between the feed and itself.
+    @State private var pageHeight: CGFloat = 0
+    /// The error/notice banner's height above the composer (0 without one).
+    @State private var bannerHeight: CGFloat = 0
     /// Kept out of the editor's room on top of the 48 pt it already leaves: the card grows by
     /// a few points more than the editor's text height (its handle row and paddings), so the
     /// visible feed below the header must not be budgeted to the point.
     private static let feedRoomCushion: CGFloat = 12
-    /// The composer card's height. Added back to the feed's so the room the composer
-    /// grows into does not shrink as the composer grows (see `composerEditorRoom`).
+    /// The composer card's height, for `composerAtRest` only.
     @State private var composerCardHeight: CGFloat = 0
+    /// The composer's recipient hint line above the card (0 without one).
+    @State private var composerHintHeight: CGFloat = 0
+    /// The composer's padding around its card (top 4 + bottom 8).
+    private static let composerPadding: CGFloat = 12
+    /// The room the composer's pull-to-expand editor may grow into (`composerEditorRoom`):
+    /// the page below the floating header, less the banner, the resting composer (hint,
+    /// padding, one-row card) and the cushion. From measurements the editor cannot move, on
+    /// purpose: it used to be the feed's measured height plus the card's growth, two values
+    /// updated in different passes, and while the editor opened they disagreed frame after
+    /// frame; SwiftUI never settled (main thread busy, the composer UI test hung on CI's iPhone).
     private var composerRoom: CGFloat {
-        feedHeight + max(0, composerCardHeight - ComposerStyle.restingHeight)
+        max(0, pageHeight - headerBottom - bannerHeight - composerHintHeight - Self.composerPadding
+            - ComposerStyle.restingHeight - Self.feedRoomCushion)
     }
     /// The composer is one row (not wrapped, no editor open): only then does a shrinking feed
     /// follow the reader to the bottom.
@@ -591,16 +597,13 @@ struct GramView: View {
     private var phoneBody: some View {
         VStack(spacing: 0) {
             content
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.frame(in: .named(Self.feedPageSpace)).maxY
-                } action: { if abs($0 - feedBottom) > 0.5 { feedBottom = $0 } }
                 .gramFloatingHeader {
                     header
                         .onGeometryChange(for: CGFloat.self) { proxy in
                             proxy.frame(in: .named(Self.feedPageSpace)).maxY
                         } action: { if abs($0 - headerBottom) > 0.5 { headerBottom = $0 } }
                 }
-            bannerView
+            measuredBanner
             composer
                 .environment(\.composerEditorRoom, composerRoom)
                 // The composer must ALWAYS fit: it holds the only way to send. Without a
@@ -625,7 +628,14 @@ struct GramView: View {
                 // Above the feed: the @-mention list floats up over the messages.
                 .zIndex(1)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if abs($0 - pageHeight) > 0.5 { pageHeight = $0 } }
         .coordinateSpace(.named(Self.feedPageSpace))
+    }
+
+    /// The banner in a stack that reports its height, 0 included (an empty view would not).
+    private var measuredBanner: some View {
+        VStack(spacing: 0) { bannerView }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if abs($0 - bannerHeight) > 0.5 { bannerHeight = $0 } }
     }
 
     /// Regular width: the message feed with the avatar-group header floating over its top,
@@ -640,9 +650,6 @@ struct GramView: View {
     private var iPadBody: some View {
         VStack(spacing: 0) {
             content
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.frame(in: .named(Self.feedPageSpace)).maxY
-                } action: { if abs($0 - feedBottom) > 0.5 { feedBottom = $0 } }
                 .gramFloatingHeader {
                     iPadHeader
                         .readableColumn(GramBubble.columnCap)
@@ -652,7 +659,7 @@ struct GramView: View {
                 }
             // The banner and composer share the feed's capped column, so the field lines up
             // under the messages instead of spanning the whole detail pane.
-            bannerView
+            measuredBanner
                 .readableColumn(GramBubble.columnCap)
             composer
                 .environment(\.composerEditorRoom, composerRoom)
@@ -660,6 +667,7 @@ struct GramView: View {
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
                 .zIndex(1)           // see phoneBody: the @-mention list floats over the feed
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if abs($0 - pageHeight) > 0.5 { pageHeight = $0 } }
         .coordinateSpace(.named(Self.feedPageSpace))
     }
 
@@ -1618,6 +1626,8 @@ struct GramView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .accessibilityIdentifier("gram-composer-hint")
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHintHeight = $0 }
+                    .onDisappear { composerHintHeight = 0 }
             }
             AdaptiveComposer(
                 text: draft,
@@ -3463,7 +3473,11 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
     @State private var barHeight: CGFloat = 0
 
     func body(content: Content) -> some View {
-        content
+        // The feed switches between views (list, "No matches", loading). Wrapped in a stack,
+        // the switch is a child and the header stays one view across it; attached straight
+        // to the switch, the header was rebuilt when the search hit "No matches", and the
+        // search field lost focus mid-word (the keyboard went down after "zz").
+        VStack(spacing: 0) { content }
             .contentMargins(.top, barHeight, for: .scrollContent)
             .overlay(alignment: .top) {
                 bar
