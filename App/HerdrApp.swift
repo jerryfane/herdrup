@@ -5250,6 +5250,9 @@ struct TerminalPaneContent: View {
     /// Set when the app actually goes `.background`, so the reseed on the next
     /// `.active` fires only after a real background — not a transient `.inactive`
     /// (Control Center / a notification banner), which would flash needlessly.
+    /// Also the terminal's `sceneBackgrounded`: while set, the pane hands its PTY width
+    /// claim back so another device viewing the agent is not held at this one's width
+    /// while the app is suspended. A transient `.inactive` keeps the claim.
     @State private var wasBackgrounded = false
     /// The live terminal's stream-liveness box. A `@State` reference type, so it SURVIVES
     /// a `streamGen` remount and keeps reading the same stream's evidence across one.
@@ -5417,6 +5420,9 @@ struct TerminalPaneContent: View {
                 // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
+                                 // Releases the width claim while the scene is in the
+                                 // background; cleared with the remount decision below.
+                                 sceneBackgrounded: wasBackgrounded,
                                  // The find and reply fields own their own responders.
                                  // Terminal focus is never inferred from device idiom.
                                  wantsTerminalKeyFocus: isForeground && !replyFocused && !findFocused

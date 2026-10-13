@@ -63,14 +63,16 @@ struct FindRequest: Equatable {
 /// crisply with no horizontal overflow. A co-viewing desktop narrows to that width
 /// while the app views the pane.
 ///
-/// The lock is handed back on TEARDOWN ONLY — one `lock:false` from `stop()` (see
-/// `releaseGeometryOwnership`), i.e. on close or LRU eviction. Merely HIDING a
-/// keep-mounted pane keeps the lease and simply stops refreshing it, so it lapses on the
-/// daemon's 5-minute TTL and the desktop reclaims the width once nobody has looked at the
-/// pane for that long. Releasing on every hide was the original design and it made every
-/// switch between two loaded panes cost two winsize changes — one when the TUI reclaimed
-/// its layout width, one when re-fronting re-pinned ours — and therefore two full agent
-/// repaints, which read as the terminal rescrolling on every agent switch.
+/// The lock is handed back with one `lock:false` (see `releaseGeometryOwnership`) on
+/// teardown (`stop()`: close or LRU eviction), when the window scene goes to the background
+/// (`setSceneBackgrounded`), and when a keep-mounted pane has stayed HIDDEN for
+/// `TerminalSizeClaim.hiddenGraceNanos` (`setForeground`). The grace exists because releasing
+/// on every hide made every switch between two loaded panes cost two winsize changes — one
+/// when the TUI reclaimed its layout width, one when re-fronting re-pinned ours — and
+/// therefore two full agent repaints, which read as the terminal rescrolling on every agent
+/// switch. A claim that is never released (crash, kill, lost network) lapses on the short
+/// `TerminalSizeClaim.leaseTTLMillis`, so another device viewing the agent is not held at
+/// this device's width for long.
 struct LiveTerminalView: UIViewRepresentable {
     let client: HerdrClient
     let paneID: String
@@ -80,11 +82,16 @@ struct LiveTerminalView: UIViewRepresentable {
     /// closure never captures a stale view.
     var onNavigate: ((Int) -> Void)? = nil
     /// Whether this pane is the one on screen. A keep-mounted pane that goes offscreen
-    /// (another agent is fronted, or we're back on the list) stays subscribed but must
-    /// RELEASE the PTY width-lock so it stops pinning a co-viewing desktop to the phone's
-    /// width while nobody's looking; it re-takes the lock when fronted again. Only the
-    /// lock lifecycle changes — the stream and the SwiftTerm view stay warm.
+    /// (another agent is fronted, or we're back on the list) stays subscribed and keeps the
+    /// PTY width-lock for a short grace, then RELEASES it so it stops pinning a co-viewing
+    /// desktop to this device's width while nobody's looking; it re-takes the lock when fronted
+    /// again. Only the lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
+    /// The host's window scene is in the background (set on `.background`, cleared on
+    /// `.active`). The width-lock is released at once and not re-taken until it clears.
+    /// Owned by the host, together with its return-to-front remount, so a pane that is about
+    /// to be remounted is dismantled rather than re-claiming under its old viewer id first.
+    var sceneBackgrounded: Bool = false
     /// Whether the terminal itself should hold keyboard focus (drive keys straight to the PTY).
     /// A deliberate tap on the terminal takes focus on every iOS idiom, including
     /// iPad software keyboards and iOS apps running on Apple Silicon Macs.
@@ -213,6 +220,9 @@ struct LiveTerminalView: UIViewRepresentable {
         context.coordinator.setPredictionMode(viewOnly ? .off : PredictiveEchoSetting.mode(predictiveEcho))
         context.coordinator.hostFitsStreamWidth = fitsStreamWidth
         context.coordinator.onResizeRefused = onResizeRefused
+        // Before setForeground: a return to the front that also re-fronts this pane must
+        // re-claim exactly once, from whichever of the two flips last.
+        context.coordinator.setSceneBackgrounded(sceneBackgrounded)
         context.coordinator.setForeground(isForeground)
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
@@ -980,24 +990,47 @@ struct LiveTerminalView: UIViewRepresentable {
         /// reconnect. 2.5× the server's 20s ping, so a single dropped ping is tolerated.
         fileprivate static let streamStuckTimeout: TimeInterval = 50
 
-        /// PTY width-lease heartbeat (#137). The daemon expires a viewer's lease on a
-        /// 5-minute TTL backstop (`DEFAULT_PTY_LEASE_TTL`), so a stable-size FOREGROUND
-        /// view — one that never fires a fresh `sizeChanged` — would silently lose its
-        /// lease. This task periodically re-asserts the current committed size (carrying
-        /// the same `viewerID`) to refresh the lease. Re-armed by `start()`, cancelled by
-        /// `stop()`. Backgrounded/relocking panes are skipped: they have no lease to keep.
+        /// PTY width-lease heartbeat (#137). We ask for a short TTL (`TerminalSizeClaim`), so
+        /// a stable-size FOREGROUND view — one that never fires a fresh `sizeChanged` — would
+        /// silently lose its lease. This task periodically re-asserts the current committed
+        /// size (carrying the same `viewerID`) to refresh the lease. Re-armed by `start()`,
+        /// cancelled by `stop()`. Hidden, backgrounded and relocking panes are skipped.
         private var heartbeatTask: Task<Void, Never>?
-        /// Lease TTL we request on every `lock:true` (`ttl_ms`). Explicit rather than the
-        /// server default so the refresh cadence below is provably under it.
-        private static let leaseTTLMillis: UInt64 = 300_000                 // 5 min
-        /// Lease-refresh cadence — comfortably under `leaseTTLMillis` so a single missed
-        /// beat can't lapse the lease (2 min refresh vs 5 min TTL).
-        private static let heartbeatIntervalNanos: UInt64 = 120_000_000_000  // 2 min
         /// A guest's lease terms: the host clamps a guest's TTL far below the owner's.
-        private var leaseTTL: UInt64 { viewOnly ? GuestTerminalSize.leaseTTLMillis : Self.leaseTTLMillis }
+        private var leaseTTL: UInt64 { viewOnly ? GuestTerminalSize.leaseTTLMillis : TerminalSizeClaim.leaseTTLMillis }
         private var heartbeatInterval: UInt64 {
-            viewOnly ? GuestTerminalSize.leaseRenewalNanos : Self.heartbeatIntervalNanos
+            viewOnly ? GuestTerminalSize.leaseRenewalNanos : TerminalSizeClaim.renewalNanos
         }
+        /// How long a hidden pane keeps its claim before `setForeground(false)`'s timer releases
+        /// it (see `TerminalSizeClaim.hiddenGraceNanos` for why there is a grace at all). DEBUG
+        /// builds take `HERDR_CLAIM_GRACE_MS` so the UI tests run in seconds.
+        private static let hiddenClaimGraceNanos: UInt64 = {
+            #if DEBUG
+            return TerminalSizeClaim.hiddenGraceNanos(
+                overrideMillis: ProcessInfo.processInfo.environment["HERDR_CLAIM_GRACE_MS"])
+            #else
+            return TerminalSizeClaim.hiddenGraceNanos
+            #endif
+        }()
+        /// The pending release of a hidden pane's claim. Armed by a hide, cancelled by a re-show,
+        /// a background (which releases at once) and `stop()`.
+        private var hiddenReleaseTask: Task<Void, Never>?
+        /// The window scene this pane is in has gone to the background (iOS suspension, sleep, a
+        /// minimised Mac window). Its claim was released then; nothing may claim again until the
+        /// scene comes back.
+        private var sceneBackgrounded = false
+        /// Whether this pane may hold a claim right now: in front, in a scene that is not in the
+        /// background. Every `lock:true` path checks this, not `foreground` alone.
+        private var claimsGeometry: Bool { foreground && !sceneBackgrounded }
+        /// This view has sent a `lock:true` since its last release, so the daemon may hold a
+        /// lease for its `viewerID`. Set as each `lock:true` goes out, cleared by the release
+        /// that hands it back, so a lease is released AT MOST ONCE however many of the grace
+        /// timer, a background and `stop()` (which can itself run twice, `.exited` then
+        /// dismantle) reach `releaseGeometryOwnership`. A pane that never claimed (mounted
+        /// hidden) sends no `lock:false` either: with no other lease left the daemon applies a
+        /// release's size once as a parting handoff, a needless SIGWINCH and agent redraw for
+        /// a lease that never existed.
+        private var holdsClaim = false
 
         /// Page-between-agents callback (see `LiveTerminalView.onNavigate`), refreshed
         /// by `updateUIView`. +1 = next agent, -1 = previous.
@@ -1070,30 +1103,22 @@ struct LiveTerminalView: UIViewRepresentable {
         /// which hops back via `MainActor.run` — so all access is main-actor-serialized.
         private static var geometryGeneration: [String: Int] = [:]
         private var myGeometryGeneration = 0
-        /// The in-flight background `lock:false` release per pane, so a re-show
-        /// (`setForeground(true)`) can AWAIT it before re-locking — the re-lock can then never
-        /// be overtaken by a reordered release that would leave the visible pane unlocked.
+        /// The in-flight `lock:false` release per pane, so a re-claim (`reclaimGeometry`) can
+        /// AWAIT it before re-locking — the re-lock can then never be overtaken by a reordered
+        /// release that would leave the visible pane unlocked.
         private static var geometryReleaseTask: [String: Task<Void, Never>] = [:]
-        /// Whether this (keep-mounted) pane is currently on screen. Only the FOREGROUND
-        /// pane holds the PTY width-lock; a backgrounded pane releases it (see
-        /// `setForeground`) so it can't pin a co-viewing desktop while hidden, and a
-        /// hidden pane's async `sizeChanged` tracks the grid but never re-locks.
+        /// Whether this (keep-mounted) pane is currently on screen. Only a FOREGROUND pane
+        /// refreshes or re-takes the PTY width-lock; a hidden pane keeps it for the grace, then
+        /// releases it (see `setForeground`), and its async `sizeChanged` tracks the grid but
+        /// never re-locks.
         private var foreground = true
-        /// True between a re-show (`setForeground(true)`) and its deferred re-lock completing —
-        /// i.e. while we're awaiting the in-flight background `lock:false` before re-taking the
+        /// True between a re-claim (`reclaimGeometry`) and its deferred re-lock completing —
+        /// i.e. while we're awaiting the in-flight `lock:false` before re-taking the
         /// lock. During this window EVERY geometry request must NOT
         /// start a drain, or a `lock:true` could race the still-in-flight `lock:false` on a
         /// separate SSH channel and leave the VISIBLE pane unlocked. The deferred re-lock clears
         /// it and then drives toward the LIVE grid.
         private var relockPending = false
-        /// The generation whose lock has already been handed back (a `lock:false` release). A
-        /// generation is released AT MOST ONCE. `releaseGeometryOwnership` now runs from `stop()`
-        /// ONLY — a hide keeps the lease — but `stop()` itself can run twice (`.exited` then
-        /// dismantle) without bumping the generation, so the idempotence is still required.
-        /// Without it a second same-generation release would fire a redundant `lock:false`
-        /// (re-resizing the shared PTY) AND let the first release's generation-keyed self-prune
-        /// clobber the newer release's registry handle.
-        private var releasedGeneration: Int?
         /// Hardware-keyboard connect/disconnect observers so key-drive focus follows the keyboard
         /// live (plug in → the front pane takes focus; unplug → it resigns). Removed in `stop()`.
         private var keyboardObservers: [NSObjectProtocol] = []
@@ -1380,7 +1405,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
             Self.geometryGeneration[paneID] = gen
             myGeometryGeneration = gen
-            // Symmetric with setForeground(true): on a fast evict→reopen (or a transient
+            // Symmetric with reclaimGeometry: on a fast evict→reopen (or a transient
             // double-mount) of the SAME pane id, a prior coordinator's ALREADY-committed
             // lock:false could otherwise overtake this fresh mount's first lock:true and strand
             // the visible pane unlocked. Defer this mount's first lock (relockPending) until any
@@ -2047,6 +2072,8 @@ struct LiveTerminalView: UIViewRepresentable {
             watchdogTask = nil
             heartbeatTask?.cancel()         // stop the PTY width-lease keep-alive (#137)
             heartbeatTask = nil
+            hiddenReleaseTask?.cancel()     // teardown releases right below
+            hiddenReleaseTask = nil
             reconnectTask?.cancel()         // cancel any pending backoff restart
             reconnectTask = nil
             backfillTask?.cancel()
@@ -2054,22 +2081,36 @@ struct LiveTerminalView: UIViewRepresentable {
             releaseGeometryOwnership()
         }
 
-        /// RELEASE the phone's geometry lock (Fix A) when the terminal view closes,
-        /// so a co-viewing desktop reclaims its own width. While the view is open we
-        /// take ownership with `lock:true` through the geometry drain so the shared PTY —
-        /// and therefore the agent's TUI — lays out at the phone's width and fits
-        /// crisply; on teardown we fire ONE best-effort `lock:false` at the last
-        /// known size to hand ownership back. Fire-and-forget: errors are ignored
-        /// (the view is going away regardless); it uses the last SENT size, or the
-        /// desired size if nothing was confirmed yet.
+        /// RELEASE the phone's geometry lock (Fix A) so a co-viewing desktop reclaims its own
+        /// width: on teardown, when the scene goes to the background, and when a hidden pane's
+        /// grace runs out. While the pane is claimed we take ownership with `lock:true`
+        /// through the geometry drain so the shared PTY — and therefore the agent's TUI — lays
+        /// out at the phone's width and fits crisply; releasing fires ONE best-effort
+        /// `lock:false` at the last known size to hand ownership back. Fire-and-forget: errors
+        /// are ignored (the TTL is the backstop); it uses the last SENT size, or the desired
+        /// size if nothing was confirmed yet. A pane that stays alive re-claims through
+        /// `reclaimGeometry`. Returns the release's task when one was started, so a background
+        /// release can keep the app awake until it is on the wire.
         ///
         /// ORDERING (review HIGH): the release must land strictly AFTER any in-flight
         /// `lock:true` resize. We do NOT cancel the resize drain — a cancelled task's
         /// already-dispatched request can still apply server-side, and if it lands
         /// AFTER our `lock:false` the pane stays locked (desktop pinned narrow). So we
         /// hand the drain off and AWAIT it first, so its last `lock:true` round-trip
-        /// completes before we send the releasing `lock:false`.
-        private func releaseGeometryOwnership() {
+        /// completes before we send the releasing `lock:false`. A live pane's handed-off drain
+        /// stops on its own (it is gated on `claimsGeometry`), and a re-claim awaits this
+        /// release — and so that drain — before it starts a new one.
+        @discardableResult
+        private func releaseGeometryOwnership() -> Task<Void, Never>? {
+            // Hand a lease back EXACTLY ONCE, and only one this view took (see holdsClaim). A
+            // second release with no claim between — stop() after a grace or background
+            // release, or stop()'s .exited+dismantle double call — is a no-op: nothing can claim
+            // while hidden, backgrounded or stopped, so there is nothing left to release, and
+            // skipping it prevents both a redundant lock:false and the prune-clobber of a newer
+            // chained release's registry handle. Checked before the hand-off, so a drain that
+            // never sent keeps its own handle and simply winds down.
+            guard holdsClaim else { return nil }
+            holdsClaim = false
             let target = confirmedTarget ?? desiredTarget
             let inflight = resizeTask
             resizeTask = nil
@@ -2079,16 +2120,9 @@ struct LiveTerminalView: UIViewRepresentable {
             // laid out): an older release may still be in flight, and its entry is the only handle
             // a future re-lock has to await it.
             // A view following the stream never held a lease, and must never send `set_pty_size`.
-            guard !fitsStreamWidth, let target, target.cols >= 4, target.rows >= 2 else { return }
+            guard !fitsStreamWidth, let target, target.cols >= 4, target.rows >= 2 else { return nil }
             let cols = target.cols
             let rows = target.rows
-            // Hand a generation's lock back EXACTLY ONCE (see releasedGeneration). A second
-            // same-generation release — stop() after a hide, or stop()'s .exited+dismantle double
-            // call — is a no-op: after stop the drain is handed off and new requests are gated,
-            // so there is nothing left to release, and skipping it prevents both a redundant
-            // lock:false and the prune-clobber of a newer chained release's registry handle.
-            guard releasedGeneration != myGeometryGeneration else { return }
-            releasedGeneration = myGeometryGeneration
             let client = self.client
             let pane = self.paneID
             let myGen = self.myGeometryGeneration
@@ -2100,14 +2134,14 @@ struct LiveTerminalView: UIViewRepresentable {
             // lock:false lands, leaving the visible pane unlocked.
             let previous = Self.geometryReleaseTask[pane]
             let gate = self.resizeGate
-            Self.geometryReleaseTask[pane] = Task.detached {
+            let release = Task.detached {
                 await previous?.value        // an older release's lock:false must land BEFORE ours
                 _ = await inflight?.value    // let the in-flight lock:true finish its round-trip
                 await keepalive?.value
-                // If a newer coordinator OR a re-show claimed this pane while we awaited, it owns
+                // If a newer coordinator OR a re-claim took this pane while we awaited, it owns
                 // the lock now — releasing would unlock a pane still on screen. Bail so its
-                // lock:true stands. (And if this release DID commit before the re-show bumped the
-                // generation, `setForeground(true)` AWAITS this task before it re-locks.)
+                // lock:true stands. (And if this release DID commit before the re-claim bumped the
+                // generation, `reclaimGeometry` AWAITS this task before it re-locks.)
                 let current = await MainActor.run { Coordinator.geometryGeneration[pane] }
                 guard current == myGen else { return }
                 // Through the gate, deciding NOW: the in-flight lock:true awaited above may have
@@ -2124,42 +2158,22 @@ struct LiveTerminalView: UIViewRepresentable {
                     if Coordinator.geometryGeneration[pane] == myGen { Coordinator.geometryReleaseTask[pane] = nil }
                 }
             }
+            Self.geometryReleaseTask[pane] = release
+            return release
         }
 
         /// Front↔background transition for a KEEP-MOUNTED pane. A HIDE KEEPS THE PTY WIDTH-LOCK
-        /// and stops refreshing it, letting it lapse on the daemon's TTL; a show RE-ASSERTS it,
-        /// which is a no-op at the PTY whenever the lease never lapsed. Hiding used to release
-        /// immediately, and that made every agent switch reflow the shared PTY twice and repaint
-        /// the agent twice — see the type comment.
-        ///
-        /// The VISIBLE pane is never left unlocked, because the re-assert's `lock:true` is
-        /// guaranteed to be the LAST geometry op even when a TEARDOWN-INITIATED `lock:false` is
-        /// still in flight for this pane: (1) bumping `geometryGeneration` makes a not-yet-sent
-        /// `lock:false` bail on its generation guard; (2) `relockPending` makes EVERY
-        /// geometry request (the re-assert itself AND any fitting proposal in the window) defer
-        /// while we await that release, so no `lock:true` can race it; the deferred re-assert then
-        /// drives toward the LIVE grid. Different panes own different PTYs + generation keys, so
-        /// releases/retakes across panes never contend.
+        /// for `hiddenClaimGraceNanos`, unrefreshed, then releases it; a show cancels a pending
+        /// release and RE-ASSERTS the lock (`reclaimGeometry`), which is a no-op at the PTY
+        /// whenever the lease was still held. Hiding used to release immediately, and that made
+        /// every agent switch reflow the shared PTY twice and repaint the agent twice — see the
+        /// type comment — so a quick switch away and back must stay inside the grace.
         func setForeground(_ f: Bool) {
             guard !stopped, f != foreground else { return }
             foreground = f
             if f {
-                let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
-                Self.geometryGeneration[paneID] = gen
-                myGeometryGeneration = gen
-                // DEFEAT the drain's dedup so the re-assert genuinely re-sends. This is required
-                // for correctness now that a hide no longer releases: if the lease LAPSED on the
-                // daemon TTL while this pane was hidden, the confirmed target is stale-but-EQUAL
-                // to the desired one, so without clearing it here the dedup would skip the
-                // re-lock and leave the pane at whatever width the TUI reclaimed. Re-asserting
-                // when the lease did NOT lapse is free: it resolves to the same size and the
-                // daemon returns early on an unchanged winsize, so it cannot cause the redraw
-                // this whole path exists to avoid.
-                confirmedTarget = nil
-                relockPending = true            // defer requests until any teardown release lands
-                // Populated only by `stop()` now, so on a normal re-front this is nil and the await
-                // below is a no-op; it still orders a re-front that races a teardown release.
-                let pending = Self.geometryReleaseTask[paneID]
+                hiddenReleaseTask?.cancel()     // back inside the grace: keep the claim
+                hiddenReleaseTask = nil
                 Task { @MainActor [weak self] in
                     // Re-fronting a keep-mounted pane whose geometry changed while hidden can
                     // leave the scroller and the cursor reconciled against the wrong metrics.
@@ -2167,19 +2181,14 @@ struct LiveTerminalView: UIViewRepresentable {
                     // reflow) reconciles them and queues one safe repaint - unlike the old
                     // unconditional full repaint, it cannot paint a grid the stream has not
                     // applied yet.
-                    if let self, let view = self.view, self.foreground, !self.stopped {
-                        let terminal = view.getTerminal()
-                        let grid = self.streamAppliedGeometry ?? (cols: terminal.cols, rows: terminal.rows)
-                        view.applyTerminalSize(cols: grid.cols, rows: grid.rows)
-                    }
-                    await pending?.value        // let any committed lock:false land FIRST
-                    guard let self, self.foreground, !self.stopped,
-                          self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
-                    self.relockPending = false
-                    // Re-take lock:true at THIS pane's own local fit, now last. A hidden pane
-                    // kept proposing its fit into `desiredTarget` without sending it.
-                    self.startGeometryDrain()
+                    guard let self, let view = self.view, self.foreground, !self.stopped else { return }
+                    let terminal = view.getTerminal()
+                    let grid = self.streamAppliedGeometry ?? (cols: terminal.cols, rows: terminal.rows)
+                    view.applyTerminalSize(cols: grid.cols, rows: grid.rows)
                 }
+                // Enqueued after the repaint, as before: a proposal that repaint makes is tracked
+                // under `relockPending` and the re-lock then drives toward it.
+                if !sceneBackgrounded { reclaimGeometry() }
             } else {
                 finishPresentation()
                 prediction.reset()
@@ -2188,20 +2197,84 @@ struct LiveTerminalView: UIViewRepresentable {
                 // Typing goes to the pane in front: release this one's input stream. Its next
                 // key opens a fresh one.
                 if let inputSender { MainActor.assumeIsolated { inputSender.closeStream() } }
-                // DELIBERATELY NO RELEASE HERE. A `lock:false` would drop the last width lease,
-                // and the daemon then stops forcing a size on purpose (`effective_pty_size` -> None,
-                // so `reconcile_pty_lease_size` leaves the winsize to the local TUI, which reclaims
-                // its own layout width). That is a REAL winsize change, so the agent takes a SIGWINCH
-                // and reflows its whole transcript — and re-fronting re-locked at our grid and made it
-                // reflow BACK. Two resizes and two full redraws for every switch between two panes
-                // that never even unmounted, which is the "terminal rescrolls when I change agent"
-                // report. Holding the lease makes both no-ops, because an unchanged size returns early
-                // in the daemon (`current_size == size`).
-                //
-                // The lease is not refreshed either: `startHeartbeat` is foreground-gated, so a pane
-                // nobody is viewing lets its lease expire on the daemon's DEFAULT_PTY_LEASE_TTL (5
-                // minutes) and the desktop reclaims the width then. Teardown still releases at once —
-                // see `stop()`, which is what hands the width back on close or LRU eviction.
+                // NO RELEASE YET. A `lock:false` drops this device's width lease, and if it was
+                // the last one the daemon stops forcing a size (`effective_pty_size` -> None) and
+                // the local TUI reclaims its own layout width: a REAL winsize change, so the agent
+                // takes a SIGWINCH and reflows its whole transcript, and re-fronting re-locks at
+                // our grid and makes it reflow BACK. Two redraws for a glance at another agent.
+                // So the lease is held, unrefreshed (`startHeartbeat` is foreground-gated), for
+                // the grace, and only a pane left hidden past it hands the width back. A pane
+                // in a backgrounded scene has released already.
+                guard !sceneBackgrounded else { return }
+                hiddenReleaseTask?.cancel()
+                let grace = Self.hiddenClaimGraceNanos
+                hiddenReleaseTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: grace)
+                    guard !Task.isCancelled, let self, !self.stopped, !self.foreground else { return }
+                    self.hiddenReleaseTask = nil
+                    self.releaseGeometryOwnership()
+                }
+            }
+        }
+
+        /// The host's window scene went to (or came back from) the background. Going: every
+        /// pane hands its claim back AT ONCE, hidden or not — iOS is about to suspend the app,
+        /// after which nothing renews or releases, and another device viewing the agent would
+        /// sit at this device's width until the TTL. A background-task assertion keeps the app
+        /// running until the `lock:false` is on the wire. Coming back: the pane in front
+        /// re-claims (a hidden one stays released until it is shown). On iOS the host remounts
+        /// the front pane on return instead, and the fresh coordinator claims for itself.
+        func setSceneBackgrounded(_ backgrounded: Bool) {
+            guard !stopped, backgrounded != sceneBackgrounded else { return }
+            sceneBackgrounded = backgrounded
+            if backgrounded {
+                hiddenReleaseTask?.cancel()
+                hiddenReleaseTask = nil
+                relockPending = false
+                guard let release = releaseGeometryOwnership() else { return }
+                let assertion = MainActor.assumeIsolated {
+                    BackgroundAssertion(name: "herdr.release-terminal-size")
+                }
+                Task { @MainActor in
+                    await release.value
+                    assertion.end()
+                }
+            } else if foreground {
+                reclaimGeometry()
+            }
+        }
+
+        /// Re-take this pane's PTY width-lock (a show, or the scene coming back).
+        ///
+        /// The VISIBLE pane is never left unlocked, because the re-assert's `lock:true` is
+        /// guaranteed to be the LAST geometry op even when a `lock:false` is still in flight for
+        /// this pane: (1) bumping `geometryGeneration` makes a not-yet-sent `lock:false` bail on
+        /// its generation guard; (2) `relockPending` makes EVERY geometry request (the re-assert
+        /// itself AND any fitting proposal in the window) defer while we await that release, so
+        /// no `lock:true` can race it; the deferred re-assert then drives toward the LIVE grid.
+        /// Different panes own different PTYs + generation keys, so releases/retakes across
+        /// panes never contend.
+        private func reclaimGeometry() {
+            let gen = (Self.geometryGeneration[paneID] ?? 0) + 1
+            Self.geometryGeneration[paneID] = gen
+            myGeometryGeneration = gen
+            // DEFEAT the drain's dedup so the re-assert genuinely re-sends. A released (or
+            // lapsed) lease leaves the confirmed target stale-but-EQUAL to the desired one, so
+            // without clearing it here the dedup would skip the re-lock and leave the pane at
+            // whatever width the TUI reclaimed. Re-asserting when the lease was still held is
+            // free: it resolves to the same size and the daemon returns early on an unchanged
+            // winsize, so it cannot cause the redraw the grace exists to avoid.
+            confirmedTarget = nil
+            relockPending = true                // defer requests until any release lands
+            let pending = Self.geometryReleaseTask[paneID]
+            Task { @MainActor [weak self] in
+                await pending?.value            // let any committed lock:false land FIRST
+                guard let self, self.claimsGeometry, !self.stopped,
+                      self.myGeometryGeneration == gen else { return }   // a newer hide/show superseded us
+                self.relockPending = false
+                // Re-take lock:true at THIS pane's own local fit, now last. A hidden pane
+                // kept proposing its fit into `desiredTarget` without sending it.
+                self.startGeometryDrain()
             }
         }
 
@@ -2314,50 +2387,55 @@ struct LiveTerminalView: UIViewRepresentable {
         }
 
         /// PTY width-lease keep-alive (#137). A stable-size foreground view fires no fresh
-        /// `set_pty_size` proposal, so without this its lease would lapse at the daemon's
-        /// 5-minute TTL and a co-viewing desktop would reclaim the width. Every
-        /// `heartbeatIntervalNanos` we RE-ASSERT the committed tuple as a keepalive: it is
-        /// explicitly NOT a geometry change, so it does not clear committed state, bump the
-        /// target generation, start a resize presentation or make the reader wait behind a
-        /// retained frame. Only a FOREGROUND, non-relocking, idle-drain view
-        /// with a committed size refreshes, and the foreground half of that is now
-        /// LOAD-BEARING POLICY rather than bookkeeping: a hidden pane KEEPS its lease (a hide no
-        /// longer releases — see `setForeground`) and deliberately stops refreshing it, so the
-        /// lease expires on the daemon TTL and a co-viewing desktop reclaims the width only once
-        /// nobody has looked at the pane for that long. Do not relax this guard to cover hidden
-        /// panes: that would pin the width for as long as the app is open. Skipping while a
-        /// relock is pending or a drain is in flight preserves the "at most one set_pty_size in
-        /// flight per pane" invariant.
+        /// `set_pty_size` proposal, so without this its lease would lapse at the short TTL we
+        /// ask for (`TerminalSizeClaim.leaseTTLMillis`) and a co-viewing desktop would reclaim
+        /// the width. Every `TerminalSizeClaim.renewalNanos` we RE-ASSERT the committed tuple
+        /// as a keepalive: it is explicitly NOT a geometry change, so it does not clear
+        /// committed state, bump the target generation, start a resize presentation or make
+        /// the reader wait behind a retained frame. Only a view that CLAIMS geometry (in front,
+        /// scene not backgrounded), non-relocking, idle-drain, with a committed size
+        /// refreshes, and the claim half of that is LOAD-BEARING POLICY rather than
+        /// bookkeeping: a hidden pane holds its lease unrefreshed for the grace and then
+        /// releases it (see `setForeground`), and a backgrounded scene has released already.
+        /// Do not relax this guard to cover hidden panes: that would pin the width for as long
+        /// as the app is open. Skipping while a relock is pending or a drain is in flight
+        /// preserves the "at most one set_pty_size in flight per pane" invariant.
         private func startHeartbeat() {
             heartbeatTask?.cancel()
             heartbeatTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: self?.heartbeatInterval ?? Self.heartbeatIntervalNanos)
+                    try? await Task.sleep(nanoseconds: self?.heartbeatInterval ?? TerminalSizeClaim.renewalNanos)
                     guard let self, !self.stopped else { return }
                     // Nothing unsettled: no drain, no request in flight, no target waiting
                     // to be sent, and no resize on screen. A keepalive must never overtake
                     // or duplicate a real geometry change.
                     // A target that was never confirmed (its drain gave up, e.g. the resize raced
                     // the stream's open) is retried here rather than waiting for a relayout.
-                    if !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
+                    if !self.fitsStreamWidth, self.claimsGeometry, !self.relockPending, self.resizeTask == nil,
                        self.desiredTarget != nil, self.desiredTarget != self.confirmedTarget {
                         self.resizeRetries = 0
                         self.startGeometryDrain()
                         continue
                     }
-                    guard !self.fitsStreamWidth, self.foreground, !self.relockPending, self.resizeTask == nil,
+                    guard !self.fitsStreamWidth, self.claimsGeometry, !self.relockPending, self.resizeTask == nil,
                           self.inflightTarget == nil, !self.presentationActive,
                           let target = self.confirmedTarget, self.desiredTarget == target,
                           target.cols >= 4, target.rows >= 2 else { continue }
                     let task = Task { @MainActor [weak self] in
-                        guard let self, !self.stopped, !self.fitsStreamWidth, self.foreground else { return }
+                        guard let self, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry else { return }
+                        // Set before sending: a send that times out may still have reached the
+                        // daemon, so the later release must go out. A send the gate refused
+                        // (nil) provably did not, so the previous state is restored.
+                        let held = self.holdsClaim
+                        self.holdsClaim = true
                         do {
-                            _ = try await self.resizeGate.send {
+                            let sent = try await self.resizeGate.send {
                                 try await self.client.setPTYSize(
                                     pane: self.paneID, cols: target.cols, rows: target.rows,
                                     cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
                                     lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
                             }
+                            if sent == nil { self.holdsClaim = held }
                         } catch {
                             self.fallBackIfRefused()
                         }
@@ -2659,11 +2737,11 @@ struct LiveTerminalView: UIViewRepresentable {
             // sweep proposes many grids and covers once.
             beginResizePresentation(reason: .local)
             armPresentationDeadline(after: Self.resizeSettleDuration + Self.presentationDeadlineDuration)
-            // A backgrounded pane (or one whose re-lock is still awaiting the in-flight release,
-            // `relockPending`) TRACKS the latest grid above but does not start a drain: a hidden
-            // pane would re-pin a co-viewing desktop, and a `lock:true` sent during the release
+            // A hidden or backgrounded pane (or one whose re-lock is still awaiting the in-flight
+            // release, `relockPending`) TRACKS the latest grid above but does not start a drain:
+            // it would re-pin a co-viewing desktop, and a `lock:true` sent during the release
             // window could race the `lock:false` and strand the visible pane unlocked.
-            guard foreground, !relockPending else { return }
+            guard claimsGeometry, !relockPending else { return }
             startGeometryDrain()
         }
 
@@ -2734,14 +2812,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The single serialized drain. At most one `set_pty_size` in flight, and a
         /// target must stand still for `resizeSettleDuration` before it is sent.
         private func startGeometryDrain() {
-            guard !stopped, !fitsStreamWidth, foreground, !relockPending, resizeTask == nil else { return }
+            guard !stopped, !fitsStreamWidth, claimsGeometry, !relockPending, resizeTask == nil else { return }
             guard let first = desiredTarget, first != confirmedTarget else { return }
             resizeTask = Task { @MainActor [weak self] in
                 // A lease keepalive already on the wire finishes first, so the two never
                 // overlap: the keepalive is not a geometry change and must not be treated
                 // as one, but it still owns the single in-flight slot while it runs.
                 await self?.keepaliveTask?.value
-                while let self, !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.foreground,
+                while let self, !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry,
                       let target = self.desiredTarget, target != self.confirmedTarget {
                     // A TRUE quiet window, measured monotonically from the last change.
                     // Comparing two endpoint samples called a sweep that returned to an
@@ -2753,10 +2831,13 @@ struct LiveTerminalView: UIViewRepresentable {
                             continue   // re-read: a newer target may have arrived meanwhile
                         }
                     }
-                    guard !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.foreground,
+                    guard !Task.isCancelled, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry,
                           self.desiredTarget == target else { continue }
                     self.inflightTarget = target
                     let generation = self.targetGeneration
+                    // See the keepalive: optimistic, undone only when provably unsent.
+                    let held = self.holdsClaim
+                    self.holdsClaim = true
                     do {
                         guard let applied = try await self.resizeGate.send({
                             try await self.client.setPTYSize(
@@ -2765,6 +2846,7 @@ struct LiveTerminalView: UIViewRepresentable {
                                 lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
                         }) else {
                             self.inflightTarget = nil
+                            self.holdsClaim = held
                             self.fallBackIfRefused()
                             break
                         }
@@ -3488,6 +3570,23 @@ struct LiveTerminalView: UIViewRepresentable {
             ansi(0x3A3F5C), ansi(0xF07A70), ansi(0x7FC89A), ansi(0xF2BE63),
             ansi(0x82B6F0), ansi(0xC9A9F5), ansi(0x74CEDC), ansi(0xEEF0F7),
         ]
+    }
+}
+
+/// One background-task assertion, ended exactly once: by the work it covers finishing, or by
+/// iOS running out of background time, whichever comes first.
+@MainActor
+private final class BackgroundAssertion {
+    private var id = UIBackgroundTaskIdentifier.invalid
+
+    init(name: String) {
+        id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in self?.end() }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }
 #endif

@@ -27,6 +27,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   History keeps its original row layout, including plain text, so resizing does not rewrap old
   boxes or background blocks. Pan sideways to read wide rows; text stays at your chosen size,
   including when a desktop viewer holds a wider grid. New output wraps at the current PTY width.
+  The app hands its terminal size back when it goes to the background or an agent stays hidden
+  for 25 s, so another device viewing the same agent gets its own width back (herdr applies the
+  narrower size after its 20 s debounce) instead of waiting for the claim to expire.
   Sideways scrolling follows the visible rows: moving into a narrow section returns to its left edge.
   Search, link lookup, and copying include the full width of archived rows.
   Resizing preserves your reading position, including after a momentum scroll; live followers

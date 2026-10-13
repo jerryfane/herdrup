@@ -528,4 +528,67 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         XCTAssertNotEqual(probe()["markerRow"] as? Int, 0, "Late reveal restored the stale history anchor")
         attach("gesture-cancels-covered-resize")
     }
+
+    // MARK: width-claim lifecycle
+
+    /// One pane's width-claim counters from the harness: `claims` (lock:true), `releases`
+    /// (lock:false), `inactiveReleases` (released while the app was not active) and the
+    /// `ttl` the last claim asked for.
+    private func claimCount(_ key: String, pane: String, in receipt: [String: Any]) -> Int {
+        let panes = receipt["claimsByPane"] as? [String: Any]
+        return (panes?[pane] as? [String: Any])?[key] as? Int ?? 0
+    }
+
+    /// A hidden pane hands its width back once the grace runs out, so another device viewing
+    /// the agent is not held at this one's width; fronting it again re-claims. Claims ask for
+    /// the short TTL, so a claim that could not be released lapses quickly.
+    func testHiddenPaneReleasesAfterGraceAndReclaimsWhenShown() {
+        launch("resize", environment: ["HERDR_CLAIM_GRACE_MS": "2000"])
+        wait { ($0["mounted"] as? Int) == 2 }
+        let start = wait { self.claimCount("claims", pane: "ix:a", in: $0) > 0 }
+        XCTAssertEqual(claimCount("ttl", pane: "ix:a", in: start), 90_000, "claims must ask for the short TTL")
+        XCTAssertEqual(claimCount("releases", pane: "ix:a", in: start), 0)
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:b" }
+        let released = wait { self.claimCount("releases", pane: "ix:a", in: $0) == 1 }
+        let claimsWhileHidden = claimCount("claims", pane: "ix:a", in: released)
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:a" }
+        wait { self.claimCount("claims", pane: "ix:a", in: $0) > claimsWhileHidden }
+        XCTAssertEqual(claimCount("releases", pane: "ix:a", in: probe()), 1, "a re-shown pane must not release again")
+    }
+
+    /// A quick switch away and back inside the grace sends no release (and so no second
+    /// winsize change and agent redraw).
+    func testQuickHideAndShowWithinGraceSendsNoRelease() {
+        launch("resize", environment: ["HERDR_CLAIM_GRACE_MS": "20000"])
+        wait { ($0["mounted"] as? Int) == 2 }
+        wait { self.claimCount("claims", pane: "ix:a", in: $0) > 0 }
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:b" }
+        command("switch")
+        wait { ($0["pane"] as? String) == "ix:a" }
+        // Long enough for an immediate or short-timer release to have landed.
+        XCTAssertFalse(holds(within: 4) { self.claimCount("releases", pane: "ix:a", in: $0) > 0 },
+                       "a hide/show inside the grace released the claim: \(probe())")
+    }
+
+    /// Going to the background releases the claim BEFORE the app comes back (a release sent
+    /// while inactive), and the pane claims again on return. The grace is long, so only the
+    /// background can have released.
+    func testAppBackgroundReleasesClaimAndReturnReclaims() {
+        launch("resize", environment: ["HERDR_CLAIM_GRACE_MS": "600000"])
+        let before = wait { self.claimCount("claims", pane: "ix:a", in: $0) > 0 }
+        let claimsBefore = claimCount("claims", pane: "ix:a", in: before)
+        XCUIDevice.shared.press(.home)
+        Thread.sleep(forTimeInterval: 3)
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
+                      "the app did not return to the foreground")
+        XCTAssertTrue(app.staticTexts["terminal-interaction-probe"].waitForExistence(timeout: 30),
+                      "the probe never came back after reactivation")
+        let after = wait { self.claimCount("claims", pane: "ix:a", in: $0) > claimsBefore }
+        XCTAssertGreaterThanOrEqual(claimCount("inactiveReleases", pane: "ix:a", in: after), 1,
+                                    "no release went out while the app was in the background")
+    }
 }

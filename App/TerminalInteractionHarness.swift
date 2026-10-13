@@ -23,10 +23,12 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             var rows: Int?
             var text: String?
             var lock: Bool?
+            var ttlMs: UInt64?
             var dataBase64: String?
             enum CodingKeys: String, CodingKey {
                 case paneID = "pane_id"
                 case dataBase64 = "data_base64"
+                case ttlMs = "ttl_ms"
                 case cols, rows, text, lock
             }
         }
@@ -45,6 +47,20 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private var opens = 0
     private var requests = 0
     private var failures = 0
+    /// The width claims this pane's viewers made (`lock:true`) and handed back (`lock:false`),
+    /// with the TTL the last claim asked for: the receipt for the claim lifecycle (hidden
+    /// grace, app background, re-claim on return), read per pane because a hidden pane's
+    /// release happens while another pane is the one on screen.
+    private var claims = 0
+    private var releases = 0
+    /// Releases that arrived while the app was not active (between `willResignActive` and
+    /// `didBecomeActive`): proof a background release went out BEFORE the app came back,
+    /// which a release sent by the return's remount teardown cannot fake.
+    private var inactiveReleases = 0
+    private var lastClaimTTL: UInt64 = 0
+    /// The app's active state as UIKit announces it. Started by the root driver, so it is
+    /// observing before the first pane exists.
+    private static let activity = AppActivity()
     private var appended = 0
     private var previousActions = 0
     private var nextActions = 0
@@ -70,6 +86,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     init(paneID: String = "", control: Bool = false) {
         self.paneID = paneID
         self.control = control
+        if paneID.isEmpty { _ = Self.activity }
     }
 
     private func locked<T>(_ body: () throws -> T) rethrows -> T {
@@ -138,8 +155,16 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     }
 
     private func resize(_ request: Request) async throws -> String {
+        let inactive = Self.activity.isInactive
         let plan = locked { () -> (Scenario, Int, Int, UInt64, UUID?) in
             requests += 1
+            if request.params?.lock == true {
+                claims += 1
+                lastClaimTTL = request.params?.ttlMs ?? 0
+            } else {
+                releases += 1
+                if inactive { inactiveReleases += 1 }
+            }
             return (scenario, max(4, request.params?.cols ?? cols),
                     max(2, request.params?.rows ?? rows), epoch, lifetime)
         }
@@ -344,6 +369,52 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                   "legacyPrevious": legacyPrevious, "kittyPrevious": kittyPrevious,
                   "input": input, "historyIndex": historyIndex, "offset": offset,
                   "scenario": scenario.rawValue, "epoch": epoch, "bytes": receivedHex] }
+    }
+
+    /// Every pane's claim counters, keyed by pane id. Lives on the ROOT driver, whose
+    /// children are the panes; panes that never received a `set_pty_size` are absent.
+    func claimReceipts() -> [String: Any] {
+        let panes = locked { children }
+        var receipts: [String: Any] = [:]
+        for (id, driver) in panes {
+            let receipt = driver.claimReceipt()
+            if (receipt["claims"] as? Int ?? 0) + (receipt["releases"] as? Int ?? 0) > 0 {
+                receipts[id] = receipt
+            }
+        }
+        return receipts
+    }
+
+    private func claimReceipt() -> [String: Any] {
+        locked { ["claims": claims, "releases": releases, "inactiveReleases": inactiveReleases,
+                  "ttl": lastClaimTTL] }
+    }
+}
+
+/// The app's active state as UIKit announces it, readable from the transport's thread.
+private final class AppActivity: @unchecked Sendable {
+    private let mutex = NSLock()
+    private var inactive = false
+    private var observers: [NSObjectProtocol] = []
+
+    init() {
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil,
+                               queue: nil) { [weak self] _ in self?.set(true) },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil,
+                               queue: nil) { [weak self] _ in self?.set(false) },
+        ]
+    }
+
+    var isInactive: Bool {
+        mutex.lock(); defer { mutex.unlock() }
+        return inactive
+    }
+
+    private func set(_ value: Bool) {
+        mutex.lock(); defer { mutex.unlock() }
+        inactive = value
     }
 }
 
@@ -673,6 +744,9 @@ final class TerminalInteractionHarness: ObservableObject {
             }
         }
         value["mounted"] = surfaces.count
+        // Every pane's width claims and releases, not just the front one's: a hidden pane's
+        // grace release lands while another pane is on screen.
+        value["claimsByPane"] = Self.driver.claimReceipts()
         value["iPad"] = UIDevice.current.userInterfaceIdiom == .pad
         value["physicalKeyboard"] = GCKeyboard.coalesced != nil
         let committed = committedFits[id]
