@@ -67,6 +67,15 @@ struct GramView: View {
     @State private var pendingPosts: [GramMessage] = []
     @State private var phase: LoadPhase = .loading
     @State private var draft: String = ""
+    /// The agent the reader picked from the @ list or the agents sheet, by its exact sender
+    /// ID: it addresses the draft while the draft's addressing mention still names it, so a
+    /// name two agents share (a local and a relayed clientloop) goes to the one picked.
+    /// Dropped when that mention is edited away.
+    @State private var pickedAgent: GramAgent?
+    /// The field's caret as a UTF-16 distance from the end of the draft. The field keeps that
+    /// distance when the draft is replaced from here (an @ completion), so it stays right
+    /// without a report from the field. 0 = the end.
+    @State private var draftCaretFromEnd = 0
     /// UIKit owns the multiline field; focus is mirrored through its delegate.
     @State private var composerFocused = false
     @StateObject private var composerKeyboard = ComposerKeyboard()
@@ -914,33 +923,34 @@ struct GramView: View {
                     .accessibilityLabel("Refresh")
                 }
                 Section("Write to") {
+                    let shared = sharedNames
                     ForEach(gramAgents) { agent in
                         Button {
-                            address(agent.name)
+                            address(agent)
                             showingAgentsSheet = false
                         } label: {
                             HStack(spacing: 12) {
                                 GramAvatar(name: agent.from, size: 32)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(verbatim: agent.name)
+                                    Text(verbatim: agentTitle(agent, shared: shared))
                                         .font(Typography.app(16, .semibold))
                                         .foregroundStyle(Palette.text)
-                                    if let machine = agent.machine {
+                                    if let machine = agent.machine, !shared.contains(agent.name.lowercased()) {
                                         Text(verbatim: machine)
                                             .font(Typography.app(13))
                                             .foregroundStyle(Palette.textDim)
                                     }
                                 }
                                 Spacer(minLength: 0)
-                                if draftAddress.recipient?.from == agent.from {
+                                if isAddressed(agent) {
                                     Image(systemName: "checkmark").foregroundStyle(Palette.brand)
                                 }
                             }
                         }
-                        .accessibilityIdentifier("gram-recipient-\(agent.name)")
+                        .accessibilityIdentifier("gram-recipient-\(agentKey(agent, shared: shared))")
                     }
                     Button {
-                        address(nil)
+                        addressQueue()
                         showingAgentsSheet = false
                     } label: {
                         HStack(spacing: 12) {
@@ -958,7 +968,7 @@ struct GramView: View {
                                     .foregroundStyle(Palette.textDim)
                             }
                             Spacer(minLength: 0)
-                            if draftAddress.recipient == nil {
+                            if isAddressed(nil) {
                                 Image(systemName: "checkmark").foregroundStyle(Palette.brand)
                             }
                         }
@@ -1591,101 +1601,127 @@ struct GramView: View {
     /// HerdrApp.swift, so a common builder would have to change the terminal's behaviour.
     ///
     /// The recipient is in the text (mock D): "@name" sends to one agent, no "@" goes to the
-    /// shared queue (`GramMention`). While an "@" is being typed, the matching agents are
-    /// listed above the card. The field is plain text (`ComposerTextField` takes no
-    /// attributes), so a mention is not tinted inside it.
+    /// shared queue (`GramMention`, `draftAddress`). While an "@" is being typed at the caret,
+    /// the matching agents are listed above the card; the addressing mention is drawn in the
+    /// brand colour in the field. A draft that cannot be addressed (a leading "@" naming no
+    /// agent, or a typed name several agents share) says why above the card and cannot be sent.
+    @ViewBuilder
     private var composer: some View {
-        AdaptiveComposer(
-            text: draft,
-            isFocused: composerFocused,
-            hasAccessory: !attachedFiles.isEmpty,
-            showsLeading: composerKeyboard.isVisible && composerFocused,
-            isRecording: draftDictating
-        ) { editorHeight in
-            ComposerTextField(
-                text: $draft,
-                isEnabled: !draftDictating,
+        let address = draftAddress
+        let matches = mentionMatches
+        VStack(spacing: 0) {
+            if matches.isEmpty, let hint = Self.hint(for: address.route) {
+                Text(hint)
+                    .font(Typography.app(12, .semibold))
+                    .foregroundStyle(Palette.waiting)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("gram-composer-hint")
+            }
+            AdaptiveComposer(
+                text: draft,
                 isFocused: composerFocused,
-                onFocusChange: { composerFocused = $0 },
-                placeholder: "Queue, or @ an agent…",
-                accessibilityIdentifier: "gram-composer-input",
-                capitalization: .sentences,
-                autocorrection: .default,
-                onCommandReturn: {
-                    guard canSend else { return }
-                    Task { await send() }
-                },
-                fixedHeight: editorHeight
-            )
-            .frame(minWidth: 0, maxWidth: .infinity)
-        } accessory: {
-            if !attachedFiles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(attachedFiles) { file in attachmentChip(file) }
-                    }
-                    .padding(.horizontal, 7)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        } leading: {
-            Button {
-                composerFocused = false
-            } label: {
-                ComposerActionIcon(image: Image("ComposerKeyboard"))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Collapse keyboard")
-        } actions: {
-            HStack(spacing: 4) {
-                ComposerAttachButton(busy: loadingPhoto) { showAttachSheet = true }
-                    .disabled(sending || loadingPhoto)
-                    .accessibilityIdentifier("gram-attach-button")
-                MicButton(text: $draft, recording: $draftDictating)
-                    .fixedSize()
-                    .disabled(sending || loadingPhoto)
-                if !hasDraftContent {
-                    SavedPromptsMenu { prompt in
-                        draft = prompt.text
+                hasAccessory: !attachedFiles.isEmpty,
+                showsLeading: composerKeyboard.isVisible && composerFocused,
+                isRecording: draftDictating
+            ) { editorHeight in
+                ComposerTextField(
+                    text: $draft,
+                    isEnabled: !draftDictating,
+                    isFocused: composerFocused,
+                    onFocusChange: { composerFocused = $0 },
+                    placeholder: "Queue, or @ an agent…",
+                    accessibilityIdentifier: "gram-composer-input",
+                    capitalization: .sentences,
+                    autocorrection: .default,
+                    onCommandReturn: {
+                        guard canSend else { return }
                         Task { await send() }
+                    },
+                    fixedHeight: editorHeight,
+                    accentRanges: address.accent.map { [NSRange($0, in: draft)] } ?? [],
+                    onSelectionChange: { offset, length in
+                        let fromEnd = max(0, length - offset)
+                        if fromEnd != draftCaretFromEnd { draftCaretFromEnd = fromEnd }
                     }
-                    .disabled(sending || loadingPhoto || draftDictating)
-                    .accessibilityIdentifier("gram-saved-prompts")
-                } else {
-                    Button {
-                        Task { await send() }
-                    } label: {
-                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                )
+                .frame(minWidth: 0, maxWidth: .infinity)
+            } accessory: {
+                if !attachedFiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(attachedFiles) { file in attachmentChip(file) }
+                        }
+                        .padding(.horizontal, 7)
                     }
-                    .disabled(!canSend)
-                    .fixedSize()
-                    .accessibilityLabel("Send gram")
-                    .accessibilityIdentifier("gram-send-button")
-                    .keyboardShortcut(.return, modifiers: .command)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
+            } leading: {
+                Button {
+                    composerFocused = false
+                } label: {
+                    ComposerActionIcon(image: Image("ComposerKeyboard"))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Collapse keyboard")
+            } actions: {
+                HStack(spacing: 4) {
+                    ComposerAttachButton(busy: loadingPhoto) { showAttachSheet = true }
+                        .disabled(sending || loadingPhoto)
+                        .accessibilityIdentifier("gram-attach-button")
+                    MicButton(text: $draft, recording: $draftDictating)
+                        .fixedSize()
+                        .disabled(sending || loadingPhoto)
+                    if !hasDraftContent {
+                        SavedPromptsMenu { prompt in
+                            draft = prompt.text
+                            Task { await send() }
+                        }
+                        .disabled(sending || loadingPhoto || draftDictating)
+                        .accessibilityIdentifier("gram-saved-prompts")
+                    } else {
+                        Button {
+                            Task { await send() }
+                        } label: {
+                            ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                        }
+                        .disabled(!canSend)
+                        .fixedSize()
+                        .accessibilityLabel("Send gram")
+                        .accessibilityIdentifier("gram-send-button")
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerCardHeight = $0 }
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
         .background(Palette.ground)
-        // The @-mention list floats 8 pt above the card, over the feed, without moving it.
+        // The @-mention list floats 8 pt above the composer, over the feed, without moving it.
         .overlay(alignment: .topLeading) {
-            let matches = mentionMatches
             if !matches.isEmpty {
                 mentionList(matches)
                     .padding(.leading, 12)
                     .alignmentGuide(.top) { $0[.bottom] + 8 }
             }
         }
+        // A pick holds only while the draft's addressing mention still names that agent.
+        .onChange(of: draft) { _, text in
+            guard let picked = pickedAgent else { return }
+            let named = GramMention.resolve(text, knownNames: mentionNames).recipient
+            if named?.caseInsensitiveCompare(picked.name) != .orderedSame { pickedAgent = nil }
+        }
     }
 
     /// Mock D's list: "Send to one agent", the agents matching the "@" being typed (avatar,
     /// name, machine), and the reminder that no "@" means the shared queue.
     private func mentionList(_ agents: [GramAgent]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let shared = sharedNames
+        return VStack(alignment: .leading, spacing: 0) {
             Text("Send to one agent")
                 .font(Typography.app(12, .semibold))
                 .foregroundStyle(Palette.textDim)
@@ -1693,14 +1729,14 @@ struct GramView: View {
                 .padding(.top, 6)
                 .padding(.bottom, 4)
             ForEach(agents) { agent in
-                Button { pickMention(agent.name) } label: {
+                Button { pickMention(agent) } label: {
                     HStack(spacing: 12) {
                         GramAvatar(name: agent.from, size: 32)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(verbatim: agent.name)
+                            Text(verbatim: agentTitle(agent, shared: shared))
                                 .font(Typography.app(15, .semibold))
                                 .foregroundStyle(Palette.text)
-                            if let machine = agent.machine {
+                            if let machine = agent.machine, !shared.contains(agent.name.lowercased()) {
                                 Text(verbatim: machine)
                                     .font(Typography.app(13))
                                     .foregroundStyle(Palette.textDim)
@@ -1714,7 +1750,7 @@ struct GramView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("gram-mention-\(agent.name)")
+                .accessibilityIdentifier("gram-mention-\(agentKey(agent, shared: shared))")
             }
             Text("No @ and it goes to the shared queue.")
                 .font(Typography.app(13))
@@ -1735,48 +1771,185 @@ struct GramView: View {
         .accessibilityIdentifier("gram-mention-list")
     }
 
-    /// The bare names an "@" can address: the agents seen in Gram, once each.
+    /// The bare names an "@" can address: the agents seen in Gram, once each. Two agents may
+    /// share one; `draftAddress` tells them apart.
     private var mentionNames: [String] {
         var seen = Set<String>()
-        return gramAgents.map(\.name).filter { seen.insert($0).inserted }
+        return gramAgents.map(\.name).filter { seen.insert($0.lowercased()).inserted }
     }
 
-    /// The agents matching the "@" being typed at the end of the draft, names starting with
-    /// the query first; empty when no "@" is being typed (or nothing matches).
-    private var mentionMatches: [GramAgent] {
-        guard let active = GramMention.activeQuery(in: draft) else { return [] }
+    /// Bare names (lowercased) that more than one agent in Gram carries.
+    private var sharedNames: Set<String> {
         var seen = Set<String>()
-        let agents = gramAgents.filter { seen.insert($0.name).inserted }
+        var shared = Set<String>()
+        for agent in gramAgents where !seen.insert(agent.name.lowercased()).inserted {
+            shared.insert(agent.name.lowercased())
+        }
+        return shared
+    }
+
+    /// An agent's row title: its name, with its machine when another agent has the same name
+    /// ("clientloop · hetzner-1").
+    private func agentTitle(_ agent: GramAgent, shared: Set<String>) -> String {
+        guard shared.contains(agent.name.lowercased()) else { return agent.name }
+        return "\(agent.name) · \(agent.machine ?? "this device")"
+    }
+
+    /// A row's identifier suffix: the bare name, or the full sender ID when the name is shared.
+    private func agentKey(_ agent: GramAgent, shared: Set<String>) -> String {
+        shared.contains(agent.name.lowercased()) ? agent.from : agent.name
+    }
+
+    /// The field's caret in `draft`; nil (the end) when the offset is not a character boundary.
+    private var draftCaret: String.Index? {
+        let utf16 = draft.utf16
+        let offset = min(utf16.count, max(0, utf16.count - draftCaretFromEnd))
+        guard let index = utf16.index(utf16.startIndex, offsetBy: offset, limitedBy: utf16.endIndex)
+        else { return nil }
+        return index.samePosition(in: draft)
+    }
+
+    /// Every agent matching the "@" being typed at the caret, names starting with the query
+    /// first; empty when no "@" is being typed there (or nothing matches).
+    private var mentionMatches: [GramAgent] {
+        guard let active = GramMention.activeQuery(in: draft, cursor: draftCaret) else { return [] }
         let query = active.query.lowercased()
-        guard !query.isEmpty else { return agents }
-        let starting = agents.filter { $0.name.lowercased().hasPrefix(query) }
-        let containing = agents.filter {
+        guard !query.isEmpty else { return gramAgents }
+        let starting = gramAgents.filter { $0.name.lowercased().hasPrefix(query) }
+        let containing = gramAgents.filter {
             !$0.name.lowercased().hasPrefix(query) && $0.name.lowercased().contains(query)
         }
         return starting + containing
     }
 
-    /// Replaces the "@" being typed with the picked agent's "@name ".
-    private func pickMention(_ name: String) {
-        guard let active = GramMention.activeQuery(in: draft) else { return }
-        draft = GramMention.complete(draft, replacing: active.range, with: name)
+    /// Replaces the "@" being typed at the caret with the picked agent's "@name ", and binds
+    /// the mention to that exact agent. The field keeps the caret's distance from the end, so
+    /// it lands after the inserted name.
+    private func pickMention(_ agent: GramAgent) {
+        guard let active = GramMention.activeQuery(in: draft, cursor: draftCaret) else { return }
+        draft = GramMention.complete(draft, replacing: active.range, with: agent.name)
+        pickedAgent = agent
     }
 
-    /// Where the draft goes and what it says (`GramMention.resolve`): the agent its first
-    /// "@name" addresses (nil: the shared queue), and the text with a leading mention taken off.
-    /// The agent's raw `from` is the wire `to`.
-    private var draftAddress: (recipient: GramAgent?, body: String) {
-        let resolved = GramMention.resolve(draft, knownNames: mentionNames)
-        let agent = resolved.recipient.flatMap { name in gramAgents.first { $0.name == name } }
-        return (agent, resolved.body)
+    /// Where the draft goes.
+    private enum DraftRoute {
+        /// No mention: the shared queue.
+        case queue
+        /// One agent, by its exact sender ID.
+        case agent(GramAgent)
+        /// A typed name several agents share and none was picked for.
+        case ambiguous(String)
+        /// A leading "@token" that names no agent in Gram ("" for a bare "@").
+        case unknown(String)
     }
 
-    /// The pill sheet's "Write to": puts `name`'s "@name " at the start of the draft in place
-    /// of a leading mention already there; nil takes a leading mention off (the shared queue).
-    private func address(_ name: String?) {
-        let resolved = GramMention.resolve(draft, knownNames: mentionNames)
-        let rest = resolved.recipient != nil && resolved.body != draft ? resolved.body : draft
-        draft = name.map { "@\($0) " + rest } ?? rest
+    private struct DraftAddress {
+        let route: DraftRoute
+        /// What is posted: the text with a leading addressing mention taken off.
+        let body: String
+        /// The addressing mention starts the draft (so `body` lacks it).
+        let leading: Bool
+        /// The addressing mention's range in the draft, drawn in the brand colour; nil unless
+        /// the route is one agent.
+        let accent: Range<String.Index>?
+    }
+
+    /// Where the draft goes and what it says (`GramMention.resolve`). The first known mention
+    /// addresses it: the agent picked for it, or the one agent with that name; a name several
+    /// agents share and nobody picked is ambiguous. A leading "@token" that names no agent is
+    /// never quietly sent to the shared queue (its files could be secrets). No mention at all:
+    /// the shared queue.
+    private var draftAddress: DraftAddress {
+        let names = mentionNames
+        let resolved = GramMention.resolve(draft, knownNames: names)
+        let leading = resolved.recipient != nil && resolved.body != draft
+        if let token = GramMention.leadingToken(in: draft), !leading {
+            return DraftAddress(route: .unknown(token), body: resolved.body, leading: false, accent: nil)
+        }
+        guard let name = resolved.recipient else {
+            return DraftAddress(route: .queue, body: resolved.body, leading: false, accent: nil)
+        }
+        let route: DraftRoute
+        if let picked = pickedAgent, picked.name.caseInsensitiveCompare(name) == .orderedSame {
+            route = .agent(picked)
+        } else {
+            let named = gramAgents.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            route = named.count == 1 ? .agent(named[0]) : .ambiguous(name)
+        }
+        var accent: Range<String.Index>?
+        if case .agent = route { accent = GramMention.ranges(in: draft, knownNames: names).first }
+        return DraftAddress(route: route, body: resolved.body, leading: leading, accent: accent)
+    }
+
+    /// Why the draft cannot be sent as it stands, if it cannot.
+    private static func hint(for route: DraftRoute) -> String? {
+        switch route {
+        case .queue, .agent: return nil
+        case .ambiguous(let name): return "Several agents are called \(name): pick one"
+        case .unknown(let token):
+            return token.isEmpty ? "Pick an agent after @" : "No agent called @\(token) in Gram"
+        }
+    }
+
+    /// Whether the draft goes to `agent` (by sender ID), or with nil to the shared queue.
+    private func isAddressed(_ agent: GramAgent?) -> Bool {
+        switch draftAddress.route {
+        case .queue: return agent == nil
+        case .agent(let addressed): return addressed.from == agent?.from
+        case .ambiguous, .unknown: return false
+        }
+    }
+
+    /// The pill sheet's "Write to" an agent: that exact agent addresses the draft, as "@name "
+    /// at the start in place of a leading mention (or a leading "@token" naming no one).
+    private func address(_ agent: GramAgent) {
+        let current = draftAddress
+        var rest = draft
+        if current.leading {
+            rest = current.body
+        } else if let token = GramMention.leadingToken(in: draft) {
+            rest = String(draft.drop(while: \.isWhitespace).dropFirst(1 + token.count)
+                .drop(while: \.isWhitespace))
+        }
+        draft = "@\(agent.name) " + rest
+        pickedAgent = agent
+    }
+
+    /// The pill sheet's "Shared queue": takes off every mention that would address the
+    /// draft, wherever it is, and a leading "@token" naming no one.
+    private func addressQueue() {
+        let names = mentionNames
+        var text = draft
+        for _ in 0...GramMention.ranges(in: draft, knownNames: names).count {
+            let resolved = GramMention.resolve(text, knownNames: names)
+            guard resolved.recipient != nil else { break }
+            if resolved.body != text {
+                text = resolved.body
+            } else if let range = GramMention.ranges(in: text, knownNames: names).first {
+                text = Self.removingMention(range, from: text)
+            }
+        }
+        if let token = GramMention.leadingToken(in: text) {
+            text = String(text.drop(while: \.isWhitespace).dropFirst(1 + token.count)
+                .drop(while: \.isWhitespace))
+        }
+        draft = text
+        pickedAgent = nil
+    }
+
+    /// `text` without the mention at `range` and one space next to it ("ship it @vetrina" ->
+    /// "ship it", "ask @vetrina to ship" -> "ask to ship").
+    private static func removingMention(_ range: Range<String.Index>, from text: String) -> String {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+        if lower > text.startIndex, text[text.index(before: lower)] == " " {
+            lower = text.index(before: lower)
+        } else if upper < text.endIndex, text[upper] == " " {
+            upper = text.index(after: upper)
+        }
+        var result = text
+        result.removeSubrange(lower..<upper)
+        return result
     }
 
     /// Something typed or attached: send takes the saved-prompts place.
@@ -1790,9 +1963,14 @@ struct GramView: View {
         // (see MicButton): sending mid-dictation would clear the field, then the next
         // recognition partial would restore the just-sent text and re-enable a duplicate.
         guard !sending, !loadingPhoto, !draftDictating else { return false }
+        let address = draftAddress
+        switch address.route {
+        case .queue, .agent: break
+        case .ambiguous, .unknown: return false
+        }
         // A bare "@vetrina" has no message: the body without the mention must say something.
         return !attachedFiles.isEmpty
-            || !draftAddress.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !address.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     #if DEBUG
@@ -2118,8 +2296,14 @@ struct GramView: View {
         // Capture the destination BEFORE any await. Otherwise the draft's "@name" could
         // change mid-upload and a file (possibly a secret) would post to a different agent
         // than the one addressed when Send was tapped. The field is also disabled while
-        // sending, but capturing is the real guarantee.
-        let to = address.recipient?.from
+        // sending, but capturing is the real guarantee. A draft that names no agent, or
+        // names several, is never sent (to the shared queue or anywhere).
+        let to: String?
+        switch address.route {
+        case .queue: to = nil
+        case .agent(let agent): to = agent.from
+        case .ambiguous, .unknown: return
+        }
         // A file with no caption is fine; an empty text-only message is not.
         guard (!text.isEmpty || !files.isEmpty), !sending else { return }
         sending = true
@@ -3295,7 +3479,13 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
                     }
+                    // The controls sit on top of the page, so VoiceOver meets them before
+                    // the feed, as when the header was the first row: without this the
+                    // overlay, laid down after the scroll view, came after the whole feed.
+                    .accessibilitySortPriority(1)
             }
+            // One container for the feed and its header, so the priority above orders them.
+            .accessibilityElement(children: .contain)
     }
 }
 
@@ -3321,20 +3511,32 @@ private extension View {
     /// `visibleTop` is the floating header's bottom edge in `GramView.feedPageSpace`. The feed
     /// scrolls on under the header, and its content has a top margin of the header's height,
     /// so a row anchored at the top may land at the header's bottom edge rather than at the scroll
-    /// view's own top: either counts as the top, or the paging anchor would never land.
+    /// view's own top: either counts as the top, or the paging anchor would never land. Only
+    /// the part of the viewport below the header counts as on screen: a row under the header's
+    /// controls and fade is not being read.
     func onFeedPlacementChange(slack: CGFloat = 0, appearance: Int = 0, visibleTop: CGFloat? = nil,
                                _ action: @escaping (FeedPlacement) -> Void) -> some View {
         onGeometryChange(for: FeedPlacement.self) { proxy in
-            guard let viewport = proxy.bounds(of: .scrollView) else {
+            guard let scrollBounds = proxy.bounds(of: .scrollView) else {
                 return FeedPlacement(onScreen: false, atTop: false, appearance: appearance)
             }
-            let onScreen = viewport.insetBy(dx: 0, dy: -slack)
+            let page = proxy.frame(in: .named(GramView.feedPageSpace))
+            var visible = scrollBounds
+            if let visibleTop {
+                // The header's bottom edge in this view's own coordinates.
+                let headerEdge = visibleTop - page.minY
+                if headerEdge > visible.minY {
+                    visible = CGRect(x: visible.minX, y: headerEdge, width: visible.width,
+                                     height: max(0, visible.maxY - headerEdge))
+                }
+            }
+            let onScreen = visible.height > 0 && visible.insetBy(dx: 0, dy: -slack)
                 .intersects(CGRect(origin: .zero, size: proxy.size))
-            // `viewport` is in this view's own coordinates, so its minY is how far the visible
-            // top lies below this view's top.
-            var atTop = abs(viewport.minY) <= 8
+            // `scrollBounds` is in this view's own coordinates, so its minY is how far the
+            // scroll view's top lies below this view's top.
+            var atTop = abs(scrollBounds.minY) <= 8
             if !atTop, let visibleTop {
-                atTop = abs(proxy.frame(in: .named(GramView.feedPageSpace)).minY - visibleTop) <= 8
+                atTop = abs(page.minY - visibleTop) <= 8
             }
             return FeedPlacement(onScreen: onScreen, atTop: atTop, appearance: appearance)
         } action: { action($0) }

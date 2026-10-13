@@ -337,7 +337,7 @@ final class MockWireFixtureTests: XCTestCase {
         // Bound before unwrapping: XCTUnwrap's autoclosure cannot contain an `await`.
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
-        XCTAssertEqual(messages.count, 9, "gram.list fixture did not decode to 9 messages")
+        XCTAssertEqual(messages.count, 10, "gram.list fixture did not decode to 10 messages")
         XCTAssertEqual(messages.map(\.createdUnixMs), messages.map(\.createdUnixMs).sorted(by: >),
                        "the daemon answers newest first")
 
@@ -378,6 +378,14 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertGreaterThan(local.text.split(separator: "\n").count, 8,
                              "the long report must be long enough to fold at 8 lines")
 
+        // Two agents share the bare name clientloop: the relayed one above and a local one,
+        // so the composer's @ list must tell them apart by their full sender ID.
+        let localTwin = try XCTUnwrap(messages.first { $0.id == "g10" })
+        XCTAssertEqual(localTwin.from, "clientloop")
+        XCTAssertEqual(localTwin.senderAgentName, federated.senderAgentName)
+        XCTAssertNotEqual(localTwin.from, federated.from)
+        XCTAssertNil(localTwin.senderMachine)
+
         // A grabbed shared-queue post (no `to`) is no longer open.
         let grabbed = try XCTUnwrap(messages.first { $0.id == "g5" })
         XCTAssertEqual(grabbed.direction, .ownerToAgent)
@@ -399,14 +407,14 @@ final class MockWireFixtureTests: XCTestCase {
         var inbox = GramInbox()
         inbox.apply(try await client.gramList(limit: 40))
         XCTAssertEqual(inbox.messages.map(\.id).last, "g9")
-        XCTAssertEqual(inbox.messages.count, 9)
+        XCTAssertEqual(inbox.messages.count, 10)
         XCTAssertEqual(inbox.nextCursor, "g9", "the head page says there is more")
 
         var generation = inbox.generation
         let second = try await client.gramList(limit: 40, beforeID: "g9")
         XCTAssertTrue(inbox.appendPage(second, generation: generation))
-        XCTAssertEqual(inbox.messages.count, 33, "the second page holds 24 rows")
-        XCTAssertEqual(Array(inbox.messages.map(\.id)[9...]), (1...24).map { "go\($0)" })
+        XCTAssertEqual(inbox.messages.count, 34, "the second page holds 24 rows")
+        XCTAssertEqual(Array(inbox.messages.map(\.id)[10...]), (1...24).map { "go\($0)" })
         XCTAssertEqual(inbox.messages.last?.text, "Older page: release planning starts here.")
         XCTAssertEqual(inbox.nextCursor, "go24", "the second page says there is more")
 
@@ -776,8 +784,9 @@ enum MockWireFixtures {
 
     /// A `gram.list` owner view, newest first: direct owner posts, a grabbed shared-queue
     /// post, read and unread agent->owner messages, federated senders with a machine label,
-    /// a code fence with a zip attachment, an image-only message and a long report. Keep in
-    /// sync with the App's MockTransport.gramList.
+    /// a code fence with a zip attachment, an image-only message and a long report, and two
+    /// agents both called clientloop (one relayed, one local). Keep in sync with the App's
+    /// MockTransport.gramList.
     static let gramList = #"""
     {"id":"mock","result":{"type":"gram_list","messages":[
       {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
@@ -786,6 +795,7 @@ enum MockWireFixtures {
       {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g10","direction":"agent_to_owner","from":"clientloop","text":"Lint is clean on my branch.","created_unix_ms":1722969000000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
       {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
       {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}

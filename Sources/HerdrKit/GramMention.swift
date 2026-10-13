@@ -10,10 +10,13 @@ import Foundation
 /// - A known mention matches a bare agent name case-insensitively and ends at the end of
 ///   the text or at a character that cannot continue a name: `@vetrina,` and `@vetrina.`
 ///   are mentions, `@vetrina2`, `@vetrina-ops` and `@vetrina.dev` are not. Names may hold
-///   `-`, `_` and `.` (`trend-scout`, `ci-watch`); the longest known name wins.
+///   `-`, `_` and `.` (`trend-scout`, `ci-watch`). Because a name must end the token, two
+///   such names never both match at one `@`: where the shorter ends, the longer goes on
+///   with a letter, digit, `-`, `_` or a `.` before one, none of which ends a name.
 /// - Only the first known mention addresses the post. A leading one (nothing but whitespace
-///   before it) is the address, so it and the one whitespace character after it leave the
-///   body; a mention later in the text is part of the message and stays.
+///   before it) is the address, so it and the run of whitespace and separating punctuation
+///   after it (`, ` `: ` ` - `) leave the body; a mention later in the text is part of the
+///   message and stays.
 public enum GramMention {
     /// The `@token` being typed: the run before `cursor` (the end of the text when nil) back
     /// to an `@` at the start of the text or after whitespace. `query` is the token without
@@ -49,8 +52,8 @@ public enum GramMention {
 
     /// Who a composed message goes to and what it says. The first known mention gives the
     /// recipient, spelled as in `knownNames`; a leading one is stripped from the body with
-    /// the whitespace character after it (and any whitespace before it). No known mention:
-    /// the recipient is nil (the shared queue) and the body is `text` unchanged.
+    /// the run of whitespace and separators after it (and any whitespace before it). No known
+    /// mention: the recipient is nil (the shared queue) and the body is `text` unchanged.
     public static func resolve(
         _ text: String, knownNames: [String]
     ) -> (recipient: String?, body: String) {
@@ -59,14 +62,32 @@ public enum GramMention {
             return (first.name, text)
         }
         var bodyStart = first.range.upperBound
-        if bodyStart < text.endIndex, text[bodyStart].isWhitespace {
+        while bodyStart < text.endIndex, text[bodyStart].isWhitespace || separators.contains(text[bodyStart]) {
             bodyStart = text.index(after: bodyStart)
         }
         return (first.name, String(text[bodyStart...]))
     }
 
+    /// What may sit between a leading mention and the message: "@vetrina, ship it",
+    /// "@vetrina: go", "@vetrina - go", "@vetrina; go".
+    private static let separators: Set<Character> = [",", ":", ";", "-", "–", "—"]
+
+    /// The token after a LEADING `@` (nothing but whitespace before it), up to where a name
+    /// may end: "vetrna" for "@vetrna hi", "" for "@ hi" or "@". Nil when the text does not
+    /// start with `@`. Lets the composer tell a leading `@name` that names no agent (and so
+    /// must not silently go to the shared queue) from plain text.
+    public static func leadingToken(in text: String) -> String? {
+        guard let at = text.firstIndex(where: { !$0.isWhitespace }), text[at] == "@" else { return nil }
+        let nameStart = text.index(after: at)
+        var index = nameStart
+        while index < text.endIndex, !endsName(text, at: index) {
+            index = text.index(after: index)
+        }
+        return String(text[nameStart..<index])
+    }
+
     /// The ranges of every known mention in `text` (each from its `@` to the end of the
-    /// name), in order, for highlighting.
+    /// name), in order. The composer draws the addressing one in the brand colour.
     public static func ranges(in text: String, knownNames: [String]) -> [Range<String.Index>] {
         mentions(in: text, knownNames: knownNames).map(\.range)
     }
@@ -74,7 +95,7 @@ public enum GramMention {
     private static func mentions(
         in text: String, knownNames: [String]
     ) -> [(range: Range<String.Index>, name: String)] {
-        let names = knownNames.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+        let names = knownNames.filter { !$0.isEmpty }
         guard !names.isEmpty else { return [] }
         var found: [(range: Range<String.Index>, name: String)] = []
         var index = text.startIndex

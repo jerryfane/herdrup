@@ -4873,6 +4873,15 @@ struct ComposerTextField: UIViewRepresentable {
     /// The pull-to-expand editor's height; nil lets the field size itself to its text,
     /// up to `ComposerStyle.visibleLines`.
     var fixedHeight: CGFloat?
+    /// UTF-16 ranges of `text` drawn in `Palette.brand` (Gram's addressing @mention). Empty
+    /// (the terminal) never touches the text storage.
+    var accentRanges: [NSRange] = []
+    /// The caret (the end of the selection) as a UTF-16 offset into the field's text, with
+    /// that text's UTF-16 length, whenever the reader moves it or types; an unchanged pair is
+    /// reported once. Nil (the terminal) reports nothing. Setting it also keeps the caret's
+    /// distance from the end of the text when the host replaces the text (Gram's @
+    /// completion), instead of only following the end.
+    var onSelectionChange: ((_ offset: Int, _ textLength: Int) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -4902,6 +4911,9 @@ struct ComposerTextField: UIViewRepresentable {
 
     func updateUIView(_ view: ReplyTextView, context: Context) {
         context.coordinator.parent = self
+        // Selection changes made from here are this update's own, not the reader's.
+        view.isApplyingUpdate = true
+        defer { view.isApplyingUpdate = false }
         view.onPasteFile = onPasteFile
         view.onCommandReturn = onCommandReturn
         view.configureTypography()
@@ -4911,17 +4923,26 @@ struct ComposerTextField: UIViewRepresentable {
             // Replacing `attributedText` scrolls the view back to the top, so a long
             // dictation ran on out of sight. When the caret was at the end (dictation,
             // a restored draft), keep the end in view; an edit elsewhere keeps its place.
-            let followsEnd = view.selectedRange.location >= (view.text as NSString).length
+            let oldLength = (view.text as NSString).length
+            let caretFromEnd = oldLength - NSMaxRange(view.selectedRange)
+            let followsEnd = view.selectedRange.location >= oldLength
             view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
             view.typingAttributes = view.composerAttributes
+            view.accentsReset()
+            context.coordinator.reportedCaret = nil
             view.updatePlaceholder()
             view.invalidateIntrinsicContentSize()
             view.refreshScrollMode()
             if followsEnd {
                 view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
                 view.requestCaretReveal()
+            } else if onSelectionChange != nil {
+                let length = (text as NSString).length
+                view.selectedRange = NSRange(location: min(length, max(0, length - caretFromEnd)), length: 0)
+                view.requestCaretReveal()
             }
         }
+        view.applyAccents(accentRanges)
         if view.fixedHeight != fixedHeight {
             view.fixedHeight = fixedHeight
             view.invalidateIntrinsicContentSize()
@@ -4984,6 +5005,26 @@ struct ComposerTextField: UIViewRepresentable {
             textView.invalidateIntrinsicContentSize()
             (textView as? ReplyTextView)?.refreshScrollMode()
             (textView as? ReplyTextView)?.requestCaretReveal()
+            reportSelection(of: textView)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            reportSelection(of: textView)
+        }
+
+        /// The last caret offset and text length reported, so an unchanged pair is not
+        /// reported again. Forgotten when the host replaces the text: the host then holds its
+        /// own idea of the caret, and the reader's next move must reach it even if equal.
+        var reportedCaret: (offset: Int, length: Int)?
+
+        private func reportSelection(of textView: UITextView) {
+            guard let onSelectionChange = parent.onSelectionChange,
+                  (textView as? ReplyTextView)?.isApplyingUpdate != true else { return }
+            let caret = NSMaxRange(textView.selectedRange)
+            let length = ((textView.text ?? "") as NSString).length
+            guard reportedCaret?.offset != caret || reportedCaret?.length != length else { return }
+            reportedCaret = (caret, length)
+            onSelectionChange(caret, length)
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
@@ -5015,6 +5056,39 @@ struct ComposerTextField: UIViewRepresentable {
         var minimumHeight: CGFloat { fixedHeight ?? lineHeight }
         var maximumHeight: CGFloat { fixedHeight ?? lineHeight * CGFloat(ComposerStyle.visibleLines) }
         private(set) var composerAttributes: [NSAttributedString.Key: Any] = [:]
+        /// True while `updateUIView` runs: selection changes then are the host's own.
+        var isApplyingUpdate = false
+        /// The accent ranges last drawn and the text they were drawn on (see `applyAccents`).
+        private var appliedAccents: [NSRange] = []
+        private var accentedText = ""
+
+        /// The text was replaced with plain attributes: nothing is drawn in the accent now.
+        func accentsReset() {
+            appliedAccents = []
+            accentedText = ""
+        }
+
+        /// Draws `ranges` in `Palette.brand` and the rest in the text colour, in place in the
+        /// text storage, so the selection, the undo stack and the scroll position stay. Redrawn
+        /// only when the ranges change, or the text changed under drawn ranges (a character
+        /// typed right after a mention takes its colour from it). Skipped during IME
+        /// composition. With no ranges drawn or asked for, the storage is never touched.
+        func applyAccents(_ ranges: [NSRange]) {
+            guard markedTextRange == nil else { return }
+            let current = text ?? ""
+            guard ranges != appliedAccents || (!ranges.isEmpty && current != accentedText) else { return }
+            let length = (current as NSString).length
+            textStorage.beginEditing()
+            textStorage.addAttribute(.foregroundColor, value: UIColor(Palette.text),
+                                     range: NSRange(location: 0, length: length))
+            for range in ranges where NSMaxRange(range) <= length {
+                textStorage.addAttribute(.foregroundColor, value: UIColor(Palette.brand), range: range)
+            }
+            textStorage.endEditing()
+            typingAttributes = composerAttributes
+            appliedAccents = ranges
+            accentedText = current
+        }
 
         override init(frame: CGRect, textContainer: NSTextContainer?) {
             super.init(frame: frame, textContainer: textContainer)
@@ -5035,6 +5109,7 @@ struct ComposerTextField: UIViewRepresentable {
             let face = composerAttributes[.font] as? UIFont ?? .systemFont(ofSize: size)
             let selection = selectedRange
             attributedText = NSAttributedString(string: text ?? "", attributes: composerAttributes)
+            accentsReset()
             typingAttributes = composerAttributes
             selectedRange = selection
             lineHeight = ComposerStyle.lineHeight
@@ -9257,10 +9332,9 @@ struct GramScreenshotHarness: View {
     @State private var showingSaved = false
 
     var body: some View {
-        // Empty `agents` keeps the recipient picker to the shared queue; `onClose` nil hides the
-        // close X (there is nothing to dismiss to in a standalone render). The machine label is
-        // the one the design's sample conversation names for local senders ("vetrina ·
-        // mac-studio"); a live session gets it from its connection.
+        // `onClose` nil hides the close X (there is nothing to dismiss to in a standalone
+        // render). The machine label is the one the design's sample conversation names for
+        // local senders ("vetrina · mac-studio"); a live session gets it from its connection.
         GramView(client: client, onClose: nil, showingSaved: $showingSaved)
             .environment(\.guestMachineLabel, "mac-studio")
     }
@@ -9786,7 +9860,8 @@ struct MockTransport: HerdrTransport {
 
     /// `gram.list` owner view for the Gram-page mock render: the sample conversation of the
     /// approved design (you, vetrina and ci-watch on this machine, clientloop and trend-scout
-    /// relayed from hetzner-1), newest first. Yesterday's thread is read; today's three agent
+    /// relayed from hetzner-1), newest first, plus a second, local clientloop so the composer's
+    /// @ list has two agents with one name. Yesterday's thread is read; today's three agent
     /// messages are unread: a long report that folds, an image, and a code fence with a zip.
     /// Byte-identical to MockWireFixtures.gramList in the tests, where it is machine-checked
     /// to decode.
@@ -9798,6 +9873,7 @@ struct MockTransport: HerdrTransport {
       {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g10","direction":"agent_to_owner","from":"clientloop","text":"Lint is clean on my branch.","created_unix_ms":1722969000000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
       {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
       {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}

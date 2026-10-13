@@ -7,8 +7,9 @@ import XCTest
 /// Strings come from the mock `gram.list` (MockTransport.gramList), the design's sample
 /// conversation, newest first: g1 your "Great, ship it." to vetrina; g2 clientloop (relayed
 /// from hetzner-1) with a one-line code fence and a zip; g3 a vetrina image; g4 vetrina's
-/// 11-line "Deployed." report that folds at 8 lines; g5 a queue post grabbed by ci-watch; g6 trend-scout's
-/// "Digest ready" (relayed); g7–g9 yesterday's vetrina thread. g2–g4 are unread.
+/// 11-line "Deployed." report that folds at 8 lines; g5 a queue post grabbed by ci-watch; g6
+/// trend-scout's "Digest ready" (relayed); g10 a LOCAL clientloop's "Lint is clean on my branch."
+/// (two agents share the name clientloop); g7–g9 yesterday's vetrina thread. g2–g4 are unread.
 final class GramTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
@@ -238,7 +239,7 @@ final class GramTests: XCTestCase {
     /// older page (24 rows, go1 newest to go24 oldest, more than a screen), and the message that
     /// was on top before (g9, "Picked up the deploy ticket.") stays on screen rather than being
     /// pushed down by the rows inserted above it. The mock has a third page behind go24, so a
-    /// chained fetch would show as a count past 33. (A first page that fits the screen, as it
+    /// chained fetch would show as a count past 34. (A first page that fits the screen, as it
     /// may on a large iPad, shows the top on open, so its fetch then is the reader's too.)
     func testGramScrollingToTheTopLoadsOneOlderPage() {
         let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
@@ -260,17 +261,17 @@ final class GramTests: XCTestCase {
         }
         if !hasSidebar {
             // The phone's first page overfills the screen: opening fetches nothing.
-            XCTAssertTrue(waitForCount(9, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
+            XCTAssertTrue(waitForCount(10, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
         }
 
         // Scroll up only until the page lands, so the swipes themselves cannot reach the top
         // of the NEW page and ask for the next one.
-        var paged = waitForCount(33, timeout: 2)
+        var paged = waitForCount(34, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(33, timeout: 3)
+            paged = waitForCount(34, timeout: 3)
         }
-        XCTAssertTrue(paged, "reaching the top should load the older page (9 + 24 messages); feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(paged, "reaching the top should load the older page (10 + 24 messages); feed says \(messages.value ?? "nil")")
 
         let previousTop = label("Picked up the deploy ticket.")
         XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
@@ -278,7 +279,7 @@ final class GramTests: XCTestCase {
 
         // Let a chained fetch, if any, land: the count must stay at exactly one page.
         Thread.sleep(forTimeInterval: 2)
-        XCTAssertEqual(messages.value as? String, "33 messages", "exactly one older page should load")
+        XCTAssertEqual(messages.value as? String, "34 messages", "exactly one older page should load")
 
         // The page's oldest message is at its top (reaching it may fetch the next page: the
         // reader is at the top again).
@@ -305,7 +306,7 @@ final class GramTests: XCTestCase {
             return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
                                     timeout: timeout) == .completed
         }
-        XCTAssertTrue(waitForCount(9, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(10, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
         let newest = app.staticTexts["Great, ship it."]
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "the feed opens at the newest message")
@@ -321,12 +322,12 @@ final class GramTests: XCTestCase {
         gramTab.tap()
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "back on Gram, the feed is still at the newest message")
-        XCTAssertTrue(waitForCount(9, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(10, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
 
-        var paged = waitForCount(33, timeout: 2)
+        var paged = waitForCount(34, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(33, timeout: 3)
+            paged = waitForCount(34, timeout: 3)
         }
         XCTAssertTrue(paged, "after a tab round trip, reaching the top should still load the older page; feed says \(messages.value ?? "nil")")
         let previousTop = app.staticTexts.matching(
@@ -334,7 +335,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
                       "the message that was on top should stay on screen after the older page lands")
         Thread.sleep(forTimeInterval: 2)
-        XCTAssertEqual(messages.value as? String, "33 messages", "exactly one older page should load")
+        XCTAssertEqual(messages.value as? String, "34 messages", "exactly one older page should load")
     }
 
     /// vetrina's report runs to 11 lines, past the 8-line fold, so it ends in "…" with a
@@ -414,9 +415,13 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["No @ and it goes to the shared queue."].exists,
                       "the list reminds that no @ means the shared queue")
         let vetrina = app.buttons["gram-mention-vetrina"]
+        // Two agents are called clientloop: the local one (sender ID "clientloop") and the one
+        // relayed from hetzner-1. Both are listed, each under its own sender ID.
         let clientloop = app.buttons["gram-mention-clientloop"]
+        let relayedClientloop = app.buttons["gram-mention-\(Self.relayedClientloop)"]
         XCTAssertTrue(vetrina.exists, "vetrina has messaged in Gram, so it is listed")
-        XCTAssertTrue(clientloop.exists, "clientloop has messaged in Gram, so it is listed")
+        XCTAssertTrue(clientloop.exists, "the local clientloop has messaged in Gram, so it is listed")
+        XCTAssertTrue(relayedClientloop.exists, "the relayed clientloop is listed too, not merged into the local one")
 
         field.typeText("vet")
         XCTAssertTrue(clientloop.waitForNonExistence(timeout: 3), "\"vet\" filters clientloop out")
@@ -434,6 +439,99 @@ final class GramTests: XCTestCase {
         let calls = waitForPostCall(app, containing: "to=vetrina text=Ship the drop")
         XCTAssertFalse(calls.contains("@vetrina"), "the leading mention is not part of the text")
         XCTAssertFalse(calls.contains("to=queue"), "a mention never also posts to the queue")
+    }
+
+    /// The relayed clientloop's full sender ID in the mock (g2); the local one's is "clientloop".
+    private static let relayedClientloop = "4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop"
+
+    /// "@vetrina " with nothing after it has no message: Send shows but stays disabled.
+    func testAMentionWithNoMessageCannotBeSent() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("@vet")
+        let vetrina = app.buttons["gram-mention-vetrina"]
+        XCTAssertTrue(vetrina.waitForExistence(timeout: 3))
+        vetrina.tap()
+        XCTAssertEqual(field.value as? String, "@vetrina ")
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3), "a mention is content: send takes the saved-prompts place")
+        XCTAssertFalse(send.isEnabled, "a mention alone has no message to send")
+    }
+
+    /// Two agents share the name clientloop. Typed, the name picks neither and Send stays off;
+    /// picking the relayed one from the list sends to its full sender ID, never the local one.
+    func testASharedNameSendsToTheAgentPicked() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        // No space after the name, so autocorrect has nothing to act on.
+        field.typeText("@clientloop")
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3))
+        XCTAssertFalse(send.isEnabled, "a typed name two agents share picks neither")
+
+        let relayed = app.buttons["gram-mention-\(Self.relayedClientloop)"]
+        XCTAssertTrue(relayed.waitForExistence(timeout: 3), "the list offers both clientloops")
+        XCTAssertTrue(app.buttons["gram-mention-clientloop"].exists)
+        XCTAssertTrue(relayed.label.contains("clientloop · hetzner-1"),
+                      "a shared name is told apart by its machine; row reads \(relayed.label)")
+        relayed.tap()
+        XCTAssertEqual(field.value as? String, "@clientloop ")
+        field.typeText("deploy?")
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+
+        let calls = waitForPostCall(app, containing: "to=\(Self.relayedClientloop) text=deploy?")
+        XCTAssertFalse(calls.contains("to=clientloop "), "the local clientloop must not get it")
+    }
+
+    /// The agents sheet addresses the exact agent: its relayed clientloop row sends to that
+    /// agent's full sender ID, though a local agent has the same name.
+    func testTheAgentsSheetSendsToTheExactAgent() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Status please")
+
+        let pill = app.buttons["gram-header-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        pill.tap()
+        let row = app.buttons["gram-recipient-\(Self.relayedClientloop)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the sheet lists the relayed clientloop by its sender ID")
+        row.tap()
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5), "choosing an agent closes the sheet")
+        XCTAssertEqual(field.value as? String, "@clientloop Status please",
+                       "the sheet puts the agent's mention at the start")
+
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3) && send.isEnabled)
+        send.tap()
+        _ = waitForPostCall(app, containing: "to=\(Self.relayedClientloop) text=Status please")
+    }
+
+    /// A leading @name that names no agent in Gram is never sent to the shared queue: Send
+    /// stays off and the composer says why.
+    func testAnUnknownLeadingMentionBlocksSend() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        // No space after the name, so autocorrect has nothing to act on.
+        field.typeText("@nobody")
+        let hint = app.staticTexts["gram-composer-hint"]
+        XCTAssertTrue(hint.waitForExistence(timeout: 3), "the composer says why it cannot send")
+        XCTAssertEqual(hint.label, "No agent called @nobody in Gram")
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3))
+        XCTAssertFalse(send.isEnabled, "an @name matching no agent must not fall back to the queue")
     }
 
     /// No "@" in the text: the post goes to the shared queue, text unchanged.

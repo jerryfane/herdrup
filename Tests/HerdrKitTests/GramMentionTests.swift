@@ -109,10 +109,35 @@ final class GramMentionTests: XCTestCase {
         XCTAssertEqual(resolve("@CI-Watch rerun").recipient, "ci-watch")
     }
 
-    func testLongestKnownNameWins() {
-        let resolved = resolve("@trend-scout digest?", names: ["trend", "trend-scout"])
-        XCTAssertEqual(resolved.recipient, "trend-scout")
-        XCTAssertEqual(resolved.body, "digest?")
+    /// Either order of the known names gives the same answer: a shorter name that the longer
+    /// one starts with cannot end the token, so the matcher needs no longest-first sort.
+    func testANameThatStartsAnotherNeverStealsTheMention() {
+        for names in [["trend", "trend-scout"], ["trend-scout", "trend"],
+                      ["vetrina", "vetrina.ops"], ["vetrina.ops", "vetrina"]] {
+            let scout = resolve("@trend-scout digest?", names: names)
+            let ops = resolve("@vetrina.ops digest?", names: names)
+            if names.contains("trend") {
+                XCTAssertEqual(scout.recipient, "trend-scout", "\(names)")
+                XCTAssertEqual(scout.body, "digest?", "\(names)")
+                XCTAssertEqual(resolve("@trend digest?", names: names).recipient, "trend", "\(names)")
+            } else {
+                XCTAssertEqual(ops.recipient, "vetrina.ops", "\(names)")
+                XCTAssertEqual(ops.body, "digest?", "\(names)")
+                XCTAssertEqual(resolve("@vetrina. digest?", names: names).recipient, "vetrina", "\(names)")
+            }
+        }
+    }
+
+    func testLeadingMentionTakesTheSeparatorAfterItOff() {
+        XCTAssertEqual(resolve("@vetrina, ship it").body, "ship it")
+        XCTAssertEqual(resolve("@vetrina: go").body, "go")
+        XCTAssertEqual(resolve("@vetrina - go").body, "go")
+        XCTAssertEqual(resolve("@vetrina;go").body, "go")
+        XCTAssertEqual(resolve("@vetrina,\n  ship it").body, "ship it")
+        XCTAssertEqual(resolve("@vetrina's build").body, "'s build", "an apostrophe is not a separator")
+        XCTAssertEqual(resolve("@vetrina: ").body, "", "nothing but a separator is an empty body")
+        XCTAssertEqual(resolve("ask @vetrina, then go").body, "ask @vetrina, then go",
+                       "a mention later in the text keeps its punctuation")
     }
 
     func testAKnownNameMustEndTheToken() {
@@ -168,6 +193,24 @@ final class GramMentionTests: XCTestCase {
         let resolved = resolve("@vetrina")
         XCTAssertEqual(resolved.recipient, "vetrina")
         XCTAssertEqual(resolved.body, "")
+    }
+
+    // MARK: leadingToken
+
+    func testLeadingTokenIsTheRunAfterALeadingAt() {
+        XCTAssertEqual(GramMention.leadingToken(in: "@vetrna hi"), "vetrna")
+        XCTAssertEqual(GramMention.leadingToken(in: "  @vetrina, go"), "vetrina")
+        XCTAssertEqual(GramMention.leadingToken(in: "@vetrina.dev is live"), "vetrina.dev")
+        XCTAssertEqual(GramMention.leadingToken(in: "@vetrina."), "vetrina")
+        XCTAssertEqual(GramMention.leadingToken(in: "@ hi"), "")
+        XCTAssertEqual(GramMention.leadingToken(in: "@"), "")
+    }
+
+    func testNoLeadingTokenWithoutALeadingAt() {
+        XCTAssertNil(GramMention.leadingToken(in: "ship it @vetrina"))
+        XCTAssertNil(GramMention.leadingToken(in: "me@vetrina"))
+        XCTAssertNil(GramMention.leadingToken(in: ""))
+        XCTAssertNil(GramMention.leadingToken(in: "   "))
     }
 
     // MARK: ranges

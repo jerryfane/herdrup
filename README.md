@@ -195,11 +195,13 @@ conversations, Gram and Saved, as Messages rows, with Read all and Refresh in th
 
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a
-violet @name in the text, which addresses the message and, when it leads, is not sent with it.
-With no @ the message goes to the shared queue, where any agent can grab it. A long message
-shows its first eight lines and a Read more link (Show less folds it back). Bubble tails mark
-text only, never an image or file card. The header floats over the feed, so messages scroll
-under it.
+violet @name in the text, which addresses that exact agent and, when it leads, is not sent with
+it (nor is a following “,” or “:”). Two agents with one name are listed with their machines;
+a typed name they share, or a leading @name that matches no agent in Gram, holds Send and says
+why above the composer. With no @ the message goes to the shared queue, where any agent can
+grab it. A long message shows its first eight lines and a Read more link (Show less folds it
+back). Bubble tails mark text only, never an image or file card. The header floats over the
+feed, so messages scroll under it.
 
 ## License
 
