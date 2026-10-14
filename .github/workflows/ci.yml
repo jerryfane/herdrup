@@ -127,10 +127,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-stack"]' || '["focused"]') }}
-    # Worst shard (iPhone app): font 10 + app 40 + SwiftTerm build 10 + test 15, plus
-    # 10-min failed-only diagnostic reruns for font, app and SwiftTerm = 105 min;
+    # Worst shard (iPhone app): font 10 + Gram 25 + app 30 + SwiftTerm build 10 + test 15,
+    # plus 10-min failed-only diagnostic reruns for font, Gram, app and SwiftTerm = 130 min;
     # setup and the build come on top. A green run of this shard takes ~45 min.
-    timeout-minutes: 120
+    timeout-minutes: 145
     env:
       SHARD: ${{ matrix.shard }}
       ONLY_SUITE: ${{ github.event.inputs.only_suite }}

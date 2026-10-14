@@ -4,8 +4,8 @@
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
 #   iphone-terminal  TERMINAL_CLASSES on iPhone
-#   iphone-app       HerdrFontTests, then every other HerdrUITests class on iPhone,
-#                    then the SwiftTerm UIKit API tests on iPhone
+#   iphone-app       HerdrFontTests, then GramTests in their own round, then every other
+#                    HerdrUITests class on iPhone, then the SwiftTerm UIKit API tests on iPhone
 #   ipad             iPad-specific rounds, then the SwiftTerm UIKit API tests on iPad
 #   settings-stack   optimized Distribution build with the device-sized stack, then the
 #                    iPad Settings resize/resume regression (herdrup#416)
@@ -199,9 +199,13 @@ case "$shard" in
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
-    skip=()
+    # Gram has its own round and budget. In one 40 m round with the rest of the app, a green
+    # run already used ~36 m of test time, and a slower runner ran out (herdrup#430, run
+    # 38521782241: 87 of ~100 tests done at 40 m). Same tests, same total time.
+    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
+    skip=(-skip-testing:HerdrUITests/GramTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
-    run_suite iPhoneApp "$IPHONE_UDID" 40m -only-testing:HerdrUITests "${skip[@]}" || failed=1
+    run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
     ;;
   ipad)
