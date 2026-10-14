@@ -393,6 +393,10 @@ struct GuestMockTransport: HerdrTransport {
                 ["id": "gm-1", "direction": "agent_to_owner", "from": "llm-opt",
                  "text": "Picked up plotarmordev's request for a TensorFold rerun.",
                  "created_unix_ms": now - 14 * minute, "read": true],
+                // The host's store expired this caption-less picture's bytes (herdr#298).
+                ["id": "gm-0", "direction": "agent_to_owner", "from": "llm-opt", "text": "",
+                 "created_unix_ms": now - 20 * minute, "read": true,
+                 "expired_file": ["name": "q4-baseline.png", "size": 873_472, "mime": "image/png", "sha256": "9c0d"]],
             ]
         }
 

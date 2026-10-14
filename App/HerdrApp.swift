@@ -2745,7 +2745,7 @@ struct TerminalHomeView: View {
         /// "You: **vetrina** great, ship it." for the owner's posts (the addressee in bold;
         /// a shared-queue post has none), "clientloop: Scaffold is up…" for an agent's.
         private static func preview(of message: GramMessage) -> AttributedString {
-            let body = summary(message.text, fileName: message.file?.name)
+            let body = summary(message.text, fileName: message.attachmentPreview)
             guard !message.isFromAgent else {
                 return AttributedString("\(message.senderAgentName): \(body)")
             }
@@ -2763,13 +2763,14 @@ struct TerminalHomeView: View {
         /// A saved copy keeps the sender as displayed (`hetzner-1/clientloop`); the row shows
         /// the bare name, like the channel row.
         private static func preview(of saved: SavedGram) -> AttributedString {
-            let body = summary(saved.text, fileName: saved.file?.name)
+            let body = summary(saved.text, fileName: saved.attachmentPreview)
             let sender = saved.fromAgent ? GramMessage.agentName(from: saved.from) : "You"
             return AttributedString("\(sender): \(body)")
         }
 
         /// The message as one line of prose: fences dropped (their code kept), runs of
-        /// whitespace and newlines collapsed. A file with no caption reads as its name.
+        /// whitespace and newlines collapsed. A file with no caption reads as its name (an
+        /// expired one as "<name> (expired)").
         private static func summary(_ text: String, fileName: String?) -> String {
             let pieces = GramText.segments(text).map { segment -> String in
                 switch segment {
@@ -3097,6 +3098,9 @@ struct TerminalHomeView: View {
             }
         }
         #if DEBUG
+        .overlay(alignment: .topLeading) {
+            if ScreenshotMock.mode != nil { StatusMotionProbe() }
+        }
         .onAppear {
             guard ScreenshotMock.mode == .resize, slots.isEmpty else { return }
             let fixtures = TerminalInteractionHarness.agents
@@ -3631,6 +3635,9 @@ struct TerminalHomeView: View {
         .onChange(of: displayedRoster) { _, _ in
             onAgentListDisplayedRosterChange?(rosterScroll.isScrolling)
         }
+        // A covered or hidden roster keeps its rows built; their working rings must not
+        // keep turning behind the pane or another tab.
+        .environment(\.statusMotion, agentRosterIsVisible)
     }
 
     /// Compact layouts cover the roster when a terminal is fronted. Regular-width
@@ -5590,6 +5597,9 @@ struct TerminalPaneContent: View {
         // recognizer to the WINDOW, so N keep-mounted panes would otherwise stack N
         // recognizers that all fire on one edge swipe.
         .overlay { if isForeground { EdgeSwipeBack { onClose() } } }
+        // Kept-alive panes behind the front one, Gram or Settings hold their status dot still,
+        // and so does the front one while the scene is inactive, like the roster's rings.
+        .environment(\.statusMotion, isForeground && scenePhase == .active)
         #if DEBUG
         // The control harness's "reply-dictation" fills the reply through this binding,
         // exactly as `MicButton` does with partial results.
@@ -9618,6 +9628,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("gram.list") {
             if Self.gramPaged { return Self.gramPagedList(requestLine) }
             if Self.gramImageCount > 0 { return Self.gramListWithImages }
+            if Self.gramExpiresSaved { return await Self.gramListExpiringSaved() }
             return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
         }
         if requestLine.contains("gram.post") {
@@ -9880,6 +9891,8 @@ struct MockTransport: HerdrTransport {
     /// relayed from hetzner-1), newest first, plus a second, local clientloop so the composer's
     /// @ list has two agents with one name. Yesterday's thread is read; today's three agent
     /// messages are unread: a long report that folds, an image, and a code fence with a zip.
+    /// Yesterday trend-scout also sent two files the store has since expired (herdr#298):
+    /// a chart with no caption (g12) and an export under a line of text (g11).
     /// Byte-identical to MockWireFixtures.gramList in the tests, where it is machine-checked
     /// to decode.
     static let gramList = #"""
@@ -9890,6 +9903,8 @@ struct MockTransport: HerdrTransport {
       {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g12","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"","created_unix_ms":1722969540000,"read_by_owner":true,"expired_file":{"name":"trend-chart.png","size":873472,"mime":"image/png","sha256":"18ce5c6f97913baa79fe27d910e2f8be0f57ca89104e1ebda73840653e30be7b"}},
+      {"id":"g11","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Raw export of the run, for the record.","created_unix_ms":1722969480000,"read_by_owner":true,"expired_file":{"name":"trend-export.csv","size":2516582,"mime":"text/csv","sha256":"65b440e08c55e62678952c82b42e9e7898f0665f43fb9fe2733f74b7d580d6a9"}},
       {"id":"g10","direction":"agent_to_owner","from":"clientloop","text":"Lint is clean on my branch.","created_unix_ms":1722969000000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
       {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
@@ -9986,12 +10001,32 @@ struct MockTransport: HerdrTransport {
     private static let gramPostRecorder = GramPostRecorder()
 
     /// `gram.get_file` calls answered per message id, for GramView's DEBUG
-    /// `gram-get-file-calls` probe: "g2=0 g3=1", the list fixture's two files always
-    /// listed, then any other id asked for.
+    /// `gram-get-file-calls` probe: "g2=0 g3=1 g11=0 g12=0", the list fixture's two files
+    /// and two expired files always listed, then any other id asked for.
     static var gramGetFileSummary: String {
         let counts = gramGetFileRecorder.counts
-        let ids = ["g2", "g3"] + counts.keys.filter { $0 != "g2" && $0 != "g3" }.sorted()
+        let listed = ["g2", "g3", "g11", "g12"]
+        let ids = listed + counts.keys.filter { !listed.contains($0) }.sorted()
         return ids.map { "\($0)=\(counts[$0] ?? 0)" }.joined(separator: " ")
+    }
+
+    /// `HERDR_MOCK_GRAM_EXPIRE_SAVED=1`: the store expires the list fixture's files (g2's zip,
+    /// g3's image) once the owner has saved their message, so the next `gram.list` answers a
+    /// saved one with its file as `expired_file` (herdr#298). A copy saved while its file was
+    /// live must then stop offering it in Saved.
+    static var gramExpiresSaved: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_EXPIRE_SAVED"] == "1"
+    }
+
+    @MainActor
+    static func gramListExpiringSaved() -> String {
+        var list = gramList
+        for (id, name) in [("g2", "amigo-poc-scaffold.zip"), ("g3", "vetrina-live.png")]
+        where SavedGramStore.shared.isSaved(id) {
+            list = list.replacingOccurrences(of: #""file":{"name":"\#(name)""#,
+                                             with: #""expired_file":{"name":"\#(name)""#)
+        }
+        return list
     }
 
     private static let gramGetFileRecorder = GramGetFileRecorder()

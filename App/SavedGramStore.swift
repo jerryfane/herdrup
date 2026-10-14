@@ -36,8 +36,17 @@ struct SavedGram: Codable, Identifiable, Hashable {
     /// The attachment's metadata, if any (bytes fetched on demand). Optional so a pre-existing
     /// saved entry (which stored only a `hasFile` flag) still decodes cleanly, to `nil`.
     var file: SavedGramFile?
+    /// The attachment the server's store had already expired when this was saved (no bytes
+    /// to fetch). Optional, so entries saved before it existed decode to `nil`.
+    var expiredFile: SavedGramFile?
 
     var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000) }
+
+    /// The attachment as the sidebar's one-line preview names it (see `GramMessage`'s).
+    var attachmentPreview: String? {
+        if let file { return file.name }
+        return expiredFile.map { GramFile.expiredPreview(of: $0.name) }
+    }
 }
 
 /// Persists the owner's saved Gram messages as JSON in UserDefaults (device-local, secret-free),
@@ -102,7 +111,8 @@ final class SavedGramStore: ObservableObject {
                 from: message.senderName,
                 fromAgent: message.isFromAgent,
                 createdUnixMs: message.createdUnixMs,
-                file: message.file.map { SavedGramFile(name: $0.name, size: $0.size, mime: $0.mime) }
+                file: message.file.map { SavedGramFile(name: $0.name, size: $0.size, mime: $0.mime) },
+                expiredFile: message.expiredFile.map { SavedGramFile(name: $0.name, size: $0.size, mime: $0.mime) }
             )
             saved.append(copy)
             saved.sort { $0.createdUnixMs > $1.createdUnixMs }
@@ -116,6 +126,22 @@ final class SavedGramStore: ObservableObject {
         saved.removeAll { $0.id == id }
         ids.remove(id)
         persist()
+    }
+
+    /// The store expired these messages' files since they were saved (herdr#298): a saved
+    /// copy that still holds a live `file` for one of them moves it to `expiredFile`, so
+    /// Saved stops offering an open of bytes that are gone. Called with every inbox answer
+    /// (head and older pages); persists only when something moved.
+    func expireFiles(in messages: [GramMessage]) {
+        var changed = false
+        for message in messages where message.expiredFile != nil && ids.contains(message.id) {
+            guard let index = saved.firstIndex(where: { $0.id == message.id }),
+                  let file = saved[index].file else { continue }
+            saved[index].file = nil
+            saved[index].expiredFile = file
+            changed = true
+        }
+        if changed { persist() }
     }
 
     private func persist() {
@@ -183,6 +209,8 @@ struct SavedGramRow: View {
             }
             if let file = saved.file {
                 fileChip(file)
+            } else if let expired = saved.expiredFile {
+                expiredChip(expired)
             }
         }
         .padding(.horizontal, 13)
@@ -262,6 +290,26 @@ struct SavedGramRow: View {
             Button { onOpenFile() } label: { Label("Open", systemImage: "eye") }
             Button { onSaveFile() } label: { Label("Save to Files…", systemImage: "square.and.arrow.down") }
         }
+        .padding(.top, 2)
+    }
+
+    /// An attachment the server's store had expired: the chip's shape with nothing to open
+    /// or save, as the inbox's expired card.
+    private func expiredChip(_ file: SavedGramFile) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock.badge.xmark").font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.textFaint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(file.name).font(Typography.app(12, .medium)).foregroundStyle(Palette.textDim).lineLimit(1)
+                Text("No longer available · \(file.displaySize)").font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(file.name), no longer available")
+        .accessibilityIdentifier("gram-attachment-expired")
         .padding(.top, 2)
     }
 

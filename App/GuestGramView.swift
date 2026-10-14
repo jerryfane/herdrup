@@ -255,6 +255,8 @@ private struct GuestGramRow: View {
                 }
                 if let file = message.file {
                     fileChip(file)
+                } else if let expired = message.expiredFile {
+                    expiredChip(expired)
                 }
             }
         }
@@ -305,6 +307,29 @@ private struct GuestGramRow: View {
         .disabled(isDownloading)
         .accessibilityLabel("Open \(file.name)")
         .accessibilityIdentifier("guest-gram-file-\(message.id)")
+        .padding(.top, 2)
+    }
+
+    /// A file the host's store expired (herdr#298): the chip's shape with nothing to open,
+    /// a muted glyph and "No longer available · <size>". Not a button.
+    private func expiredChip(_ file: GuestGramFile) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock.badge.xmark")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(Palette.textFaint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(file.name)
+                    .font(Typography.app(13, .medium)).foregroundStyle(Palette.textDim)
+                    .lineLimit(1).truncationMode(.middle)
+                Text("No longer available · \(file.displaySize)")
+                    .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surface))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(file.name), no longer available")
+        .accessibilityIdentifier("guest-gram-expired-\(message.id)")
         .padding(.top, 2)
     }
 

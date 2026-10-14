@@ -90,10 +90,16 @@ class CaretView: UIView {
         setNeedsDisplay(bounds)
     }
     
+    /// herdr: holds a blinking style steady (an embedder's caret nobody can see). A repeating
+    /// blink keeps the window compositing every frame and never lets UIKit settle.
+    var blinkPaused = false {
+        didSet { if blinkPaused != oldValue { updateCursorStyle() } }
+    }
+
     func updateCursorStyle () {
         switch style {
         case .blinkUnderline, .blinkBlock, .blinkBar:
-            updateAnimation(to: true)
+            updateAnimation(to: !blinkPaused)
         case .steadyBar, .steadyBlock, .steadyUnderline:
             updateAnimation(to: false)
         }

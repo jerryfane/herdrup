@@ -596,6 +596,60 @@ struct GramFileCard: View {
     }
 }
 
+/// An attachment the store's size budget expired (herdr#298): the file card's place and
+/// shape, but nothing to open. A muted icon, the file's name and "No longer available ·
+/// <size>"; not a button, no download ring, no Save to Files. Image or file alike: there is
+/// no picture to show. `embedded` as in `GramFileCard`.
+struct GramExpiredFileCard: View {
+    let name: String
+    let byteCount: Int?
+    var embedded = false
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    var body: some View {
+        if embedded {
+            card
+        } else {
+            card
+                .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass))
+                .background(GramBubble.inFill)
+                .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
+        }
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            if embedded { Rectangle().fill(Palette.hairline).frame(height: 1) }
+            HStack(spacing: 10) {
+                Image(systemName: "clock.badge.xmark")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Palette.textFaint)
+                    .frame(width: 32, height: 40)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(name)
+                        .font(Typography.app(15, .semibold))
+                        .foregroundStyle(Palette.textDim)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text((["No longer available", sizeLabel(byteCount)] as [String?]).compactMap { $0 }
+                        .joined(separator: " · "))
+                        .font(Typography.app(13))
+                        .foregroundStyle(Palette.textFaint)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 9)
+            .padding(.bottom, 10)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(name), no longer available")
+        .accessibilityIdentifier("gram-attachment-expired")
+    }
+}
+
 /// A 32 x 40 page with a folded-looking corner and the file's extension at its foot.
 private struct GramDocumentIcon: View {
     let label: String

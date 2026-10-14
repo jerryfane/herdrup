@@ -108,6 +108,33 @@ final class GuestGramTests: XCTestCase {
         XCTAssertNil(request.params["caller_pane_id"], "a guest never names a pane")
     }
 
+    /// herdr#298: the guest projection carries `expired_file` for a file the host's store
+    /// expired. It decodes as metadata only, never as an openable `file`; absent stays nil.
+    func testGuestGramListDecodesAnExpiredFile() async throws {
+        let transport = ScriptedTransport { _, _ in #"""
+        {"id":"x","result":{"type":"guest_gram_list","messages":[
+          {"id":"m3","direction":"agent_to_owner","from":"llm-opt","text":"",
+           "created_unix_ms":1790000300000,"read":true,
+           "expired_file":{"name":"bench.png","size":873472,"mime":"image/png","sha256":"cd34"}},
+          {"id":"m2","direction":"agent_to_owner","from":"llm-opt","text":"both",
+           "created_unix_ms":1790000200000,"read":true,
+           "file":{"name":"live.md","size":10,"mime":"text/markdown","sha256":"ab12"},
+           "expired_file":{"name":"old.md","size":10,"mime":"text/markdown","sha256":"ef56"}},
+          {"id":"m1","direction":"agent_to_owner","from":"llm-opt","text":"plain",
+           "created_unix_ms":1790000100000,"read":true}]}}
+        """# }
+        let page = try await HerdrClient(transport: transport).guestGramList()
+
+        let expired = page.messages[0]
+        XCTAssertNil(expired.file, "an expired file is never a file to open")
+        XCTAssertEqual(expired.expiredFile, GuestGramFile(name: "bench.png", size: 873472,
+                                                          mime: "image/png", sha256: "cd34"))
+        XCTAssertEqual(page.messages[1].file?.name, "live.md")
+        XCTAssertNil(page.messages[1].expiredFile, "a message with bytes is not also expired")
+        XCTAssertNil(page.messages[2].file)
+        XCTAssertNil(page.messages[2].expiredFile, "absent from the wire stays nil")
+    }
+
     func testGuestGramListOmitsUnsetParamsAndClampsTheLimit() async throws {
         let transport = ScriptedTransport { _, _ in #"{"id":"x","result":{"type":"guest_gram_list","messages":[]}}"# }
         let client = HerdrClient(transport: transport)

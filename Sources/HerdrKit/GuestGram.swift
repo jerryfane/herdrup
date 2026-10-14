@@ -41,22 +41,29 @@ public struct GuestGramMessage: Decodable, Identifiable, Sendable, Equatable {
     public let text: String
     public let createdUnixMs: UInt64
     public let file: GuestGramFile?
+    /// The file the host store's attachment budget expired (herdr#298): what was there, with
+    /// no bytes to fetch. Never openable; nil when `file` is present, and absent from hosts
+    /// predating it.
+    public let expiredFile: GuestGramFile?
     /// The guest has seen it. `var` for the optimistic flip after `gram.mark_read`.
     public var read: Bool
 
     public init(id: String, direction: GramDirection, from: String, text: String,
-                createdUnixMs: UInt64, file: GuestGramFile? = nil, read: Bool) {
+                createdUnixMs: UInt64, file: GuestGramFile? = nil, expiredFile: GuestGramFile? = nil,
+                read: Bool) {
         self.id = id
         self.direction = direction
         self.from = from
         self.text = text
         self.createdUnixMs = createdUnixMs
         self.file = file
+        self.expiredFile = file == nil ? expiredFile : nil
         self.read = read
     }
 
     enum CodingKeys: String, CodingKey {
         case id, direction, from, text, file, read
+        case expiredFile = "expired_file"
         case createdUnixMs = "created_unix_ms"
     }
 
@@ -68,6 +75,7 @@ public struct GuestGramMessage: Decodable, Identifiable, Sendable, Equatable {
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         createdUnixMs = try c.decode(UInt64.self, forKey: .createdUnixMs)
         file = try c.decodeIfPresent(GuestGramFile.self, forKey: .file)
+        expiredFile = try file == nil ? c.decodeIfPresent(GuestGramFile.self, forKey: .expiredFile) : nil
         read = try c.decodeIfPresent(Bool.self, forKey: .read) ?? false
     }
 
