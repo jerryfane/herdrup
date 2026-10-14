@@ -337,7 +337,7 @@ final class MockWireFixtureTests: XCTestCase {
         // Bound before unwrapping: XCTUnwrap's autoclosure cannot contain an `await`.
         let answer = try await client.gramList()
         let messages = try XCTUnwrap(answer.messages)
-        XCTAssertEqual(messages.count, 10, "gram.list fixture did not decode to 10 messages")
+        XCTAssertEqual(messages.count, 12, "gram.list fixture did not decode to 12 messages")
         XCTAssertEqual(messages.map(\.createdUnixMs), messages.map(\.createdUnixMs).sorted(by: >),
                        "the daemon answers newest first")
 
@@ -393,6 +393,19 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(grabbed.grabbedBy, "ci-watch")
         XCTAssertFalse(grabbed.isOpenQueueItem)
 
+        // Two files the store expired: kept as metadata only, never as an openable `file`.
+        let expiredOnly = try XCTUnwrap(messages.first { $0.id == "g12" })
+        XCTAssertEqual(expiredOnly.text, "", "a caption-less expired file has nothing else to show")
+        XCTAssertNil(expiredOnly.file)
+        XCTAssertEqual(expiredOnly.expiredFile?.name, "trend-chart.png")
+        XCTAssertEqual(expiredOnly.attachmentPreview, "trend-chart.png (expired)")
+        let expiredWithText = try XCTUnwrap(messages.first { $0.id == "g11" })
+        XCTAssertNil(expiredWithText.file)
+        XCTAssertEqual(expiredWithText.expiredFile?.name, "trend-export.csv")
+        XCTAssertEqual(messages.filter { $0.expiredFile != nil }.map(\.id), ["g12", "g11"])
+        XCTAssertEqual(messages.filter { $0.file != nil }.map(\.id), ["g2", "g3"],
+                       "only the two live attachments are files to open")
+
         // Today's three agent messages are unread → the header badge shows 3.
         XCTAssertEqual(messages.filter { $0.isUnread }.map(\.id), ["g2", "g3", "g4"])
     }
@@ -407,14 +420,14 @@ final class MockWireFixtureTests: XCTestCase {
         var inbox = GramInbox()
         inbox.apply(try await client.gramList(limit: 40))
         XCTAssertEqual(inbox.messages.map(\.id).last, "g9")
-        XCTAssertEqual(inbox.messages.count, 10)
+        XCTAssertEqual(inbox.messages.count, 12)
         XCTAssertEqual(inbox.nextCursor, "g9", "the head page says there is more")
 
         var generation = inbox.generation
         let second = try await client.gramList(limit: 40, beforeID: "g9")
         XCTAssertTrue(inbox.appendPage(second, generation: generation))
-        XCTAssertEqual(inbox.messages.count, 34, "the second page holds 24 rows")
-        XCTAssertEqual(Array(inbox.messages.map(\.id)[10...]), (1...24).map { "go\($0)" })
+        XCTAssertEqual(inbox.messages.count, 36, "the second page holds 24 rows")
+        XCTAssertEqual(Array(inbox.messages.map(\.id)[12...]), (1...24).map { "go\($0)" })
         XCTAssertEqual(inbox.messages.last?.text, "Older page: release planning starts here.")
         XCTAssertEqual(inbox.nextCursor, "go24", "the second page says there is more")
 
@@ -784,8 +797,9 @@ enum MockWireFixtures {
 
     /// A `gram.list` owner view, newest first: direct owner posts, a grabbed shared-queue
     /// post, read and unread agent->owner messages, federated senders with a machine label,
-    /// a code fence with a zip attachment, an image-only message and a long report, and two
-    /// agents both called clientloop (one relayed, one local). Keep in sync with the App's
+    /// a code fence with a zip attachment, an image-only message and a long report, two
+    /// agents both called clientloop (one relayed, one local), and two messages whose file
+    /// the store expired (one with no text). Keep in sync with the App's
     /// MockTransport.gramList.
     static let gramList = #"""
     {"id":"mock","result":{"type":"gram_list","messages":[
@@ -795,6 +809,8 @@ enum MockWireFixtures {
       {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
       {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
       {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
+      {"id":"g12","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"","created_unix_ms":1722969540000,"read_by_owner":true,"expired_file":{"name":"trend-chart.png","size":873472,"mime":"image/png","sha256":"18ce5c6f97913baa79fe27d910e2f8be0f57ca89104e1ebda73840653e30be7b"}},
+      {"id":"g11","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Raw export of the run, for the record.","created_unix_ms":1722969480000,"read_by_owner":true,"expired_file":{"name":"trend-export.csv","size":2516582,"mime":"text/csv","sha256":"65b440e08c55e62678952c82b42e9e7898f0665f43fb9fe2733f74b7d580d6a9"}},
       {"id":"g10","direction":"agent_to_owner","from":"clientloop","text":"Lint is clean on my branch.","created_unix_ms":1722969000000,"read_by_owner":true},
       {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
       {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},

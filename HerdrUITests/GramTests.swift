@@ -239,7 +239,7 @@ final class GramTests: XCTestCase {
     /// older page (24 rows, go1 newest to go24 oldest, more than a screen), and the message that
     /// was on top before (g9, "Picked up the deploy ticket.") stays on screen rather than being
     /// pushed down by the rows inserted above it. The mock has a third page behind go24, so a
-    /// chained fetch would show as a count past 34. (A first page that fits the screen, as it
+    /// chained fetch would show as a count past 36. (A first page that fits the screen, as it
     /// may on a large iPad, shows the top on open, so its fetch then is the reader's too.)
     func testGramScrollingToTheTopLoadsOneOlderPage() {
         let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
@@ -261,17 +261,17 @@ final class GramTests: XCTestCase {
         }
         if !hasSidebar {
             // The phone's first page overfills the screen: opening fetches nothing.
-            XCTAssertTrue(waitForCount(10, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
+            XCTAssertTrue(waitForCount(12, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
         }
 
         // Scroll up only until the page lands, so the swipes themselves cannot reach the top
         // of the NEW page and ask for the next one.
-        var paged = waitForCount(34, timeout: 2)
+        var paged = waitForCount(36, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(34, timeout: 3)
+            paged = waitForCount(36, timeout: 3)
         }
-        XCTAssertTrue(paged, "reaching the top should load the older page (10 + 24 messages); feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(paged, "reaching the top should load the older page (12 + 24 messages); feed says \(messages.value ?? "nil")")
 
         let previousTop = label("Picked up the deploy ticket.")
         XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
@@ -279,7 +279,7 @@ final class GramTests: XCTestCase {
 
         // Let a chained fetch, if any, land: the count must stay at exactly one page.
         Thread.sleep(forTimeInterval: 2)
-        XCTAssertEqual(messages.value as? String, "34 messages", "exactly one older page should load")
+        XCTAssertEqual(messages.value as? String, "36 messages", "exactly one older page should load")
 
         // The page's oldest message is at its top (reaching it may fetch the next page: the
         // reader is at the top again).
@@ -290,7 +290,7 @@ final class GramTests: XCTestCase {
 
     /// The feed draws only the newest window of the loaded messages (paging keeps adding to
     /// what is loaded). Reaching the top reveals the older LOADED ones first, without asking
-    /// the daemon for another page. A 6-message window over the 10-message first page. iPhone
+    /// the daemon for another page. A 6-message window over the 12-message first page. iPhone
     /// only: an iPad screen fits the 6 rows, so the sentinel is on screen at once and reveals
     /// them before anything can be observed (the same code path, correctly).
     func testOlderLoadedMessagesAreRevealedWithoutFetching() throws {
@@ -302,7 +302,7 @@ final class GramTests: XCTestCase {
                       "the feed opens at the newest message")
         let messages = app.otherElements["gram-feed-messages"]
         XCTAssertTrue(messages.waitForExistence(timeout: 5))
-        XCTAssertEqual(messages.value as? String, "10 messages", "one page is loaded")
+        XCTAssertEqual(messages.value as? String, "12 messages", "one page is loaded")
         let oldest = app.descendants(matching: .any)["gram-bubble-g9"]
         XCTAssertFalse(oldest.exists, "the oldest loaded message is outside the drawn window")
 
@@ -312,7 +312,7 @@ final class GramTests: XCTestCase {
         // restore (up to ~0.7 s) and the mock's round trip, so a page fetched after the reveal
         // would have landed.
         Thread.sleep(forTimeInterval: 2)
-        XCTAssertEqual(messages.value as? String, "10 messages", "revealing loaded rows fetches no page")
+        XCTAssertEqual(messages.value as? String, "12 messages", "revealing loaded rows fetches no page")
     }
 
     /// iPhone: Gram is a persistent tab, so leaving it and coming back keeps the feed's layout
@@ -333,7 +333,7 @@ final class GramTests: XCTestCase {
             return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
                                     timeout: timeout) == .completed
         }
-        XCTAssertTrue(waitForCount(10, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(12, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
         let newest = app.staticTexts["Great, ship it."]
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "the feed opens at the newest message")
@@ -349,12 +349,12 @@ final class GramTests: XCTestCase {
         gramTab.tap()
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "back on Gram, the feed is still at the newest message")
-        XCTAssertTrue(waitForCount(10, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(12, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
 
-        var paged = waitForCount(34, timeout: 2)
+        var paged = waitForCount(36, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(34, timeout: 3)
+            paged = waitForCount(36, timeout: 3)
         }
         XCTAssertTrue(paged, "after a tab round trip, reaching the top should still load the older page; feed says \(messages.value ?? "nil")")
         let previousTop = app.staticTexts.matching(
@@ -362,7 +362,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
                       "the message that was on top should stay on screen after the older page lands")
         Thread.sleep(forTimeInterval: 2)
-        XCTAssertEqual(messages.value as? String, "34 messages", "exactly one older page should load")
+        XCTAssertEqual(messages.value as? String, "36 messages", "exactly one older page should load")
     }
 
     // MARK: - Render budget
@@ -376,9 +376,9 @@ final class GramTests: XCTestCase {
     }
 
     /// Scrolling a feed of pictures re-renders only the rows that change. Twelve image messages
-    /// (`HERDR_MOCK_GRAM_IMAGES`), each under a three-line text, 34 rows in all. A picture
+    /// (`HERDR_MOCK_GRAM_IMAGES`), each under a three-line text, 36 rows in all. A picture
     /// coming on or off screen re-renders its own row (and its preview landing, once); with
-    /// the on-screen set held by the PAGE, every such change re-rendered all 34 rows. Six
+    /// the on-screen set held by the PAGE, every such change re-rendered every row. Six
     /// swipes carry a dozen pictures across the edges: about 30-60 row renders now, and well
     /// over 800 (two dozen crossings x 34 rows, plus a page render per prefetch) before.
     func testScrollingPicturesStaysWithinARowRenderBudget() {
@@ -832,6 +832,55 @@ final class GramTests: XCTestCase {
         let save = app.buttons["Save to Files"].firstMatch
         XCTAssertTrue(save.waitForExistence(timeout: 5), "the card's menu should offer Save to Files")
         XCTAssertTrue(app.buttons["Delete"].firstMatch.exists, "the same menu keeps the message's actions")
+    }
+
+    /// herdr#298: a file the store expired keeps its message. trend-scout's caption-less
+    /// chart (g12) draws as just the expired card, never an empty bubble; its export (g11)
+    /// draws the card under its text. The card names the file and says it is no longer
+    /// available; it is not a button, has no Open or Save to Files, and tapping it fetches
+    /// nothing.
+    func testAnExpiredAttachmentDrawsAsAnInertCard() {
+        let app = launchGram()
+        let bubble = app.descendants(matching: .any)["gram-bubble-g12"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 10), "the file-only expired message should draw")
+        let card = bubble.descendants(matching: .any)["gram-attachment-expired"].firstMatch
+        reveal(card, in: app, older: true)
+        XCTAssertTrue(card.exists && card.isHittable, "the expired file should draw as a card on screen")
+        XCTAssertEqual(card.label, "trend-chart.png, no longer available")
+        XCTAssertNotEqual(card.elementType, .button, "an expired file is not a button")
+        XCTAssertEqual(bubble.descendants(matching: .button).count, 0, "nothing in the expired card opens")
+        XCTAssertFalse(bubble.descendants(matching: .any)["gram-image-preview-g12"].exists,
+                       "an expired image draws no picture card")
+        // Not an empty bubble: the message is the card alone (its padded box holds the name
+        // and status lines, the element's frame), with no second, empty bubble beside it.
+        XCTAssertGreaterThan(card.frame.height, 30, "the card draws its name and status")
+        XCTAssertTrue(bubble.frame.insetBy(dx: -1, dy: -1).contains(card.frame), "the card is the message's bubble")
+        XCTAssertLessThan(bubble.frame.height, card.frame.height + 30,
+                          "the file-only message is the card alone, with no empty bubble beside it")
+
+        let withText = app.descendants(matching: .any)["gram-bubble-g11"]
+        XCTAssertTrue(withText.waitForExistence(timeout: 5))
+        let textCard = withText.descendants(matching: .any)["gram-attachment-expired"].firstMatch
+        XCTAssertTrue(textCard.exists, "the expired file draws under its message's text")
+        XCTAssertEqual(textCard.label, "trend-export.csv, no longer available")
+        XCTAssertTrue(withText.staticTexts["Raw export of the run, for the record."].exists,
+                      "the message's own text stays")
+        XCTAssertEqual(withText.descendants(matching: .button).matching(identifier: "gram-attachment-open").count, 0)
+
+        let calls = probe(app, "gram-get-file-calls")
+        card.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(waitForGetFileCalls(calls, "g12", 0, timeout: 0.5),
+                      "tapping the expired card fetches nothing; probe says \(calls.label)")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g11", 0, timeout: 0.5),
+                      "the expired export is never fetched; probe says \(calls.label)")
+        XCTAssertFalse(probe(app, "gram-opened-file").label.hasPrefix("opened:"), "tapping it opens nothing")
+
+        card.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Delete"].firstMatch.waitForExistence(timeout: 5),
+                      "the message's own menu stays")
+        XCTAssertFalse(app.buttons["Save to Files"].exists, "an expired file has nothing to save")
+        XCTAssertFalse(app.buttons["Open"].exists, "an expired file has nothing to open")
     }
 
     /// Saving a message from its menu redraws that row with the saved badge, and unsaving

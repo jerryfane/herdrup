@@ -48,6 +48,11 @@ public struct GramFile: Decodable, Sendable, Equatable {
         if bytes < 1024 * 1024 { return String(format: "%.0f KB", bytes / 1024) }
         return String(format: "%.1f MB", bytes / (1024 * 1024))
     }
+
+    /// A one-line preview of an attachment the store expired: "<name> (expired)".
+    public static func expiredPreview(of name: String) -> String {
+        "\(name) (expired)"
+    }
 }
 
 /// One gram message as returned by the server.
@@ -70,6 +75,11 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     public var readByOwner: Bool
     /// A file attached to this message, or nil. Fetch its bytes with `gramGetFile`.
     public let file: GramFile?
+    /// The attachment the store's size budget expired (herdr#298): the message stays but
+    /// its bytes are gone, so this is only what it was. Never openable; nil when `file` is
+    /// present (a message with bytes is never also drawn as expired), and absent from
+    /// daemons predating it.
+    public let expiredFile: GramFile?
     /// The label of the federated machine `from` is relayed from, when `from` is
     /// `<alias>/<name>` and the daemon knows the alias's machine. Absent otherwise, and
     /// from daemons predating it.
@@ -77,11 +87,35 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, direction, from, to, text, file
+        case expiredFile = "expired_file"
         case grabbedBy = "grabbed_by"
         case grabbedUnixMs = "grabbed_unix_ms"
         case createdUnixMs = "created_unix_ms"
         case readByOwner = "read_by_owner"
         case machineLabel = "machine_label"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        direction = try c.decode(GramDirection.self, forKey: .direction)
+        from = try c.decode(String.self, forKey: .from)
+        to = try c.decodeIfPresent(String.self, forKey: .to)
+        text = try c.decode(String.self, forKey: .text)
+        grabbedBy = try c.decodeIfPresent(String.self, forKey: .grabbedBy)
+        grabbedUnixMs = try c.decodeIfPresent(UInt64.self, forKey: .grabbedUnixMs)
+        createdUnixMs = try c.decode(UInt64.self, forKey: .createdUnixMs)
+        readByOwner = try c.decode(Bool.self, forKey: .readByOwner)
+        file = try c.decodeIfPresent(GramFile.self, forKey: .file)
+        expiredFile = try file == nil ? c.decodeIfPresent(GramFile.self, forKey: .expiredFile) : nil
+        machineLabel = try c.decodeIfPresent(String.self, forKey: .machineLabel)
+    }
+
+    /// The attachment as a one-line preview names it: the file's name, "<name> (expired)"
+    /// for one the store expired, nil for none.
+    public var attachmentPreview: String? {
+        if let file { return file.name }
+        return expiredFile.map { GramFile.expiredPreview(of: $0.name) }
     }
 
     /// The sender as people read it: a federated sender's machine label in place of its

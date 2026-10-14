@@ -134,6 +134,86 @@ final class TerminalControlTests: TerminalInteractionTestCase {
         attach("two-taps-cancel-without-input")
     }
 
+    /// Keycaps tapped while one is still in flight leave TOGETHER: over a 2 s route a
+    /// quick run of eight caps reaches the host in fewer requests than taps, in exactly
+    /// the tap order, and the pane applies them in that order. A switch between raw
+    /// bytes and named keys ends a request, and so does a bare Escape: it never shares a
+    /// write with the key after it, which vim/tmux/readline would read as Alt+key.
+    ///
+    /// XCUITest taps run about 0.4 s apart on an M-series simulator and up to ~1 s on a
+    /// hosted one; a 2 s window still catches two or more caps at the slow end, so
+    /// "fewer requests than taps" holds there, against one request per tap on a
+    /// per-key chain.
+    func testKeycapsTappedDuringSlowSendLeaveTogetherInOrder() throws {
+        launch("control", environment: ["HERDR_MOCK_KEY_SEND_DELAY_MS": "2000"])
+        XCTAssertEqual(keySendRequests(), [], "nothing may reach the host before a tap")
+
+        // Named keys, at the bar's leading end: Left goes out at once; esc and the Ups
+        // are tapped while it is in flight. Without the Escape rule the first Up would
+        // join esc's request.
+        let left = try XCTUnwrap(onscreen("Left", timeout: 5), "the arrow caps must be on screen at launch")
+        let escape = try XCTUnwrap(onscreen("Escape", timeout: 2), "esc must share the viewport with Left")
+        let up = try XCTUnwrap(onscreen("Up", timeout: 2), "Up must share the viewport with Left")
+        for key in [left, escape, up, up] { key.tap() }
+        let namedExpected = ["key:Left", "key:Escape", "key:Up", "key:Up"]
+        // ANSWERED, not just received: the probe records a request on arrival, and the
+        // raw phase's first cap must not find the last named request still in flight
+        // (it would rightly queue behind it). On a phone, scrolling to ^C happened to
+        // outlast the 2 s answer; on an iPad ^C is on screen at once.
+        let namedAnswered = XCTNSPredicateExpectation(predicate: NSPredicate { [weak self] _, _ in
+            guard let self else { return false }
+            return self.keySendRequests().flatMap { $0 }.count >= namedExpected.count
+                && self.keySendsInFlight() == 0
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [namedAnswered], timeout: 40), .completed)
+        let named = keySendRequests()
+        print("Named keycap requests: \(named)")
+        XCTAssertEqual(named.flatMap { $0 }, namedExpected, "named caps must keep their tap order")
+        let escapeRequest = try XCTUnwrap(named.first { $0.contains("key:Escape") })
+        XCTAssertEqual(escapeRequest.last, "key:Escape",
+                       "a bare Escape must end its request, never share a write with the next key: \(named)")
+
+        // Raw caps. The fixture walks history back twice, clears, walks back past the
+        // oldest entry, clears and steps back once: only this order ends on the newer
+        // known command with six previous steps and two clears.
+        let clear = cap("^C")
+        let previous = try XCTUnwrap(onscreen("^P", timeout: 2), "^P must share the viewport with ^C")
+        let taps = [previous, previous, clear, previous, previous, previous, clear, previous]
+        let started = Date()
+        for key in taps { key.tap() }
+        print("Eight keycap taps took \(Date().timeIntervalSince(started)) s")
+        wait(timeout: 40) {
+            ($0["input"] as? String) == "second-known-command"
+                && ($0["previous"] as? Int) == 6 && ($0["clears"] as? Int) == 2
+        }
+        let raw = Array(keySendRequests().dropFirst(named.count))
+        print("Raw keycap requests (\(raw.count) for \(taps.count) taps): \(raw)")
+        XCTAssertEqual(raw.flatMap { $0 }, ["10", "10", "03", "10", "10", "10", "03", "10"],
+                       "every raw cap must reach the host once, in tap order")
+        XCTAssertEqual(raw.first, ["10"], "the first cap must leave at once, not wait for company")
+        XCTAssertLessThan(raw.count, taps.count,
+                          "caps tapped during an in-flight send must leave together: \(raw)")
+        attach("keycaps-batched-in-order")
+    }
+
+    /// The fixture's received keycap requests, in arrival order, each as its tokens: a
+    /// `pane.send_text` as its scalars in hex, an `agent.send_keys` as `key:<name>`s.
+    private func keySendRequests() -> [[String]] {
+        let label = app.descendants(matching: .any)["terminal-key-sends"].firstMatch.label
+        guard !label.isEmpty else { return [] }
+        return label.components(separatedBy: " | ").map { entry in
+            if entry.hasPrefix("text:") {
+                return entry.dropFirst("text:".count).split(separator: " ").map(String.init)
+            }
+            return entry.dropFirst("keys:".count).split(separator: ",").map { "key:" + $0 }
+        }
+    }
+
+    /// How many of those requests the fixture has not answered yet; -1 when unreadable.
+    private func keySendsInFlight() -> Int {
+        Int(app.descendants(matching: .any)["terminal-key-sends"].firstMatch.value as? String ?? "") ?? -1
+    }
+
     /// The reply path takes the keyboard first, from a fresh launch. Typing the chord
     /// is the observable focus check; this must not depend on a SwiftUI toolbar control
     /// because the reply editor is UIKit-backed.

@@ -183,8 +183,24 @@ extension Color {
     }
 }
 
+private struct StatusMotionKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// Whether `TurningRing` and `PulsingDot` may move. False where they stay built but are
+    /// not on screen: a kept-alive pane behind another tab or pane, a roster the pane covers.
+    /// A repeating animation nobody can see still drives SwiftUI's display link every frame
+    /// (#427: an idle Mac app at 66% CPU).
+    var statusMotion: Bool {
+        get { self[StatusMotionKey.self] }
+        set { self[StatusMotionKey.self] = newValue }
+    }
+}
+
 /// The "working" status shape — a thin broken ring, turning. Colour carries the
 /// meaning (the working blue); the motion says "live" without claiming a duration.
+/// It holds still while `statusMotion` is off.
 struct TurningRing: View {
     var color: Color
     /// Sized like `PulsingDot.diameter`: the defaults are the inline badge size, so the
@@ -193,15 +209,33 @@ struct TurningRing: View {
     /// ring inline (13/1.6) while a code is in flight.
     var diameter: CGFloat = 13
     var lineWidth: CGFloat = 1.6
-    @State private var spin = false
+    @Environment(\.statusMotion) private var statusMotion
+    @ViewBuilder
     var body: some View {
-        Circle().trim(from: 0, to: 0.72)
+        let ring = Circle().trim(from: 0, to: 0.72)
             .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             .frame(width: diameter, height: diameter)
+        // Stopping means removing the motion: a repeatForever animation keeps running
+        // after its value is set back without one.
+        if statusMotion {
+            ring.modifier(Spinning())
+        } else {
+            ring
+        }
+    }
+}
+
+private struct Spinning: ViewModifier {
+    @State private var spin = false
+    func body(content: Content) -> some View {
+        content
             .rotationEffect(.degrees(spin ? 360 : 0))
             .onAppear {
                 withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
             }
+            #if DEBUG
+            .modifier(StatusMotionTally())
+            #endif
     }
 }
 
@@ -209,28 +243,74 @@ struct TurningRing: View {
 /// holds perfectly still otherwise. Reuses TurningRing's onAppear +
 /// repeatForever idiom; a fading scale reads "alive" without implying a
 /// duration. Colour still carries the meaning — only the working state moves.
+/// Like `TurningRing`, it holds still while `statusMotion` is off.
 struct PulsingDot: View {
     var color: Color
     var active: Bool
     var diameter: CGFloat = 7
-    @State private var pulse = false
+    @Environment(\.statusMotion) private var statusMotion
+    @ViewBuilder
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: diameter, height: diameter)
-            .opacity(active && pulse ? 0.4 : 1)
-            .scaleEffect(active && pulse ? 1.35 : 1)
-            .onAppear { if active { startPulsing() } }
-            .onChange(of: active) { _, isActive in
-                // Snap back to solid when it stops working, restart when it resumes.
-                pulse = false
-                if isActive { startPulsing() }
-            }
-    }
-
-    private func startPulsing() {
-        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-            pulse = true
+        let dot = Circle().fill(color).frame(width: diameter, height: diameter)
+        // Removed rather than reset when it stops, as in `TurningRing`; solid again at once.
+        if active && statusMotion {
+            dot.modifier(Pulsing())
+        } else {
+            dot
         }
     }
 }
+
+private struct Pulsing: ViewModifier {
+    @State private var pulse = false
+    func body(content: Content) -> some View {
+        content
+            .opacity(pulse ? 0.4 : 1)
+            .scaleEffect(pulse ? 1.35 : 1)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true }
+            }
+            #if DEBUG
+            .modifier(StatusMotionTally())
+            #endif
+    }
+}
+
+#if DEBUG
+/// For the UI tests: how many `TurningRing`s and `PulsingDot`s are moving right now (their
+/// `Spinning`/`Pulsing` motion is in the view tree), so a test can hold a screen to
+/// "nothing hidden animates" (`status-motion`).
+@MainActor
+enum StatusMotionCount {
+    fileprivate(set) static var count = 0
+}
+
+private struct StatusMotionTally: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .onAppear { StatusMotionCount.count += 1 }
+            .onDisappear { StatusMotionCount.count -= 1 }
+    }
+}
+
+/// The `status-motion` probe: `StatusMotionCount.count` as its label, polled. Its own view and
+/// state, so the poll re-renders this probe alone.
+struct StatusMotionProbe: View {
+    @State private var count = 0
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier("status-motion")
+            .accessibilityLabel("\(count)")
+            .allowsHitTesting(false)
+            .task {
+                while !Task.isCancelled {
+                    if StatusMotionCount.count != count { count = StatusMotionCount.count }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
+    }
+}
+#endif

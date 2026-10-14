@@ -214,7 +214,7 @@ struct GramView: View {
     /// "opened:<name>" once a file has been handed to a viewer, for the `gram-opened-file`
     /// probe.
     @State private var openedFileProbe = ""
-    /// The mock's `gram.get_file` calls per id ("g2=0 g3=1"), for the `gram-get-file-calls`
+    /// The mock's `gram.get_file` calls per id ("g2=0 g3=1 g11=0 g12=0"), for the `gram-get-file-calls`
     /// probe. Polled while a mock runs: prefetches start from rows, not from a page action.
     @State private var getFileProbe = ""
     /// How many older pages the paged mock has answered, for the `gram-list-pages` probe.
@@ -347,7 +347,7 @@ struct GramView: View {
                 || message.from.localizedCaseInsensitiveContains(search)
                 || message.senderName.localizedCaseInsensitiveContains(search)
                 || (message.to ?? "").localizedCaseInsensitiveContains(search)
-                || (message.file?.name ?? "").localizedCaseInsensitiveContains(search)
+                || ((message.file ?? message.expiredFile)?.name ?? "").localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -357,7 +357,7 @@ struct GramView: View {
         return savedGrams.saved.filter { saved in
             saved.text.localizedCaseInsensitiveContains(search)
                 || saved.from.localizedCaseInsensitiveContains(search)
-                || (saved.file?.name ?? "").localizedCaseInsensitiveContains(search)
+                || ((saved.file ?? saved.expiredFile)?.name ?? "").localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -3560,7 +3560,8 @@ private struct GramRowRenderProbe: View {
 /// beside its last bubble; the owner's own posts sit on the right with a status line
 /// ("Grabbed by …" / "Delivered to …"). Prose folds past four lines, fenced code draws in a
 /// monospaced inset with Copy, an image attachment shows as a picture card and any other
-/// file as a file card, sharing one card with the text when the message has both.
+/// file as a file card, sharing one card with the text when the message has both. A file
+/// the store expired draws as a file card with nothing to open (`GramExpiredFileCard`).
 struct GramRow: View, Equatable {
     let message: GramMessage
     var isDownloadingFile: Bool
@@ -3650,13 +3651,16 @@ struct GramRow: View, Equatable {
         guard let file = message.file, !file.isImage else { return nil }
         return file
     }
+    /// The attachment drawn as a card in the text part, below any text: a document, or any
+    /// file the store expired (image or not: there is no picture left to show).
+    private var hasCard: Bool { documentFile != nil || message.expiredFile != nil }
 
     var body: some View {
         #if DEBUG
         let _ = GramRowRenders.record()
         #endif
         let segments = GramText.segments(message.text)
-        let hasTextPart = !segments.isEmpty || documentFile != nil
+        let hasTextPart = !segments.isEmpty || hasCard
         VStack(alignment: mine ? .trailing : .leading, spacing: 0) {
             if startsGroup && !mine {
                 senderLine
@@ -3673,10 +3677,10 @@ struct GramRow: View, Equatable {
                 }
                 VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
                     // The tail goes only on a part that ENDS IN TEXT: never on a picture, a
-                    // bare file card, or a text + document card (the document comes last).
+                    // bare file card, or a text + file card (the card comes last).
                     if hasTextPart {
                         chrome(textPart(segments), first: true,
-                               tail: !segments.isEmpty && documentFile == nil && imageFile == nil)
+                               tail: !segments.isEmpty && !hasCard && imageFile == nil)
                     }
                     if let image = imageFile {
                         chrome(imageCard(image), first: !hasTextPart, tail: false)
@@ -3767,15 +3771,15 @@ struct GramRow: View, Equatable {
         }
     }
 
-    /// The text and any non-image file: a plain bubble for prose alone, a card (the card width,
-    /// or less in a narrower column) once there is code or a file, and the bare file card for
-    /// a file with no text.
+    /// The text and any card file (a document, or a file the store expired): a plain bubble
+    /// for prose alone, a card (the card width, or less in a narrower column) once there is
+    /// code or a file, and the bare file card for a file with no text.
     @ViewBuilder
     private func textPart(_ segments: [GramTextSegment]) -> some View {
         let hasCode = segments.contains { if case .code = $0 { return true } else { return false } }
-        if segments.isEmpty, let file = documentFile {
-            fileCard(file, embedded: false)
-        } else if hasCode || documentFile != nil {
+        if segments.isEmpty, hasCard {
+            card(embedded: false)
+        } else if hasCode || hasCard {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
                     switch segment {
@@ -3789,8 +3793,8 @@ struct GramRow: View, Equatable {
                             .padding(.top, 7)
                     }
                 }
-                if let file = documentFile {
-                    fileCard(file, embedded: true)
+                if hasCard {
+                    card(embedded: true)
                         .padding(.top, 9)
                 } else {
                     Color.clear.frame(height: 8)
@@ -3810,6 +3814,17 @@ struct GramRow: View, Equatable {
             .padding(.vertical, 7)
             .padding(.horizontal, 12)
             .background(fill, in: bubbleShape)
+        }
+    }
+
+    /// The text part's file card: the document's, or the expired file's, which has nothing
+    /// to open.
+    @ViewBuilder
+    private func card(embedded: Bool) -> some View {
+        if let file = documentFile {
+            fileCard(file, embedded: embedded)
+        } else if let expired = message.expiredFile {
+            GramExpiredFileCard(name: expired.name, byteCount: Int(clamping: expired.size), embedded: embedded)
         }
     }
 
