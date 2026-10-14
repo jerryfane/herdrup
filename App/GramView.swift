@@ -1269,8 +1269,10 @@ struct GramView: View {
                                     Image(systemName: "arrow.up")
                                         .font(.system(size: 12, weight: .semibold))
                                     // Names both ways: a short result list cannot be scrolled.
+                                    // After a bounded search found nothing older: true even with
+                                    // matches from the newer messages shown below.
                                     Text(searchedOlderWithoutMatch.map {
-                                        "No match in \($0) messages. Tap or scroll up to search older ones"
+                                        "No older matches in \($0) messages. Tap or scroll up to search further"
                                     } ?? "Tap or scroll up to search older messages")
                                 } else {
                                     ProgressView().controlSize(.small)

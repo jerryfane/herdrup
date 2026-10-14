@@ -52,7 +52,8 @@ final class SavedGramStore: ObservableObject {
     /// reversed, oldest at the top and the newest at the bottom (`GramSavedFeed`).
     @Published private(set) var saved: [SavedGram]
     private var ids: Set<String>
-    /// Off for the DEBUG seed below, so a UI test's saves and unsaves never reach UserDefaults.
+    /// Off in DEBUG mock runs, so a UI test's saves and unsaves never reach UserDefaults (a
+    /// test that stops between a save and its unsave would otherwise leave it saved).
     private var persists = true
 
     init() {
@@ -67,6 +68,12 @@ final class SavedGramStore: ObservableObject {
             }
             saved = seeded
             ids = Set(seeded.map(\.id))
+            persists = false
+            return
+        }
+        if ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"] != nil {
+            saved = []
+            ids = []
             persists = false
             return
         }
