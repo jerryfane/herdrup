@@ -141,6 +141,13 @@ struct GramView: View {
     /// A failed page fetch, shown ON the sentinel so it survives the next successful
     /// head poll (which clears `refreshNote`) and gives the reader something to tap.
     @State private var pageError: String?
+    /// A search's fetch of older pages for matches is running (`loadOlderMatches`): the
+    /// sentinel and the "No matches in recent messages" button say so meanwhile.
+    @State private var searchingOlder = false
+    /// The last bounded search of older pages for the current query found nothing: how many
+    /// messages are loaded now. The sentinel says so instead of falling silent. Cleared by a
+    /// new query and by a search that finds a match.
+    @State private var searchedOlderWithoutMatch: Int?
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -192,9 +199,10 @@ struct GramView: View {
     /// without this nothing would say the bottom or the rows are on screen again until the
     /// reader scrolled. See `onFeedPlacementChange` and the bottom/sentinel trackers.
     @State private var feedAppearance = 0
-    /// Text segments opened with "Read more" (`<message id>#<segment>`). Here rather than in
-    /// the row so a row that is rebuilt (a new window, a search) does not fold it again.
-    @State private var expandedTexts: Set<String> = []
+    /// Text segments opened with "Read more", by message id (segment indexes). Here rather
+    /// than in the row so a row that is rebuilt (a new window, a search) does not fold it
+    /// again; each row is handed only its own, so opening one re-renders only that row.
+    @State private var expandedTexts: [String: Set<Int>] = [:]
     /// The "Gram ›" pill's sheet: Read all, the agents seen in Gram, and the shared queue.
     @State private var showingAgentsSheet = false
     /// The floating header's bottom edge in the page's coordinate space (`feedPageSpace`):
@@ -209,6 +217,8 @@ struct GramView: View {
     /// The mock's `gram.get_file` calls per id ("g2=0 g3=1"), for the `gram-get-file-calls`
     /// probe. Polled while a mock runs: prefetches start from rows, not from a page action.
     @State private var getFileProbe = ""
+    /// How many older pages the paged mock has answered, for the `gram-list-pages` probe.
+    @State private var listPagesProbe = 0
     #endif
     /// This device's machine label, for a local agent's "name · machine" line.
     @Environment(\.guestMachineLabel) private var localMachine
@@ -276,11 +286,6 @@ struct GramView: View {
     /// Every running file download by message id, so an open or save of an image the feed
     /// is prefetching joins that transfer instead of starting a second.
     @State private var fetches = Fetches()
-    /// Image rows inside the feed's visible bounds (from the rows' placement reports), so an
-    /// image card fetches its preview only while really on screen: the feed is an eager
-    /// stack, so every drawn row exists whether it is seen or not. Only image rows are
-    /// tracked, so a scroll re-renders the page only when a picture enters or leaves.
-    @State private var imageRowsOnScreen: Set<String> = []
     /// Bounds the image prefetches running at once (`GramImagePreview`).
     @State private var prefetchSlots = AsyncSlots(limit: GramImagePreview.maxConcurrentPrefetches)
     /// A Gram file downloaded and staged for export through the system document
@@ -411,6 +416,9 @@ struct GramView: View {
         /// The search text the feed last showed, so a CHANGE of it (not the feed's first
         /// appearance) scrolls to the newest match. nil until the feed has appeared.
         var shownSearch: String?
+        /// The running older-messages fetch (the sentinel's, or the no-matches button's),
+        /// so a new or cleared search cancels it.
+        var olderFetch: Task<Void, Never>?
     }
 
     /// The newest message in the whole loaded list (not the search-filtered one): what the
@@ -438,6 +446,10 @@ struct GramView: View {
     }
     /// Loaded messages older than the drawn window: the top sentinel reveals them, no fetch.
     private var hasHiddenOlder: Bool { visibleMessages.count > renderLimit }
+    /// The top sentinel searches older history for matches rather than loading the next page:
+    /// a search is active. Search covers the loaded messages only (the daemon has no search),
+    /// so reaching the top of the results is how the reader asks for older matches.
+    private var sentinelSearchesOlder: Bool { !search.isEmpty }
 
     /// The newest `renderLimit` of the visible messages, oldest first, with their separators,
     /// unread rule and groups. Everything the feed draws comes from here.
@@ -515,10 +527,20 @@ struct GramView: View {
         // just-selected section with "No matches", which reads as a bug. Only the page's OWN
         // field: a host's sidebar search (`searchText`) is the reader's and outlives the switch.
         .onChange(of: showingSaved) { _, _ in localSearch = "" }
-        // A new search (or clearing it) starts from the newest window again: the walk may
-        // have loaded the whole store. On the page, not the feed: from "No matches" the feed
-        // is unmounted, and a reset inside it would miss the clear.
-        .onChange(of: search) { _, _ in renderLimit = Self.renderWindow }
+        // A new search (or clearing it) starts from the newest window again, and ends the
+        // previous query's search of older history. On the page, not the feed: from "No
+        // matches" the feed is unmounted, and a reset inside it would miss the clear.
+        .onChange(of: search) { _, new in
+            renderLimit = Self.renderWindow
+            feedVisibility.olderFetch?.cancel()
+            searchedOlderWithoutMatch = nil
+            feedVisibility.olderFetch = nil
+            feedVisibility.pageRequested = false
+            searchingOlder = false
+            // During a search only the reader's own arrival at the top searches older
+            // history: a short result list shows the sentinel at once, which asks nothing.
+            feedVisibility.pageArmed = new.isEmpty
+        }
         // The "Gram ›" pill: Read all, the agents seen in Gram, and the shared queue.
         .sheet(isPresented: $showingAgentsSheet) { agentsSheet }
         // Paperclip → the shared attach sheet and pickers; picks stage straight into
@@ -1048,54 +1070,46 @@ struct GramView: View {
         // Let a drag on the message feed dismiss the keyboard too, so the composer
         // never gets stuck covering the tab bar with no way out.
         .scrollDismissesKeyboard(.interactively)
-        // THE WHOLE-STORE WALK LIVES HERE, on a view that outlives every result state.
-        // Hanging it on the result views instead meant the walk died the moment the
-        // screen switched between "no matches yet" and the first match: the successor
-        // task started while the cancelled predecessor was still suspended in its page
-        // fetch, the single-flight guard refused it, and the banner then promised a
-        // search that had stopped. One owner, re-keyed on the query, cancelled with it.
-        .task(id: searchWalkKey) {
-            guard !showingSaved, !search.isEmpty else { return }
-            await loadEveryPage()
-        }
     }
-
-    /// Identity for the search walk: the query, plus which section is showing. Saved is
-    /// local, so switching to it must cancel the walk rather than re-key it.
-    private var searchWalkKey: String { "\(showingSaved ? "saved" : "inbox")\u{1}\(search)" }
 
     /// Shown when the list HAS rows but the active search matches none of them. A distinct
     /// state from "nothing here yet": a blank scroll after typing reads as an empty inbox,
     /// which is the bug the agents list already avoids the same way.
     ///
-    /// `stillLoading` and `failure` are passed IN because this view is shared with the
-    /// Saved section, which is local and complete by construction: reading the inbox's
-    /// paging state here told a Saved filter with no hits that older gram messages were
-    /// still being searched, and counted inbox rows as its denominator.
-    private func noMatches(stillLoading: Bool, loadedCount: Int, failure: String?) -> some View {
+    /// `hasOlder` is passed IN because this view is shared with the Saved section, which is
+    /// local and complete by construction: there "No matches" is the whole answer. In the
+    /// inbox a search covers the LOADED messages (the daemon has no search), so while older
+    /// history exists it says so and offers the bounded search of older pages that reaching
+    /// the top of a result list runs (`searchOlderMessages`).
+    private func noMatches(hasOlder: Bool, loadedCount: Int) -> some View {
         centered {
             VStack(spacing: 8) {
-                Image(systemName: failure == nil ? "magnifyingglass" : "exclamationmark.triangle")
+                Image(systemName: hasOlder && pageError != nil ? "exclamationmark.triangle" : "magnifyingglass")
                     .font(.system(size: 28))
                     .foregroundStyle(Palette.textFaint)
-                // "No matches" is a claim about the whole store, so while older pages are
-                // still coming in — or after the walk gave up — it says what is true.
-                if let failure {
-                    Text("Couldn't search everything")
+                if hasOlder {
+                    Text("No matches in recent messages")
                         .font(Typography.app(15, .medium))
                         .foregroundStyle(Palette.textDim)
-                    Text("\(failure) Nothing in the \(loadedCount) loaded matches “\(search)”.")
+                    Text(pageError.map { "\($0) Nothing in the \(loadedCount) loaded matches “\(search)”." }
+                         ?? "Nothing in the \(loadedCount) most recent messages matches “\(search)”.")
                         .font(Typography.app(13))
                         .foregroundStyle(Palette.textFaint)
                         .multilineTextAlignment(.center)
-                } else if stillLoading {
-                    Text("Searching older messages…")
-                        .font(Typography.app(15, .medium))
-                        .foregroundStyle(Palette.textDim)
-                    Text("Nothing in the \(loadedCount) loaded so far matches “\(search)”.")
-                        .font(Typography.app(13))
-                        .foregroundStyle(Palette.textFaint)
-                        .multilineTextAlignment(.center)
+                    Button { searchOlderMessages() } label: {
+                        HStack(spacing: 6) {
+                            if searchingOlder { ProgressView().controlSize(.small).tint(Palette.ground) }
+                            Text(searchingOlder ? "Searching older messages…" : "Search older messages")
+                        }
+                        .font(Typography.app(14, .semibold))
+                        .foregroundStyle(Palette.ground)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Palette.text))
+                    }
+                    .disabled(searchingOlder)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("gram-search-older")
                 } else {
                     Text("No matches")
                         .font(Typography.app(15, .medium))
@@ -1112,7 +1126,8 @@ struct GramView: View {
 
     /// The Saved section: locally-kept copies of bookmarked messages. Rendered from the local
     /// store (independent of the poll), so a saved message survives even after the original is
-    /// deleted from the server.
+    /// deleted from the server. Read like the inbox: oldest at the top, opening at the newest,
+    /// drawn a window at a time (`GramSavedFeed`).
     @ViewBuilder
     private var savedContent: some View {
         if savedGrams.saved.isEmpty {
@@ -1132,33 +1147,24 @@ struct GramView: View {
                 .padding(.horizontal, 32)
             }
         } else if visibleSaved.isEmpty {
-            // Saved is local and complete: there is no page still to arrive.
-            noMatches(stillLoading: false, loadedCount: savedGrams.saved.count, failure: nil)
+            // Saved is local and complete: there is nothing older to search.
+            noMatches(hasOlder: false, loadedCount: savedGrams.saved.count)
         } else {
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    ForEach(visibleSaved) { s in
-                        SavedGramRow(
-                            saved: s,
-                            isDownloadingFile: downloadingFileFor == s.id,
-                            downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
-                            onOpenFile: { openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
-                            onSaveFile: { saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
-                            // UNSAVE DOES NOT EVICT. Unsaving stops keeping the message
-                            // in the Saved tab; the message itself may still be in the
-                            // inbox, and discarding its bytes here would re-download the
-                            // next open — defeating the feature. Bytes go on DELETE
-                            // (the message is gone), on sign-out, or by the LRU ceiling.
-                            onUnsave: { savedGrams.remove(s.id) }
-                        )
-                    }
-                }
-                .padding(16)
-                // iPad / Mac: a readable conversation column, centred, so a bubble never
-                // stretches across the whole detail pane. Regular width only: a large iPhone in
-                // landscape is wider than the cap but must keep its full-width feed.
-                .readableColumn(feedCap)
-            }
+            GramSavedFeed(
+                saved: visibleSaved,
+                search: search,
+                headerBottom: headerBottom,
+                columnCap: feedCap,
+                downloadingFileFor: downloadingFileFor,
+                downloadBytes: downloadBytes,
+                onOpenFile: { s in openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
+                onSaveFile: { s in saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
+                // UNSAVE DOES NOT EVICT. Unsaving stops keeping the message in the Saved
+                // tab; the message itself may still be in the inbox, and discarding its
+                // bytes here would re-download the next open — defeating the feature.
+                // Bytes go on DELETE (the message is gone), on sign-out, or by the LRU ceiling.
+                onUnsave: { s in savedGrams.remove(s.id) }
+            )
         }
     }
 
@@ -1225,8 +1231,7 @@ struct GramView: View {
         // and without it one keystroke would replace the only affordance telling the owner how
         // to give their agents gram with "No matches" about a list that never had rows.
         case .loaded where !search.isEmpty && !messages.isEmpty && visibleMessages.isEmpty:
-            noMatches(stillLoading: inboxStore.inbox.hasMore && pageError == nil,
-                      loadedCount: messages.count, failure: pageError)
+            noMatches(hasOlder: inboxStore.inbox.nextCursor != nil, loadedCount: messages.count)
         case .loaded:
             ScrollViewReader { feed in
             ScrollView {
@@ -1234,39 +1239,23 @@ struct GramView: View {
                 // composer's pull-up editor shrank the feed: main thread at 100% in layout,
                 // the composer UI test hung on CI's iPhone (also with no other change) and 2/2
                 // locally; with this stack it passes on CI and 3/3 locally in 18 s. An eager
-                // stack draws every row it is given, and a search walk loads the whole store,
+                // stack draws every row it is given, and paging keeps adding to what is loaded,
                 // so it is given only the newest `renderLimit` messages (`feedEntries`); older
                 // loaded ones are revealed by the top sentinel without a fetch.
                 VStack(spacing: 0) {
-                    // SEARCH RESULTS ARE AN INSTALMENT UNTIL THE WALK FINISHES. Matches
-                    // already on screen otherwise look like the whole answer, which is
-                    // the same lie the empty state was fixed for. Older matches arrive
-                    // above, so the note sits at the top.
-                    if !search.isEmpty, inboxStore.inbox.hasMore {
-                        HStack(spacing: 8) {
-                            if let pageError {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("\(pageError) These matches may be incomplete.")
-                            } else {
-                                ProgressView().controlSize(.small)
-                                Text("Searching older messages…")
-                            }
-                        }
-                        .font(Typography.app(12))
-                        .foregroundStyle(Palette.textFaint)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .accessibilityIdentifier("gram-searching-older")
-                    }
                     // The sentinel, at the TOP: the feed is oldest-first and opens at the
                     // bottom, so it comes on screen only when the reader scrolls up past the
                     // oldest loaded message, which is exactly when the next page is worth
                     // fetching (see `requestOlderPage`). A failed page says so and becomes a tap
                     // target, instead of spinning forever with nothing left to re-trigger it.
-                    if hasHiddenOlder || (inboxStore.inbox.nextCursor != nil && search.isEmpty) {
+                    // During a search the same arrival searches older pages for matches
+                    // (`loadOlderMatches`), and the sentinel says so; it is a tap target
+                    // then too, since a result list that fits on screen cannot be scrolled
+                    // to bring it in.
+                    if hasHiddenOlder || inboxStore.inbox.nextCursor != nil {
                         Button {
-                            // A tap retries a failed page: a fresh, reader-asked fetch.
+                            // A tap retries a failed page, or searches older pages: a fresh,
+                            // reader-asked fetch.
                             pageError = nil
                             feedVisibility.pageArmed = true
                             requestOlderPage()
@@ -1276,9 +1265,18 @@ struct GramView: View {
                                     Image(systemName: "arrow.clockwise")
                                         .font(.system(size: 12, weight: .semibold))
                                     Text("\(pageError) Tap to retry.")
+                                } else if sentinelSearchesOlder && !searchingOlder {
+                                    Image(systemName: "arrow.up")
+                                        .font(.system(size: 12, weight: .semibold))
+                                    // Names both ways: a short result list cannot be scrolled.
+                                    // After a bounded search found nothing older: true even with
+                                    // matches from the newer messages shown below.
+                                    Text(searchedOlderWithoutMatch.map {
+                                        "No older matches in \($0) messages. Tap or scroll up to search further"
+                                    } ?? "Tap or scroll up to search older messages")
                                 } else {
                                     ProgressView().controlSize(.small)
-                                    Text("Loading older messages…")
+                                    Text(sentinelSearchesOlder ? "Searching older messages…" : "Loading older messages…")
                                 }
                             }
                             .font(Typography.app(12))
@@ -1287,7 +1285,7 @@ struct GramView: View {
                             .padding(.vertical, 8)
                         }
                         .buttonStyle(.plain)
-                        .disabled(pageError == nil)
+                        .disabled(pageError == nil && !(sentinelSearchesOlder && !searchingOlder))
                         .accessibilityIdentifier("gram-loading-older")
                         // Fetches when the sentinel ARRIVES on screen after the initial scroll:
                         // the first layout starts at the top and builds it although the reader
@@ -1332,18 +1330,25 @@ struct GramView: View {
                                 downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
                                 // Not before the feed has landed on the newest message: the
                                 // first layout passes through the top rows, never seen.
-                                isOnScreen: didInitialScroll && imageRowsOnScreen.contains(entry.id),
+                                feedLanded: didInitialScroll,
+                                visibleTop: headerBottom,
+                                appearance: feedAppearance,
                                 isSaved: savedGrams.isSaved(entry.message.id),
+                                expandedSegments: expandedTexts[entry.id] ?? [],
+                                fontScale: uiFontScale,
                                 onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
                                 onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
                                 onPrefetchImage: { await prefetchImage(entry.message) },
                                 onToggleSave: { savedGrams.toggle(entry.message) },
                                 onDelete: { delete(entry.message) },
+                                onSetExpanded: { segment, open in setExpanded(entry.id, segment: segment, open) },
                                 startsGroup: entry.startsGroup,
                                 endsGroup: entry.endsGroup,
-                                expandedTexts: $expandedTexts,
                                 localMachine: localMachine
                             )
+                            // A page render (a keystroke, a poll, another file's progress) skips
+                            // every row whose inputs are unchanged (`GramRow.==`).
+                            .equatable()
                             // 2 pt inside a group, 10 pt between groups.
                             .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
                         }
@@ -1362,14 +1367,6 @@ struct GramView: View {
                             } else {
                                 feedVisibility.rows.remove(entry.id)
                             }
-                            if entry.message.file?.isImage == true,
-                               imageRowsOnScreen.contains(entry.id) != placement.onScreen {
-                                if placement.onScreen {
-                                    imageRowsOnScreen.insert(entry.id)
-                                } else {
-                                    imageRowsOnScreen.remove(entry.id)
-                                }
-                            }
                             if placement.atTop {
                                 feedVisibility.rowsAtTop.insert(entry.id)
                             } else {
@@ -1379,7 +1376,6 @@ struct GramView: View {
                         .onDisappear {
                             feedVisibility.rows.remove(entry.id)
                             feedVisibility.rowsAtTop.remove(entry.id)
-                            if imageRowsOnScreen.contains(entry.id) { imageRowsOnScreen.remove(entry.id) }
                         }
                     }
                     if shouldShowSetupCard { setupCard.padding(.top, 14) }
@@ -1488,11 +1484,22 @@ struct GramView: View {
                     try? await Task.sleep(nanoseconds: 60_000_000)
                     if feedVisibility.atBottom { break }
                 }
+                // The results are on screen at the newest match. A sentinel off screen now
+                // arrives only when the reader scrolls up to it, so it may search older pages
+                // then; one already in view (the results fit) waits for a tap. Arming on its
+                // own reports alone missed a sentinel that stayed off screen across the change.
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                guard !Task.isCancelled else { return }
+                if !feedVisibility.sentinelOnScreen, !feedVisibility.pageRequested, !feedVisibility.anchoring {
+                    feedVisibility.pageArmed = true
+                }
             }
             .onDisappear {
                 didInitialScroll = false
                 feedVisibility.initialScrollIssued = false
-                feedVisibility.pageArmed = true
+                // During a search the next feed waits for the reader to bring the sentinel in
+                // (see the page's `onChange(of: search)`).
+                feedVisibility.pageArmed = search.isEmpty
                 feedVisibility.anchoring = false
                 feedVisibility.shownSearch = nil
                 showingNewMessages = false
@@ -1539,9 +1546,11 @@ struct GramView: View {
                         || (feedVisibility.rows.contains(id) && feedVisibility.atBottom)
                     if !feedVisibility.sentinelOnScreen {
                         feedVisibility.pageArmed = true
-                    } else if settled {
+                    } else if settled, search.isEmpty || hasHiddenOlder {
                         // The reader's place is back and the top is STILL in view: the reader
-                        // can see it, so this is an arrival at the top too.
+                        // can see it, so this is an arrival at the top too. Not into another
+                        // search of older pages: that is bounded per arrival, and a result
+                        // list that fits on screen would otherwise walk the whole store.
                         feedVisibility.pageArmed = true
                         requestOlderPage()
                     }
@@ -2046,8 +2055,10 @@ struct GramView: View {
     /// LABEL of `gram-post-calls` (the GuestPaneView probes' pattern). Not the value: on the
     /// iPhone tab an element with an empty value reads back the tab's badge ("3").
     /// Refreshed after each send. Beside it, `gram-opened-file`: "opened:<name>" once a file
-    /// reached a viewer, "none" before; and `gram-get-file-calls`: the mock's `gram.get_file`
-    /// calls per id (`MockTransport.gramGetFileSummary`).
+    /// reached a viewer, "none" before; `gram-get-file-calls`: the mock's `gram.get_file`
+    /// calls per id (`MockTransport.gramGetFileSummary`); `gram-list-pages`: how many older
+    /// pages (`before_id` requests) the paged mock answered; and `gram-row-renders`
+    /// (`GramRowRenderProbe`).
     private var postCallsProbeView: some View {
         ZStack {
             Color.clear
@@ -2062,6 +2073,11 @@ struct GramView: View {
                 .accessibilityElement()
                 .accessibilityIdentifier("gram-opened-file")
                 .accessibilityLabel(openedFileProbe.isEmpty ? "none" : openedFileProbe)
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("gram-list-pages")
+                .accessibilityLabel("\(listPagesProbe)")
+            GramRowRenderProbe()
         }
         .frame(width: 1, height: 1)
         .allowsHitTesting(false)
@@ -2070,6 +2086,8 @@ struct GramView: View {
             while !Task.isCancelled {
                 let summary = MockTransport.gramGetFileSummary
                 if summary != getFileProbe { getFileProbe = summary }
+                let pages = GramPagingMock.shared.pageRequests
+                if pages != listPagesProbe { listPagesProbe = pages }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
@@ -2287,8 +2305,7 @@ struct GramView: View {
     /// Its own in-flight flag, NOT `isLoading`: the 6-second head poll and a page fetch
     /// answer different questions, and sharing one flag would make each starve the
     /// other precisely while the reader is scrolling. Both WAIT for each other rather
-    /// than bailing — bailing left the sentinel spinning with nothing to re-trigger it,
-    /// and let a whole-store search give up in a second and a half.
+    /// than bailing: bailing left the sentinel spinning with nothing to re-trigger it.
     ///
     /// The inbox's `generation` is read BEFORE the request and handed back with the
     /// answer, so a page built on a cursor that a head replacement has since invalidated
@@ -2297,8 +2314,8 @@ struct GramView: View {
     /// change (a queue item being grabbed) counts as a change — and the sentinel's task
     /// is keyed on the cursor, so nothing else would re-fire.
     ///
-    /// Returns whether the loaded list actually grew, so a caller looping to the end can
-    /// tell a finished walk from a stuck one.
+    /// Returns whether the loaded list actually grew, so a search looping over older pages
+    /// (`loadOlderMatches`) can tell a page that landed from a stuck one.
     @discardableResult
     private func loadMore() async -> Bool {
         await waitWhile { isLoadingPage }
@@ -2320,9 +2337,9 @@ struct GramView: View {
                 // since nothing failed — the list simply did not grow.
                 guard inboxStore.inbox.generation != generation else { return false }
             } catch {
-                // A cancelled fetch is not a failure: the reader retyped or left, and the
-                // successor walk is already starting. Reporting it would flash an error
-                // for every keystroke.
+                // A cancelled fetch is not a failure: the reader changed or cleared the
+                // search (which cancels its fetch) or left. Reporting it would flash an
+                // error for every keystroke.
                 guard !Task.isCancelled else { return false }
                 // Surfaced ON the sentinel, not in `refreshNote`: a successful head poll
                 // clears that note within six seconds and the reader would be left with a
@@ -2343,33 +2360,46 @@ struct GramView: View {
         }
     }
 
-    /// Pull every remaining page in. Search reads the whole store, so it says so by
-    /// loading it rather than quietly answering from a window.
+    /// How many older pages one arrival at the top of a search's results may fetch looking
+    /// for a match. The daemon has no search, so search covers the loaded messages; this
+    /// bounds what reaching the top costs when the next match is far back.
+    static let searchPagesPerArrival = 5
+
+    /// During a search: fetch older pages until one adds a match, at most
+    /// `searchPagesPerArrival` of them, then stop. Run by the sentinel's arrival
+    /// (`loadOlderPage`) and by the "No matches in recent messages" button
+    /// (`searchOlderMessages`). Returns whether a match was added.
     ///
-    /// NOT guarded on a walk-in-flight flag. It used to be, and that refused every
-    /// successor: SwiftUI cancels the predecessor's task without awaiting it, so a
-    /// predecessor suspended in a page fetch — where a healthy walk spends nearly all
-    /// its time — still held the flag when the next keystroke's walk began, and the
-    /// terminal query was never walked at all while the banner claimed it was. Overlap
-    /// is instead serialised one level down, where it belongs: `loadMore` waits for the
-    /// in-flight page and appends under a generation check, so a straggler can only
-    /// deliver a contiguous page or be dropped.
-    ///
-    /// A false answer from `loadMore` therefore means no progress, not necessarily a
-    /// failure — a stall budget of five with a pause between tries covers a transient
-    /// one. Giving up leaves `pageError` set, but a CANCELLED walk reports nothing.
-    private func loadEveryPage() async {
-        var stalls = 0
-        while inboxStore.inbox.nextCursor != nil, !Task.isCancelled, stalls < 5 {
-            if await loadMore() {
-                stalls = 0
-            } else {
-                stalls += 1
-                try? await Task.sleep(nanoseconds: 500_000_000)
+    /// Overlap is serialised by `loadMore`, which waits for the page in flight and appends
+    /// under a generation check. A search change cancels the task running this
+    /// (`FeedVisibility.olderFetch`), so it stops at the next page boundary and leaves
+    /// `searchingOlder` to the new query.
+    private func loadOlderMatches() async -> Bool {
+        let query = search
+        let before = visibleMessages.count
+        searchingOlder = true
+        defer { if !Task.isCancelled { searchingOlder = false } }
+        for _ in 0..<Self.searchPagesPerArrival {
+            guard !Task.isCancelled, search == query, await loadMore() else { return false }
+            if visibleMessages.count > before {
+                searchedOlderWithoutMatch = nil
+                return true
             }
         }
-        if !Task.isCancelled, inboxStore.inbox.nextCursor != nil, pageError == nil {
-            pageError = "Couldn't load every older message."
+        if !Task.isCancelled, search == query { searchedOlderWithoutMatch = messages.count }
+        return false
+    }
+
+    /// The "No matches in recent messages" button: the same bounded search of older pages.
+    /// The feed is not on screen, so this owns the fetch itself; a match brings the feed
+    /// back, which opens at the newest match.
+    private func searchOlderMessages() {
+        guard !searchingOlder else { return }
+        pageError = nil
+        feedVisibility.olderFetch?.cancel()
+        feedVisibility.olderFetch = Task { @MainActor in
+            guard await loadOlderMatches(), !Task.isCancelled else { return }
+            renderLimit = max(renderLimit, visibleMessages.count)
         }
     }
 
@@ -2718,8 +2748,12 @@ struct GramView: View {
             // page): stop before writing any file, so a late completion can't strand one.
             try Task.checkCancellation()
             // Keep the bytes for next time. A failure here is not an error: an open
-            // proceeds from a temp file and the next open simply downloads again.
-            let cached = Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
+            // proceeds from a temp file and the next open simply downloads again. Written
+            // OFF the main actor: a camera-size picture is megabytes, and writing it here
+            // stalled the feed's scrolling. `store` checks the epoch before and after.
+            let cached = await Task.detached(priority: .userInitiated) {
+                Downloads.store(data, id: id, name: name, mime: mime, epoch: epoch)
+            }.value
             return (name, mime, data, cached)
         }
     }
@@ -2734,7 +2768,7 @@ struct GramView: View {
     /// this image while it runs joins its transfer (`download`) rather than starting one.
     private func prefetchImage(_ message: GramMessage) async {
         guard let file = message.file, GramImagePreview.shouldPrefetch(file),
-              Downloads.cached(id: message.id) == nil
+              await Self.cachedOffMain(message.id) == nil
         else { return }
         do {
             try await prefetchSlots.acquire()
@@ -2743,9 +2777,15 @@ struct GramView: View {
         }
         defer { prefetchSlots.release() }
         // An open may have cached it while this waited for a slot.
-        guard Downloads.cached(id: message.id) == nil else { return }
+        guard await Self.cachedOffMain(message.id) == nil else { return }
         // A failure leaves the placeholder; a tap still opens normally.
         _ = try? await download(id: message.id, expectedBytes: Self.expectedReplyBytes(for: file.size))
+    }
+
+    /// `Downloads.cached` reads the file's metadata from disk: off the main thread on paths
+    /// that run while the reader scrolls.
+    nonisolated static func cachedOffMain(_ id: String) async -> CachedGramFile? {
+        await Task.detached(priority: .userInitiated) { Downloads.cached(id: id) }.value
     }
 
     /// Apply one progress callback. Three rules the raw callback cannot enforce:
@@ -3091,14 +3131,18 @@ struct GramView: View {
 
     /// The sentinel's automatic fetch: ONE older page per arrival of the sentinel on screen
     /// (see `FeedVisibility.pageArmed`), never before the initial scroll, and not over a
-    /// failure (that waits for the reader's tap on the sentinel).
+    /// failure (that waits for the reader's tap on the sentinel). During a search, one
+    /// bounded search of older pages per arrival instead (`loadOlderMatches`). Held in
+    /// `FeedVisibility.olderFetch`, so a new or cleared search cancels it.
     private func requestOlderPage() {
         guard didInitialScroll, feedVisibility.pageArmed, !feedVisibility.anchoring,
               !feedVisibility.pageRequested, pageError == nil else { return }
         feedVisibility.pageArmed = false
         feedVisibility.pageRequested = true
-        Task { @MainActor in
+        feedVisibility.olderFetch = Task { @MainActor in
             let grew = await loadOlderPage()
+            // Cancelled by a search change, which has already reset the flags for the new query.
+            guard !Task.isCancelled else { return }
             feedVisibility.pageRequested = false
             // Nothing landed, so no anchor scroll will re-arm: the next arrival may fetch.
             if !grew { feedVisibility.pageArmed = true }
@@ -3106,19 +3150,40 @@ struct GramView: View {
     }
 
     /// One older window: loaded messages above the drawn window first (no fetch), else the
-    /// next page from the daemon, drawn whole. Then the previously-top message is scrolled
-    /// back to the top so the reader keeps their place (see `pageAnchorID`). Returns whether
-    /// the feed grew.
+    /// next page from the daemon, drawn whole; during a search, older pages until one adds
+    /// a match (`loadOlderMatches`). Then the previously-top message is scrolled back to the
+    /// top so the reader keeps their place (see `pageAnchorID`). Returns whether the feed grew.
     private func loadOlderPage() async -> Bool {
         let top = feedEntries.first?.id
         if hasHiddenOlder {
+            // A reveal from a task the next keystroke already cancelled must not move the
+            // window or anchor the new query's feed.
+            guard !Task.isCancelled else { return false }
             renderLimit += Self.renderWindow
         } else {
-            guard await loadMore() else { return false }
+            let grew: Bool
+            if search.isEmpty {
+                grew = await loadMore()
+            } else {
+                grew = await loadOlderMatches()
+            }
+            // Cancelled: the search changed while the page was in flight, and the new
+            // query's feed must not be scrolled to the old one's anchor.
+            guard grew, !Task.isCancelled else { return false }
             renderLimit = max(renderLimit, visibleMessages.count)
         }
         if let top { pageAnchorID = top }
         return true
+    }
+
+    /// Opens or folds one "Read more" segment of a message.
+    private func setExpanded(_ id: String, segment: Int, _ open: Bool) {
+        if open {
+            expandedTexts[id, default: []].insert(segment)
+        } else {
+            expandedTexts[id]?.remove(segment)
+            if expandedTexts[id]?.isEmpty == true { expandedTexts[id] = nil }
+        }
     }
 
     private func markReadIfNeeded(_ message: GramMessage) {
@@ -3246,6 +3311,249 @@ private struct FileExportPicker: UIViewControllerRepresentable {
     }
 }
 
+/// The Saved section's feed, read like the inbox: oldest at the top and the newest at the
+/// bottom, opening at the newest with the inbox's bounded scroll to the bottom marker. It
+/// draws only the newest `GramView.renderWindow` saved messages (an eager, windowed stack,
+/// like the inbox's), and reaching the top reveals the next older window, putting the
+/// previously-top message back at the top so the reader keeps their place. Saved is local
+/// and complete, so a reveal never fetches. A search filters `saved` before it gets here and
+/// starts over from the newest window.
+private struct GramSavedFeed: View {
+    /// The saved messages to show, newest first (the store's order), after the search filter.
+    let saved: [SavedGram]
+    let search: String
+    /// The floating header's bottom edge (`GramView.headerBottom`): rows under it are not on
+    /// screen, and an anchored row may land at it.
+    let headerBottom: CGFloat
+    let columnCap: CGFloat
+    let downloadingFileFor: String?
+    let downloadBytes: (received: Int, total: Int)?
+    let onOpenFile: (SavedGram) -> Void
+    let onSaveFile: (SavedGram) -> Void
+    let onUnsave: (SavedGram) -> Void
+
+    /// How many of the newest saved messages are drawn. Grows by a window per arrival at the
+    /// top; a new search starts it over.
+    @State private var renderLimit = GramView.renderWindow
+    /// The previously-top message after a reveal; the feed scrolls back to it.
+    @State private var anchorID: String?
+    /// Bumped each time the feed comes on screen, so its trackers report again (see
+    /// `GramView.feedAppearance`).
+    @State private var appearance = 0
+    @State private var visibility = Visibility()
+
+    /// What of the feed is on screen, read only from callbacks (a reference box, so updating
+    /// it on every scroll does not re-render the feed). The inbox's `FeedVisibility` for
+    /// Saved: there is no fetch, read tracking or composer resize to follow here.
+    private final class Visibility {
+        var rows: Set<String> = []
+        var rowsAtTop: Set<String> = []
+        var atBottom = false
+        var sentinelOnScreen = false
+        /// The sentinel may reveal when it comes on screen: spent by a reveal, given back when
+        /// the sentinel leaves the screen or the reveal's anchor has settled with it in view.
+        var armed = true
+        var anchoring = false
+        var initialScrollIssued = false
+        /// The feed has landed on the newest saved message: the first layout starts at the top,
+        /// and the sentinel it builds there was never seen.
+        var landed = false
+        var shownSearch: String?
+    }
+
+    private static let bottomID = "gram-saved-bottom"
+
+    private var hasHiddenOlder: Bool { saved.count > renderLimit }
+    /// The drawn window, oldest at the top.
+    private var drawn: [SavedGram] { Array(saved.prefix(renderLimit).reversed()) }
+
+    var body: some View {
+        let rows = drawn
+        ScrollViewReader { feed in
+            ScrollView {
+                VStack(spacing: 14) {
+                    if hasHiddenOlder {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading older saved messages…")
+                        }
+                        .font(Typography.app(12))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("gram-saved-older")
+                        .background {
+                            Color.clear
+                                .onFeedVisibilityChange { onScreen in
+                                    visibility.sentinelOnScreen = onScreen
+                                    if onScreen {
+                                        revealOlder()
+                                    } else if !visibility.anchoring {
+                                        visibility.armed = true
+                                    }
+                                }
+                                .id(appearance)
+                        }
+                        .onDisappear {
+                            visibility.sentinelOnScreen = false
+                            if !visibility.anchoring { visibility.armed = true }
+                        }
+                    }
+                    ForEach(rows) { s in
+                        SavedGramRow(
+                            saved: s,
+                            isDownloadingFile: downloadingFileFor == s.id,
+                            downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
+                            onOpenFile: { onOpenFile(s) },
+                            onSaveFile: { onSaveFile(s) },
+                            onUnsave: { onUnsave(s) }
+                        )
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("gram-saved-\(s.id)")
+                        .onFeedPlacementChange(appearance: appearance,
+                                               visibleTop: headerBottom > 0 ? headerBottom : nil) { placement in
+                            if placement.onScreen { visibility.rows.insert(s.id) } else { visibility.rows.remove(s.id) }
+                            if placement.atTop { visibility.rowsAtTop.insert(s.id) } else { visibility.rowsAtTop.remove(s.id) }
+                        }
+                        .onDisappear {
+                            visibility.rows.remove(s.id)
+                            visibility.rowsAtTop.remove(s.id)
+                        }
+                    }
+                    Color.clear.frame(height: 1).id(Self.bottomID)
+                        .background {
+                            Color.clear
+                                .onFeedBottomChange(slack: 24) { bottom in
+                                    visibility.atBottom = bottom.onScreen
+                                    if bottom.onScreen { finishInitialScroll() }
+                                }
+                                .id(appearance)
+                        }
+                        .onDisappear { visibility.atBottom = false }
+                }
+                .padding(16)
+                // How many saved messages are drawn, so a UI test can tell the window from all.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("gram-saved-messages")
+                .accessibilityValue("\(rows.count) of \(saved.count) saved")
+                // iPad / Mac: a readable conversation column, centred, so a bubble never
+                // stretches across the whole detail pane.
+                .readableColumn(columnCap)
+            }
+            .accessibilityIdentifier("gram-saved-feed")
+            .onAppear { appearance += 1 }
+            // Open at the newest, as the inbox does (and for its reasons, not
+            // `.defaultScrollAnchor(.bottom)`): jump again after each layout pass until the
+            // bottom marker is really on screen, bounded.
+            .task {
+                visibility.initialScrollIssued = true
+                for _ in 0..<8 {
+                    feed.scrollTo(Self.bottomID, anchor: .bottom)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if visibility.atBottom { break }
+                }
+                if visibility.atBottom { finishInitialScroll() }
+            }
+            // A changed search shows its newest match at the bottom, from the newest window.
+            .task(id: search) {
+                guard let shown = visibility.shownSearch else {
+                    visibility.shownSearch = search
+                    return
+                }
+                guard shown != search else { return }
+                visibility.shownSearch = search
+                for _ in 0..<8 {
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    guard !Task.isCancelled else { return }
+                    feed.scrollTo(Self.bottomID, anchor: .bottom)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if visibility.atBottom { break }
+                }
+            }
+            .onChange(of: search) { _, _ in renderLimit = GramView.renderWindow }
+            .onDisappear {
+                visibility.landed = false
+                visibility.initialScrollIssued = false
+                visibility.armed = true
+                visibility.anchoring = false
+                visibility.shownSearch = nil
+            }
+            // A reveal landed above: put the previously-top message back at the top (the
+            // inbox's anchor restore). If the sentinel is still in view once that settles, the
+            // reader can see the top, so the next window is revealed.
+            .onChange(of: anchorID) { _, id in
+                guard let id else { return }
+                anchorID = nil
+                visibility.anchoring = true
+                Task { @MainActor in
+                    for _ in 0..<10 {
+                        feed.scrollTo(id, anchor: .top)
+                        try? await Task.sleep(nanoseconds: 60_000_000)
+                        if visibility.rowsAtTop.contains(id) { break }
+                    }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    visibility.anchoring = false
+                    let settled = visibility.rowsAtTop.contains(id)
+                        || (visibility.rows.contains(id) && visibility.atBottom)
+                    if !visibility.sentinelOnScreen {
+                        visibility.armed = true
+                    } else if settled {
+                        visibility.armed = true
+                        revealOlder()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The feed has landed on the newest saved message; a feed that fits shows the top too.
+    private func finishInitialScroll() {
+        guard visibility.initialScrollIssued, !visibility.landed else { return }
+        visibility.landed = true
+        if visibility.sentinelOnScreen { revealOlder() }
+    }
+
+    /// One older window per arrival of the sentinel, after the feed has landed. The message on
+    /// top now is put back at the top once the window is drawn above it.
+    private func revealOlder() {
+        guard visibility.landed, visibility.armed, !visibility.anchoring, hasHiddenOlder else { return }
+        visibility.armed = false
+        let top = drawn.first?.id
+        renderLimit += GramView.renderWindow
+        if let top { anchorID = top }
+    }
+}
+
+#if DEBUG
+/// For the UI tests: how many times a `GramRow` body has run, so a test can hold the feed to
+/// a render budget (`gram-row-renders`).
+@MainActor
+enum GramRowRenders {
+    private(set) static var count = 0
+    static func record() { count += 1 }
+}
+
+/// The `gram-row-renders` probe: `GramRowRenders.count` as its label, polled. Its own view and
+/// state, so the poll re-renders this probe alone, never the page whose rows it counts.
+private struct GramRowRenderProbe: View {
+    @State private var count = 0
+
+    var body: some View {
+        Color.clear
+            .accessibilityElement()
+            .accessibilityIdentifier("gram-row-renders")
+            .accessibilityLabel("\(count)")
+            .task {
+                guard ScreenshotMock.mode != nil else { return }
+                while !Task.isCancelled {
+                    if GramRowRenders.count != count { count = GramRowRenders.count }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
+    }
+}
+#endif
+
 /// One message in the feed: option D's iMessage layout in herdr's colours (round 3).
 ///
 /// An agent's group opens with a "name · machine" line and carries the sender's avatar
@@ -3253,17 +3561,29 @@ private struct FileExportPicker: UIViewControllerRepresentable {
 /// ("Grabbed by …" / "Delivered to …"). Prose folds past four lines, fenced code draws in a
 /// monospaced inset with Copy, an image attachment shows as a picture card and any other
 /// file as a file card, sharing one card with the text when the message has both.
-struct GramRow: View {
+struct GramRow: View, Equatable {
     let message: GramMessage
     var isDownloadingFile: Bool
     /// Reply bytes received against bytes expected for THIS row's download, when the
     /// transport reports them. nil means no measurement — the card's ring spins rather
     /// than showing a share that is not driven by anything.
     var downloadProgress: (received: Int, total: Int)?
-    /// The row is inside the feed's visible bounds, and the feed has landed: only then does
-    /// its image card fetch a preview it does not have.
-    var isOnScreen: Bool
+    /// The feed has landed on the newest message: before that its first layout passes
+    /// through rows the reader never sees, so an image card must not fetch for them.
+    var feedLanded: Bool
+    /// The floating header's bottom edge in `GramView.feedPageSpace` (0 until measured): an
+    /// image card under the header is not on screen.
+    var visibleTop: CGFloat = 0
+    /// The feed's appearance count (`GramView.feedAppearance`), so an image card still on
+    /// screen when the tab comes back reports again.
+    var appearance = 0
     var isSaved: Bool
+    /// The text segments of THIS message the reader opened with "Read more" (by segment
+    /// index). Owned by the page, so a rebuilt row does not fold the text again.
+    var expandedSegments: Set<Int> = []
+    /// The UI text-size setting. Not drawn from directly (`Typography.scale` is a global),
+    /// but compared in `==`: without it a size change would leave every row at the old size.
+    var fontScale: Double = 1
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
     /// Fetches the image attachment into the download cache without opening it (see
@@ -3271,13 +3591,12 @@ struct GramRow: View {
     var onPrefetchImage: () async -> Void
     var onToggleSave: () -> Void
     var onDelete: () -> Void
+    /// Opens (true) or folds (false) a text segment, by index.
+    var onSetExpanded: (Int, Bool) -> Void
     /// The first message of a sender group: draws the sender line.
     var startsGroup = true
     /// The last message of a group: draws the avatar and the bubble tail.
     var endsGroup = true
-    /// Text segments the reader opened with "Read more", keyed `<message id>#<segment>`.
-    /// Owned by the page, so a rebuilt row does not fold the text again.
-    @Binding var expandedTexts: Set<String>
     /// This device's own machine label, for a local sender's "name · machine" line (a
     /// federated sender carries its own). Empty when unknown: the line shows the name only.
     var localMachine = ""
@@ -3286,6 +3605,35 @@ struct GramRow: View {
     @Environment(\.displayScale) private var displayScale
     /// The image attachment's picture, decoded once its bytes are in the download cache.
     @State private var thumbnail: UIImage?
+    /// The image card is inside the feed's visible bounds (its own placement report, see
+    /// `imageCard`). Row state, not page state: see there.
+    @State private var onScreen = false
+
+    /// The card is on screen and the feed has landed: only then does it fetch a preview it
+    /// does not have.
+    private var isOnScreen: Bool { feedLanded && onScreen }
+
+    /// Everything the row draws from, closures excluded (they only act). The feed applies
+    /// `.equatable()`, so a page render (a composer keystroke, a poll, another file's
+    /// download progress) skips every row whose inputs are unchanged. An input missing here
+    /// is drawn stale, so every new drawing input belongs in this list. The feed's landing,
+    /// header edge and appearance matter to an image card only, so a text row ignores them.
+    nonisolated static func == (lhs: GramRow, rhs: GramRow) -> Bool {
+        lhs.message == rhs.message
+            && lhs.isDownloadingFile == rhs.isDownloadingFile
+            && lhs.downloadProgress?.received == rhs.downloadProgress?.received
+            && lhs.downloadProgress?.total == rhs.downloadProgress?.total
+            && lhs.isSaved == rhs.isSaved
+            && lhs.expandedSegments == rhs.expandedSegments
+            && lhs.fontScale == rhs.fontScale
+            && lhs.startsGroup == rhs.startsGroup
+            && lhs.endsGroup == rhs.endsGroup
+            && lhs.localMachine == rhs.localMachine
+            && (lhs.message.file?.isImage != true
+                || (lhs.feedLanded == rhs.feedLanded
+                    && lhs.visibleTop == rhs.visibleTop
+                    && lhs.appearance == rhs.appearance))
+    }
 
     private var mine: Bool { !message.isFromAgent }
     private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
@@ -3304,6 +3652,9 @@ struct GramRow: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = GramRowRenders.record()
+        #endif
         let segments = GramText.segments(message.text)
         let hasTextPart = !segments.isEmpty || documentFile != nil
         VStack(alignment: mine ? .trailing : .leading, spacing: 0) {
@@ -3463,14 +3814,11 @@ struct GramRow: View {
     }
 
     private func foldingText(_ text: String, index: Int) -> some View {
-        let key = "\(message.id)#\(index)"
-        return GramFoldingText(
+        GramFoldingText(
             text: linkified(text, tint: mine ? Palette.onAccent : Palette.brand),
             isExpanded: Binding(
-                get: { expandedTexts.contains(key) },
-                set: { open in
-                    if open { expandedTexts.insert(key) } else { expandedTexts.remove(key) }
-                }
+                get: { expandedSegments.contains(index) },
+                set: { open in onSetExpanded(index, open) }
             ),
             toggleTint: mine ? Palette.onAccent : Palette.brand
         )
@@ -3516,6 +3864,13 @@ struct GramRow: View {
         // On screen (the feed has landed), and again when an open ends: an image over the
         // prefetch cap is cached by opening it.
         .task(id: isOnScreen && !isDownloadingFile) { await loadThumbnail() }
+        // This card's own on-screen state, below the floating header (the rule the feed's
+        // read tracking uses). Row-local: a picture entering or leaving the screen re-renders
+        // this row alone, never the page and every other bubble with it.
+        .onFeedPlacementChange(appearance: appearance, visibleTop: visibleTop > 0 ? visibleTop : nil) { placement in
+            if onScreen != placement.onScreen { onScreen = placement.onScreen }
+        }
+        .onDisappear { if onScreen { onScreen = false } }
     }
 
     /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
@@ -3539,13 +3894,17 @@ struct GramRow: View {
         // Off screen, or an open of this file is running: the task restarts when that
         // changes (after an open the file is cached).
         guard isOnScreen, !isDownloadingFile else { return }
-        if GramView.Downloads.cached(id: message.id) == nil {
+        // The disk cache lookup reads the file's metadata: off the main thread, so a card
+        // scrolling on screen never stalls the scroll on disk I/O.
+        let id = message.id
+        let lookup = { await GramView.cachedOffMain(id) }
+        if await lookup() == nil {
             // A card a fling only flies past never fetches: it must stay on screen a moment.
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             await onPrefetchImage()
         }
-        guard !Task.isCancelled, let cached = GramView.Downloads.cached(id: message.id) else { return }
+        guard !Task.isCancelled, let cached = await lookup() else { return }
         thumbnail = await GramThumbnails.load(id: message.id, url: cached.url,
                                               spec: GramCardMetrics.imageSize(sizeClass), scale: displayScale)
     }

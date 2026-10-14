@@ -9617,6 +9617,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.list") {
             if Self.gramPaged { return Self.gramPagedList(requestLine) }
+            if Self.gramImageCount > 0 { return Self.gramListWithImages }
             return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
         }
         if requestLine.contains("gram.post") {
@@ -9628,8 +9629,9 @@ struct MockTransport: HerdrTransport {
             if let delay = Self.gramFileDelay(for: id) {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
-            // g3 is the list fixture's image: a real PNG, so its card decodes a preview.
-            return id == "g3" ? Self.gramImageContent : Self.gramFileContent
+            // g3 is the list fixture's image, and `gi<n>` the image mock's: a real PNG, so
+            // the card decodes a preview.
+            return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : Self.gramFileContent
         }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
         if requestLine.contains("gram.delete") { return Self.gramOk }
@@ -10023,6 +10025,23 @@ struct MockTransport: HerdrTransport {
         gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
     }
 
+    /// `HERDR_MOCK_GRAM_IMAGES=N`: `gram.list` answers `gramList` with N image messages (each
+    /// `gram.get_file` answers the g3 PNG) above its newest message, each followed by a
+    /// three-line text, so a scroll through the feed keeps carrying pictures on and off screen.
+    static var gramImageCount: Int {
+        Int(ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_IMAGES"] ?? "") ?? 0
+    }
+
+    static var gramListWithImages: String {
+        let rows = (1...gramImageCount).reversed().map { n in
+            let at = 1723041360000 + UInt64(n) * 120_000
+            let text = #"{"id":"gt\#(n)","direction":"agent_to_owner","from":"vetrina","text":"Frame \#(n) notes.\nLine two.\nLine three.","created_unix_ms":\#(at + 60_000),"read_by_owner":true}"#
+            let image = #"{"id":"gi\#(n)","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":\#(at),"read_by_owner":true,"file":{"name":"frame-\#(n).png","size":413,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}"#
+            return text + "," + image
+        }.joined(separator: ",")
+        return gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + rows + ",")
+    }
+
     /// Fourteen read five-line messages, newer than g1 and newest first: taller together
     /// than any screen the tests run on.
     static let gramNewerRows: String = (1...14).reversed().map { n in
@@ -10117,16 +10136,23 @@ final class GramGetFileRecorder: @unchecked Sendable {
 }
 
 /// The paged Gram mock's server side (`HERDR_MOCK_GRAM_PAGED=1`): how many older pages it
-/// has served, so a head poll answers with everything the client has loaded.
+/// has served, so a head poll answers with everything the client has loaded, and how many
+/// older-page requests (`before_id`) it answered, for GramView's DEBUG `gram-list-pages`
+/// probe (a search must not fetch history the reader did not ask for).
 final class GramPagingMock: @unchecked Sendable {
     static let shared = GramPagingMock()
     private let lock = NSLock()
     private var servedPages = 0
+    private var requests = 0
 
     var depth: Int { lock.withLock { servedPages } }
+    var pageRequests: Int { lock.withLock { requests } }
 
     func served(_ page: Int) {
-        lock.withLock { servedPages = max(servedPages, page) }
+        lock.withLock {
+            servedPages = max(servedPages, page)
+            requests += 1
+        }
     }
 }
 
