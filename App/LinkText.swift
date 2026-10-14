@@ -4,9 +4,14 @@ import SwiftUI
 /// runs, styled with a tint + underline. SwiftUI's `Text` does NOT auto-link a plain `String`, so
 /// Gram message bodies run through this to make links clickable (a tap opens the URL via the
 /// `openURL` environment). Bare URLs, `https://…`, and `www.…` are all detected by NSDataDetector.
+///
+/// Called from row bodies, which re-run on every page render, so the answer is cached by
+/// (text, tint) and the detector is built once: a re-render costs a cache lookup, not a scan.
 func linkified(_ text: String, tint: Color = Palette.brand) -> AttributedString {
+    let key = LinkifiedCache.Key(text: text, tint: tint)
+    if let hit = LinkifiedCache.shared.object(forKey: key) { return hit.value }
     let ns = NSMutableAttributedString(string: text)
-    if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+    if let detector = LinkifiedCache.detector {
         let full = NSRange(location: 0, length: (text as NSString).length)
         detector.enumerateMatches(in: text, range: full) { match, _, _ in
             guard let match, let url = match.url else { return }
@@ -19,5 +24,44 @@ func linkified(_ text: String, tint: Color = Palette.brand) -> AttributedString 
     for run in attributed.runs where run.link != nil {
         attributed[run.range].foregroundColor = tint
     }
+    LinkifiedCache.shared.setObject(LinkifiedCache.Box(attributed), forKey: key)
     return attributed
+}
+
+/// The shared link detector and the (text, tint) → linkified answer cache behind `linkified`.
+private enum LinkifiedCache {
+    /// Built once. NSDataDetector (an NSRegularExpression) is immutable and thread-safe.
+    static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Bounded so a long scroll through history cannot grow it without limit; NSCache also
+    /// drops entries under memory pressure. A miss only re-detects.
+    static let shared: NSCache<Key, Box> = {
+        let cache = NSCache<Key, Box>()
+        cache.countLimit = 2000
+        return cache
+    }()
+
+    final class Key: NSObject {
+        let text: String
+        let tint: Color
+        init(text: String, tint: Color) {
+            self.text = text
+            self.tint = tint
+        }
+        override var hash: Int {
+            var hasher = Hasher()
+            hasher.combine(text)
+            hasher.combine(tint)
+            return hasher.finalize()
+        }
+        override func isEqual(_ object: Any?) -> Bool {
+            guard let other = object as? Key else { return false }
+            return text == other.text && tint == other.tint
+        }
+    }
+
+    final class Box {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
 }

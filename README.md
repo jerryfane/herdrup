@@ -193,6 +193,9 @@ images and files are cards that open on a tap (Save to Files is in the long-pres
 menu), pictures show inline, and a download draws the composer's ring. On iPad and Mac the
 sidebar holds Gram's search field (⌘F; no mic, the composer keeps dictation) and its two
 conversations, Gram and Saved, as Messages rows, with Read all and Refresh in the bar.
+Saved reads like the feed: oldest at the top, opening at the newest, older ones drawn as you scroll up.
+Search filters the loaded messages, newest match at the bottom; scrolling to the top of the results (or
+“Search older messages” when none match) fetches older pages until another match turns up.
 
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a

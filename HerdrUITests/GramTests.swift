@@ -288,8 +288,8 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(olderOldest.isHittable, "the older page's oldest message should appear")
     }
 
-    /// The feed draws only the newest window of the loaded messages (a search walk can load
-    /// the whole store). Reaching the top reveals the older LOADED ones first, without asking
+    /// The feed draws only the newest window of the loaded messages (paging keeps adding to
+    /// what is loaded). Reaching the top reveals the older LOADED ones first, without asking
     /// the daemon for another page. A 6-message window over the 10-message first page. iPhone
     /// only: an iPad screen fits the 6 rows, so the sentinel is on screen at once and reveals
     /// them before anything can be observed (the same code path, correctly).
@@ -363,6 +363,193 @@ final class GramTests: XCTestCase {
                       "the message that was on top should stay on screen after the older page lands")
         Thread.sleep(forTimeInterval: 2)
         XCTAssertEqual(messages.value as? String, "34 messages", "exactly one older page should load")
+    }
+
+    // MARK: - Render budget
+
+    /// The DEBUG `gram-row-renders` probe: how many `GramRow` bodies have run (its label;
+    /// polled every 250 ms, so read it after a pause).
+    private func rowRenders(_ app: XCUIApplication) -> Int {
+        let probe = app.descendants(matching: .any)["gram-row-renders"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG row-render probe should be present")
+        return Int(probe.label) ?? -1
+    }
+
+    /// Scrolling a feed of pictures re-renders only the rows that change. Twelve image messages
+    /// (`HERDR_MOCK_GRAM_IMAGES`), each under a three-line text, 34 rows in all. A picture
+    /// coming on or off screen re-renders its own row (and its preview landing, once); with
+    /// the on-screen set held by the PAGE, every such change re-rendered all 34 rows. Six
+    /// swipes carry a dozen pictures across the edges: about 30-60 row renders now, and well
+    /// over 800 (two dozen crossings x 34 rows, plus a page render per prefetch) before.
+    func testScrollingPicturesStaysWithinARowRenderBudget() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_IMAGES": "12"])
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        let newest = app.descendants(matching: .any)["gram-bubble-gt12"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 10) && newest.isHittable, "the feed opens at the newest message")
+        // Let the opening settle: the landing, the pictures on screen fetching and decoding.
+        Thread.sleep(forTimeInterval: 3)
+        let before = rowRenders(app)
+        for _ in 0..<3 { feed.swipeDown(); Thread.sleep(forTimeInterval: 0.6) }
+        for _ in 0..<3 { feed.swipeUp(); Thread.sleep(forTimeInterval: 0.6) }
+        Thread.sleep(forTimeInterval: 2)
+        let spent = rowRenders(app) - before
+        XCTAssertGreaterThan(spent, 0, "pictures crossing the screen re-render their own rows")
+        XCTAssertLessThan(spent, 150, "scrolling should re-render only the rows that change; spent \(spent)")
+    }
+
+    /// Typing in the composer re-renders the page on every keystroke; the rows, whose inputs
+    /// do not change, must not re-render with it. Before rows were `Equatable`, each of the
+    /// ten keystrokes re-rendered all ten rows (about 100).
+    func testTypingInTheComposerDoesNotReRenderTheRows() {
+        let app = launchGram()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        // The keyboard is up and the feed has settled under it.
+        Thread.sleep(forTimeInterval: 2)
+        let before = rowRenders(app)
+        field.typeText("abcdefghij")
+        Thread.sleep(forTimeInterval: 1.5)
+        let spent = rowRenders(app) - before
+        XCTAssertLessThanOrEqual(spent, 5, "typing should not re-render the feed's rows; spent \(spent)")
+    }
+
+    // MARK: - Saved paging
+
+    /// Saved reads like the inbox: oldest at the top, opening at the NEWEST saved message,
+    /// drawing only the newest window, and revealing older saved ones when the reader reaches
+    /// the top, keeping their place. 30 saved (`HERDR_MOCK_GRAM_SAVED`, gs1 oldest) under a
+    /// 20-message window: gs11...gs30 drawn at first.
+    func testSavedOpensAtTheNewestAndRevealsOlderOnesAtTheTop() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_SAVED": "30", "HERDR_GRAM_RENDER_WINDOW": "20"])
+        let toggle = app.buttons["gram-saved-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.tap()
+        let feed = app.scrollViews["gram-saved-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 5), "the Saved feed should show")
+        let newest = app.descendants(matching: .any)["gram-saved-gs30"]
+        let onScreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
+        XCTAssertEqual(XCTWaiter().wait(for: [onScreen], timeout: 5), .completed,
+                       "Saved should open at the newest saved message, on screen")
+        let drawn = app.otherElements["gram-saved-messages"]
+        XCTAssertTrue(drawn.waitForExistence(timeout: 5))
+        XCTAssertEqual(drawn.value as? String, "20 of 30 saved", "only the newest window is drawn")
+        XCTAssertFalse(app.descendants(matching: .any)["gram-saved-gs10"].exists,
+                       "a saved message older than the window is not drawn until the reader scrolls up")
+        XCTAssertFalse(app.descendants(matching: .any)["gram-saved-gs1"].exists, "the oldest is not drawn")
+
+        func waitForDrawn(_ value: String, timeout: TimeInterval) -> Bool {
+            let shown = NSPredicate(format: "value == %@", value)
+            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: shown, object: drawn)],
+                                    timeout: timeout) == .completed
+        }
+        var revealed = false
+        for _ in 0..<12 where !revealed {
+            feed.swipeDown(velocity: .slow)
+            revealed = waitForDrawn("30 of 30 saved", timeout: 1.5)
+        }
+        XCTAssertTrue(revealed, "reaching the top should draw the older saved messages; says \(drawn.value ?? "nil")")
+        let previousTop = app.descendants(matching: .any)["gram-saved-gs11"]
+        XCTAssertTrue(previousTop.waitForExistence(timeout: 3) && previousTop.isHittable,
+                      "the saved message that was on top should stay on screen after the reveal")
+        let oldest = app.descendants(matching: .any)["gram-saved-gs1"]
+        for _ in 0..<10 where !oldest.isHittable { feed.swipeDown(velocity: .slow) }
+        XCTAssertTrue(oldest.isHittable, "scrolling up reaches the oldest saved message")
+    }
+
+    // MARK: - Search paging
+
+    /// The DEBUG `gram-list-pages` probe: how many older pages (`before_id`) the paged mock
+    /// answered (its label; polled every 250 ms).
+    private func listPages(_ app: XCUIApplication) -> Int {
+        let probe = app.descendants(matching: .any)["gram-list-pages"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG list-pages probe should be present")
+        return Int(probe.label) ?? -1
+    }
+
+    /// A search covers the loaded messages and fetches nothing by itself: "Digest" matches g6
+    /// on the first page, so no older page is requested (the removed whole-store walk asked
+    /// for every page). Older history still exists, so the sentinel offers to search it.
+    func testSearchMatchingRecentMessagesFetchesNoOlderPage() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+        XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 10), "the feed opens")
+        // iPad/Mac: the first page fits, so opening loads one older page. Let that land first.
+        Thread.sleep(forTimeInterval: 3)
+        let before = listPages(app)
+        let field = openSearchField(app)
+        field.tap()
+        field.typeText("Digest")
+        XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 5), "the match shows")
+        // The sentinel is a button, so its text is its label.
+        let sentinel = app.descendants(matching: .any)["gram-loading-older"].firstMatch
+        let offers = NSPredicate(format: "label CONTAINS %@", "Scroll up to search older messages")
+        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: offers, object: sentinel)],
+                                        timeout: 5), .completed,
+                       "with older history the sentinel offers to search it; it says \(sentinel.exists ? sentinel.label : "nothing")")
+        Thread.sleep(forTimeInterval: 3)
+        XCTAssertEqual(listPages(app), before, "a search must not fetch older pages the reader did not ask for")
+    }
+
+    /// Reaching the top of a search's results searches older pages until a NEW match lands,
+    /// keeping the reader's place. "vetrina" matches 6 rows of the first page (and every row
+    /// of the older ones), more than a screen. iPhone holds the first page alone, so the
+    /// older match is go1; iPad/Mac loaded the second page on open, so it is gx1, the last.
+    func testReachingTheTopOfSearchResultsFindsOlderMatches() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 10), "the feed opens")
+        Thread.sleep(forTimeInterval: 3)
+        let pagesBefore = listPages(app)
+        let field = openSearchField(app)
+        field.tap()
+        field.typeText("vetrina")
+        let matches = app.otherElements["gram-feed-messages"]
+        XCTAssertTrue(matches.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(listPages(app), pagesBefore, "typing the query fetches nothing")
+        let shown = matches.value as? String ?? ""
+        let older = app.descendants(matching: .any)[shown == "6 messages" ? "gram-bubble-go1" : "gram-bubble-gx1"]
+        XCTAssertFalse(older.exists, "the older match is not loaded yet; feed says \(shown)")
+
+        for _ in 0..<10 where !older.exists {
+            feed.swipeDown(velocity: .slow)
+            _ = older.waitForExistence(timeout: 2)
+        }
+        XCTAssertTrue(older.exists, "reaching the top of the results should fetch older pages until a match lands")
+        XCTAssertGreaterThan(listPages(app), pagesBefore, "the older match came from an older page")
+        XCTAssertNotEqual(matches.value as? String, shown, "more matches are shown")
+    }
+
+    /// No loaded message matches, but older history exists: the empty state says the search
+    /// covered the recent messages and offers the older ones. "kickoff" is only in gx1, the
+    /// last page; the button fetches (at most five pages) until it lands. With the whole
+    /// history loaded, a query matching nothing is plain "No matches".
+    func testNoRecentMatchesOffersToSearchOlderMessages() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+        XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 10), "the feed opens")
+        Thread.sleep(forTimeInterval: 3)
+        let pagesBefore = listPages(app)
+        let field = openSearchField(app)
+        field.tap()
+        field.typeText("kickoff")
+        XCTAssertTrue(app.staticTexts["No matches in recent messages"].waitForExistence(timeout: 5),
+                      "no loaded match, older history left: say what was searched")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(listPages(app), pagesBefore, "the empty state fetches nothing by itself")
+        let searchOlder = app.buttons["gram-search-older"]
+        XCTAssertTrue(searchOlder.waitForExistence(timeout: 3))
+        searchOlder.tap()
+        let match = app.descendants(matching: .any)["gram-bubble-gx1"]
+        XCTAssertTrue(match.waitForExistence(timeout: 10), "Search older messages should find the older match")
+        XCTAssertGreaterThan(listPages(app), pagesBefore)
+
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
+        field.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5),
+                      "with every page loaded, no match is the whole answer")
+        XCTAssertFalse(app.buttons["gram-search-older"].exists, "and there is nothing older to search")
     }
 
     /// vetrina's report runs to 11 lines, past the 8-line fold, so it ends in "…" with a

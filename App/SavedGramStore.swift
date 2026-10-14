@@ -48,11 +48,29 @@ final class SavedGramStore: ObservableObject {
     static let shared = SavedGramStore()
 
     private let defaultsKey = "dev.herdr.savedGrams.v1"
-    /// Newest-first, matching how the Gram list is shown.
+    /// Newest-first, like the inbox store's list. The Saved feed draws it as the inbox does:
+    /// reversed, oldest at the top and the newest at the bottom (`GramSavedFeed`).
     @Published private(set) var saved: [SavedGram]
     private var ids: Set<String>
+    /// Off for the DEBUG seed below, so a UI test's saves and unsaves never reach UserDefaults.
+    private var persists = true
 
     init() {
+        #if DEBUG
+        // `HERDR_MOCK_GRAM_SAVED=N`: N saved messages in memory only (gs1 oldest), for the
+        // Saved paging UI test. Three lines each, so a window of them overfills any screen.
+        if let count = ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_SAVED"].flatMap(Int.init), count > 0 {
+            let seeded = (1...count).reversed().map { n in
+                SavedGram(id: "gs\(n)", text: "Saved note \(n).\nLine two.\nLine three.",
+                          from: n.isMultiple(of: 2) ? "owner" : "vetrina", fromAgent: !n.isMultiple(of: 2),
+                          createdUnixMs: 1_722_000_000_000 + UInt64(n) * 60_000, file: nil)
+            }
+            saved = seeded
+            ids = Set(seeded.map(\.id))
+            persists = false
+            return
+        }
+        #endif
         let decoded: [SavedGram]
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let d = try? JSONDecoder().decode([SavedGram].self, from: data) {
@@ -94,6 +112,7 @@ final class SavedGramStore: ObservableObject {
     }
 
     private func persist() {
+        guard persists else { return }
         guard let data = try? JSONEncoder().encode(saved) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
