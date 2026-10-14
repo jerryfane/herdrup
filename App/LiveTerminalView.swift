@@ -87,6 +87,9 @@ struct LiveTerminalView: UIViewRepresentable {
     /// desktop to this device's width while nobody's looking; it re-takes the lock when fronted
     /// again. Only the lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
+    /// Inactive or background (another app in front on Mac, Control Center, app switcher):
+    /// the front pane's caret holds still too, like the status dot (#427).
+    @Environment(\.scenePhase) private var scenePhase
     /// The host's window scene is in the background (set on `.background`, cleared on
     /// `.active`). The width-lock is released at once and not re-taken until it clears.
     /// Owned by the host, together with its return-to-front remount, so a pane that is about
@@ -233,9 +236,10 @@ struct LiveTerminalView: UIViewRepresentable {
         // re-claim exactly once, from whichever of the two flips last.
         context.coordinator.setSceneBackgrounded(sceneBackgrounded)
         context.coordinator.setForeground(isForeground)
-        // A kept-alive pane behind another pane, the list, Gram or Settings holds its caret
-        // steady: the blink is a repeating animation that keeps the window compositing (#427).
-        terminalView.caretBlinkPaused = !isForeground || Self.steadyCaret
+        // A kept-alive pane behind another pane, the list, Gram or Settings, and any pane
+        // while the scene is not active, holds its caret steady: the blink is a repeating
+        // animation that keeps the window compositing (#427).
+        terminalView.caretBlinkPaused = !isForeground || scenePhase != .active || Self.steadyCaret
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         // Before the focus decision below: a host-delivered keycap is the user acting
