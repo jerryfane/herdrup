@@ -189,7 +189,8 @@ Gram reads like iMessage in herdr's colours: your messages are violet bubbles on
 agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
 time separators, an amber unread rule and green/grey Grabbed/Delivered lines. Long reports
 fold to eight lines with Read more; fenced code sits in a monospaced box with its own Copy;
-images and files are cards with name, size and Open / Save to Files. On iPad and Mac the
+images and files are cards that open on a tap (Save to Files is in the long-press / right-click
+menu), pictures show inline, and a download draws the composer's ring. On iPad and Mac the
 sidebar holds Gram's search field (⌘F; no mic, the composer keeps dictation) and its two
 conversations, Gram and Saved, as Messages rows, with Read all and Refresh in the bar.
 

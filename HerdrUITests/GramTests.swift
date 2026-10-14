@@ -308,7 +308,10 @@ final class GramTests: XCTestCase {
 
         for _ in 0..<8 where !oldest.exists { feed.swipeDown(velocity: .slow); Thread.sleep(forTimeInterval: 0.5) }
         XCTAssertTrue(oldest.waitForExistence(timeout: 3), "reaching the top should draw the older loaded messages")
-        // The revealed rows push the sentinel off screen again: no fetch.
+        // The revealed rows push the sentinel off screen again: no fetch. Wait past the anchor
+        // restore (up to ~0.7 s) and the mock's round trip, so a page fetched after the reveal
+        // would have landed.
+        Thread.sleep(forTimeInterval: 2)
         XCTAssertEqual(messages.value as? String, "10 messages", "revealing loaded rows fetches no page")
     }
 
@@ -598,6 +601,186 @@ final class GramTests: XCTestCase {
             XCTAssertTrue(app.buttons["gram-saved-toggle"].exists,
                           "iPad/Mac float a Saved capsule at the header's right")
         }
+    }
+
+    /// The attachment card of message `id`: the whole card is its Open button.
+    private func attachmentCard(_ app: XCUIApplication, message id: String) -> XCUIElement {
+        app.descendants(matching: .any)["gram-bubble-\(id)"]
+            .descendants(matching: .button)["gram-attachment-open"].firstMatch
+    }
+
+    /// clientloop's zip (g2): tapping anywhere on its card opens it, and the card carries no
+    /// Open / Save to Files bar of its own.
+    func testTappingAFileCardOpensIt() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g2")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the zip should draw as a file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+        XCTAssertEqual(card.label, "Open amigo-poc-scaffold.zip", "the card is one button that opens the file")
+        let bubble = app.descendants(matching: .any)["gram-bubble-g2"]
+        XCTAssertEqual(bubble.descendants(matching: .button).matching(identifier: "gram-attachment-open").count, 1,
+                       "one Open target: the card itself")
+        XCTAssertFalse(app.descendants(matching: .any)["gram-attachment-save"].exists,
+                       "Save to Files is no longer a button on the card")
+        XCTAssertFalse(bubble.buttons["Open"].exists, "no separate Open button")
+
+        card.tap()
+        let probe = app.descendants(matching: .any)["gram-opened-file"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG opened-file probe should be present")
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "opened:"),
+                                               object: probe)
+        XCTAssertEqual(XCTWaiter().wait(for: [opened], timeout: 10), .completed,
+                       "tapping the card should download the file and hand it to a viewer; probe says \(probe.label)")
+    }
+
+    /// Long-pressing the file card offers Save to Files in the message's menu, beside the
+    /// message's own actions (one menu, not two).
+    func testLongPressingAFileCardOffersSaveToFiles() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g2")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the zip should draw as a file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+
+        card.press(forDuration: 1.2)
+        let save = app.buttons["Save to Files"].firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 5), "the card's menu should offer Save to Files")
+        XCTAssertTrue(app.buttons["Delete"].firstMatch.exists, "the same menu keeps the message's actions")
+    }
+
+    /// A DEBUG probe element by identifier (its state is in its label).
+    private func probe(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id].firstMatch
+    }
+
+    /// Waits until `element`'s label matches the regular expression `pattern`.
+    private func waitForLabel(_ element: XCUIElement, matching pattern: String, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label MATCHES %@", pattern),
+                                                    object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    /// Waits until `gram-get-file-calls` reports `count` `gram.get_file` calls for `id` (the
+    /// label reads e.g. "g2=0 g3=1"). Polls the label directly: a predicate waiter with a
+    /// regex re-checked too rarely for these short windows and failed on a matching label.
+    private func waitForGetFileCalls(_ probe: XCUIElement, _ id: String, _ count: Int,
+                                     timeout: TimeInterval) -> Bool {
+        let wanted = "\(id)=\(count)"
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if probe.label.split(separator: " ").contains(Substring(wanted)) { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        return probe.label.split(separator: " ").contains(Substring(wanted))
+    }
+
+    /// Scrolls the feed until `element` is on screen below the floating header (the header is
+    /// see-through: a row behind it is "hittable" for XCUITest but not visible, and the app
+    /// rightly does not count it as seen). Down for older rows, up for newer.
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication, older: Bool) {
+        let feed = app.scrollViews["gram-feed"]
+        let header = app.descendants(matching: .any)["gram-header-pill"]
+        func shown() -> Bool {
+            guard element.isHittable else { return false }
+            let headerBottom = header.exists ? header.frame.maxY : feed.frame.minY
+            return element.frame.minY >= headerBottom && element.frame.maxY <= feed.frame.maxY
+        }
+        for _ in 0..<12 where !shown() {
+            if older { feed.swipeDown(velocity: .slow) } else { feed.swipeUp(velocity: .slow) }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// vetrina's image (g3) shows its picture without a tap: the card fetches it through the
+    /// download cache while on screen and decodes a preview (the DEBUG
+    /// `gram-image-preview-g3` probe says "placeholder" / "preview").
+    func testImageCardShowsAPreviewWithoutOpening() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g3")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the image should draw as an image card")
+        XCTAssertEqual(card.label, "Open vetrina-live.png, 412 KB")
+        reveal(card, in: app, older: true)
+        let preview = probe(app, "gram-image-preview-g3")
+        XCTAssertTrue(waitForLabel(preview, matching: "preview", timeout: 8),
+                      "the image card should decode its preview on its own; probe says \(preview.label)")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "gram-image-preview"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// Opening an image whose preview already landed opens the cached file: the daemon is
+    /// asked for g3 once, by the prefetch, never again by the open.
+    func testOpeningAPreviewedImageDoesNotFetchItAgain() {
+        let app = launchGram()
+        let card = attachmentCard(app, message: "g3")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the image should draw as an image card")
+        reveal(card, in: app, older: true)
+        XCTAssertTrue(waitForLabel(probe(app, "gram-image-preview-g3"), matching: "preview", timeout: 8),
+                      "the preview should land first")
+        let calls = probe(app, "gram-get-file-calls")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g3", 1, timeout: 3),
+                      "the prefetch fetched g3 once; probe says \(calls.label)")
+
+        card.tap()
+        let opened = probe(app, "gram-opened-file")
+        XCTAssertTrue(waitForLabel(opened, matching: "opened:vetrina-live\\.png", timeout: 5),
+                      "tapping the card should open the image; probe says \(opened.label)")
+        // Past the probe's poll, so a second fetch would show.
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(waitForGetFileCalls(calls, "g3", 1, timeout: 1),
+                      "the open must reuse the cached file, not fetch it again; probe says \(calls.label)")
+    }
+
+    /// The feed is an eager stack, so a drawn row exists whether it is seen or not: the
+    /// image card must fetch only once it is really on screen. Fourteen newer messages
+    /// (`HERDR_MOCK_GRAM_NEWER`) put g3 above the fold, inside a window that draws it.
+    func testAnImageCardAboveTheFoldFetchesOnlyOnceScrolledIntoView() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_NEWER": "1", "HERDR_GRAM_RENDER_WINDOW": "200"])
+        let newest = app.descendants(matching: .any)["gram-bubble-gn14"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 10), "the newer messages should load")
+        let landed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
+        XCTAssertEqual(XCTWaiter().wait(for: [landed], timeout: 5), .completed, "the feed opens at the newest message")
+        let card = attachmentCard(app, message: "g3")
+        XCTAssertTrue(card.exists, "the image row is drawn")
+        XCTAssertFalse(card.isHittable, "precondition: the image sits above the fold")
+
+        // Past the landing, the prefetch delay and the probe's poll.
+        Thread.sleep(forTimeInterval: 2)
+        let calls = probe(app, "gram-get-file-calls")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g3", 0, timeout: 1),
+                      "an image card off screen must not fetch; probe says \(calls.label)")
+
+        reveal(card, in: app, older: true)
+        XCTAssertTrue(card.isHittable, "scrolling up should bring the image on screen")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g3", 1, timeout: 5),
+                      "on screen, the card fetches its preview once; probe says \(calls.label)")
+        XCTAssertTrue(waitForLabel(probe(app, "gram-image-preview-g3"), matching: "preview", timeout: 8),
+                      "and draws it")
+    }
+
+    /// A prefetch never holds up an open: with g3's download held in flight for 10 s
+    /// (`HERDR_MOCK_GRAM_FILE_DELAY`), opening the zip (g2) still opens it at once.
+    func testAPrefetchDoesNotBlockOpeningAnotherFile() {
+        // Held for 60 s: a slow CI runner spent more than 10 s scrolling, and the download
+        // landed before the precondition check. The test ends when the zip opens, not then.
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_FILE_DELAY": "g3=60"])
+        let image = attachmentCard(app, message: "g3")
+        XCTAssertTrue(image.waitForExistence(timeout: 10), "the image should draw as an image card")
+        reveal(image, in: app, older: true)
+        let calls = probe(app, "gram-get-file-calls")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g3", 1, timeout: 5),
+                      "the image's prefetch should be in flight; probe says \(calls.label)")
+        XCTAssertEqual(probe(app, "gram-image-preview-g3").label, "placeholder",
+                       "precondition: the held download has not landed")
+
+        let file = attachmentCard(app, message: "g2")
+        reveal(file, in: app, older: false)
+        file.tap()
+        let opened = probe(app, "gram-opened-file")
+        XCTAssertTrue(waitForLabel(opened, matching: "opened:.+", timeout: 4),
+                      "the zip should open while the image is still downloading; probe says \(opened.label)")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g2", 1, timeout: 2),
+                      "the open fetched the zip itself; probe says \(calls.label)")
     }
 
     /// clientloop's command sits in a code block with its own Copy. Tapping it says "Copied".
