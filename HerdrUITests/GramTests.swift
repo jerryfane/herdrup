@@ -1063,9 +1063,10 @@ final class GramTests: XCTestCase {
     /// A prefetch never holds up an open: with g3's download held in flight for 10 s
     /// (`HERDR_MOCK_GRAM_FILE_DELAY`), opening the zip (g2) still opens it at once.
     func testAPrefetchDoesNotBlockOpeningAnotherFile() {
-        // Held for 60 s: a slow CI runner spent more than 10 s scrolling, and the download
-        // landed before the precondition check. The test ends when the zip opens, not then.
-        let app = launchGram(environment: ["HERDR_MOCK_GRAM_FILE_DELAY": "g3=60"])
+        // Held for 10 minutes, i.e. for the whole test: a slow CI runner took ~90 s to scroll
+        // the image into view (run 38629962966), longer than the earlier 60 s hold, and the
+        // preview landed before the precondition check. The test ends when the zip opens.
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_FILE_DELAY": "g3=600"])
         let image = attachmentCard(app, message: "g3")
         XCTAssertTrue(image.waitForExistence(timeout: 10), "the image should draw as an image card")
         reveal(image, in: app, older: true)
