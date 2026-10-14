@@ -5302,9 +5302,6 @@ struct TerminalPaneContent: View {
     /// A failed key invalidates only keys queued before the failure; a new tap can retry.
     @State private var keyFailureEpoch = 0
     @State private var keySendSequence = 0
-    /// The keycap batch still waiting for the write ahead of it: keys tapped meanwhile
-    /// join it and leave together in ONE request. nil once its send starts.
-    @State private var openKeyBatch: KeySendBatch?
     @State private var actionNote: String?
     /// In-flight guard for the [Switch] banner action, so repeated taps don't queue multiple
     /// `/tui default` prompts (the reply box's send is gated by `sending`; this is its analogue).
@@ -5600,8 +5597,9 @@ struct TerminalPaneContent: View {
         // recognizer to the WINDOW, so N keep-mounted panes would otherwise stack N
         // recognizers that all fire on one edge swipe.
         .overlay { if isForeground { EdgeSwipeBack { onClose() } } }
-        // Kept-alive panes behind the front one, Gram or Settings hold their status dot still.
-        .environment(\.statusMotion, isForeground)
+        // Kept-alive panes behind the front one, Gram or Settings hold their status dot still,
+        // and so does the front one while the scene is inactive, like the roster's rings.
+        .environment(\.statusMotion, isForeground && scenePhase == .active)
         #if DEBUG
         // The control harness's "reply-dictation" fills the reply through this binding,
         // exactly as `MicButton` does with partial results.
@@ -6599,21 +6597,32 @@ struct TerminalPaneContent: View {
             guard let clearedReply, reply.isEmpty else { return }
             reply = clearedReply
         }
-        // Keycap writes take their own ordered, batching drain.
+        let isKeyAction: Bool
         switch plan {
-        case .keys, .rawText:
-            enqueueKeySend(plan)
-            return
-        case .prompt, .text, .refused:
-            break
+        case .keys, .rawText: isKeyAction = true
+        default: isKeyAction = false
         }
-        // A key tapped after this send must not join a batch queued AHEAD of it.
-        openKeyBatch = nil
+        // Keep rapid taps responsive, but dispatch their writes in order. A failure
+        // cancels keys already queued behind it rather than silently changing a chord.
         let precedingKeySend = keySendTask
-        sending = true
-        Task {
+        let queuedEpoch = keyFailureEpoch
+        let sequence: Int?
+        if isKeyAction {
+            keySendSequence += 1
+            sequence = keySendSequence
+        } else {
+            sequence = nil
+            sending = true
+        }
+        let task = Task {
             if let precedingKeySend { await precedingKeySend.value }
-            defer { sending = false }
+            defer {
+                if !isKeyAction { sending = false }
+                if let sequence, keySendSequence == sequence { keySendTask = nil }
+            }
+            if isKeyAction && keyFailureEpoch != queuedEpoch {
+                return
+            }
             do {
                 switch plan {
                 case .prompt(let pane, let text):
@@ -6621,17 +6630,22 @@ struct TerminalPaneContent: View {
                 case .text(let pane, let text):
                     try await client.sendText(pane: pane, text: text)
                     actionNote = nil
+                case .rawText(let pane, let text):
+                    try await client.sendText(pane: pane, text: text)
+                    actionNote = nil
+                case .keys(let pane, let keys):
+                    try await client.sendKeys(pane: pane, keys: keys)
+                    actionNote = nil
                 case .refused(let reason):
                     actionNote = "not sent: \(reason)"
                     restoreClearedReply()
                     return
-                case .keys, .rawText:
-                    return  // dispatched by enqueueKeySend above
                 }
                 // The live stream provides output; only a prompt send needs to
                 // re-resolve agent status and input mode.
-                await refresh()
+                if !isKeyAction { await refresh() }
             } catch let apiError as APIError {
+                if isKeyAction { keyFailureEpoch += 1 }
                 if case .prompt = plan {
                     actionNote = Self.promptRejectionNote(for: apiError)
                     // A post-write/unknown rejection must not put text back for
@@ -6639,12 +6653,24 @@ struct TerminalPaneContent: View {
                     if !PromptRejection(apiError).mayHaveReachedAgent {
                         restoreClearedReply()
                     }
+                } else if isKeyAction {
+                    let prefix = apiError.code == "timeout"
+                        ? "Key delivery uncertain — check the terminal"
+                        : "send failed: \(apiError)"
+                    let suffix = sequence.map { keySendSequence > $0 } == true
+                        ? "; later queued keys were not sent" : ""
+                    actionNote = prefix + suffix
                 } else {
                     actionNote = "send failed: \(apiError)"
                     restoreClearedReply()
                 }
             } catch {
-                if case .prompt = plan {
+                if isKeyAction {
+                    keyFailureEpoch += 1
+                    let suffix = sequence.map { keySendSequence > $0 } == true
+                        ? "; later queued keys were not sent" : ""
+                    actionNote = "Key delivery uncertain — check the terminal before trying again" + suffix
+                } else if case .prompt = plan {
                     // A transport failure does not prove whether the server wrote
                     // bytes before losing the response. Don't invite a blind resend.
                     actionNote = "couldn't confirm delivery — check the terminal before sending again"
@@ -6654,111 +6680,7 @@ struct TerminalPaneContent: View {
                 }
             }
         }
-    }
-
-    /// Keycap writes share one ordered drain, and keys tapped while a write is in flight
-    /// do not each wait a round trip of their own: they join ONE open batch, sent as a
-    /// single request when the write ahead of it returns. Every request to a federated
-    /// pane pays a relay round trip (~0.75 s), so a rapid run of taps otherwise backed
-    /// up one request per key.
-    ///
-    /// A batch is one request kind for one pane — consecutive raw bytes join one
-    /// `pane.send_text`, consecutive named keys one `agent.send_keys` — so a switch of
-    /// kind or pane closes it and the tap opens the next: the wire order is exactly the
-    /// tap order. A bare Escape also closes its batch, so it never shares a write with
-    /// the key after it. A failure cancels every batch queued behind it rather than
-    /// silently changing a chord; a tap after the failure opens a fresh batch and can retry.
-    private func enqueueKeySend(_ plan: InputPlan) {
-        if let open = openKeyBatch, open.epoch == keyFailureEpoch, open.append(plan) { return }
-        guard let batch = KeySendBatch(plan, epoch: keyFailureEpoch) else { return }
-        openKeyBatch = batch
-        let precedingKeySend = keySendTask
-        keySendSequence += 1
-        let sequence = keySendSequence
-        keySendTask = Task {
-            if let precedingKeySend { await precedingKeySend.value }
-            // Closed before its own send: a tap from here on opens the next batch.
-            if openKeyBatch === batch { openKeyBatch = nil }
-            defer { if keySendSequence == sequence { keySendTask = nil } }
-            guard keyFailureEpoch == batch.epoch else { return }
-            do {
-                switch batch.payload {
-                case .text(let text):
-                    try await client.sendText(pane: batch.pane, text: text)
-                case .keys(let keys):
-                    try await client.sendKeys(pane: batch.pane, keys: keys)
-                }
-                actionNote = nil
-            } catch {
-                keyFailureEpoch += 1
-                let suffix = keySendSequence > sequence ? "; later queued keys were not sent" : ""
-                if let apiError = error as? APIError {
-                    let prefix = apiError.code == "timeout"
-                        ? "Key delivery uncertain — check the terminal"
-                        : "send failed: \(apiError)"
-                    actionNote = prefix + suffix
-                } else {
-                    actionNote = "Key delivery uncertain — check the terminal before trying again" + suffix
-                }
-            }
-        }
-    }
-
-    /// One keycap request still open to more taps: raw bytes for `pane.send_text`, or
-    /// named keys for `agent.send_keys`, all for one pane.
-    @MainActor
-    private final class KeySendBatch {
-        enum Payload { case text(String), keys([String]) }
-        /// Per-request caps; a tap past one opens the next batch. herdr bounds neither
-        /// method itself, so these keep a batch far inside the SSH exec bridge's
-        /// request-line budget (`CitadelTransport.maxCommandBytes`).
-        static let maxTextBytes = 4096
-        static let maxKeys = 64
-        let pane: String
-        let epoch: Int
-        private(set) var payload: Payload
-
-        /// nil for a plan that is not a keycap write.
-        init?(_ plan: InputPlan, epoch: Int) {
-            switch plan {
-            case .rawText(let pane, let text):
-                self.pane = pane
-                payload = .text(text)
-            case .keys(let pane, let keys):
-                self.pane = pane
-                payload = .keys(keys)
-            default:
-                return nil
-            }
-            self.epoch = epoch
-        }
-
-        /// A batch ending in a bare Escape takes nothing after it. Vim, tmux and readline
-        /// read ESC followed by a key in ONE write as Alt+key (escape-time), so whatever
-        /// is tapped next goes out in the following request, a round trip later.
-        private var endsWithEscape: Bool {
-            switch payload {
-            case .text(let text): return text.unicodeScalars.last == "\u{1b}"
-            case .keys(let keys): return keys.last.map { ["escape", "esc"].contains($0.lowercased()) } ?? false
-            }
-        }
-
-        /// Adds `plan` when it continues this batch — same pane, same request kind,
-        /// within the caps, not after a bare Escape — and reports whether it did.
-        func append(_ plan: InputPlan) -> Bool {
-            guard !endsWithEscape else { return false }
-            switch (payload, plan) {
-            case (.text(let text), .rawText(let pane, let more))
-                where pane == self.pane && text.utf8.count + more.utf8.count <= Self.maxTextBytes:
-                payload = .text(text + more)
-            case (.keys(let keys), .keys(let pane, let more))
-                where pane == self.pane && keys.count + more.count <= Self.maxKeys:
-                payload = .keys(keys + more)
-            default:
-                return false
-            }
-            return true
-        }
+        if isKeyAction { keySendTask = task }
     }
     /// Uploads and posts every staged attachment, then submits ONE prompt naming them
     /// all.
@@ -6784,8 +6706,6 @@ struct TerminalPaneContent: View {
         }
 
         sending = true
-        // A key tapped after this send must not join a batch queued AHEAD of it.
-        openKeyBatch = nil
         let precedingKeySend = keySendTask
         Task {
             if let precedingKeySend { await precedingKeySend.value }
@@ -9708,6 +9628,7 @@ struct MockTransport: HerdrTransport {
         if requestLine.contains("gram.list") {
             if Self.gramPaged { return Self.gramPagedList(requestLine) }
             if Self.gramImageCount > 0 { return Self.gramListWithImages }
+            if Self.gramExpiresSaved { return await Self.gramListExpiringSaved() }
             return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
         }
         if requestLine.contains("gram.post") {
@@ -10087,6 +10008,25 @@ struct MockTransport: HerdrTransport {
         let listed = ["g2", "g3", "g11", "g12"]
         let ids = listed + counts.keys.filter { !listed.contains($0) }.sorted()
         return ids.map { "\($0)=\(counts[$0] ?? 0)" }.joined(separator: " ")
+    }
+
+    /// `HERDR_MOCK_GRAM_EXPIRE_SAVED=1`: the store expires the list fixture's files (g2's zip,
+    /// g3's image) once the owner has saved their message, so the next `gram.list` answers a
+    /// saved one with its file as `expired_file` (herdr#298). A copy saved while its file was
+    /// live must then stop offering it in Saved.
+    static var gramExpiresSaved: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_EXPIRE_SAVED"] == "1"
+    }
+
+    @MainActor
+    static func gramListExpiringSaved() -> String {
+        var list = gramList
+        for (id, name) in [("g2", "amigo-poc-scaffold.zip"), ("g3", "vetrina-live.png")]
+        where SavedGramStore.shared.isSaved(id) {
+            list = list.replacingOccurrences(of: #""file":{"name":"\#(name)""#,
+                                             with: #""expired_file":{"name":"\#(name)""#)
+        }
+        return list
     }
 
     private static let gramGetFileRecorder = GramGetFileRecorder()

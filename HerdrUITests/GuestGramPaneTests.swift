@@ -97,6 +97,28 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertEqual(probe(app, "guest-forbidden-calls"), "", "the Gram tab calls only what a guest may")
     }
 
+    /// herdr#298: a file the host's store expired (gm-0, a picture with no caption) draws as
+    /// a chip naming it "no longer available", never an empty row body. It is not a button
+    /// and tapping it fetches nothing from the host.
+    func testAnExpiredGramFileDrawsAsAnInertChip() {
+        let app = launch(features: "gram")
+        openGramTab(app)
+        let row = element(app, "guest-gram-row-gm-0")
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the expired message keeps its row")
+        let list = element(app, "guest-gram-list")
+        for _ in 0..<4 where !row.isHittable { list.swipeUp() }
+        let chip = element(app, "guest-gram-expired-gm-0")
+        XCTAssertTrue(chip.waitForExistence(timeout: 3), "the row should show the expired file")
+        XCTAssertEqual(chip.label, "q4-baseline.png, no longer available")
+        XCTAssertNotEqual(chip.elementType, .button, "an expired file is not a button")
+        XCTAssertFalse(app.buttons["guest-gram-file-gm-0"].exists, "nothing offers it to open")
+
+        chip.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertFalse(probe(app, "guest-host-calls").contains("gram.get_file_chunk:gm-0"),
+                       "tapping the expired chip fetches nothing")
+    }
+
     /// A file downloads from the host in its bounded pieces and opens.
     func testOpeningAGramFileDownloadsItInPiecesAndOpensIt() {
         let app = launch(features: "gram")

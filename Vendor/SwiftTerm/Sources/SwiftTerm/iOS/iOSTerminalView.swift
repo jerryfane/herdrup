@@ -309,6 +309,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     private var caretHiddenBeforeSuppression = false
 
+    /// herdr: holds a blinking caret steady while nobody can see it (a hidden kept-alive
+    /// pane). Its repeating blink keeps the window compositing every frame and UIKit from
+    /// ever settling.
+    public var caretBlinkPaused: Bool {
+        get { caretView?.blinkPaused ?? false }
+        set { caretView?.blinkPaused = newValue }
+    }
+
     /// Last proposed grid plus the cell metrics it was computed from, so an
     /// unchanged layout does not re-propose, but a font change does.
     var requestedTerminalGrid: (cols: Int, rows: Int)? = nil

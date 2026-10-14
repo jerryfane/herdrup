@@ -128,6 +128,22 @@ final class SavedGramStore: ObservableObject {
         persist()
     }
 
+    /// The store expired these messages' files since they were saved (herdr#298): a saved
+    /// copy that still holds a live `file` for one of them moves it to `expiredFile`, so
+    /// Saved stops offering an open of bytes that are gone. Called with every inbox answer
+    /// (head and older pages); persists only when something moved.
+    func expireFiles(in messages: [GramMessage]) {
+        var changed = false
+        for message in messages where message.expiredFile != nil && ids.contains(message.id) {
+            guard let index = saved.firstIndex(where: { $0.id == message.id }),
+                  let file = saved[index].file else { continue }
+            saved[index].file = nil
+            saved[index].expiredFile = file
+            changed = true
+        }
+        if changed { persist() }
+    }
+
     private func persist() {
         guard persists else { return }
         guard let data = try? JSONEncoder().encode(saved) else { return }

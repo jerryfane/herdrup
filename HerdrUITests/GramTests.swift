@@ -883,6 +883,50 @@ final class GramTests: XCTestCase {
         XCTAssertFalse(app.buttons["Open"].exists, "an expired file has nothing to open")
     }
 
+    /// A message saved while its file was live, whose file the store expires afterwards
+    /// (`HERDR_MOCK_GRAM_EXPIRE_SAVED`: the next `gram.list` answers a saved g2 with its zip as
+    /// `expired_file`): once the inbox load brings the expiry, the Saved copy shows the
+    /// non-interactive expired chip, not the old Open chip, and tapping it fetches nothing.
+    func testASavedCopyStopsOfferingAFileTheStoreExpired() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_EXPIRE_SAVED": "1"])
+        let card = attachmentCard(app, message: "g2")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "precondition: the zip is a live file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+        card.press(forDuration: 1.2)
+        let save = app.buttons["Save"].firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 5), "the message menu offers Save")
+        save.tap()
+
+        // The next poll answers g2 with its file expired; the inbox redraws it as such.
+        let bubble = app.descendants(matching: .any)["gram-bubble-g2"]
+        let inboxExpired = bubble.descendants(matching: .any)["gram-attachment-expired"].firstMatch
+        XCTAssertTrue(inboxExpired.waitForExistence(timeout: 15), "the mock should expire the saved message's file")
+
+        let toggle = app.buttons["gram-saved-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        // The one saved message: its row folds into the feed's element, so look in the feed.
+        let saved = app.scrollViews["gram-saved-feed"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5), "the Saved feed should show")
+        XCTAssertTrue(saved.staticTexts["hetzner-1/clientloop"].waitForExistence(timeout: 5),
+                      "Saved should hold the copy of g2")
+        let chip = saved.descendants(matching: .any)["gram-attachment-expired"].firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 3), "the saved copy should show the file as expired")
+        XCTAssertEqual(chip.label, "amigo-poc-scaffold.zip, no longer available")
+        XCTAssertNotEqual(chip.elementType, .button, "an expired file is not a button")
+        XCTAssertEqual(saved.buttons.matching(NSPredicate(format: "label CONTAINS %@", "amigo-poc-scaffold.zip")).count, 0,
+                       "the saved copy no longer offers the file to open")
+
+        let calls = probe(app, "gram-get-file-calls")
+        chip.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(waitForGetFileCalls(calls, "g2", 0, timeout: 0.5),
+                      "tapping the expired chip fetches nothing; probe says \(calls.label)")
+        chip.press(forDuration: 1.2)
+        XCTAssertFalse(app.buttons["Open"].waitForExistence(timeout: 2), "an expired file has nothing to open")
+        XCTAssertFalse(app.buttons["Save to Files…"].exists, "an expired file has nothing to save")
+    }
+
     /// Saving a message from its menu redraws that row with the saved badge, and unsaving
     /// removes it. Guards GramRow's `==`: a row that skipped `isSaved` would stay stale.
     func testSavingAMessageRedrawsItsBadge() {

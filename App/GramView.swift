@@ -2246,6 +2246,8 @@ struct GramView: View {
                 limit: min(max(Self.pageSize, inboxStore.inbox.messages.count),
                            Self.maxRefreshLimit))
             let changed = inboxStore.inbox.apply(answer)
+            // A saved copy whose file the store has since expired stops offering it.
+            savedGrams.expireFiles(in: answer.messages ?? [])
             phase = .loaded
             refreshNote = nil
             loadFailures = 0
@@ -2329,6 +2331,7 @@ struct GramView: View {
             do {
                 let answer = try await client.gramList(limit: Self.pageSize, beforeID: cursor)
                 if inboxStore.inbox.appendPage(answer, generation: generation) {
+                    savedGrams.expireFiles(in: answer.messages ?? [])
                     pageError = nil
                     return true
                 }

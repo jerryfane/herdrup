@@ -15,11 +15,15 @@ final class StatusMotionTests: XCTestCase {
 
     /// The list mock has one working agent, herdr-app: its roster ring turns, its open pane's
     /// dot pulses. Covered by the pane (iPhone) the ring stops; behind Gram and Settings the
-    /// kept-alive pane's dot stops too.
+    /// kept-alive pane's dot stops too. Back on Agents, and back from the Home screen, the
+    /// same shapes move again.
     func testHiddenStatusShapesHoldStill() {
         let pad = UIDevice.current.userInterfaceIdiom == .pad
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
+        // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
+        // The status shapes' SwiftUI animations do not hold it up.
+        app.launchEnvironment["HERDR_STEADY_CARET"] = "1"
         app.launch()
         let row = app.staticTexts["herdr-app"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15), "the roster should list the working agent")
@@ -42,6 +46,25 @@ final class StatusMotionTests: XCTestCase {
         app.buttons["Settings"].firstMatch.tap()
         sleep(1)
         XCTAssertEqual(moving(app), 0, "nothing moves behind Settings")
+
+        app.buttons["Agents"].firstMatch.tap()
+        sleep(1)
+        // iPad / Mac: the roster and the still-fronted pane come back together. iPhone: the roster.
+        XCTAssertEqual(moving(app), pad ? 2 : 1, "back on Agents, what is on screen moves again")
+        if !pad {
+            row.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+                          "the kept-alive pane should come back to the front")
+            sleep(1)
+            XCTAssertEqual(moving(app), 1, "the kept-alive pane's dot pulses again in front")
+        }
+
+        // Everything holds still while the scene is not active, and resumes together.
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        sleep(1)
+        XCTAssertEqual(moving(app), pad ? 2 : 1, "back from the Home screen, the same shapes move again")
         app.terminate()
     }
 }

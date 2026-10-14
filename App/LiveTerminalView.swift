@@ -169,6 +169,15 @@ struct LiveTerminalView: UIViewRepresentable {
     /// The host's own copy of the stuck-stream threshold, so it judges staleness by the
     /// same rule the watchdog reconnects on rather than a second, drifting number.
     static var streamStuckTimeout: TimeInterval { Coordinator.streamStuckTimeout }
+    /// DEBUG builds take `HERDR_STEADY_CARET` for UI tests that tap with a pane on screen: a
+    /// blinking caret never lets XCUITest's "wait for the app to idle" finish (60 s a tap).
+    private static let steadyCaret: Bool = {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["HERDR_STEADY_CARET"] != nil
+        #else
+        return false
+        #endif
+    }()
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
@@ -224,6 +233,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // re-claim exactly once, from whichever of the two flips last.
         context.coordinator.setSceneBackgrounded(sceneBackgrounded)
         context.coordinator.setForeground(isForeground)
+        // A kept-alive pane behind another pane, the list, Gram or Settings holds its caret
+        // steady: the blink is a repeating animation that keeps the window compositing (#427).
+        terminalView.caretBlinkPaused = !isForeground || Self.steadyCaret
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         // Before the focus decision below: a host-delivered keycap is the user acting

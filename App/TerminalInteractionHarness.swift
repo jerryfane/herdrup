@@ -25,12 +25,11 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             var lock: Bool?
             var ttlMs: UInt64?
             var dataBase64: String?
-            var keys: [String]?
             enum CodingKeys: String, CodingKey {
                 case paneID = "pane_id"
                 case dataBase64 = "data_base64"
                 case ttlMs = "ttl_ms"
-                case cols, rows, text, lock, keys
+                case cols, rows, text, lock
             }
         }
     }
@@ -116,25 +115,6 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         return ms * 1_000_000
     }()
 
-    /// `HERDR_MOCK_KEY_SEND_DELAY_MS`: how long `pane.send_text` and `agent.send_keys`
-    /// take to answer, nil when unset or 0. A slow federated route for the keycap drain.
-    static let keySendDelayNanos: UInt64? = {
-        guard let raw = ProcessInfo.processInfo.environment["HERDR_MOCK_KEY_SEND_DELAY_MS"],
-              let ms = UInt64(raw), ms > 0 else { return nil }
-        return ms * 1_000_000
-    }()
-
-    /// Every `pane.send_text` / `agent.send_keys` request received, across all panes, in
-    /// arrival order, and how many are still unanswered. Read through `keySendLog` and
-    /// `keySendsInFlight`.
-    private static let keySends = KeySendRecorder()
-
-    /// The `terminal-key-sends` probe's label: one entry per request, ` | `-separated —
-    /// `text:<hex scalars>` or `keys:<name>,<name>`.
-    static var keySendLog: String { keySends.log }
-    /// The `terminal-key-sends` probe's value: requests received but not yet answered.
-    static var keySendsInFlight: Int { keySends.inFlight }
-
     func roundTrip(_ line: String) async throws -> String {
         let request = try JSONDecoder().decode(Request.self, from: Data(line.utf8))
         if let id = request.params?.paneID, id != paneID {
@@ -146,21 +126,11 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         case "pane.set_pty_size":
             return try await resize(request)
         case "pane.send_text":
-            let text = request.params?.text ?? ""
-            Self.keySends.record("text:" + text.unicodeScalars.map { String(format: "%02x", $0.value) }
-                .joined(separator: " "))
-            defer { Self.keySends.answered() }
-            if let delay = Self.keySendDelayNanos { try await Task.sleep(nanoseconds: delay) }
             // HERDR_ECHO_DELAY_MS: a slow link, so the simulator shows instant typing's
             // predictions. The echo and the reply both come after the delay, as over a
             // real round trip; keys go out stop-and-wait here, so order is kept.
             if let delay = Self.echoDelayNanos { try await Task.sleep(nanoseconds: delay) }
-            locked { consume(text) }
-            return Self.json(["id": request.id, "result": [:]])
-        case "agent.send_keys":
-            Self.keySends.record("keys:" + (request.params?.keys ?? []).joined(separator: ","))
-            defer { Self.keySends.answered() }
-            if let delay = Self.keySendDelayNanos { try await Task.sleep(nanoseconds: delay) }
+            locked { consume(request.params?.text ?? "") }
             return Self.json(["id": request.id, "result": [:]])
         case "agent.read":
             return Self.json(["id": request.id, "result": ["read": [
@@ -418,34 +388,6 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private func claimReceipt() -> [String: Any] {
         locked { ["claims": claims, "releases": releases, "inactiveReleases": inactiveReleases,
                   "ttl": lastClaimTTL] }
-    }
-}
-
-/// The fixture's received keycap requests, shared by every pane's driver.
-private final class KeySendRecorder: @unchecked Sendable {
-    private let mutex = NSLock()
-    private var entries: [String] = []
-    private var unanswered = 0
-
-    func record(_ entry: String) {
-        mutex.lock(); defer { mutex.unlock() }
-        entries.append(entry)
-        unanswered += 1
-    }
-
-    func answered() {
-        mutex.lock(); defer { mutex.unlock() }
-        unanswered -= 1
-    }
-
-    var log: String {
-        mutex.lock(); defer { mutex.unlock() }
-        return entries.joined(separator: " | ")
-    }
-
-    var inFlight: Int {
-        mutex.lock(); defer { mutex.unlock() }
-        return unanswered
     }
 }
 
@@ -1042,14 +984,6 @@ private struct TerminalInteractionControls: View {
             Text("Terminal receipt").font(.system(size: 8))
                 .accessibilityIdentifier("terminal-interaction-probe")
                 .accessibilityLabel(harness.probe())
-                // An overlay, so this probe adds no height to the bar above the pane.
-                .frame(maxWidth: .infinity)
-                .overlay(alignment: .trailing) {
-                    Text("Key sends").font(.system(size: 8))
-                        .accessibilityIdentifier("terminal-key-sends")
-                        .accessibilityLabel(TerminalInteractionDriver.keySendLog)
-                        .accessibilityValue("\(TerminalInteractionDriver.keySendsInFlight)")
-                }
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
         .frame(maxWidth: .infinity).background(Color.black)

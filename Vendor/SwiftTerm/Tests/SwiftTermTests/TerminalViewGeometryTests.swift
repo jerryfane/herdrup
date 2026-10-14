@@ -180,5 +180,27 @@ final class TerminalViewGeometryTests: XCTestCase {
         let primary = view.font as CTFont
         XCTAssertTrue(view.glyphSlotFit(font: primary, glyph: glyph, columnWidth: 1).isIdentity)
     }
+
+    /// herdr: a hidden pane holds its blinking caret steady, a program's cursor-style change
+    /// cannot restart the blink while paused, and unpausing blinks again.
+    func testCaretBlinkPausesAndResumes() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+        window.isHidden = false
+        let view = makeView()
+        window.addSubview(view)
+        let caret = try XCTUnwrap(view.caretView)
+        func blinking() -> Bool { !(caret.layer.animationKeys() ?? []).isEmpty }
+        XCTAssertEqual(view.getTerminal().options.cursorStyle, .blinkBlock)
+        XCTAssertTrue(blinking(), "the default caret blinks")
+
+        view.caretBlinkPaused = true
+        XCTAssertFalse(blinking(), "a paused caret holds still")
+        XCTAssertEqual(caret.layer.opacity, 1, "and stays visible")
+        view.feed(text: "\(escape)[5 q")
+        XCTAssertFalse(blinking(), "a blinking style set while paused stays steady")
+
+        view.caretBlinkPaused = false
+        XCTAssertTrue(blinking(), "unpaused, it blinks again")
+    }
 }
 #endif
