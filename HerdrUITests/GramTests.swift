@@ -484,7 +484,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 5), "the match shows")
         // The sentinel is a button, so its text is its label.
         let sentinel = app.descendants(matching: .any)["gram-loading-older"].firstMatch
-        let offers = NSPredicate(format: "label CONTAINS %@", "Scroll up to search older messages")
+        let offers = NSPredicate(format: "label CONTAINS %@", "Tap or scroll up to search older messages")
         XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: offers, object: sentinel)],
                                         timeout: 5), .completed,
                        "with older history the sentinel offers to search it; it says \(sentinel.exists ? sentinel.label : "nothing")")
@@ -832,6 +832,28 @@ final class GramTests: XCTestCase {
         let save = app.buttons["Save to Files"].firstMatch
         XCTAssertTrue(save.waitForExistence(timeout: 5), "the card's menu should offer Save to Files")
         XCTAssertTrue(app.buttons["Delete"].firstMatch.exists, "the same menu keeps the message's actions")
+    }
+
+    /// Saving a message from its menu redraws that row with the saved badge, and unsaving
+    /// removes it. Guards GramRow's `==`: a row that skipped `isSaved` would stay stale.
+    func testSavingAMessageRedrawsItsBadge() {
+        let app = launchGram()
+        let bubble = app.descendants(matching: .any)["gram-bubble-g1"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 10), "the newest message should draw")
+        let badge = bubble.descendants(matching: .any)["gram-saved-badge"]
+        XCTAssertFalse(badge.exists, "precondition: not saved")
+
+        bubble.press(forDuration: 1.2)
+        let save = app.buttons["Save"].firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 5), "the message menu offers Save")
+        save.tap()
+        XCTAssertTrue(badge.waitForExistence(timeout: 3), "a saved message shows its badge")
+
+        bubble.press(forDuration: 1.2)
+        let unsave = app.buttons["Unsave"].firstMatch
+        XCTAssertTrue(unsave.waitForExistence(timeout: 5), "a saved message's menu offers Unsave")
+        unsave.tap()
+        XCTAssertTrue(badge.waitForNonExistence(timeout: 3), "unsaving removes the badge")
     }
 
     /// A DEBUG probe element by identifier (its state is in its label).

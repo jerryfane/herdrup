@@ -144,6 +144,10 @@ struct GramView: View {
     /// A search's fetch of older pages for matches is running (`loadOlderMatches`): the
     /// sentinel and the "No matches in recent messages" button say so meanwhile.
     @State private var searchingOlder = false
+    /// The last bounded search of older pages for the current query found nothing: how many
+    /// messages are loaded now. The sentinel says so instead of falling silent. Cleared by a
+    /// new query and by a search that finds a match.
+    @State private var searchedOlderWithoutMatch: Int?
     /// Saved (bookmarked) Gram messages. Whether the Saved section is showing is the host's
     /// `showingSaved` binding above, not local state.
     @ObservedObject private var savedGrams = SavedGramStore.shared
@@ -529,6 +533,7 @@ struct GramView: View {
         .onChange(of: search) { _, new in
             renderLimit = Self.renderWindow
             feedVisibility.olderFetch?.cancel()
+            searchedOlderWithoutMatch = nil
             feedVisibility.olderFetch = nil
             feedVisibility.pageRequested = false
             searchingOlder = false
@@ -1263,7 +1268,10 @@ struct GramView: View {
                                 } else if sentinelSearchesOlder && !searchingOlder {
                                     Image(systemName: "arrow.up")
                                         .font(.system(size: 12, weight: .semibold))
-                                    Text("Scroll up to search older messages")
+                                    // Names both ways: a short result list cannot be scrolled.
+                                    Text(searchedOlderWithoutMatch.map {
+                                        "No match in \($0) messages. Tap or scroll up to search older ones"
+                                    } ?? "Tap or scroll up to search older messages")
                                 } else {
                                     ProgressView().controlSize(.small)
                                     Text(sentinelSearchesOlder ? "Searching older messages…" : "Loading older messages…")
@@ -2371,8 +2379,12 @@ struct GramView: View {
         defer { if !Task.isCancelled { searchingOlder = false } }
         for _ in 0..<Self.searchPagesPerArrival {
             guard !Task.isCancelled, search == query, await loadMore() else { return false }
-            if visibleMessages.count > before { return true }
+            if visibleMessages.count > before {
+                searchedOlderWithoutMatch = nil
+                return true
+            }
         }
+        if !Task.isCancelled, search == query { searchedOlderWithoutMatch = messages.count }
         return false
     }
 
@@ -2754,7 +2766,7 @@ struct GramView: View {
     /// this image while it runs joins its transfer (`download`) rather than starting one.
     private func prefetchImage(_ message: GramMessage) async {
         guard let file = message.file, GramImagePreview.shouldPrefetch(file),
-              Downloads.cached(id: message.id) == nil
+              await Self.cachedOffMain(message.id) == nil
         else { return }
         do {
             try await prefetchSlots.acquire()
@@ -2763,9 +2775,15 @@ struct GramView: View {
         }
         defer { prefetchSlots.release() }
         // An open may have cached it while this waited for a slot.
-        guard Downloads.cached(id: message.id) == nil else { return }
+        guard await Self.cachedOffMain(message.id) == nil else { return }
         // A failure leaves the placeholder; a tap still opens normally.
         _ = try? await download(id: message.id, expectedBytes: Self.expectedReplyBytes(for: file.size))
+    }
+
+    /// `Downloads.cached` reads the file's metadata from disk: off the main thread on paths
+    /// that run while the reader scrolls.
+    nonisolated static func cachedOffMain(_ id: String) async -> CachedGramFile? {
+        await Task.detached(priority: .userInitiated) { Downloads.cached(id: id) }.value
     }
 
     /// Apply one progress callback. Three rules the raw callback cannot enforce:
@@ -3136,6 +3154,9 @@ struct GramView: View {
     private func loadOlderPage() async -> Bool {
         let top = feedEntries.first?.id
         if hasHiddenOlder {
+            // A reveal from a task the next keystroke already cancelled must not move the
+            // window or anchor the new query's feed.
+            guard !Task.isCancelled else { return false }
             renderLimit += Self.renderWindow
         } else {
             let grew: Bool
@@ -3874,7 +3895,7 @@ struct GramRow: View, Equatable {
         // The disk cache lookup reads the file's metadata: off the main thread, so a card
         // scrolling on screen never stalls the scroll on disk I/O.
         let id = message.id
-        let lookup = { await Task.detached(priority: .userInitiated) { GramView.Downloads.cached(id: id) }.value }
+        let lookup = { await GramView.cachedOffMain(id) }
         if await lookup() == nil {
             // A card a fling only flies past never fetches: it must stay on screen a moment.
             try? await Task.sleep(nanoseconds: 250_000_000)
