@@ -210,18 +210,22 @@ struct TurningRing: View {
     var diameter: CGFloat = 13
     var lineWidth: CGFloat = 1.6
     @Environment(\.statusMotion) private var statusMotion
-    @ViewBuilder
     var body: some View {
         let ring = Circle().trim(from: 0, to: 0.72)
             .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             .frame(width: diameter, height: diameter)
         // Stopping means removing the motion: a repeatForever animation keeps running
-        // after its value is set back without one.
-        if statusMotion {
-            ring.modifier(Spinning())
-        } else {
-            ring
+        // after its value is set back without one. Each start is a new `Spinning`, fresh state.
+        Group {
+            if statusMotion {
+                ring.modifier(Spinning())
+            } else {
+                ring
+            }
         }
+        #if DEBUG
+        .modifier(StatusShapeID(id: "status-ring"))
+        #endif
     }
 }
 
@@ -231,7 +235,7 @@ private struct Spinning: ViewModifier {
         content
             .rotationEffect(.degrees(spin ? 360 : 0))
             .onAppear {
-                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+                StatusMotion.start(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
             }
             #if DEBUG
             .modifier(StatusMotionTally())
@@ -249,15 +253,19 @@ struct PulsingDot: View {
     var active: Bool
     var diameter: CGFloat = 7
     @Environment(\.statusMotion) private var statusMotion
-    @ViewBuilder
     var body: some View {
         let dot = Circle().fill(color).frame(width: diameter, height: diameter)
         // Removed rather than reset when it stops, as in `TurningRing`; solid again at once.
-        if active && statusMotion {
-            dot.modifier(Pulsing())
-        } else {
-            dot
+        Group {
+            if active && statusMotion {
+                dot.modifier(Pulsing())
+            } else {
+                dot
+            }
         }
+        #if DEBUG
+        .modifier(StatusShapeID(id: "status-dot"))
+        #endif
     }
 }
 
@@ -268,7 +276,7 @@ private struct Pulsing: ViewModifier {
             .opacity(pulse ? 0.4 : 1)
             .scaleEffect(pulse ? 1.35 : 1)
             .onAppear {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true }
+                StatusMotion.start(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true }
             }
             #if DEBUG
             .modifier(StatusMotionTally())
@@ -276,10 +284,20 @@ private struct Pulsing: ViewModifier {
     }
 }
 
+private enum StatusMotion {
+    /// Starts a status shape's repeating animation once the update that showed it is over.
+    /// Started inside that update, the one coming back with a tab switch (Agents → Gram →
+    /// Agents) never ran: the ring sat still (build 203).
+    static func start(_ animation: Animation, _ change: @escaping () -> Void) {
+        DispatchQueue.main.async { withAnimation(animation, change) }
+    }
+}
+
 #if DEBUG
 /// For the UI tests: how many `TurningRing`s and `PulsingDot`s are moving right now (their
 /// `Spinning`/`Pulsing` motion is in the view tree), so a test can hold a screen to
-/// "nothing hidden animates" (`status-motion`).
+/// "nothing hidden animates" (`status-motion`). Whether a shown shape really moves, the
+/// tests see on screen.
 @MainActor
 enum StatusMotionCount {
     fileprivate(set) static var count = 0
@@ -290,6 +308,19 @@ private struct StatusMotionTally: ViewModifier {
         content
             .onAppear { StatusMotionCount.count += 1 }
             .onDisappear { StatusMotionCount.count -= 1 }
+    }
+}
+
+/// For the UI tests, in the screenshot mock only: the status shape as an element of its own,
+/// so a test can photograph it and see whether it moves. The label is left to the call site.
+private struct StatusShapeID: ViewModifier {
+    let id: String
+    func body(content: Content) -> some View {
+        if ScreenshotMock.mode != nil {
+            content.accessibilityElement().accessibilityIdentifier(id)
+        } else {
+            content
+        }
     }
 }
 
