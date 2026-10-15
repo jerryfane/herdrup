@@ -4,8 +4,9 @@
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
 #   iphone-terminal  TERMINAL_CLASSES on iPhone
-#   iphone-app       HerdrFontTests, then GramTests in their own round, then every other
-#                    HerdrUITests class on iPhone, then the SwiftTerm UIKit API tests on iPhone
+#   iphone-app       HerdrFontTests, then GramTests and StatusMotionTests in their own rounds,
+#                    then every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
+#                    tests on iPhone
 #   ipad             iPad-specific rounds, then the SwiftTerm UIKit API tests on iPad
 #   settings-stack   optimized Distribution build with the device-sized stack, then the
 #                    iPad Settings resize/resume regression (herdrup#416)
@@ -203,7 +204,11 @@ case "$shard" in
     # run already used ~36 m of test time, and a slower runner ran out (herdrup#430, run
     # 38521782241: 87 of ~100 tests done at 40 m). Same tests, same total time.
     run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
-    skip=(-skip-testing:HerdrUITests/GramTests)
+    # StatusMotionTests photograph shapes over time and wait out tab switches (~3.5 min on
+    # a slow hosted runner): with them in the app round, #433's run 38703928881 ran out of
+    # its 30 m on the last class.
+    run_suite iPhoneStatusMotion "$IPHONE_UDID" 10m -only-testing:HerdrUITests/StatusMotionTests || failed=1
+    skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1

@@ -2,6 +2,7 @@ import XCTest
 
 /// Status shapes that nobody can see must not move: a repeating SwiftUI animation drives the
 /// display link every frame even behind another view (#427: an idle Mac app at 66% CPU).
+/// Ones that can be seen must move, on screen, not just be counted (build 203).
 final class StatusMotionTests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
@@ -11,6 +12,90 @@ final class StatusMotionTests: XCTestCase {
         let probe = app.descendants(matching: .any)["status-motion"].firstMatch
         XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG status-motion probe should be present")
         return Int(probe.label) ?? -1
+    }
+
+    private func launchList() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
+        // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
+        app.launchEnvironment["HERDR_STEADY_CARET"] = "1"
+        app.launch()
+        XCTAssertTrue(app.staticTexts["herdr-app"].firstMatch.waitForExistence(timeout: 15),
+                      "the roster should list the working agent")
+        return app
+    }
+
+    /// Whether `shape` visibly moves on screen. The first photo is taken after a 0.25 s
+    /// settle (so a tab switch's own fade is over), then four more 0.25 s apart; it moves
+    /// when at least two of them differ from the first. A ring that turns once per 0.9 s, or a
+    /// dot that pulses every 0.8 s, never comes back to the same pixels; a stuck one stays put,
+    /// and a single late redraw cannot pass for motion. Counting the motion in the view tree
+    /// (`moving`) cannot see a motion that never starts.
+    private func moves(_ shape: XCUIElement) -> Bool {
+        XCTAssertTrue(shape.waitForExistence(timeout: 10), "the status shape should be on screen")
+        usleep(250_000)
+        let first = shape.screenshot()
+        var changed = 0
+        for _ in 0..<4 {
+            usleep(250_000)
+            if shape.screenshot().pngRepresentation != first.pngRepresentation { changed += 1 }
+        }
+        if changed >= 2 { return true }
+        // Keep the photo of the stuck shape in the result bundle.
+        let photo = XCTAttachment(screenshot: first)
+        photo.name = "\(shape.identifier) held still (\(changed)/4 photos changed)"
+        photo.lifetime = .keepAlways
+        add(photo)
+        return false
+    }
+
+    private func ring(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["status-ring"].firstMatch
+    }
+
+    private func dot(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["status-dot"].firstMatch
+    }
+
+    /// The owner's report (build 203): Agents → Gram → Agents left the working ring stuck.
+    /// One launch for the three moments the ring must turn: first open, back from Gram, back
+    /// from Settings (each tab switch builds a fresh motion that must start).
+    func testRingTurnsOnOpenAndAfterTabSwitches() {
+        let app = launchList()
+        XCTAssertTrue(moves(ring(app)), "the working row's ring turns")
+        app.buttons["Gram"].firstMatch.tap()
+        sleep(1)
+        app.buttons["Agents"].firstMatch.tap()
+        XCTAssertTrue(moves(ring(app)), "back from Gram, the working row's ring turns again")
+        app.buttons["Settings"].firstMatch.tap()
+        sleep(1)
+        app.buttons["Agents"].firstMatch.tap()
+        XCTAssertTrue(moves(ring(app)), "back from Settings, the working row's ring turns again")
+        app.terminate()
+    }
+
+    /// The working pane's header dot, left for Gram and fronted again (iPhone: back to the
+    /// roster and the row again; iPad: the pane stays beside the roster).
+    func testPaneDotPulsesAfterGram() {
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        let app = launchList()
+        let row = app.staticTexts["herdr-app"].firstMatch
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+                      "the pane should open")
+        XCTAssertTrue(moves(dot(app)), "the working pane's dot pulses")
+
+        if !pad { app.buttons["Back"].firstMatch.tap() }
+        app.buttons["Gram"].firstMatch.tap()
+        sleep(1)
+        app.buttons["Agents"].firstMatch.tap()
+        if !pad {
+            row.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+                          "the kept-alive pane should come back to the front")
+        }
+        XCTAssertTrue(moves(dot(app)), "back from Gram, the working pane's dot pulses again")
+        app.terminate()
     }
 
     /// The list mock has one working agent, herdr-app: its roster ring turns, its open pane's
@@ -51,12 +136,14 @@ final class StatusMotionTests: XCTestCase {
         sleep(1)
         // iPad / Mac: the roster and the still-fronted pane come back together. iPhone: the roster.
         XCTAssertEqual(moving(app), pad ? 2 : 1, "back on Agents, what is on screen moves again")
+        XCTAssertTrue(moves(ring(app)), "back on Agents, the ring turns on screen")
         if !pad {
             row.tap()
             XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
                           "the kept-alive pane should come back to the front")
             sleep(1)
             XCTAssertEqual(moving(app), 1, "the kept-alive pane's dot pulses again in front")
+            XCTAssertTrue(moves(dot(app)), "the kept-alive pane's dot pulses on screen")
         }
 
         // Everything holds still while the scene is not active, and resumes together.
@@ -65,6 +152,7 @@ final class StatusMotionTests: XCTestCase {
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
         sleep(1)
         XCTAssertEqual(moving(app), pad ? 2 : 1, "back from the Home screen, the same shapes move again")
+        XCTAssertTrue(moves(pad ? ring(app) : dot(app)), "back from the Home screen, they move on screen")
         app.terminate()
     }
 }
