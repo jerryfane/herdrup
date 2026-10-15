@@ -25,20 +25,25 @@ final class StatusMotionTests: XCTestCase {
         return app
     }
 
-    /// Whether `shape` visibly moves on screen: photographed every 0.25 s, some photo differs
-    /// from the first. A ring that turns once per 0.9 s, or a dot that pulses every 0.8 s,
-    /// never comes back to the same pixels at all five instants; a stuck one always does.
-    /// Counting the motion in the view tree (`moving`) cannot see a motion that never starts.
+    /// Whether `shape` visibly moves on screen. The first photo is taken after a 0.25 s
+    /// settle (so a tab switch's own fade is over), then four more 0.25 s apart; it moves
+    /// when at least two of them differ from the first. A ring that turns once per 0.9 s, or a
+    /// dot that pulses every 0.8 s, never comes back to the same pixels; a stuck one stays put,
+    /// and a single late redraw cannot pass for motion. Counting the motion in the view tree
+    /// (`moving`) cannot see a motion that never starts.
     private func moves(_ shape: XCUIElement) -> Bool {
         XCTAssertTrue(shape.waitForExistence(timeout: 10), "the status shape should be on screen")
+        usleep(250_000)
         let first = shape.screenshot()
+        var changed = 0
         for _ in 0..<4 {
             usleep(250_000)
-            if shape.screenshot().pngRepresentation != first.pngRepresentation { return true }
+            if shape.screenshot().pngRepresentation != first.pngRepresentation { changed += 1 }
         }
+        if changed >= 2 { return true }
         // Keep the photo of the stuck shape in the result bundle.
         let photo = XCTAttachment(screenshot: first)
-        photo.name = "\(shape.identifier) held still"
+        photo.name = "\(shape.identifier) held still (\(changed)/4 photos changed)"
         photo.lifetime = .keepAlways
         add(photo)
         return false
@@ -52,24 +57,16 @@ final class StatusMotionTests: XCTestCase {
         app.descendants(matching: .any)["status-dot"].firstMatch
     }
 
-    func testRingTurnsOnFirstOpen() {
+    /// The owner's report (build 203): Agents → Gram → Agents left the working ring stuck.
+    /// One launch for the three moments the ring must turn: first open, back from Gram, back
+    /// from Settings (each tab switch builds a fresh motion that must start).
+    func testRingTurnsOnOpenAndAfterTabSwitches() {
         let app = launchList()
         XCTAssertTrue(moves(ring(app)), "the working row's ring turns")
-        app.terminate()
-    }
-
-    /// The owner's report (build 203): Agents → Gram → Agents left the working ring stuck.
-    func testRingTurnsAfterGram() {
-        let app = launchList()
         app.buttons["Gram"].firstMatch.tap()
         sleep(1)
         app.buttons["Agents"].firstMatch.tap()
         XCTAssertTrue(moves(ring(app)), "back from Gram, the working row's ring turns again")
-        app.terminate()
-    }
-
-    func testRingTurnsAfterSettings() {
-        let app = launchList()
         app.buttons["Settings"].firstMatch.tap()
         sleep(1)
         app.buttons["Agents"].firstMatch.tap()
