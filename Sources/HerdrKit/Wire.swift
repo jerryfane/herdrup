@@ -1267,3 +1267,77 @@ public struct AgentKind: Decodable, Sendable, Equatable, Identifiable {
     public let installed: Bool
     public var id: String { kind }
 }
+
+// MARK: - Pane process info (pane.process_info)
+
+/// A pane's shell and foreground job (`pane.process_info`, `ResponseResult::PaneProcessInfo`).
+/// Field-for-field herdr's `PaneProcessInfo` / `PaneProcessInfoProcess`
+/// (src/api/schema/panes.rs): every field the server may skip is optional here, and
+/// `foreground_processes` (skipped when empty) decodes to `[]`.
+public struct PaneProcessInfo: Decodable, Sendable, Equatable {
+    public let paneID: String
+    public let shellPID: UInt32?
+    public let foregroundProcessGroupID: UInt32?
+    public let tty: String?
+    public let foregroundProcesses: [Process]
+
+    public struct Process: Decodable, Sendable, Equatable {
+        public let pid: UInt32
+        public let name: String
+        public let argv0: String?
+        public let argv: [String]?
+        public let cmdline: String?
+        public let cwd: String?
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case paneID = "pane_id"
+        case shellPID = "shell_pid"
+        case foregroundProcessGroupID = "foreground_process_group_id"
+        case tty
+        case foregroundProcesses = "foreground_processes"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        paneID = try container.decode(String.self, forKey: .paneID)
+        shellPID = try container.decodeIfPresent(UInt32.self, forKey: .shellPID)
+        foregroundProcessGroupID = try container.decodeIfPresent(UInt32.self, forKey: .foregroundProcessGroupID)
+        tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        foregroundProcesses = try container.decodeIfPresent([Process].self, forKey: .foregroundProcesses) ?? []
+    }
+
+    /// herdr CLI's `process_info_shows_shell_initialization` (src/cli/agent.rs): the pane's
+    /// shell leads the foreground process group and is itself among the foreground processes.
+    /// True both while the shell is still running its rc files (whose children share its
+    /// group, so the server's `agent.start` answers `agent_pane_busy`) and once it is an idle
+    /// prompt; false when a job-controlled foreground process owns the terminal, or when the
+    /// host exposes no foreground group (Windows) — a pane that will not become free by waiting.
+    public var showsShellInitialization: Bool {
+        guard let shellPID, foregroundProcessGroupID == shellPID else { return false }
+        return foregroundProcesses.contains { process in
+            process.pid == shellPID
+                && (Self.isPaneShellProcessName(process.name)
+                    || process.argv?.first.map(Self.isPaneShellProcessName) == true)
+        }
+    }
+
+    /// herdr's `is_pane_shell_process_name` over `normalized_process_name`
+    /// (src/platform/mod.rs): basename, leading `-` (login shell) and trailing `.exe`
+    /// stripped, ASCII-lowercased, then matched against the known shells. A non-ASCII
+    /// basename can never equal an ASCII shell name under ASCII lowercasing, so it is
+    /// rejected up front rather than run through Unicode `lowercased()`.
+    static func isPaneShellProcessName(_ name: String) -> Bool {
+        var normalized = Substring(name.split(separator: "/", omittingEmptySubsequences: false).last ?? "")
+        normalized = normalized.split(separator: "\\", omittingEmptySubsequences: false).last ?? ""
+        guard normalized.allSatisfy(\.isASCII) else { return false }
+        while normalized.hasPrefix("-") { normalized = normalized.dropFirst() }
+        while normalized.hasSuffix(".exe") { normalized = normalized.dropLast(4) }
+        return paneShellNames.contains(normalized.lowercased())
+    }
+
+    private static let paneShellNames: Set<String> = [
+        "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "csh", "tcsh",
+        "elvish", "xonsh", "nu", "pwsh", "powershell", "cmd",
+    ]
+}

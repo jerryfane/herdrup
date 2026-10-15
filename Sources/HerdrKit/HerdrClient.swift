@@ -1086,7 +1086,8 @@ public actor HerdrClient {
     }
 
     /// Starts an agent of `kind` (claude/codex/gemini/…) named `name` in an
-    /// existing pane (the one from `splitPane`). Returns the started agent.
+    /// existing pane. Returns the started agent. One `agent.start` attempt: a pane
+    /// `splitPane` just created goes through `startAgentWhenShellReady` instead.
     ///
     /// NOTE: this only INITIATES launch. `agent.start` returns while the agent is
     /// still `launch_pending`, and `agent.prompt` refuses (agent_not_ready) for a
@@ -1099,6 +1100,100 @@ public actor HerdrClient {
     public func startAgent(name: String, kind: String, paneID: String) async throws -> AgentInfo {
         let params = AgentStartParams(name: name, kind: kind, paneID: paneID)
         return try await call("agent.start", params, as: AgentStartedResult.self).agent
+    }
+
+    struct PaneProcessInfoResult: Decodable {
+        let processInfo: PaneProcessInfo
+        enum CodingKeys: String, CodingKey { case processInfo = "process_info" }
+    }
+
+    /// The pane's shell pid, foreground process group and foreground processes
+    /// (`pane.process_info` -> `ResponseResult::PaneProcessInfo { process_info }`).
+    public func paneProcessInfo(paneID: String) async throws -> PaneProcessInfo {
+        try await call("pane.process_info", PaneTarget(paneID: paneID),
+                       as: PaneProcessInfoResult.self).processInfo
+    }
+
+    /// Pacing and clock for `startAgentWhenShellReady`. The defaults are herdr CLI's
+    /// `AGENT_START_POLL_INTERVAL` (100 ms) and `PANE_SHELL_READINESS_RETRY_TIMEOUT`
+    /// (2 s) from src/cli/agent.rs; tests inject `now`/`sleep` to run the loop on a
+    /// fake clock.
+    struct ShellReadinessTiming: Sendable {
+        var pollInterval: Duration = .milliseconds(100)
+        var window: Duration = .seconds(2)
+        var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+        var sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    }
+
+    /// `startAgent` on a pane whose shell may still be starting — the pane `splitPane`
+    /// just created (herdrup#435).
+    ///
+    /// herdr accepts `agent.start` only while the pane's foreground job is its lone idle
+    /// shell, so a shell still running its rc files answers `agent_pane_busy`. This is
+    /// herdr CLI's readiness retry (`agent start`, src/cli/agent.rs: the loop after
+    /// `PANE_SHELL_READINESS_RETRY_TIMEOUT`, `pane_shell_is_initializing`,
+    /// `process_info_shows_shell_initialization`): on `agent_pane_busy`, retry while
+    /// `pane.process_info` shows the shell leading the foreground group
+    /// (`PaneProcessInfo.showsShellInitialization`), polling every 100 ms within 2 s of
+    /// the first busy answer, re-checking the shell before each retry. A pane some other
+    /// foreground process owns, or a window that runs out, surfaces the last
+    /// `agent_pane_busy`; every other `agent.start` error is thrown at once.
+    ///
+    /// Deliberate differences from the CLI:
+    /// - A herdr that predates `pane.process_info` (rejects it as an unknown method)
+    ///   gets plain `agent.start` retries in the same window instead of none: its fresh
+    ///   panes race their shell startup just the same.
+    /// - No `pane.get` terminal pinning: the caller created this pane moments ago. Nor
+    ///   the CLI's `timeout_ms` gate, since no `timeout_ms` is sent.
+    /// - Any other `pane.process_info` API error (or an undecodable answer) reads as
+    ///   "not initializing", as the CLI's null `process_info` does; transport errors
+    ///   propagate, as the CLI's `send_request(..)?` does.
+    public func startAgentWhenShellReady(name: String, kind: String,
+                                         paneID: String) async throws -> AgentInfo {
+        try await startAgentWhenShellReady(name: name, kind: kind, paneID: paneID,
+                                           timing: ShellReadinessTiming())
+    }
+
+    func startAgentWhenShellReady(name: String, kind: String, paneID: String,
+                                  timing: ShellReadinessTiming) async throws -> AgentInfo {
+        var processInfoUnsupported = false
+        func shellMayBeInitializing() async throws -> Bool {
+            if processInfoUnsupported { return true }
+            do {
+                return try await paneProcessInfo(paneID: paneID).showsShellInitialization
+            } catch let error as APIError
+                where error.code == "invalid_request"
+                    && error.message.lowercased().contains("unknown variant")
+                    && error.message.contains("pane.process_info") {
+                // An older herdr cannot even deserialize the method (see `probeFork`).
+                processInfoUnsupported = true
+                return true
+            } catch is APIError {
+                return false
+            } catch is DecodingError {
+                return false
+            }
+        }
+
+        var deadline: ContinuousClock.Instant?
+        var previousBusy: APIError?
+        while true {
+            if let busy = previousBusy {
+                if let deadline, timing.now() >= deadline { throw busy }
+                guard try await shellMayBeInitializing() else { throw busy }
+            }
+            do {
+                return try await startAgent(name: name, kind: kind, paneID: paneID)
+            } catch let busy as APIError where busy.code == "agent_pane_busy" {
+                guard try await shellMayBeInitializing() else { throw busy }
+                let end = deadline ?? timing.now() + timing.window
+                deadline = end
+                previousBusy = busy
+                let remaining = end - timing.now()
+                guard remaining > .zero else { throw busy }
+                try await timing.sleep(min(timing.pollInterval, remaining))
+            }
+        }
     }
 
     struct PaneTarget: Encodable {

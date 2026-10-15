@@ -1432,7 +1432,8 @@ struct NewAgentView: View {
         .padding(.horizontal, 16).padding(.top, 16)
     }
 
-    /// The spawn: split a pane in the folder, then start the agent. It does NOT
+    /// The spawn: split a pane in the folder, then start the agent once the new
+    /// pane's shell can take it (`startAgentWhenShellReady`, herdrup#435). It does NOT
     /// send the task here. `agent.start` only initiates launch; `agent.prompt`
     /// refuses (agent_not_ready) for a variable, sometimes-long window until the
     /// agent registers as a promptable known agent with a composer, and there is no
@@ -1461,7 +1462,8 @@ struct NewAgentView: View {
             do {
                 let paneID = try await client.splitPane(cwd: cwd.isEmpty ? nil : cwd)
                 createdPane = paneID
-                _ = try await client.startAgent(name: name, kind: chosenKind, paneID: paneID)
+                _ = try await client.startAgentWhenShellReady(name: name, kind: chosenKind,
+                                                              paneID: paneID)
                 onStarted(paneID, name, taskText)
             } catch let startError {
                 if let pane = createdPane {
