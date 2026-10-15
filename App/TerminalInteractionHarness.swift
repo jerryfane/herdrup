@@ -24,11 +24,15 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             var text: String?
             var lock: Bool?
             var ttlMs: UInt64?
+            var cellWidthPx: UInt32?
+            var cellHeightPx: UInt32?
             var dataBase64: String?
             enum CodingKeys: String, CodingKey {
                 case paneID = "pane_id"
                 case dataBase64 = "data_base64"
                 case ttlMs = "ttl_ms"
+                case cellWidthPx = "cell_width_px"
+                case cellHeightPx = "cell_height_px"
                 case cols, rows, text, lock
             }
         }
@@ -58,6 +62,19 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     /// which a release sent by the return's remount teardown cannot fake.
     private var inactiveReleases = 0
     private var lastClaimTTL: UInt64 = 0
+    /// LEASE RENEWALS ARE NOT RESIZES. The pane in front re-asserts its unchanged claim
+    /// every `TerminalSizeClaim.renewalNanos` (25 s). herdr sizes a pane to the widest live
+    /// claim, so re-asserting the same claim refreshes the lease and changes nothing:
+    /// it is counted in `claims` and `renewals`, never in `requests`, and it does not
+    /// re-apply the grid. Counting it as a resize failed every receipt that counts resizes
+    /// ("one keyboard transition is one PTY resize" got 2) and re-applying it undid an
+    /// unsolicited server grid, whenever a test outlived 25 s on a slow CI runner.
+    /// `claimed` is the tuple this pane's last accepted `lock:true` asked for, cleared by a
+    /// release, a refused request, a new stream (the daemon drops a stream's lease with it)
+    /// and a reset.
+    private struct Claim: Equatable { let cols: Int?, rows: Int?, cellWidthPx: UInt32?, cellHeightPx: UInt32? }
+    private var claimed: Claim?
+    private var renewals = 0
     /// The app's active state as UIKit announces it. Started by the root driver, so it is
     /// observing before the first pane exists.
     private static let activity = AppActivity()
@@ -156,17 +173,36 @@ final class TerminalInteractionDriver: @unchecked Sendable {
 
     private func resize(_ request: Request) async throws -> String {
         let inactive = Self.activity.isInactive
+        let params = request.params
+        let claim = params?.lock == true
+            ? Claim(cols: params?.cols, rows: params?.rows,
+                    cellWidthPx: params?.cellWidthPx, cellHeightPx: params?.cellHeightPx)
+            : nil
+        var renewal: (cols: Int, rows: Int)?
         let plan = locked { () -> (Scenario, Int, Int, UInt64, UUID?) in
-            requests += 1
-            if request.params?.lock == true {
+            if let claim, claim == claimed, scenario != .failure {
                 claims += 1
-                lastClaimTTL = request.params?.ttlMs ?? 0
+                renewals += 1
+                lastClaimTTL = params?.ttlMs ?? 0
+                renewal = (cols, rows)
+                return (scenario, cols, rows, epoch, lifetime)
+            }
+            requests += 1
+            if let claim {
+                claims += 1
+                lastClaimTTL = params?.ttlMs ?? 0
+                claimed = scenario == .failure ? nil : claim
             } else {
                 releases += 1
                 if inactive { inactiveReleases += 1 }
+                claimed = nil
             }
-            return (scenario, max(4, request.params?.cols ?? cols),
-                    max(2, request.params?.rows ?? rows), epoch, lifetime)
+            return (scenario, max(4, params?.cols ?? cols),
+                    max(2, params?.rows ?? rows), epoch, lifetime)
+        }
+        if let renewal {
+            return Self.json(["id": request.id, "result": ["type": "pane_pty_size",
+                "pane_id": paneID, "cols": renewal.cols, "rows": renewal.rows, "locked": true]])
         }
         if plan.0 == .failure {
             locked { failures += 1 }
@@ -209,7 +245,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
         return AsyncThrowingStream { c in
             let token = UUID()
             locked {
-                continuation = c; lifetime = token; opens += 1
+                continuation = c; lifetime = token; opens += 1; claimed = nil
                 c.yield(Self.json(["id": request.id, "result": ["type": "stream_started",
                     "pane_id": paneID, "epoch": epoch, "cols": cols, "rows": rows,
                     "base_seq": offset, "resync": true]]))
@@ -306,7 +342,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
 
     func configure(_ next: Scenario) { locked { scenario = next } }
     func enableKitty() { locked { kitty = true; emitData("\u{1b}[>9u") } }
-    func reset() { locked { epoch += 1; offset = 0; seed() } }
+    func reset() { locked { epoch += 1; offset = 0; claimed = nil; seed() } }
     func unsolicitedResize() {
         locked { cols = cols == 120 ? 80 : 120; emitFrame("resize", extra: ["cols": cols, "rows": rows]) }
     }
@@ -387,7 +423,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
 
     private func claimReceipt() -> [String: Any] {
         locked { ["claims": claims, "releases": releases, "inactiveReleases": inactiveReleases,
-                  "ttl": lastClaimTTL] }
+                  "renewals": renewals, "ttl": lastClaimTTL] }
     }
 }
 
