@@ -915,7 +915,9 @@ struct ConnectView: View {
                     .buttonStyle(ConnectRowButtonStyle(held: false))
                     .disabled(connecting != nil)
                     .accessibilityIdentifier("shared-machine-row")
-                    .contextMenu {
+                    // Not rebuilt by unrelated redraws while open: see StableMenuItems.
+                    // The store is a singleton, so an older copy of the item acts the same.
+                    .stableContextMenu(key: access) {
                         Button(role: .destructive) { sharedMachines.remove(access) } label: {
                             Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
                         }
@@ -1175,8 +1177,10 @@ struct ConnectView: View {
         .buttonStyle(ConnectRowButtonStyle(held: busy))
         .disabled(connecting != nil)
         .accessibilityValue(busy ? "Connecting" : "")
-        // Hold to manage: Edit opens the editor pre-filled; Remove drops it.
-        .contextMenu {
+        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Not rebuilt by
+        // unrelated redraws while open (see StableMenuItems); the items write state or the
+        // singleton store only.
+        .stableContextMenu(key: saved) {
             Button { editorTarget = .edit(saved) } label: {
                 Label("Edit", systemImage: "pencil")
             }
@@ -1912,6 +1916,20 @@ struct TerminalHomeView: View {
     @State private var forgetSupported = false
     /// The archived row awaiting Close confirmation.
     @State private var forgetCandidate: AgentRow?
+    /// A long-press menu action that talks to the daemon, run by `.onChange(of: menuAction)`
+    /// on the current client. The menus only set it: an open menu may hold an older copy of
+    /// this view (StableMenuItems), whose `client` may be a replaced one.
+    @State private var menuAction: RosterMenuAction?
+    enum RosterMenuAction: Equatable {
+        case stop(AgentRow), archive(AgentRow), unarchive(AgentRow), closeTerminal(SavedTerminal)
+    }
+    /// What an agent row's long-press menu shows; it is rebuilt only when this changes.
+    struct AgentMenuKey: Equatable {
+        let row: AgentRow
+        let transferSupported: Bool
+        let transferTargets: [AgentSessionTransferHarness]
+        let swapTargets: [CredentialAccount]
+    }
     @State private var sessionTransferHarnesses: Set<AgentSessionTransferHarness> = []
     @State private var checkedSessionTransferCapability = false
     /// A pending rename (nil = no sheet). An agent sets its daemon `name` (a resolvable mention
@@ -2222,6 +2240,46 @@ struct TerminalHomeView: View {
             // `.localizedDescription` bridges to a useless generic NSError string.
             error = "couldn't open a terminal: \(e)"
         }
+    }
+
+    /// A roster menu's daemon action. A failure is disclosed, not swallowed; `\(e)` surfaces
+    /// the APIError's "code: message" (`.localizedDescription` bridges to a generic string).
+    private func run(_ action: RosterMenuAction) async {
+        switch action {
+        case .closeTerminal(let terminal):
+            await deleteTerminal(terminal)
+            return
+        case .stop(let row):
+            do {
+                try await client.closePane(paneID: row.info.paneID)
+            } catch let e {
+                error = "couldn't stop \(row.title): \(e)"
+                return
+            }
+        case .archive(let row):
+            do {
+                // Attributed on purpose. Without `by`/`reason` the daemon records
+                // `by: "api"` and no reason — the same shape it writes for a pane that
+                // merely died, so a deliberate archive would be indistinguishable from
+                // bookkeeping to anything reading the record later.
+                try await client.archiveAgent(target: row.info.paneID,
+                                              reason: HerdrKit.appArchiveReason,
+                                              by: HerdrKit.appArchiveActor)
+            } catch let e {
+                error = "couldn't archive \(row.title): \(e)"
+                return
+            }
+        case .unarchive(let row):
+            // Resume the preserved session into a fresh pane, restoring the agent's
+            // identity. Target by name (or terminal id): the pane id no longer resolves.
+            do {
+                try await client.unarchiveAgent(target: unarchiveTarget(row.info))
+            } catch let e {
+                error = "couldn't unarchive \(row.title): \(e)"
+                return
+            }
+        }
+        await load()
     }
 
     /// Close a terminal: end its shell pane server-side (best-effort — it may already have
@@ -3163,6 +3221,17 @@ struct TerminalHomeView: View {
                 )
             }
         }
+        // The roster menus' daemon actions, on the current client (see `menuAction`).
+        .onChange(of: menuAction) { _, action in
+            guard let action else { return }
+            menuAction = nil
+            Task { await run(action) }
+        }
+        // DEBUG mock knob: a home redraw at every touch-down (DebugTouchRedraw).
+        .onAppear { DebugTouchRedraw.installIfEnabled() }
+        .onReceive(NotificationCenter.default.publisher(for: DebugTouchRedraw.touchDown)) { _ in
+            rosterNow = Date()
+        }
         // The live status stream (herdr events v2): one all-panes `events.subscribe`
         // held while the app is not backgrounded and the daemon advertises
         // `events_v2`. Keyed on both, so backgrounding cancels the task, which closes
@@ -3833,14 +3902,15 @@ struct TerminalHomeView: View {
                         terminalCard(terminal)
                     }
                     .buttonStyle(.plain)
-                    .contextMenu {
+                    // Items only write state (see StableMenuItems and `menuAction`).
+                    .stableContextMenu(key: terminal) {
                         // Rename = set the pane's daemon `label` (shown in `herdr pane list`) so you
                         // can tell an agent to check this terminal by name, + the app-local row label.
                         Button {
                             renameTarget = .terminal(terminal)
                         } label: { Label("Rename", systemImage: "pencil") }
                         Button(role: .destructive) {
-                            Task { await deleteTerminal(terminal) }
+                            menuAction = .closeTerminal(terminal)
                         } label: { Label("Close terminal", systemImage: "xmark.circle") }
                     }
                 }
@@ -3866,24 +3936,15 @@ struct TerminalHomeView: View {
             if !archivedCollapsed {
                 ForEach(fullList.archived) { row in
                     archivedCard(row)
-                        .contextMenu {
-                            // Unarchive = resume the preserved session into a fresh pane,
-                            // restoring the agent's identity. Target by name (or terminal id)
-                            // since the pane id no longer resolves once archived.
-                            Button {
-                                Task {
-                                    do {
-                                        try await client.unarchiveAgent(target: unarchiveTarget(row.info))
-                                        await load()
-                                    } catch let e {
-                                        error = "couldn't unarchive \(row.title): \(e)"
-                                    }
-                                }
-                            } label: { Label("Unarchive", systemImage: "arrow.uturn.up") }
+                        // Items only write state (see StableMenuItems and `menuAction`).
+                        .stableContextMenu(key: StableMenuKey(row, forgetSupported)) {
+                            Button { menuAction = .unarchive(row) } label: {
+                                Label("Unarchive", systemImage: "arrow.uturn.up")
+                            }
                             if forgetSupported {
-                                Button(role: .destructive) {
-                                    forgetCandidate = row
-                                } label: { Label("Close", systemImage: "xmark") }
+                                Button(role: .destructive) { forgetCandidate = row } label: {
+                                    Label("Close", systemImage: "xmark")
+                                }
                             }
                         }
                 }
@@ -4051,22 +4112,18 @@ struct TerminalHomeView: View {
                     // classifies this agent. The scroll receipt also uses this value
                     // to prove an existing row moved, independently of row count.
                     .accessibilityValue(row.group.label)
-                    // Long-press an agent → quick actions. Stop = close the pane
-                    // (`pane.close`, the only stop RPC — its inverse is start), then reload;
-                    // disclose a failure rather than swallowing it (file convention).
-                    .contextMenu {
+                    // Long-press an agent → quick actions. Items only write state (see
+                    // StableMenuItems and `menuAction`); the key is everything they show.
+                    .stableContextMenu(key: AgentMenuKey(
+                        row: row,
+                        transferSupported: sessionTransferSupported,
+                        transferTargets: sessionTransferTargets(for: row.info),
+                        swapTargets: accounts.filter { $0.kind == row.info.agent }
+                    )) {
+                        // Stop = close the pane (`pane.close`, the only stop RPC — its
+                        // inverse is start), then reload.
                         Button(role: .destructive) {
-                            Task {
-                                do {
-                                    try await client.closePane(paneID: row.info.paneID)
-                                    await load()
-                                } catch let e {
-                                    // `\(e)` surfaces the APIError's "code: message"
-                                    // (CustomStringConvertible); `.localizedDescription`
-                                    // would bridge to a useless generic NSError string.
-                                    error = "couldn't stop \(row.title): \(e)"
-                                }
-                            }
+                            menuAction = .stop(row)
                         } label: { Label("Stop agent", systemImage: "stop.circle") }
                         // Rename = set the agent's daemon `name`, which becomes a resolvable
                         // mention target (another agent can `herdr agent read <name>`).
@@ -4148,22 +4205,7 @@ struct TerminalHomeView: View {
                         // The daemon REJECTS archiving a mid-turn agent unless forced, so a
                         // working agent surfaces that error rather than being torn off a turn.
                         Button {
-                            Task {
-                                do {
-                                    // Attributed on purpose. Without `by`/`reason` the
-                                    // daemon records `by: "api"` and no reason — the same
-                                    // shape it writes for a pane that merely died, so a
-                                    // deliberate archive would be indistinguishable from
-                                    // bookkeeping to anything reading the record later.
-                                    try await client.archiveAgent(
-                                        target: row.info.paneID,
-                                        reason: HerdrKit.appArchiveReason,
-                                        by: HerdrKit.appArchiveActor)
-                                    await load()
-                                } catch let e {
-                                    error = "couldn't archive \(row.title): \(e)"
-                                }
-                            }
+                            menuAction = .archive(row)
                         } label: { Label("Archive", systemImage: "archivebox") }
                     }
                 }
@@ -4759,6 +4801,45 @@ struct TerminalHomeView: View {
             } while buffer.reloadAgain && !Task.isCancelled
             buffer.reloadTask = nil
         }
+    }
+}
+
+/// A long-press menu's items, rebuilt only when `key` (what the menu shows) changes.
+///
+/// A MENU MUST NOT BE REBUILT WHILE IT IS OPEN. Built inline, a `.contextMenu` builder runs
+/// on every body pass of the view that holds it: in TerminalHomeView each roster poll (5 s,
+/// with `rosterNow`), each load, each state write. A pass landing while the menu was up
+/// rebuilt its items under the finger, and a tap in flight was dropped: the menu stayed
+/// open and nothing happened (ArchivedCloseTests on CI's iPhone; the DEBUG
+/// `HERDR_REDRAW_ON_TOUCH` knob makes it happen on every tap). The item closures are left
+/// out of `==`, so an open menu may hold an older copy: they must only write @State
+/// (stable storage), and the work runs from the holder's `.onChange`, on its current
+/// client.
+struct StableMenuItems<Key: Equatable, Items: View>: View, Equatable {
+    let key: Key
+    @ViewBuilder let items: () -> Items
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
+
+    var body: some View { items() }
+}
+
+/// Two values as one menu key.
+struct StableMenuKey<First: Equatable, Second: Equatable>: Equatable {
+    let first: First
+    let second: Second
+    init(_ first: First, _ second: Second) {
+        self.first = first
+        self.second = second
+    }
+}
+
+extension View {
+    /// `.contextMenu` whose items are rebuilt only when `key` changes: see StableMenuItems.
+    func stableContextMenu<Key: Equatable, Items: View>(
+        key: Key, @ViewBuilder items: @escaping () -> Items
+    ) -> some View {
+        contextMenu { StableMenuItems(key: key, items: items).equatable() }
     }
 }
 
@@ -8238,7 +8319,10 @@ struct SettingsView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                         accountRow(account)
-                            .contextMenu {
+                            // Items only write state; rebuilt only when what they show
+                            // changes (see StableMenuItems).
+                            .stableContextMenu(key: StableMenuKey(
+                                account, agents.contains(where: { $0.agent == account.kind }))) {
                                 // Bulk swap: move every same-kind agent onto this
                                 // account at once (e.g. an exhausted Claude → the
                                 // spare). Shown only when there are agents to move.
