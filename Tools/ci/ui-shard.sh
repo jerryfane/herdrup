@@ -29,9 +29,12 @@ if [ -z "$TIMEOUT_BIN" ]; then
   exit 1
 fi
 
-PROJECT=(-project Herdr.xcodeproj -scheme Herdr
-  -derivedDataPath .build-dd -clonedSourcePackagesDirPath SourcePackages
-  CODE_SIGNING_ALLOWED=NO)
+test_plans=(.build-dd/Build/Products/Herdr_*.xctestrun)
+if [ "${#test_plans[@]}" -ne 1 ] || [ ! -f "${test_plans[0]}" ]; then
+  echo "::error::expected exactly one prebuilt Herdr test plan"
+  exit 1
+fi
+PROJECT=(-xctestrun "${test_plans[0]}")
 
 recorder=
 stop_recording() {
