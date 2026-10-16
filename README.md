@@ -133,6 +133,7 @@ Both force termination after another 15 seconds and retain a boot log.
 Debug resize receipts are per pane, so a background terminal's fixed grid
 cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
+Gram search regressions check matching results and older-page fetch counts, not prompt wording.
 
 The four simulator jobs run in parallel. Gram shares the iPhone terminal job; the other
 iPhone job runs font, status-motion and remaining app tests. A failed first run still fails
