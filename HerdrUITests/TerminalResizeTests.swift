@@ -110,7 +110,12 @@ class TerminalInteractionTestCase: XCTestCase {
 
 
     func focusTerminal() {
+        let diagnosticStarted = Date()
+        let diagnosticStateBefore = app.state.rawValue
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        let diagnosticStateAfter = app.state.rawValue
+        print("FOCUS_DIAGNOSTIC stateBefore=\(diagnosticStateBefore) stateAfter=\(diagnosticStateAfter) lookupSeconds=\(Date().timeIntervalSince(diagnosticStarted))")
+        XCTAssertEqual(app.state, .runningForeground, "Terminal app lost foreground before focus tap")
         terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
         wait { ($0["focused"] as? Bool) == true }
     }

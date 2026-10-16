@@ -2077,6 +2077,10 @@ struct GramView: View {
                 .accessibilityElement()
                 .accessibilityIdentifier("gram-list-pages")
                 .accessibilityLabel("\(listPagesProbe)")
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("gram-diagnostic-g1-saved")
+                .accessibilityLabel(savedGrams.isSaved("g1") ? "saved" : "not-saved")
             GramRowRenderProbe()
         }
         .frame(width: 1, height: 1)

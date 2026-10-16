@@ -940,7 +940,15 @@ final class GramTests: XCTestCase {
         let save = app.buttons["Save"].firstMatch
         XCTAssertTrue(save.waitForExistence(timeout: 5), "the message menu offers Save")
         save.tap()
-        XCTAssertTrue(badge.waitForExistence(timeout: 3), "a saved message shows its badge")
+        let appeared = badge.waitForExistence(timeout: 3)
+        if !appeared {
+            print("SAVE_DIAGNOSTIC state=\(app.state.rawValue) store=\(probe(app, "gram-diagnostic-g1-saved").label) menuStillVisible=\(save.exists)")
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "save-failure-hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(appeared, "a saved message shows its badge")
 
         bubble.press(forDuration: 1.2)
         let unsave = app.buttons["Unsave"].firstMatch

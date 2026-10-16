@@ -794,6 +794,8 @@ final class TerminalInteractionHarness: ObservableObject {
             value["lastCoverMs"] = surface.lastCoverMilliseconds()
             value["stableMs"] = noteStability(paneID: id, surface)
             value["focused"] = surface.view?.isFirstResponder ?? false
+            value["diagnosticAppState"] = UIApplication.shared.applicationState.rawValue
+            value["diagnosticWindowKey"] = surface.view?.window?.isKeyWindow ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search
             // test can say which half is broken: a non-zero total here with an empty counter
             // in the UI means the wiring, not the engine.
@@ -819,11 +821,21 @@ final class TerminalInteractionHarness: ObservableObject {
         // can tell a command tap that landed from one that was dropped.
         value["naturalFit"] = naturalPanes.contains(id)
         value["fixtureFit"] = fits[id].map { "\($0.0)x\($0.1)" } ?? ""
+        value["diagnosticMaxTickGapMs"] = diagnosticMaxTickGapMs
         value.merge(journalProbe()) { _, rhs in rhs }
         value.merge(Self.driver.hostReceipt()) { _, rhs in rhs }
         return TerminalInteractionDriver.json(value)
     }
-    func tick() { revision += 1 }
+    private var diagnosticPreviousTick: CFTimeInterval?
+    private var diagnosticMaxTickGapMs = 0
+    func tick() {
+        let now = CACurrentMediaTime()
+        if let previous = diagnosticPreviousTick {
+            diagnosticMaxTickGapMs = max(diagnosticMaxTickGapMs, Int((now - previous) * 1000))
+        }
+        diagnosticPreviousTick = now
+        revision += 1
+    }
     func grid(_ cols: Int, _ rows: Int) {
         naturalPanes.remove(activeID)
         fits[activeID] = (cols, rows)

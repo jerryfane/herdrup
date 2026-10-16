@@ -276,7 +276,13 @@ case "$shard" in
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
     echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-    run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+    run_suite "UIStateEvidence" "$udid" 25m \
+      -test-iterations 3 \
+      "-only-testing:HerdrUITests/TerminalControlTests/testACopiedFileURLAttachesTheFileRatherThanItsPath" \
+      "-only-testing:HerdrUITests/TerminalControlTests/testAppDeactivationDisarmsBeforeNextDirectKey" \
+      "-only-testing:HerdrUITests/GramTests/testSavedOpensAtTheNewestAndRevealsOlderOnesAtTheTop" \
+      "-only-testing:HerdrUITests/GramTests/testSavingAMessageRedrawsItsBadge" \
+      "-only-testing:HerdrUITests/GramTests/testSearchMatchingRecentMessagesFetchesNoOlderPage" || failed=1
     ;;
   *)
     echo "::error::unknown shard $shard"
