@@ -118,8 +118,8 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-stack"]' || '["focused"]') }}
-    # Worst test/build rounds (iPad): 25 + 15 + 5 + 5 + SwiftTerm build 10 + test 15,
-    # plus four 10-min diagnostic rounds and SwiftTerm's 15 = 130 min.
+    # Worst test/build rounds (iPad): 25 + 20 + 5 + 5 + SwiftTerm build 10 + test 15,
+    # plus four 10-min diagnostic rounds and SwiftTerm's 15 = 135 min.
     # Up to seven boot checks add at most 5m + 15s each; leave setup/build/upload room.
     # The deadline is a failure ceiling, not the expected green-run duration.
     timeout-minutes: 190

@@ -246,7 +246,9 @@ case "$shard" in
     fi
     # The iPhone shards keep their coordinate/keyboard receipts; these rounds cover
     # iPad's hardware-keyboard prerequisite and the iPad-only detail column.
-    run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
+    # Run 38862083708/4 spent 14m on passing cases before the old 15m cap cut off launch.
+    # Leave room for the remaining cases; individual test limits and failures are unchanged.
+    run_suite iPadControl "$IPAD_UDID" 20m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
