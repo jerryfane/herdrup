@@ -256,6 +256,14 @@ jobs:
       - name: Run the ${{ matrix.shard }} device shard
         run: Tools/ci/ui-shard.sh "$SHARD"
 
+      - name: Export diagnostic composer events
+        if: always()
+        run: |
+          mkdir -p TestReceipts
+          xcrun simctl spawn "$IPHONE_UDID" log show --style compact --last 45m \
+            --predicate 'eventMessage CONTAINS "[ComposerTrace]"' \
+            > TestReceipts/composer-events.log 2>&1
+
       - name: Export simulator screenshots
         if: always()
         run: |

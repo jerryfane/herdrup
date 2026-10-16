@@ -5042,6 +5042,9 @@ struct ComposerTextField: UIViewRepresentable {
         view.configureTypography()
         view.setPlaceholder(placeholder)
         if view.text != text {
+            if accessibilityIdentifier == "gram-composer-input" {
+                NSLog("[ComposerTrace] replace native=\(String(reflecting: view.text ?? "")) binding=\(String(reflecting: text)) selection=\(NSStringFromRange(view.selectedRange)) marked=\(view.markedTextRange != nil)")
+            }
             // Dictation fills the field through this binding, a partial result at a time.
             // Replacing `attributedText` scrolls the view back to the top, so a long
             // dictation ran on out of sight. When the caret was at the end (dictation,
@@ -5067,6 +5070,9 @@ struct ComposerTextField: UIViewRepresentable {
         }
         view.applyAccents(accentRanges)
         if view.fixedHeight != fixedHeight {
+            if accessibilityIdentifier == "gram-composer-input" {
+                NSLog("[ComposerTrace] layout height=\(String(describing: view.fixedHeight))->\(String(describing: fixedHeight)) native=\(String(reflecting: view.text ?? "")) binding=\(String(reflecting: text)) selection=\(NSStringFromRange(view.selectedRange)) marked=\(view.markedTextRange != nil)")
+            }
             view.fixedHeight = fixedHeight
             view.invalidateIntrinsicContentSize()
             view.refreshScrollMode()
@@ -5122,6 +5128,9 @@ struct ComposerTextField: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             let old = parent.text
             let new = textView.text ?? ""
+            if parent.accessibilityIdentifier == "gram-composer-input" {
+                NSLog("[ComposerTrace] didChange native=\(String(reflecting: new)) binding=\(String(reflecting: old)) selection=\(NSStringFromRange(textView.selectedRange)) marked=\(textView.markedTextRange != nil)")
+            }
             parent.text = new
             parent.onChange(old, new)
             (textView as? ReplyTextView)?.updatePlaceholder()
@@ -5132,6 +5141,9 @@ struct ComposerTextField: UIViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
+            if parent.accessibilityIdentifier == "gram-composer-input", textView.text != parent.text {
+                NSLog("[ComposerTrace] selection native=\(String(reflecting: textView.text ?? "")) binding=\(String(reflecting: parent.text)) selection=\(NSStringFromRange(textView.selectedRange)) marked=\(textView.markedTextRange != nil)")
+            }
             reportSelection(of: textView)
         }
 
@@ -5152,6 +5164,9 @@ struct ComposerTextField: UIViewRepresentable {
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText replacement: String) -> Bool {
+            if parent.accessibilityIdentifier == "gram-composer-input" {
+                NSLog("[ComposerTrace] input replacement=\(String(reflecting: replacement)) range=\(NSStringFromRange(range)) native=\(String(reflecting: textView.text ?? "")) binding=\(String(reflecting: parent.text)) marked=\(textView.markedTextRange != nil)")
+            }
             guard replacement == "\n", let onReturn = parent.onReturn else { return true }
             onReturn(textView.text ?? "")
             return false
