@@ -131,6 +131,7 @@ The app and test bundles are built before the timed UI runs, and each simulator 
 before its test deadline starts. Debug resize receipts are per pane, so a background
 terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
+Gram search regressions check matching results and older-page fetch counts, not prompt wording.
 
 ## Architecture
 
