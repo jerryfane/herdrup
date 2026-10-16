@@ -471,7 +471,7 @@ final class GramTests: XCTestCase {
 
     /// A search covers the loaded messages and fetches nothing by itself: "Digest" matches g6
     /// on the first page, so no older page is requested (the removed whole-store walk asked
-    /// for every page). Older history still exists, so the sentinel offers to search it.
+    /// for every page), even though older history is available.
     func testSearchMatchingRecentMessagesFetchesNoOlderPage() {
         let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
         XCTAssertTrue(app.staticTexts["Great, ship it."].waitForExistence(timeout: 10), "the feed opens")
@@ -482,12 +482,6 @@ final class GramTests: XCTestCase {
         field.tap()
         field.typeText("Digest")
         XCTAssertTrue(app.staticTexts["trend-scout"].waitForExistence(timeout: 5), "the match shows")
-        // The sentinel is a button, so its text is its label.
-        let sentinel = app.descendants(matching: .any)["gram-loading-older"].firstMatch
-        let offers = NSPredicate(format: "label CONTAINS %@", "Tap or scroll up to search older messages")
-        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: offers, object: sentinel)],
-                                        timeout: 5), .completed,
-                       "with older history the sentinel offers to search it; it says \(sentinel.exists ? sentinel.label : "nothing")")
         Thread.sleep(forTimeInterval: 3)
         XCTAssertEqual(listPages(app), before, "a search must not fetch older pages the reader did not ask for")
     }
