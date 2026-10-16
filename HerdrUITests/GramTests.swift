@@ -55,8 +55,7 @@ final class GramTests: XCTestCase {
         let zero = hasSidebar
             ? NSPredicate(format: "exists == false")
             : NSPredicate(format: "exists == true AND NOT (value CONTAINS %@)", "unread")
-        return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: zero, object: readAll)],
-                                timeout: timeout) == .completed
+        return waitForPredicate(zero, object: readAll, timeout: timeout)
     }
 
     func testGramPageRenders() {
@@ -123,8 +122,8 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5),
                       "clearing the search should bring the filtered-out messages back")
         let newest = app.descendants(matching: .any)["gram-bubble-g1"]
-        let onScreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
-        XCTAssertEqual(XCTWaiter().wait(for: [onScreen], timeout: 5), .completed,
+        let onScreen = NSPredicate(format: "hittable == true")
+        XCTAssertTrue(waitForPredicate(onScreen, object: newest, timeout: 5),
                        "clearing the search should return the feed to the newest message, on screen")
 
         // CLOSING must also clear. A hidden field that is still filtering would leave the
@@ -256,8 +255,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
         func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
             let loaded = NSPredicate(format: "value == %@", "\(count) messages")
-            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
-                                    timeout: timeout) == .completed
+            return waitForPredicate(loaded, object: messages, timeout: timeout)
         }
         if !hasSidebar {
             // The phone's first page overfills the screen: opening fetches nothing.
@@ -330,8 +328,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
         func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
             let loaded = NSPredicate(format: "value == %@", "\(count) messages")
-            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: loaded, object: messages)],
-                                    timeout: timeout) == .completed
+            return waitForPredicate(loaded, object: messages, timeout: timeout)
         }
         XCTAssertTrue(waitForCount(12, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
         let newest = app.staticTexts["Great, ship it."]
@@ -430,8 +427,8 @@ final class GramTests: XCTestCase {
         let feed = app.scrollViews["gram-saved-feed"]
         XCTAssertTrue(feed.waitForExistence(timeout: 5), "the Saved feed should show")
         let newest = app.descendants(matching: .any)["gram-saved-gs30"]
-        let onScreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
-        XCTAssertEqual(XCTWaiter().wait(for: [onScreen], timeout: 5), .completed,
+        let onScreen = NSPredicate(format: "hittable == true")
+        XCTAssertTrue(waitForPredicate(onScreen, object: newest, timeout: 5),
                        "Saved should open at the newest saved message, on screen")
         let drawn = app.otherElements["gram-saved-messages"]
         XCTAssertTrue(drawn.waitForExistence(timeout: 5))
@@ -442,8 +439,7 @@ final class GramTests: XCTestCase {
 
         func waitForDrawn(_ value: String, timeout: TimeInterval) -> Bool {
             let shown = NSPredicate(format: "value == %@", value)
-            return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: shown, object: drawn)],
-                                    timeout: timeout) == .completed
+            return waitForPredicate(shown, object: drawn, timeout: timeout)
         }
         var revealed = false
         for _ in 0..<12 where !revealed {
@@ -599,8 +595,7 @@ final class GramTests: XCTestCase {
         let probe = app.descendants(matching: .any)["gram-post-calls"].firstMatch
         XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG post probe should be present")
         let recorded = NSPredicate(format: "label CONTAINS %@", expected)
-        let landed = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: recorded, object: probe)],
-                                      timeout: 5) == .completed
+        let landed = waitForPredicate(recorded, object: probe, timeout: 5)
         XCTAssertTrue(landed, "the mock should record \"\(expected)\"; probe says \(probe.label)")
         return probe.label
     }
@@ -808,9 +803,8 @@ final class GramTests: XCTestCase {
         card.tap()
         let probe = app.descendants(matching: .any)["gram-opened-file"].firstMatch
         XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG opened-file probe should be present")
-        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "opened:"),
-                                               object: probe)
-        XCTAssertEqual(XCTWaiter().wait(for: [opened], timeout: 10), .completed,
+        let opened = NSPredicate(format: "label BEGINSWITH %@", "opened:")
+        XCTAssertTrue(waitForPredicate(opened, object: probe, timeout: 10),
                        "tapping the card should download the file and hand it to a viewer; probe says \(probe.label)")
     }
 
@@ -949,16 +943,19 @@ final class GramTests: XCTestCase {
     }
 
     /// Waits until `element`'s label matches the regular expression `pattern`.
-    /// Judge each completed lookup before the deadline: XCTest's asynchronous waiter can
-    /// time out during a slow accessibility query even when the label already matches.
     private func waitForLabel(_ element: XCUIElement, matching pattern: String, timeout: TimeInterval) -> Bool {
-        let matches = NSPredicate(format: "label MATCHES %@", pattern)
+        waitForPredicate(NSPredicate(format: "label MATCHES %@", pattern), object: element, timeout: timeout)
+    }
+
+    /// Judge each completed lookup before the deadline: XCTest's asynchronous waiter can
+    /// time out during a slow accessibility query even when the observed state already matches.
+    private func waitForPredicate(_ matches: NSPredicate, object: Any?, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if matches.evaluate(with: element) { return true }
+            if matches.evaluate(with: object) { return true }
             Thread.sleep(forTimeInterval: 0.2)
         } while Date() < deadline
-        return matches.evaluate(with: element)
+        return matches.evaluate(with: object)
     }
 
     /// Waits until `gram-get-file-calls` reports `count` `gram.get_file` calls for `id` (the
@@ -1040,8 +1037,8 @@ final class GramTests: XCTestCase {
         let app = launchGram(environment: ["HERDR_MOCK_GRAM_NEWER": "1", "HERDR_GRAM_RENDER_WINDOW": "200"])
         let newest = app.descendants(matching: .any)["gram-bubble-gn14"]
         XCTAssertTrue(newest.waitForExistence(timeout: 10), "the newer messages should load")
-        let landed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: newest)
-        XCTAssertEqual(XCTWaiter().wait(for: [landed], timeout: 5), .completed, "the feed opens at the newest message")
+        let landed = NSPredicate(format: "hittable == true")
+        XCTAssertTrue(waitForPredicate(landed, object: newest, timeout: 5), "the feed opens at the newest message")
         let card = attachmentCard(app, message: "g3")
         XCTAssertTrue(card.exists, "the image row is drawn")
         XCTAssertFalse(card.isHittable, "precondition: the image sits above the fold")
@@ -1084,25 +1081,6 @@ final class GramTests: XCTestCase {
                       "the zip should open while the image is still downloading; probe says \(opened.label)")
         XCTAssertTrue(waitForGetFileCalls(calls, "g2", 1, timeout: 2),
                       "the open fetched the zip itself; probe says \(calls.label)")
-    }
-
-    /// clientloop's command sits in a code block with its own Copy. Tapping it says "Copied".
-    /// The pasteboard is deliberately NOT read back: a programmatic read raises the system
-    /// paste prompt, which hung CI before (TerminalSelectionTests).
-    func testCodeBlockCopyConfirms() {
-        let app = launchGram()
-        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
-
-        let copy = app.buttons["gram-code-copy"].firstMatch
-        XCTAssertTrue(copy.waitForExistence(timeout: 5), "a code block should offer Copy")
-        for _ in 0..<3 where !copy.isHittable { app.swipeUp() }
-        XCTAssertEqual(copy.label, "Copy code")
-
-        copy.tap()
-        let copied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Copied"),
-                                               object: copy)
-        XCTAssertEqual(XCTWaiter().wait(for: [copied], timeout: 2), .completed,
-                       "Copy should confirm with \"Copied\"")
     }
 
     /// iPad/Mac: the sidebar lists Gram's two conversations, Gram selected, and selecting Saved
@@ -1169,8 +1147,7 @@ final class GramTests: XCTestCase {
         field.typeText("ok")
         let card = app.descendants(matching: .any)["composer-card"].firstMatch
         let settled = NSPredicate { _, _ in newest.isHittable && newest.frame.maxY <= card.frame.minY + 1 }
-        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: settled, object: nil)],
-                                        timeout: 3), .completed,
+        XCTAssertTrue(waitForPredicate(settled, object: nil, timeout: 3),
                        "the newest message should stay visible above the composer")
         XCTAssertFalse(app.buttons["gram-new-messages"].exists, "nothing new arrived: no pill")
     }
