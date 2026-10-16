@@ -180,7 +180,7 @@ jobs:
         run: |
           xcrun simctl list devices available --json > SimulatorDevices.json
           python3 - <<'PY'
-          import json, os, re
+          import json, os, re, subprocess
           with open("SimulatorDevices.json") as source:
               devices = json.load(source)["devices"]
           runtimes = [
@@ -201,8 +201,15 @@ jobs:
               (device for device in pads if "iPad Pro" in device["name"] and "13-inch" in device["name"]),
               pads[0],
           )
+          # Diagnostic control: same runtime and device type, newly created data.
+          phone = dict(phones[0])
+          phone["udid"] = subprocess.check_output([
+              "xcrun", "simctl", "create", "HerdrUIStateEvidence",
+              phone["deviceTypeIdentifier"], runtime,
+          ], text=True).strip()
           with open(os.environ["GITHUB_ENV"], "a") as output:
-              for key, device in [("IPHONE_UDID", phones[0]), ("IPAD_UDID", ipad)]:
+              output.write(f"DIAGNOSTIC_OWNED_UDID={phone['udid']}\n")
+              for key, device in [("IPHONE_UDID", phone), ("IPAD_UDID", ipad)]:
                   output.write(f"{key}={device['udid']}\n")
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY
@@ -274,6 +281,14 @@ jobs:
             TestReceipts/
             SimulatorDevices.json
           if-no-files-found: ignore
+
+      - name: Remove only the diagnostic device created by this job
+        if: always()
+        run: |
+          if [ -n "${DIAGNOSTIC_OWNED_UDID:-}" ]; then
+            xcrun simctl shutdown "$DIAGNOSTIC_OWNED_UDID" || true
+            xcrun simctl delete "$DIAGNOSTIC_OWNED_UDID"
+          fi
 
   # The required status check on main. It keeps the name the branch protection rule
   # already requires, and passes only if every device shard passed.
