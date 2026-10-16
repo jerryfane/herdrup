@@ -222,15 +222,16 @@ class TerminalInteractionTestCase: XCTestCase {
                 file: file, line: line)
     }
 
+    /// The pane shows the asked-for grid, uncovered and completely drawn, and its grid,
+    /// cover and completeness have not changed for 0.4 s. The app measures that quiet time
+    /// (`stableMs`), so ONE probe read decides: timing it here between two reads failed on
+    /// a CI runner where a single accessibility read took 12 s and the 15 s wait got only one.
     func settled(cols: Int? = nil, rows: Int? = nil) {
-        var stableSince: Date?
         wait {
-            let matches = ($0["covered"] as? Bool) == false && ($0["complete"] as? Bool) == true
+            ($0["covered"] as? Bool) == false && ($0["complete"] as? Bool) == true
                 && (cols == nil || ($0["cols"] as? Int) == cols)
                 && (rows == nil || ($0["rows"] as? Int) == rows)
-            guard matches else { stableSince = nil; return false }
-            if stableSince == nil { stableSince = Date() }
-            return Date().timeIntervalSince(stableSince!) >= 0.4
+                && ($0["stableMs"] as? Int ?? 0) >= 400
         }
     }
 

@@ -70,8 +70,8 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     /// ("one keyboard transition is one PTY resize" got 2) and re-applying it undid an
     /// unsolicited server grid, whenever a test outlived 25 s on a slow CI runner.
     /// `claimed` is the tuple this pane's last accepted `lock:true` asked for, cleared by a
-    /// release, a refused request, a new stream (the daemon drops a stream's lease with it)
-    /// and a reset.
+    /// release, a refused request, the stream ending (the daemon drops a stream's lease with
+    /// it), a new stream and a reset.
     private struct Claim: Equatable { let cols: Int?, rows: Int?, cellWidthPx: UInt32?, cellHeightPx: UInt32? }
     private var claimed: Claim?
     private var renewals = 0
@@ -261,6 +261,9 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                             if self.lifetime == token {
                                 self.continuation = nil
                                 self.lifetime = nil
+                                // The daemon drops a stream's lease when the stream
+                                // closes, so the next lock:true is a new claim.
+                                self.claimed = nil
                             }
                         }
                     }
@@ -500,6 +503,26 @@ final class TerminalInteractionHarness: ObservableObject {
     }
     private var surfaces: [String: Surface] = [:]
     private var fits: [String: (Int, Int)] = [:]
+    /// HOW LONG THE PANE HAS HELD ITS GEOMETRY, measured in the app (`stableMs` in the probe).
+    ///
+    /// "Settled" means the grid, the cover and the draw's completeness stayed unchanged for
+    /// a while. The test used to time that itself, between two of its own probe reads; on a
+    /// slow CI runner one accessibility read took 12 s, so a 15 s wait got a single read and
+    /// timed out on a pane that had long settled (CI 38803711505). Measured here, one read
+    /// is enough. Updated on every draw and every probe evaluation (each fixture tick), so a
+    /// change is seen within a tick even when no draw follows it. Output text is NOT part
+    /// of it: a busy agent keeps printing at a settled grid.
+    private var stability: [String: (signature: String, since: CFTimeInterval)] = [:]
+    private func noteStability(paneID: String, _ surface: Surface) -> Int {
+        let shown = surface.isCovered() ? (surface.retained ?? surface.painted) : surface.painted
+        let signature = [shown["cols"], shown["rows"], shown["complete"]]
+            .map { $0.map { "\($0)" } ?? "-" }.joined(separator: "|") + "|covered=\(surface.isCovered())"
+        let now = CACurrentMediaTime()
+        if stability[paneID]?.signature != signature {
+            stability[paneID] = (signature, now)
+        }
+        return Int(((now - (stability[paneID]?.since ?? now)) * 1000).rounded(.down))
+    }
     private var activeID: String {
         surfaces.first(where: { $0.value.isForeground() })?.key ?? "ix:a"
     }
@@ -601,6 +624,7 @@ final class TerminalInteractionHarness: ObservableObject {
         surface.painted = shared.viewport(view, cellSize: cellSize)
         surface.painted["complete"] = complete
         shared.surfaces[paneID] = surface
+        _ = shared.noteStability(paneID: paneID, surface)
         shared.sampleSweep()
         // A draw must not synchronously invalidate its SwiftUI host.
     }
@@ -768,6 +792,7 @@ final class TerminalInteractionHarness: ObservableObject {
             value["covered"] = surface.isCovered()
             value["coverInstalls"] = surface.coverInstalls()
             value["lastCoverMs"] = surface.lastCoverMilliseconds()
+            value["stableMs"] = noteStability(paneID: id, surface)
             value["focused"] = surface.view?.isFirstResponder ?? false
             // Asks SwiftTerm DIRECTLY, bypassing the app's find wiring, so a failing search
             // test can say which half is broken: a non-zero total here with an empty counter
