@@ -54,15 +54,19 @@ trap stop_recording EXIT
 
 # Bound the entire boot request + readiness wait, not just xcodebuild. A stuck
 # CoreSimulator must leave time for receipt upload. TERM gets 15 s before KILL.
+# First-boot data migration took 5m41s in run 38916529804. Give that one cold
+# attempt 10m; later readiness checks keep the shorter 5m allowance.
+next_boot_budget=10m
 boot_simulator() {
-  local udid="$1" log="$2" status=0
-  "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m bash -c '
+  local udid="$1" log="$2" status=0 budget="$next_boot_budget"
+  next_boot_budget=5m
+  "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
     # An already-booted device rejects boot; bootstatus is the readiness authority.
     xcrun simctl boot "$1" || true
     exec xcrun simctl bootstatus "$1" -b
   ' _ "$udid" 2>&1 | tee "$log" || status=$?
   if [ "$status" -ne 0 ]; then
-    echo "::error::simulator $udid failed to become ready within 5m (exit $status); see $log"
+    echo "::error::simulator $udid failed to become ready within $budget (exit $status); see $log"
     return 1
   fi
 }
