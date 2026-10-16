@@ -5,20 +5,11 @@ name: CI
 on:
   # PULL REQUESTS, NOT EVERY PUSH.
   #
-  # This job is a full Xcode build plus an XCUITest — ~17 minutes on a macOS runner,
-  # which GitHub bills at roughly ten times the Linux rate. On `push` it fired for every
-  # commit on every non-main branch, including work-in-progress pushes to branches that
-  # never became a PR: 120 runs across 85 distinct branches, 35 of them repeat builds of a
-  # branch that had already been built. That was ~71% of the account's entire monthly
-  # GitHub bill, and it hit the spending limit, which took CI down for every private repo.
-  #
-  # The `concurrency` block below already cancels a superseded run, and it works — but it
-  # can only help while the previous build is still running. Pushes minutes apart on a
-  # 17-minute build never overlap, so each one cost a full build. Building per PR instead
-  # of per push is what removes those.
-  #
-  # `main` is not branch-protected, so no required status check depends on the old push
-  # trigger. `workflow_dispatch` stays for deliberate one-off runs.
+  # Full simulator CI runs for PRs, not every work-in-progress branch push.
+  # Standard hosted runners are free for this public repository, but macOS concurrency
+  # is limited. Avoid duplicate runs and cancel superseded PR heads below.
+  # Protected main requires the aggregate device gate plus the Linux/font checks.
+  # workflow_dispatch remains available for deliberate full or focused runs.
   pull_request:
     paths-ignore:
       - "**/*.md"
@@ -127,11 +118,11 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-stack"]' || '["focused"]') }}
-    # Worst shard (iPhone app): font 10 + Gram 25 + status motion 10 + app 30 + SwiftTerm
-    # build 10 + test 15, plus failed-only diagnostic reruns for font, Gram, status motion and
-    # app (10 min each) and SwiftTerm (15) = 155 min; setup and the build come on top. A green
-    # run of this shard takes ~50 min.
-    timeout-minutes: 170
+    # Worst test/build rounds (iPad): 25 + 15 + 5 + 5 + SwiftTerm build 10 + test 15,
+    # plus four 10-min diagnostic rounds and SwiftTerm's 15 = 130 min.
+    # Up to seven boot checks add at most 5m + 15s each; leave setup/build/upload room.
+    # The deadline is a failure ceiling, not the expected green-run duration.
+    timeout-minutes: 190
     env:
       SHARD: ${{ matrix.shard }}
       ONLY_SUITE: ${{ github.event.inputs.only_suite }}
@@ -206,6 +197,40 @@ jobs:
                   output.write(f"{key}={device['udid']}\n")
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY
+
+      # Reuse only a successful optimized BUILD on a rerun of this exact run/head.
+      # No restore prefix and no test-result caching: the regression and crash guard
+      # always execute. Products include the .xctestrun and test-host bundles.
+      - name: Identify the optimized build toolchain
+        if: matrix.shard == 'settings-stack'
+        id: settings_toolchain
+        run: |
+          XCODE=$(xcodebuild -version)
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-build-version)
+          OS=$(sw_vers -buildVersion)
+          KEY=$(printf '%s\n' "$XCODE" "$SDK" "$OS" "$RUNNER_ARCH" "$GITHUB_WORKSPACE" | shasum -a 256 | cut -d ' ' -f 1)
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Restore this run's optimized build products
+        if: matrix.shard == 'settings-stack'
+        id: settings_products
+        uses: actions/cache/restore@v4
+        with:
+          path: .build-dd-settings-stack/Build/Products
+          key: settings-products-v1-${{ github.run_id }}-${{ github.sha }}-${{ steps.settings_toolchain.outputs.key }}
+
+      - name: Build optimized app and tests for simulator
+        if: matrix.shard == 'settings-stack' && steps.settings_products.outputs.cache-hit != 'true'
+        run: Tools/ci/ui-shard.sh settings-build
+
+      # Save before testing: a failing test must not discard a valid build, but a
+      # failed build must never be published. Reruns still test the complete shard.
+      - name: Save optimized build products for this run's reruns
+        if: matrix.shard == 'settings-stack' && steps.settings_products.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .build-dd-settings-stack/Build/Products
+          key: ${{ steps.settings_products.outputs.cache-primary-key }}
 
       - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
         if: matrix.shard != 'settings-stack'

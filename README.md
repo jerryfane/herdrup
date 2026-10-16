@@ -127,10 +127,20 @@ geometry only from ordered stream frames; a short retained frame covers resize t
 stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
-The app and test bundles are built before the timed UI runs, and each simulator is booted
-before its test deadline starts. Debug resize receipts are per pane, so a background
-terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
+The app and test bundles are built before the timed UI runs. Simulator startup has its
+own five-minute deadline, with forced termination after another 15 seconds and a retained
+boot log. Debug resize receipts are per pane, so a background terminal's fixed grid
+cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
+
+The four simulator jobs run in parallel. Gram shares the iPhone terminal job; the other
+iPhone job runs font, status-motion and remaining app tests. A failed first run still fails
+its job even if the diagnostic rerun passes; manual reruns execute the entire selected job.
+The optimized Settings job builds only the selected simulator architecture and caches
+`Build/Products` for the same workflow run, commit, Xcode/SDK, OS, architecture and workspace.
+It saves a successful build before testing, so a test failure does not discard the build.
+Cache hits still run the Settings regression and attached-crash check; test results are
+never cached. Release archives and TestFlight builds are unchanged.
 
 ## Architecture
 
