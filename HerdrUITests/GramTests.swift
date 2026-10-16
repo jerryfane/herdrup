@@ -949,10 +949,16 @@ final class GramTests: XCTestCase {
     }
 
     /// Waits until `element`'s label matches the regular expression `pattern`.
+    /// Judge each completed lookup before the deadline: XCTest's asynchronous waiter can
+    /// time out during a slow accessibility query even when the label already matches.
     private func waitForLabel(_ element: XCUIElement, matching pattern: String, timeout: TimeInterval) -> Bool {
-        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label MATCHES %@", pattern),
-                                                    object: element)
-        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+        let matches = NSPredicate(format: "label MATCHES %@", pattern)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if matches.evaluate(with: element) { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        return matches.evaluate(with: element)
     }
 
     /// Waits until `gram-get-file-calls` reports `count` `gram.get_file` calls for `id` (the
