@@ -2048,7 +2048,9 @@ struct TerminalHomeView: View {
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
     /// Unread agent→owner grams, badged on the Gram tab. Session-scoped; written
     /// by GramView while visible and by an ambient poll (below) while it isn't.
-    @StateObject private var gramUnread = GramUnreadTracker()
+    /// Only the badge/sidebar readers observe this object: publishing a count must not
+    /// rebuild the tab host while a message's context menu is handling a touch.
+    @State private var gramUnread = GramUnreadTracker()
     /// Gram's Inbox/Saved selection, owned HERE rather than inside `GramView` because on regular
     /// width the selector is rendered in the split view's sidebar — a sibling column of the page
     /// it drives. Shared by both layouts, so the phone's header toggle and the sidebar rows read
@@ -2700,26 +2702,28 @@ struct TerminalHomeView: View {
     /// `gramSearch`; the page reads both as bindings, so the detail pane filters and swaps in
     /// place with no navigation, and the page shows no search control of its own.
     private var gramSidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SectionTopBar(title: "Gram", count: gramUnread.count, leading: {
-                SectionBackSlot(.leading) { sectionBackButton }
-            }) {
-                hideSidebarButton
-                SectionBackSlot(.trailing) { sectionBackButton }
-                if !gramShowingSaved, gramUnread.count > 0 {
-                    SectionBarButton(icon: "envelope.open", label: "Read all") { gramReadAllToken += 1 }
+        GramUnreadContent(unread: gramUnread) { count in
+            VStack(alignment: .leading, spacing: 0) {
+                SectionTopBar(title: "Gram", count: count, leading: {
+                    SectionBackSlot(.leading) { sectionBackButton }
+                }) {
+                    hideSidebarButton
+                    SectionBackSlot(.trailing) { sectionBackButton }
+                    if !gramShowingSaved, count > 0 {
+                        SectionBarButton(icon: "envelope.open", label: "Read all") { gramReadAllToken += 1 }
+                    }
+                    SectionBarButton(icon: "arrow.clockwise", label: "Refresh") { gramRefreshToken += 1 }
                 }
-                SectionBarButton(icon: "arrow.clockwise", label: "Refresh") { gramRefreshToken += 1 }
+                sidebarSearchField(text: $gramSearch, focus: $gramSearchFocused,
+                                   identifier: "gram-search-field", height: 40, outlined: true)
+                    .padding(.top, 2)
+                GramSidebarConversations(showingSaved: $gramShowingSaved, unreadCount: count)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                Spacer(minLength: 0)
             }
-            sidebarSearchField(text: $gramSearch, focus: $gramSearchFocused,
-                               identifier: "gram-search-field", height: 40, outlined: true)
-                .padding(.top, 2)
-            GramSidebarConversations(showingSaved: $gramShowingSaved, unreadCount: gramUnread.count)
-                .padding(.horizontal, 8)
-                .padding(.top, 6)
-            Spacer(minLength: 0)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     /// ⌘F on Gram: the cursor goes to the sidebar search. A minimised sidebar is opened first;
@@ -2862,9 +2866,11 @@ struct TerminalHomeView: View {
     /// shows. Earlier systems keep the frosted bar. It follows the sidebar's width but never
     /// grows past `sidebarTabBarMaxWidth`, centred, so a wide sidebar doesn't stretch it.
     private var sidebarTabBar: some View {
-        HStack(spacing: 0) {
-            ForEach(HomeTab.allCases, id: \.self) { tab in
-                sidebarTabItem(tab, badge: tab == .gram ? gramUnread.count : 0)
+        GramUnreadContent(unread: gramUnread) { count in
+            HStack(spacing: 0) {
+                ForEach(HomeTab.allCases, id: \.self) { tab in
+                    sidebarTabItem(tab, badge: tab == .gram ? count : 0)
+                }
             }
         }
         .animation(.smooth(duration: 0.3), value: selectedTab)
@@ -3013,8 +3019,10 @@ struct TerminalHomeView: View {
             sidebarToggleButton(
                 icon: "sidebar.left", hint: "Expand sidebar (⌘K)", minimize: false)
                 .padding(.bottom, 2)
-            ForEach(HomeTab.allCases, id: \.self) { tab in
-                railSectionButton(tab, badge: tab == .gram ? gramUnread.count : 0)
+            GramUnreadContent(unread: gramUnread) { count in
+                ForEach(HomeTab.allCases, id: \.self) { tab in
+                    railSectionButton(tab, badge: tab == .gram ? count : 0)
+                }
             }
             // Gated on the same condition as the counts below it: a separator with
             // nothing on its far side is precisely the zero-value noise those counts
@@ -3089,6 +3097,26 @@ struct TerminalHomeView: View {
         }
     }
 
+    private struct GramUnreadContent<Content: View>: View {
+        @ObservedObject var unread: GramUnreadTracker
+        private let content: (Int) -> Content
+
+        init(unread: GramUnreadTracker, @ViewBuilder content: @escaping (Int) -> Content) {
+            self.unread = unread
+            self.content = content
+        }
+
+        var body: some View { content(unread.count) }
+    }
+
+    private struct GramUnreadBadge: ViewModifier {
+        @ObservedObject var unread: GramUnreadTracker
+
+        func body(content: Content) -> some View {
+            content.badge(unread.count == 0 ? nil : Text("\(unread.count)"))
+        }
+    }
+
     var body: some View {
         // Observe the text-size setting so the home re-renders at the new
         // `Typography.scale` on change (identity unchanged → @State preserved).
@@ -3112,7 +3140,7 @@ struct TerminalHomeView: View {
                          showingSaved: $gramShowingSaved)
                     .tag(HomeTab.gram)
                     .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
-                    .badge(gramUnread.count == 0 ? nil : Text("\(gramUnread.count)"))
+                    .modifier(GramUnreadBadge(unread: gramUnread))
 
                 SettingsView(
                     client: client,
