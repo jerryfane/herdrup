@@ -5042,28 +5042,7 @@ struct ComposerTextField: UIViewRepresentable {
         view.configureTypography()
         view.setPlaceholder(placeholder)
         if view.text != text {
-            // Dictation fills the field through this binding, a partial result at a time.
-            // Replacing `attributedText` scrolls the view back to the top, so a long
-            // dictation ran on out of sight. When the caret was at the end (dictation,
-            // a restored draft), keep the end in view; an edit elsewhere keeps its place.
-            let oldLength = (view.text as NSString).length
-            let caretFromEnd = oldLength - NSMaxRange(view.selectedRange)
-            let followsEnd = view.selectedRange.location >= oldLength
-            view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
-            view.typingAttributes = view.composerAttributes
-            view.accentsReset()
-            context.coordinator.reportedCaret = nil
-            view.updatePlaceholder()
-            view.invalidateIntrinsicContentSize()
-            view.refreshScrollMode()
-            if followsEnd {
-                view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
-                view.requestCaretReveal()
-            } else if onSelectionChange != nil {
-                let length = (text as NSString).length
-                view.selectedRange = NSRange(location: min(length, max(0, length - caretFromEnd)), length: 0)
-                view.requestCaretReveal()
-            }
+            context.coordinator.scheduleTextUpdate(in: view)
         }
         view.applyAccents(accentRanges)
         if view.fixedHeight != fixedHeight {
@@ -5097,10 +5076,47 @@ struct ComposerTextField: UIViewRepresentable {
         /// Keep that responder alive through text-binding renders until the true state arrives.
         var nativeFocusPendingStateSync = false
 
+        private var textUpdateScheduled = false
         init(_ parent: ComposerTextField) {
             self.parent = parent
         }
 
+        /// A layout pass can carry a binding snapshot from before the latest native edit.
+        /// Read the live binding off that pass instead of replacing newer UIKit text with it.
+        func scheduleTextUpdate(in view: ReplyTextView) {
+            guard !textUpdateScheduled else { return }
+            textUpdateScheduled = true
+            Task { @MainActor [weak self, weak view] in
+                guard let self else { return }
+                self.textUpdateScheduled = false
+                guard let view else { return }
+                let text = self.parent.text
+                guard view.text != text else { return }
+                view.isApplyingUpdate = true
+                defer { view.isApplyingUpdate = false }
+                // Dictation and restored drafts follow the end; an edit elsewhere keeps
+                // its offset from the end, as it did before deferring synchronization.
+                let oldLength = (view.text as NSString).length
+                let caretFromEnd = oldLength - NSMaxRange(view.selectedRange)
+                let followsEnd = view.selectedRange.location >= oldLength
+                view.attributedText = NSAttributedString(string: text, attributes: view.composerAttributes)
+                view.typingAttributes = view.composerAttributes
+                view.accentsReset()
+                self.reportedCaret = nil
+                view.updatePlaceholder()
+                view.invalidateIntrinsicContentSize()
+                view.refreshScrollMode()
+                if followsEnd {
+                    view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
+                    view.requestCaretReveal()
+                } else if self.parent.onSelectionChange != nil {
+                    let length = (text as NSString).length
+                    view.selectedRange = NSRange(location: min(length, max(0, length - caretFromEnd)), length: 0)
+                    view.requestCaretReveal()
+                }
+                view.applyAccents(self.parent.accentRanges)
+            }
+        }
         func textViewDidBeginEditing(_ textView: UITextView) {
             nativeFocusPendingStateSync = true
             parent.onFocusChange(true)

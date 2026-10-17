@@ -146,6 +146,10 @@ It saves a successful build before testing, so a test failure does not discard t
 Cache hits still run the Settings regression and attached-crash check; test results are
 never cached. Release archives and TestFlight builds are unchanged.
 
+The shared native composer reconciles external text edits after the SwiftUI layout pass,
+using the current binding rather than a captured layout value. This preserves newer
+keystrokes while still applying dictation, mention completion, restored drafts, and send clears.
+
 ## Architecture
 
 ```
