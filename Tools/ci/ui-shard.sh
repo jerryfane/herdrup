@@ -311,7 +311,7 @@ case "$shard" in
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
     echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-    run_suite "$label-TabDelivery" "$udid" 25m "-only-testing:HerdrUITests/GramTests/testOlderLoadedMessagesAreRevealedWithoutFetching" "-test-iterations" "20" || failed=1
+    run_suite "$label-TabSequence" "$udid" 25m "-only-testing:HerdrUITests/GramTests/testDiagnosticSearchThenOlderHistory" "-test-iterations" "20" || failed=1
     ;;
   *)
     echo "::error::unknown shard $shard"

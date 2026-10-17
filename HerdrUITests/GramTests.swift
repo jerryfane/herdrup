@@ -14,6 +14,12 @@ final class GramTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
+    // Diagnostic-only: preserve the immediate predecessor of the hosted failure.
+    func testDiagnosticSearchThenOlderHistory() throws {
+        testNoRecentMatchesOffersToSearchOlderMessages()
+        try testOlderLoadedMessagesAreRevealedWithoutFetching()
+    }
+
     /// iPad and Mac draw Gram in the split view: the sidebar holds search, the conversations
     /// and Read all. iPhone keeps them on the page (search button, the "Gram ›" pill's sheet).
     private var hasSidebar: Bool { UIDevice.current.userInterfaceIdiom != .phone }
