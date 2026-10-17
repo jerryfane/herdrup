@@ -24,6 +24,7 @@ struct HerdrApp: App {
         // approved later — is finished promptly instead of waiting for Settings to open.
         _ = TipStore.shared
         #if DEBUG
+        if ScreenshotMock.mode != nil { TabDeliveryTrace.install() }
         // A mock run starts with no downloaded gram files, so what a test sees (the image
         // card's fetched preview) comes from this run's canned replies, not an earlier one's.
         if ScreenshotMock.mode != nil { GramView.Downloads.invalidate() }
@@ -3156,6 +3157,9 @@ struct TerminalHomeView: View {
                     .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
             }
             .tint(Palette.text)
+            .onChange(of: selectedTab) { old, new in
+                NSLog("[TabTrace] SwiftUI selection old=\(old) new=\(new) front=\(String(describing: frontID))")
+            }
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
             // covers it and captures touches; otherwise the overlay is fully inert.
