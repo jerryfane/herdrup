@@ -286,7 +286,7 @@ jobs:
         if: always()
         run: |
           mkdir -p TestReceipts
-          xcrun simctl spawn "$IPHONE_UDID" log show --style compact --last 45m \
+          xcrun simctl spawn "$IPHONE_UDID" log show --style compact --last 2h \
             --predicate 'eventMessage CONTAINS "[TabTrace]"' \
             > TestReceipts/tab-events.log 2>&1
 

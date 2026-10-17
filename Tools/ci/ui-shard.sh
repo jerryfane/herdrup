@@ -306,12 +306,8 @@ case "$shard" in
     fi
     ;;
   focused)
-    case "${ONLY_DEVICE:-iphone}" in
-      ipad) label=iPad; udid="$IPAD_UDID" ;;
-      *)    label=iPhone; udid="$IPHONE_UDID" ;;
-    esac
-    echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-    run_suite "$label-TabSequence" "$udid" 25m "-only-testing:HerdrUITests/GramTests/testDiagnosticSearchThenOlderHistory" "-test-iterations" "20" || failed=1
+    # Diagnostic only: reproduce the entire original simulator/test ordering.
+    exec "$0" iphone-terminal
     ;;
   *)
     echo "::error::unknown shard $shard"
