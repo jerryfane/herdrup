@@ -127,10 +127,30 @@ geometry only from ordered stream frames; a short retained frame covers resize t
 stretching text or restarting the stream. For unmarked output,
 reveal uses a bounded quiet/deadline heuristic rather than assuming a semantic redraw-complete signal.
 CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and iPad simulators.
-The app and test bundles are built before the timed UI runs, and each simulator is booted
-before its test deadline starts. Debug resize receipts are per pane, so a background
-terminal's fixed grid cannot overwrite the foreground terminal's keyboard-resize result.
+The app and test bundles are built before the timed UI runs. The first simulator boot
+allows ten minutes for cold data migration; later readiness checks allow five minutes.
+Both force termination after another 15 seconds and retain a boot log.
+Debug resize receipts are per pane, so a background terminal's fixed grid
+cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
+Gram search regressions check matching results and older-page fetch counts, not prompt wording.
+Gram state checks poll completed accessibility queries directly, preserving their conditions
+when a slow lookup consumes the waiter's deadline. Synchronous queries can exceed that deadline.
+Terminal UI queries match the exact `terminal-surface` accessibility identifier rather than
+searching unrelated labels and values. Focus, input and viewport assertions remain unchanged.
+
+The four simulator jobs run in parallel. Gram shares the iPhone terminal job; the other
+iPhone job runs font, status-motion and remaining app tests. A failed first run still fails
+its job even if the diagnostic rerun passes; manual reruns execute the entire selected job.
+The optimized Settings job builds only the selected simulator architecture and caches
+`Build/Products` for the same workflow run, commit, Xcode/SDK, OS, architecture and workspace.
+It saves a successful build before testing, so a test failure does not discard the build.
+Cache hits still run the Settings regression and attached-crash check; test results are
+never cached. Release archives and TestFlight builds are unchanged.
+
+The shared native composer reconciles external text edits after the SwiftUI layout pass,
+using the current binding rather than a captured layout value. This preserves newer
+keystrokes while still applying dictation, mention completion, restored drafts, and send clears.
 
 ## Architecture
 
@@ -193,6 +213,8 @@ images and files are cards that open on a tap (Save to Files is in the long-pres
 menu), pictures show inline, and a download draws the composer's ring. On iPad and Mac the
 sidebar holds Gram's search field (⌘F; no mic, the composer keeps dictation) and its two
 conversations, Gram and Saved, as Messages rows, with Read all and Refresh in the bar.
+Unread-count updates redraw the badge and sidebar readers, not the whole tab host, so they
+do not interrupt a message's open context menu.
 Saved reads like the feed: oldest at the top, opening at the newest, older ones drawn as you scroll up.
 Search filters the loaded messages, newest match at the bottom; scrolling to the top of the results (or
 “Search older messages” when none match) fetches older pages until another match turns up.

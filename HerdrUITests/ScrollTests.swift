@@ -18,7 +18,7 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
         app.launch()
-        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
 
         // Let the app launch and the mock stream feed all 200 lines into the real
@@ -66,7 +66,7 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "ccscroll"
         app.launch()
-        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + enter alt-screen/mouse + render
 
@@ -107,7 +107,7 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "backfill"
         app.launch()
-        let viewport = app.descendants(matching: .any)["terminal-surface"].firstMatch
+        let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + backfill read + reset seed feed
 

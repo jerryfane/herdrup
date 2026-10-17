@@ -3,23 +3,24 @@
 # parallel jobs; each job has already built the app and test bundles into .build-dd
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
-#   iphone-terminal  TERMINAL_CLASSES on iPhone
-#   iphone-app       HerdrFontTests, then GramTests and StatusMotionTests in their own rounds,
-#                    then every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
+#   iphone-terminal  TERMINAL_CLASSES, then GramTests in a separate round on iPhone
+#   iphone-app       HerdrFontTests, then StatusMotionTests in its own round, then
+#                    every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
 #                    tests on iPhone
 #   ipad             iPad-specific rounds, then the SwiftTerm UIKit API tests on iPad
-#   settings-stack   optimized Distribution build with the device-sized stack, then the
-#                    iPad Settings resize/resume regression (herdrup#416)
+#   settings-build   optimized simulator build; CI caches its products before testing
+#   settings-stack   iPad Settings resize/resume regression using that Distribution build
+#                    with the device-sized stack (herdrup#416), even on cache hits
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
 # The two iPhone shards are complementary BY CONSTRUCTION: one runs exactly
-# TERMINAL_CLASSES, the other runs the whole bundle with the same identifiers skipped,
+# TERMINAL_CLASSES and GramTests, the other skips those same identifiers,
 # so a new test class lands in iphone-app without anyone listing it. A misspelled or
 # renamed entry would silently drop that class from both shards, so iphone-terminal
 # fails unless its result bundle shows every listed class executed tests.
 set -uo pipefail
 
-shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|focused}"
+shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-stack|focused}"
 TERMINAL_CLASSES=(TerminalControlTests TerminalResizeTests TerminalSearchTests TerminalSelectionTests)
 mkdir -p TestReceipts
 
@@ -33,6 +34,14 @@ PROJECT=(-project Herdr.xcodeproj -scheme Herdr
   -derivedDataPath .build-dd -clonedSourcePackagesDirPath SourcePackages
   CODE_SIGNING_ALLOWED=NO)
 
+# Build the optimized simulator products; tests use the generated .xctestrun below.
+# Only the selected simulator architecture runs this test. Distribution otherwise builds
+# an unused x86_64 copy on the arm64 hosted runner (baseline 38829646885).
+SETTINGS_PROJECT=(-project Herdr.xcodeproj -scheme Herdr -configuration Distribution
+  -derivedDataPath .build-dd-settings-stack -clonedSourcePackagesDirPath SourcePackages
+  ENABLE_TESTABILITY=YES 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG'
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO)
+
 recorder=
 stop_recording() {
   if [ -n "$recorder" ]; then
@@ -42,6 +51,25 @@ stop_recording() {
   fi
 }
 trap stop_recording EXIT
+
+# Bound the entire boot request + readiness wait, not just xcodebuild. A stuck
+# CoreSimulator must leave time for receipt upload. TERM gets 15 s before KILL.
+# First-boot data migration took 5m41s in run 38916529804. Give that one cold
+# attempt 10m; later readiness checks keep the shorter 5m allowance.
+next_boot_budget=10m
+boot_simulator() {
+  local udid="$1" log="$2" status=0 budget="$next_boot_budget"
+  next_boot_budget=5m
+  "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
+    # An already-booted device rejects boot; bootstatus is the readiness authority.
+    xcrun simctl boot "$1" || true
+    exec xcrun simctl bootstatus "$1" -b
+  ' _ "$udid" 2>&1 | tee "$log" || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "::error::simulator $udid failed to become ready within $budget (exit $status); see $log"
+    return 1
+  fi
+}
 
 # Prints one -only-testing argument per failed test case in an .xcresult.
 failed_tests() {
@@ -68,8 +96,7 @@ run_suite() {
   shift 3
   local status=0
   # Boot outside the test deadline. Booting during the build was measured to slow both.
-  xcrun simctl boot "$udid" 2>/dev/null || true
-  xcrun simctl bootstatus "$udid" -b >/dev/null || return 1
+  boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
   # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the job budget
   # and take the receipt upload down with it. Per-case allowances make xcodebuild
   # fail a stuck test with diagnostics instead of blocking to the deadline.
@@ -164,8 +191,7 @@ PY
       exit 1
     fi
     label="SwiftTermUIKit-$device"
-    xcrun simctl boot "$udid" 2>/dev/null || true
-    xcrun simctl bootstatus "$udid" -b >/dev/null
+    boot_simulator "$udid" "../../TestReceipts/$label-boot.log" || exit 1
     if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$scheme" \
         -destination "platform=iOS Simulator,id=$udid" \
         -parallel-testing-enabled NO \
@@ -175,8 +201,7 @@ PY
         -resultBundlePath "../../TestReceipts/$label-first.xcresult" \
         CODE_SIGNING_ALLOWED=NO 2>&1 | tee "../../TestReceipts/$label-first.log" | xcbeautify; then
       echo "::error::$label first run failed; collecting raw diagnostics without erasing failure"
-      xcrun simctl boot "$udid" 2>/dev/null || true
-      xcrun simctl bootstatus "$udid" -b >/dev/null
+      boot_simulator "$udid" "../../TestReceipts/$label-diagnostic-boot.log" || exit 1
       "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$scheme" \
           -destination "platform=iOS Simulator,id=$udid" \
           -parallel-testing-enabled NO \
@@ -197,13 +222,12 @@ case "$shard" in
     for class in "${TERMINAL_CLASSES[@]}"; do only+=("-only-testing:HerdrUITests/$class"); done
     run_suite iPhoneTerminal "$IPHONE_UDID" 40m "${only[@]}" || failed=1
     check_classes_ran TestReceipts/iPhoneTerminal-first.xcresult || failed=1
+    # Baseline run 38829646885: terminal finished in 24 min while iphone-app took 63.
+    # Moving Gram's ~20 min round balances them without another runner or test omission.
+    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
-    # Gram has its own round and budget. In one 40 m round with the rest of the app, a green
-    # run already used ~36 m of test time, and a slower runner ran out (herdrup#430, run
-    # 38521782241: 87 of ~100 tests done at 40 m). Same tests, same total time.
-    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
     # StatusMotionTests photograph shapes over time and wait out tab switches (~3.5 min on
     # a slow hosted runner): with them in the app round, #433's run 38703928881 ran out of
     # its 30 m on the last class.
@@ -214,8 +238,7 @@ case "$shard" in
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
     ;;
   ipad)
-    xcrun simctl boot "$IPAD_UDID" 2>/dev/null || true
-    xcrun simctl bootstatus "$IPAD_UDID" -b >/dev/null
+    boot_simulator "$IPAD_UDID" TestReceipts/iPadRecording-boot.log || exit 1
     # Parallel test clones are disabled, so the video records the tested device.
     xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad.mp4 \
       > TestReceipts/terminal-resize-iPad-video.log 2>&1 &
@@ -227,32 +250,44 @@ case "$shard" in
     fi
     # The iPhone shards keep their coordinate/keyboard receipts; these rounds cover
     # iPad's hardware-keyboard prerequisite and the iPad-only detail column.
-    run_suite iPadControl "$IPAD_UDID" 15m -only-testing:HerdrUITests/TerminalControlTests || failed=1
+    # Run 38862083708/4 spent 14m on passing cases before the old 15m cap cut off launch.
+    # Leave room for the remaining cases; individual test limits and failures are unchanged.
+    run_suite iPadControl "$IPAD_UDID" 20m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
+    ;;
+  settings-build)
+    # Build before booting: compiler and simulator compete for the hosted runner's CPUs.
+    "$TIMEOUT_BIN" --signal=INT --kill-after=15s 40m \
+        xcodebuild build-for-testing "${SETTINGS_PROJECT[@]}" \
+        -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+        -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
+        2>&1 | tee TestReceipts/settings-device-stack-build.log | xcbeautify || failed=1
     ;;
   settings-stack)
     # Distribution, so the optimizer produces the frame sizes that overflowed a
     # device's 1008 KiB main stack; project.yml gives simulator builds that stack.
     # DEBUG keeps the screenshot fixtures; testability lets the UI tests attach.
-    xcrun simctl boot "$IPAD_UDID" 2>/dev/null || true
-    xcrun simctl bootstatus "$IPAD_UDID" -b >/dev/null
+    # The test-run file uses __TESTROOT__ paths, so Build/Products is self-contained.
+    # Never infer a pass from a cache hit or fall back to a different configuration.
+    settings_runs=(.build-dd-settings-stack/Build/Products/Herdr_*.xctestrun)
+    if [ "${#settings_runs[@]}" -ne 1 ] || [ ! -f "${settings_runs[0]}" ]; then
+      echo "::error::expected one optimized Settings .xctestrun in Build/Products"
+      exit 1
+    fi
+    boot_simulator "$IPAD_UDID" TestReceipts/settings-device-stack-boot.log || exit 1
     xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
     xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
-    "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test \
-        -project Herdr.xcodeproj -scheme Herdr -configuration Distribution \
+    "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test-without-building -xctestrun "${settings_runs[0]}" \
         -destination "platform=iOS Simulator,id=$IPAD_UDID" \
-        -derivedDataPath .build-dd-settings-stack \
-        -clonedSourcePackagesDirPath SourcePackages \
         -parallel-testing-enabled NO \
         -test-timeouts-enabled YES \
         -default-test-execution-time-allowance 300 \
         -maximum-test-execution-time-allowance 600 \
         -resultBundlePath TestReceipts/settings-device-stack.xcresult \
         -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
-        ENABLE_TESTABILITY=YES 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG' \
-        CODE_SIGNING_ALLOWED=NO 2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
+        2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
     # XCTest activation can restart a crashed app and still report a pass.
     # Without a readable export the guard cannot tell, so that fails the shard too.
     if ! xcrun xcresulttool export attachments \

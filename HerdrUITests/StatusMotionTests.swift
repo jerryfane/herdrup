@@ -81,7 +81,7 @@ final class StatusMotionTests: XCTestCase {
         let app = launchList()
         let row = app.staticTexts["herdr-app"].firstMatch
         row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+        XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10),
                       "the pane should open")
         XCTAssertTrue(moves(dot(app)), "the working pane's dot pulses")
 
@@ -91,7 +91,7 @@ final class StatusMotionTests: XCTestCase {
         app.buttons["Agents"].firstMatch.tap()
         if !pad {
             row.tap()
-            XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+            XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10),
                           "the kept-alive pane should come back to the front")
         }
         XCTAssertTrue(moves(dot(app)), "back from Gram, the working pane's dot pulses again")
@@ -116,7 +116,7 @@ final class StatusMotionTests: XCTestCase {
         XCTAssertEqual(moving(app), 1, "the working row's ring turns on the roster")
 
         row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+        XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10),
                       "the pane should open")
         sleep(1)
         // iPad / Mac keep the roster beside the pane: its ring and the pane's dot. iPhone covers
@@ -139,7 +139,7 @@ final class StatusMotionTests: XCTestCase {
         XCTAssertTrue(moves(ring(app)), "back on Agents, the ring turns on screen")
         if !pad {
             row.tap()
-            XCTAssertTrue(app.descendants(matching: .any)["terminal-surface"].firstMatch.waitForExistence(timeout: 10),
+            XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10),
                           "the kept-alive pane should come back to the front")
             sleep(1)
             XCTAssertEqual(moving(app), 1, "the kept-alive pane's dot pulses again in front")
