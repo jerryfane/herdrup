@@ -42,7 +42,7 @@ final class StoreScreenshotTests: XCTestCase {
     }
 
     func testCaptureTerminal() {
-        capture("pane", named: "store-02-terminal") { $0.otherElements["terminal-surface"].exists || $0.staticTexts["Terminal"].exists }
+        capture("pane", named: "store-02-terminal") { $0.terminalSurface.exists || $0.staticTexts["Terminal"].exists }
     }
 
     func testCaptureGram() {

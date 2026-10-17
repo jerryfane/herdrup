@@ -136,6 +136,8 @@ The built-version check selects `Herdr.app`, not the separate UI test runner bun
 Gram search regressions check matching results and older-page fetch counts, not prompt wording.
 Gram state checks poll completed accessibility queries directly, preserving their conditions
 when a slow lookup consumes the waiter's deadline. Synchronous queries can exceed that deadline.
+Terminal UI queries match the exact `terminal-surface` accessibility identifier rather than
+searching unrelated labels and values. Focus, input and viewport assertions remain unchanged.
 
 The four simulator jobs run in parallel. Gram shares the iPhone terminal job; the other
 iPhone job runs font, status-motion and remaining app tests. A failed first run still fails
