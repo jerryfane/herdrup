@@ -101,6 +101,15 @@ final class AgentRosterScrollTests: XCTestCase {
         XCTAssertFalse(coalescingViolation.exists, "roster published while scrolling before the gesture began")
         XCTAssertTrue(armStress.waitForExistence(timeout: 3), "roster stress arm control was absent")
         armStress.tap()
+        // THE STRESS IS ARMED, OR NOTHING BELOW MEANS ANYTHING. An arm tap the system
+        // gesture gate cancelled (CI 39116174699) left the driver serving the stable
+        // roster for the whole scroll, and the test only noticed 60 s later, as a
+        // deferred row that was never promoted. Confirm the arm action ran here, where
+        // the failure names its real cause.
+        let armed = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "armed"), object: armStress)], timeout: 3)
+        XCTAssertEqual(armed, .completed,
+                       "the roster stress arm tap did not reach its action (value: \(armStress.value ?? "nil"))")
 
         for _ in 0..<18 {
             scroll.swipeUp()
