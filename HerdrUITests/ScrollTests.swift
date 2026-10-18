@@ -139,6 +139,43 @@ final class ScrollTests: XCTestCase {
             "No backfilled history to scroll into: content unchanged after swiping (diff=\(movedDiff)). The connect-time scrollback backfill did not populate SwiftTerm's scrollback.")
     }
 
+    /// The RECONNECT-HISTORY receipt. The `keyframehistory` mock drops its first stream right
+    /// after a screen-only keyframe, and only the keyframe of the in-place reconnect carries
+    /// history (`history_b64`); `agent.read` has none. A swipe can therefore reveal earlier
+    /// output only if the app seeds scrollback from a reconnect's keyframe. RED before that
+    /// (the history prepend ran on the first keyframe only, from the backfill); GREEN after.
+    func testReconnectKeyframeRestoresHistory() {
+        let app = XCUIApplication()
+        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "keyframehistory"
+        app.launch()
+        let viewport = app.terminalSurface
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
+        // Launch + the dropped stream + the reconnect's 0.3–0.5 s backoff + its keyframe.
+        Thread.sleep(forTimeInterval: 4.0)
+
+        let before = viewport.screenshot()
+        Thread.sleep(forTimeInterval: 1.0)
+        let beforeAgain = viewport.screenshot()
+        let idleDiff = pixelDiffFraction(before, beforeAgain)
+        attach(before, name: "kh-01-before")
+        XCTAssertLessThan(idleDiff, 0.02,
+            "Mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
+
+        let high = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        let low  = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        for _ in 0..<5 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        let after = viewport.screenshot()
+        attach(after, name: "kh-02-after-swipe")
+        let movedDiff = pixelDiffFraction(before, after)
+        XCTAssertGreaterThan(movedDiff, 0.10,
+            "No history after an in-place reconnect: content unchanged after swiping (diff=\(movedDiff)). The reconnect's keyframe history did not reach SwiftTerm's scrollback.")
+    }
+
     // MARK: - helpers
 
     private func attach(_ shot: XCUIScreenshot, name: String) {

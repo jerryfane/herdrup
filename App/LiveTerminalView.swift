@@ -988,6 +988,25 @@ struct LiveTerminalView: UIViewRepresentable {
             }
         }
 
+        /// Replace the emulator's scrollback with a keyframe's history: the rows directly
+        /// above the keyframe's screen, oldest first, already at its width.
+        ///
+        /// The rows must end up IN SCROLLBACK, not on screen, because the seed that follows
+        /// repaints the screen. After the last history row, `rows` line feeds scroll exactly
+        /// the history rows off the top — no more (blank rows below them stay on screen, and
+        /// the seed's clear erases them), no fewer, however short the history is.
+        private func seedKeyframeHistory(_ history: Data, rows: Int, into view: TerminalView) {
+            view.feed(byteArray: Self.historyResetSequence[...])
+            var clean = graphicsFilter.filter([UInt8](history)[...])
+            while let last = clean.last, last == 0x0A || last == 0x0D { clean.removeLast() }
+            guard !clean.isEmpty else { return }
+            view.feed(byteArray: clean[...])
+            // SGR reset first so the scrolled-in blank rows aren't tinted by the history's colours.
+            var push = [UInt8]("\u{1b}[0m".utf8)
+            for _ in 0..<max(rows, 1) { push.append(contentsOf: [0x0D, 0x0A]) }
+            view.feed(byteArray: push[...])
+        }
+
         /// Auto-reconnect. `reconnectAttempts` drives capped exponential backoff (reset once a
         /// fresh stream delivers a real `.reset`, i.e. it genuinely re-established). `lastStreamActivity`
         /// feeds the heartbeat watchdog: the server pings every 20s (`PING_INTERVAL`), so a long
@@ -2373,7 +2392,10 @@ struct LiveTerminalView: UIViewRepresentable {
                 do {
                     // Same viewerID as this view's set_pty_size: the daemon ties the
                     // width-lease taken by the resize to THIS stream, dropping it on close.
-                    for try await event in self.client.streamTerminal(pane: self.paneID, viewerID: self.viewerID) {
+                    // Every keyframe carries the history above its screen, so a reconnect
+                    // or a lagged re-seed restores scrollback, not just the visible rows.
+                    for try await event in self.client.streamTerminal(
+                        pane: self.paneID, scrollbackLines: Int(Self.backfillLines), viewerID: self.viewerID) {
                         if Task.isCancelled { return }
                         await self.handle(event)
                     }
@@ -2434,33 +2456,40 @@ struct LiveTerminalView: UIViewRepresentable {
                         continue
                     }
                     guard !self.fitsStreamWidth, self.claimsGeometry, !self.relockPending, self.resizeTask == nil,
-                          self.inflightTarget == nil, !self.presentationActive,
+                          self.inflightTarget == nil, self.keepaliveTask == nil, !self.presentationActive,
                           let target = self.confirmedTarget, self.desiredTarget == target,
                           target.cols >= 4, target.rows >= 2 else { continue }
-                    let task = Task { @MainActor [weak self] in
-                        guard let self, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry else { return }
-                        // Set before sending: a send that times out may still have reached the
-                        // daemon, so the later release must go out. A send the gate refused
-                        // (nil) provably did not, so the previous state is restored.
-                        let held = self.holdsClaim
-                        self.holdsClaim = true
-                        do {
-                            let sent = try await self.resizeGate.send {
-                                try await self.client.setPTYSize(
-                                    pane: self.paneID, cols: target.cols, rows: target.rows,
-                                    cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
-                                    lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
-                            }
-                            if sent == nil { self.holdsClaim = held }
-                        } catch {
-                            self.fallBackIfRefused()
-                        }
-                    }
-                    self.keepaliveTask = task
-                    await task.value
-                    self.keepaliveTask = nil
+                    await self.reassertClaim(target)
                 }
             }
+        }
+
+        /// Re-send the confirmed size as a lease keepalive. Shared by the heartbeat and by a
+        /// reconnect: closing a stream drops its viewer's lease on the server, so the pane goes
+        /// back to the other viewers' size until this view claims it again.
+        private func reassertClaim(_ target: TerminalGeometryTarget) async {
+            let task = Task { @MainActor [weak self] in
+                guard let self, !self.stopped, !self.fitsStreamWidth, self.claimsGeometry else { return }
+                // Set before sending: a send that times out may still have reached the
+                // daemon, so the later release must go out. A send the gate refused
+                // (nil) provably did not, so the previous state is restored.
+                let held = self.holdsClaim
+                self.holdsClaim = true
+                do {
+                    let sent = try await self.resizeGate.send {
+                        try await self.client.setPTYSize(
+                            pane: self.paneID, cols: target.cols, rows: target.rows,
+                            cellWidthPx: target.cellWidthPx, cellHeightPx: target.cellHeightPx,
+                            lock: true, viewerID: self.viewerID, ttl: self.leaseTTL)
+                    }
+                    if sent == nil { self.holdsClaim = held }
+                } catch {
+                    self.fallBackIfRefused()
+                }
+            }
+            keepaliveTask = task
+            await task.value
+            keepaliveTask = nil
         }
 
         /// Auto-restart a dropped or stuck stream with capped exponential backoff, instead of
@@ -2503,10 +2532,18 @@ struct LiveTerminalView: UIViewRepresentable {
                 if resizeTask == nil, desiredTarget != nil, desiredTarget != confirmedTarget {
                     resizeRetries = 0
                     startGeometryDrain()
+                } else if didSeedOnce, resizeTask == nil, inflightTarget == nil, keepaliveTask == nil,
+                          !relockPending, let target = confirmedTarget, desiredTarget == target,
+                          target.cols >= 4, target.rows >= 2 {
+                    // A RECONNECT. The old stream's close dropped this viewer's lease, so the
+                    // pane is back at the other viewers' size (often the desktop's). Claim it
+                    // again now rather than at the next heartbeat, up to 25 s away, which is
+                    // how long the terminal would otherwise be laid out for the wrong screen.
+                    Task { @MainActor [weak self] in await self?.reassertClaim(target) }
                 }
             case .frame(let frame):
                 switch frame {
-                case .reset(_, _, let cols, let rows, let data, _):
+                case .reset(_, _, let cols, let rows, let data, let history, _):
                     reconnectAttempts = 0   // a full keyframe = the stream genuinely (re)established
                     graphicsFilter.reset()  // fresh screen: abandon any graphics string split before this keyframe
                     let firstReset = !didSeedOnce
@@ -2527,7 +2564,14 @@ struct LiveTerminalView: UIViewRepresentable {
                     // A keyframe replaces the screen: whatever a pending resize was waiting
                     // to reveal describes a screen that no longer exists.
                     discardPresentationReadiness()
-                    if firstReset {
+                    if let history {
+                        // The keyframe carries the scrollback above its screen, captured with it
+                        // on the server. It REPLACES this emulator's history on every reset — the
+                        // first one, a reconnect, a lagged re-seed — so output that scrolled off
+                        // while the stream was down is never missing and nothing is doubled.
+                        if !stopped { seedKeyframeHistory(history, rows: rows, into: view) }
+                    } else if firstReset {
+                        // An older server sends no history: fall back to the separate backfill.
                         // History ABOVE the seed: feed it now so its lines scroll into SwiftTerm's
                         // scrollback; the ESC[2J below then erases only the overlapping VISIBLE rows
                         // (recent's bottom ≈ the current screen) in place — scrollback untouched — and
@@ -3558,6 +3602,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// keep no scrollback of their own regardless; scrolling THOSE is handled by
         /// `handleScrollPan`, which sends wheel/arrow scroll INTO the agent.)
         private static let clearSequence = [UInt8]("\u{1b}[2J\u{1b}[H".utf8)
+        /// Clear scrollback AND screen and home: the emulator's history is about to be
+        /// replaced wholesale by a keyframe's (`seedKeyframeHistory`).
+        private static let historyResetSequence = [UInt8]("\u{1b}[0m\u{1b}[3J\u{1b}[2J\u{1b}[H".utf8)
         /// The dim terminated marker shown when the process exits.
         private static let exitedNotice = [UInt8]("\r\n\u{1b}[2mprocess exited\u{1b}[0m\r\n".utf8)
 

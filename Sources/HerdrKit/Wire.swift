@@ -783,7 +783,9 @@ public struct StreamStarted: Decodable, Sendable, Equatable {
 public enum StreamFrame: Sendable, Equatable {
     /// Full-screen (re)seed. `lagged` = the client fell behind and the server
     /// dropped the backlog and re-seeded, so the caller should clear before feeding.
-    case reset(seq: UInt64, epoch: UInt64, cols: Int, rows: Int, data: Data, lagged: Bool)
+    /// `history` = the scrollback rows above this screen, oldest first, captured with
+    /// it (`scrollback_lines` requested); `nil` from a server that does not send it.
+    case reset(seq: UInt64, epoch: UInt64, cols: Int, rows: Int, data: Data, history: Data?, lagged: Bool)
     /// Raw PTY delta bytes, to be fed to the emulator in `seq` order.
     case data(seq: UInt64, epoch: UInt64, data: Data)
     /// In-band SIGWINCH: the PTY winsize changed at this offset.
@@ -798,6 +800,7 @@ extension StreamFrame: Decodable {
     private enum CodingKeys: String, CodingKey {
         case stream, frame, seq, epoch, cols, rows
         case dataB64 = "data_b64"
+        case historyB64 = "history_b64"
         case lagged
     }
 
@@ -823,12 +826,12 @@ extension StreamFrame: Decodable {
         let epoch = try c.decode(UInt64.self, forKey: .epoch)
         // `data_b64` is base64 of raw PTY bytes; on the frames that carry it it is
         // required AND must be valid base64, so a truncated payload fails loudly.
-        func payload() throws -> Data {
-            let b64 = try c.decode(String.self, forKey: .dataB64)
+        func payload(_ key: CodingKeys = .dataB64) throws -> Data {
+            let b64 = try c.decode(String.self, forKey: key)
             guard let bytes = Data(base64Encoded: b64) else {
                 throw DecodingError.dataCorruptedError(
-                    forKey: .dataB64, in: c,
-                    debugDescription: "data_b64 is not valid base64")
+                    forKey: key, in: c,
+                    debugDescription: "\(key.stringValue) is not valid base64")
             }
             return bytes
         }
@@ -838,7 +841,11 @@ extension StreamFrame: Decodable {
             let rows = try c.decode(Int.self, forKey: .rows)
             // Server omits `lagged` when false (skip_serializing_if is_false).
             let lagged = (try? c.decode(Bool.self, forKey: .lagged)) ?? false
-            self = .reset(seq: seq, epoch: epoch, cols: cols, rows: rows, data: try payload(), lagged: lagged)
+            // Absent from servers that do not window history into keyframes; present
+            // (possibly empty) once asked for, and then strict like `data_b64`.
+            let history = c.contains(.historyB64) ? try payload(.historyB64) : nil
+            self = .reset(seq: seq, epoch: epoch, cols: cols, rows: rows, data: try payload(),
+                          history: history, lagged: lagged)
         case "data":
             self = .data(seq: seq, epoch: epoch, data: try payload())
         case "resize":
