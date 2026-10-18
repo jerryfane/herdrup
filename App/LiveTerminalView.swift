@@ -855,6 +855,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Added to the sweep's reported duration, so the LAST animation frame is inside
         /// the window.
         static let keyboardSweepGrace: Duration = .milliseconds(80)
+        /// Consecutive rendered frames the pane must keep one size, past the window,
+        /// before the sweep is taken as finished. Two, so one frame in which the
+        /// animation produced no layout cannot pass for its end.
+        static let keyboardSweepStillFrames = 2
         /// Whether a keyboard sweep keeps the terminal live instead of covering it. iPhone
         /// only: its keyboard is always full-width and bottom-docked, so the pane shrinks
         /// from the bottom. iPad's floating/split keyboards can move without resizing the
@@ -2834,7 +2838,53 @@ struct LiveTerminalView: UIViewRepresentable {
             let backstop = window + Self.keyboardSweepGrace
             keyboardSweepDeadlineTask = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: backstop) } catch { return }
+                // THE END IS THE LAYOUT STANDING STILL, not the clock. The reported
+                // duration is when UIKit's animation ends, but the layout passes that
+                // carry it run on this main thread: when it is late, the band is still
+                // mid-sweep here, the sweep committed an intermediate fit and every
+                // later frame committed its own PTY resize (measured with the app
+                // stopped 200 ms in every 260 ms: sweep closed on 50x16, then 50x18 and
+                // 50x26 were each sent). Past the backstop, the sweep waits until the
+                // surface keeps one size across consecutive rendered frames, so it never
+                // closes earlier than before. The presentation ceiling bounds the wait,
+                // because a sweep that never settles must not hold its grid forever.
+                let ceiling = ContinuousClock.now + Self.presentationDeadlineDuration
+                var last = self?.surface?.bounds.size
+                var stillFrames = 0
+                while stillFrames < Self.keyboardSweepStillFrames, ContinuousClock.now < ceiling {
+                    await DisplayFrame.next()
+                    guard !Task.isCancelled, let self else { return }
+                    let size = self.surface?.bounds.size
+                    stillFrames = size == last ? stillFrames + 1 : 0
+                    last = size
+                }
+                guard !Task.isCancelled else { return }
                 self?.endKeyboardSweep()
+            }
+        }
+
+        /// Resumes on the next rendered frame. One display link per wait, invalidated on
+        /// its first tick; the link retains this object until then.
+        @MainActor
+        private final class DisplayFrame: NSObject {
+            private var continuation: CheckedContinuation<Void, Never>?
+            private var link: CADisplayLink?
+
+            static func next() async {
+                let frame = DisplayFrame()
+                await withCheckedContinuation { continuation in
+                    frame.continuation = continuation
+                    let link = CADisplayLink(target: frame, selector: #selector(tick))
+                    link.add(to: .main, forMode: .common)
+                    frame.link = link
+                }
+            }
+
+            @objc private func tick() {
+                link?.invalidate()
+                link = nil
+                continuation?.resume()
+                continuation = nil
             }
         }
 
