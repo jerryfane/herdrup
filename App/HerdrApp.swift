@@ -486,12 +486,17 @@ struct RootView: View {
                 // Let the UI test establish a real top-of-list precondition before
                 // scroll-time refreshes begin. This DEBUG-only transparent control
                 // avoids making corrective precondition gestures change the roster.
-                Button(action: Self.rosterStressDriver.arm) {
-                    Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Arm roster refresh stress")
-                .accessibilityIdentifier("roster-stress-arm")
+                RosterStressArmControl(driver: Self.rosterStressDriver)
+                    // CLEAR OF THE CONTROL CENTER CORNER. Pinned top-trailing it sat at
+                    // (380,84), inside the top-right region where a downward system swipe
+                    // starts, and a synthesized tap whose touch-up arrived late was taken
+                    // by the system gesture gate: CI 39116174699 logged `touch cancelled
+                    // ... _UISystemGestureGateGestureRecognizer=ended` for it, the driver
+                    // never armed, and the receipt failed later as "not promoted after
+                    // returning to idle". Inset from both edges, and trailing of the
+                    // rows' centre so it never covers a row's hit point.
+                    .padding(.top, 160)
+                    .padding(.trailing, 48)
             }
         case .pane:
             NavigationStack {
@@ -10335,6 +10340,27 @@ final class GramPagingMock: @unchecked Sendable {
             servedPages = max(servedPages, page)
             requests += 1
         }
+    }
+}
+
+/// The roster stress fixture's arm control. Its accessibility value says whether
+/// the arm action actually ran, so the UI test can confirm the precondition it depends
+/// on instead of finding a dropped tap only as a missing deferred row much later.
+struct RosterStressArmControl: View {
+    let driver: RosterStressDriver
+    @State private var armed = false
+
+    var body: some View {
+        Button {
+            driver.arm()
+            armed = true
+        } label: {
+            Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Arm roster refresh stress")
+        .accessibilityValue(armed ? "armed" : "idle")
+        .accessibilityIdentifier("roster-stress-arm")
     }
 }
 
