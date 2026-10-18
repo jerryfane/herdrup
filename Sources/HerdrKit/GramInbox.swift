@@ -65,11 +65,21 @@ public struct GramInbox: Sendable, Equatable {
 
     private var serverUnreadCount: Int?
     /// Ids marked read that the window does not hold, so a second mark of the same id
-    /// cannot decrement the daemon's count twice. Read-all marks deliberately twice —
-    /// a poll landing mid-pass reverts the local flips, so it re-applies them — and the
-    /// re-apply runs AFTER that poll, which is why this set survives a head answer and
-    /// is cleared only by a store swap.
+    /// cannot decrement the daemon's count twice. A later Read-all pass marks every id an
+    /// unread-only fetch still returns, and a daemon that answered that fetch before the
+    /// first mark landed returns this one again; that is why this set survives a head
+    /// answer and is cleared only by a store swap.
     private var readOutsideWindow: Set<String> = []
+
+    /// Counts local reads: `markRead` stamps each read it applies with the next value. A
+    /// head request reads it BEFORE it is sent and hands it back to `apply`, which can
+    /// then tell a read the answer could not have seen from one it reflects.
+    public private(set) var readStamp = 0
+    /// Ids read locally, with their stamp, until a head answer requested after the read
+    /// settles them. An answer requested BEFORE the read (a poll in flight while Read all
+    /// ran) still reports the row unread: adopting it as is put the count back up for a
+    /// whole poll interval after a fully successful pass.
+    private var localReads: [String: Int] = [:]
 
     /// Folds in an answer to a HEAD request — the first page, or an unpaged full list.
     /// Returns whether `messages` changed, so a caller can skip work (re-render, badge
@@ -85,8 +95,14 @@ public struct GramInbox: Sendable, Equatable {
     /// older pages come back from the sentinel as the reader scrolls. Unchanged answers
     /// carry no messages and leave everything, including deep pages, exactly as it is —
     /// which is the common case on a 6-second poll.
+    ///
+    /// `readStamp` is this inbox's `readStamp` as it was when the request was SENT; the
+    /// default treats the answer as requested after every local read. A row read locally
+    /// after that stays read: it is flipped only once the daemon confirmed its
+    /// `gram.mark_read`, so an answer still reporting it unread was computed before the
+    /// mark landed. Answers requested after the flip are the daemon's word and win.
     @discardableResult
-    public mutating func apply(_ answer: GramListAnswer) -> Bool {
+    public mutating func apply(_ answer: GramListAnswer, readStamp asked: Int = .max) -> Bool {
         // A store swap invalidates everything we hold, INCLUDING on an "unchanged"
         // answer. The daemon mixes its store id into the digest so it cannot happen
         // from that side, but a client that reconnected to a different machine must
@@ -98,11 +114,12 @@ public struct GramInbox: Sendable, Equatable {
             hasMore = false
             serverUnreadCount = nil
             readOutsideWindow = []
+            localReads = [:]
             generation += 1
         }
         if let incoming = answer.storeID { storeID = incoming }
 
-        guard let fresh = answer.messages else {
+        guard var fresh = answer.messages else {
             // Unchanged: keep the list AND the digest we already hold. Never treat
             // this as an empty inbox.
             //
@@ -116,11 +133,26 @@ public struct GramInbox: Sendable, Equatable {
             // the pre-mutation list.
             return false
         }
+        // A row read after the request went out that the answer still reports unread was
+        // counted before the mark landed: it stays read, and the daemon's count drops by
+        // it. An id the answer does not carry, or carries as read, is evidence of nothing
+        // and left to the daemon's count. Reads the answer could see are settled by it.
+        var unreadCount = answer.unreadCount
+        var heldRead = false
+        for (id, stamp) in localReads where stamp > asked {
+            guard let index = fresh.firstIndex(where: { $0.id == id }), fresh[index].isUnread else { continue }
+            fresh[index].readByOwner = true
+            if let count = unreadCount { unreadCount = max(0, count - 1) }
+            heldRead = true
+        }
+        localReads = localReads.filter { $0.value > asked }
         let changed = fresh != messages
         messages = fresh
-        digest = answer.digest
+        // A row held read is not the list the daemon fingerprinted: hold no digest, so the
+        // next poll is unconditional and brings the daemon's own word on it.
+        digest = heldRead ? nil : answer.digest
         hasLoaded = true
-        serverUnreadCount = answer.unreadCount
+        serverUnreadCount = unreadCount
         hasMore = answer.hasMore ?? false
         // ONLY on a real change. An identical answer leaves the oldest loaded row — and
         // therefore the cursor — exactly where it was, so a page fetch already in flight
@@ -182,8 +214,10 @@ public struct GramInbox: Sendable, Equatable {
         digest = nil
     }
 
-    /// Marks a message read locally. Same digest reasoning as `remove`, and the same
-    /// reason for moving the server count.
+    /// Marks a message read locally, once the daemon has confirmed `gram.mark_read` for
+    /// it. Same digest reasoning as `remove`, and the same reason for moving the server
+    /// count. Each read is stamped (`readStamp`), so a head answer requested before it
+    /// cannot flip the row back (`apply`).
     ///
     /// An id this inbox does not HOLD still counts. Read-all takes its ids from an
     /// unread-only fetch, so it legitimately marks messages older than the loaded page;
@@ -191,20 +225,19 @@ public struct GramInbox: Sendable, Equatable {
     /// pass, with the Read-all button still sitting there and nothing to explain it.
     ///
     /// IDEMPOTENT on both paths. A loaded row is guarded by `isUnread`; an out-of-window
-    /// id is remembered, because Read-all marks each id TWICE on purpose — a poll
-    /// landing mid-pass reverts the local flips, so it re-applies them — and a second
-    /// decrement would walk the badge to zero while the pass was still reporting
-    /// failures.
+    /// id is remembered, because the same id can be marked again (see
+    /// `readOutsideWindow`) and a second decrement would walk the badge to zero while a
+    /// pass was still reporting failures.
     public mutating func markRead(id: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else {
+        if let index = messages.firstIndex(where: { $0.id == id }) {
+            guard messages[index].isUnread else { return }
+            messages[index].readByOwner = true
+        } else {
             guard readOutsideWindow.insert(id).inserted else { return }
-            if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
-            digest = nil
-            return
         }
-        guard messages[index].isUnread else { return }
-        messages[index].readByOwner = true
         if let count = serverUnreadCount { serverUnreadCount = max(0, count - 1) }
         digest = nil
+        readStamp += 1
+        localReads[id] = readStamp
     }
 }

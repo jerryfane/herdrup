@@ -2241,11 +2241,13 @@ struct GramView: View {
             // walk them down again one page at a time. Refreshing the whole window keeps
             // their place and still costs a fraction of the store; beyond the daemon's
             // own clamp there is nothing to gain by asking for more.
+            // Reads confirmed while this request is out stay read (`GramInbox.apply`).
+            let readStamp = inboxStore.inbox.readStamp
             let answer = try await client.gramList(
                 ifUnchangedDigest: inboxStore.inbox.conditionalDigest,
                 limit: min(max(Self.pageSize, inboxStore.inbox.messages.count),
                            Self.maxRefreshLimit))
-            let changed = inboxStore.inbox.apply(answer)
+            let changed = inboxStore.inbox.apply(answer, readStamp: readStamp)
             // A saved copy whose file the store has since expired stops offering it.
             savedGrams.expireFiles(in: answer.messages ?? [])
             phase = .loaded
