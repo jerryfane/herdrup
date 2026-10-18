@@ -9771,11 +9771,23 @@ struct MockTransport: HerdrTransport {
             return Self.agentList
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
+        if requestLine.contains("gram.mark_read") {
+            Self.gramOwnerReads.markRead(Self.requestParamID(requestLine))
+            return #"{"id":"mock","result":{}}"#
+        }
         if requestLine.contains("gram.list") {
-            if Self.gramPaged { return Self.gramPagedList(requestLine) }
-            if Self.gramImageCount > 0 { return Self.gramListWithImages }
-            if Self.gramExpiresSaved { return await Self.gramListExpiringSaved() }
-            return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
+            // Read state as of when the request arrived, as the daemon computes it.
+            let reads = Self.gramOwnerReads.ids
+            let list: String
+            if Self.gramPaged { list = Self.gramPagedList(requestLine) }
+            else if Self.gramImageCount > 0 { list = Self.gramListWithImages }
+            else if Self.gramExpiresSaved { list = await Self.gramListExpiringSaved() }
+            else { list = Self.gramNewer ? Self.gramListWithNewer : Self.gramList }
+            let answer = Self.applyingOwnerReads(reads, to: list)
+            if Self.gramHoldsPollAcrossRead, Self.isGramHeadPoll(requestLine) {
+                await Self.gramOwnerReads.holdPastNextRead()
+            }
+            return answer
         }
         if requestLine.contains("gram.post") {
             Self.recordGramPost(requestLine)
@@ -10190,10 +10202,56 @@ struct MockTransport: HerdrTransport {
     private static let gramGetFileRecorder = GramGetFileRecorder()
 
     private static func recordGramGetFile(_ requestLine: String) -> String {
-        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
-        let id = (object?["params"] as? [String: Any])?["id"] as? String ?? ""
+        let id = requestParamID(requestLine)
         gramGetFileRecorder.record(id)
         return id
+    }
+
+    /// The request's `params.id` ("" when absent).
+    private static func requestParamID(_ requestLine: String) -> String {
+        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+        return (object?["params"] as? [String: Any])?["id"] as? String ?? ""
+    }
+
+    /// The ids `gram.mark_read` has marked: like the daemon, later `gram.list` answers report
+    /// them read. Without this every poll after a Read all put the count straight back.
+    private static let gramOwnerReads = GramOwnerReads()
+
+    /// `list` with the messages in `reads` marked read and `unread_count`, when the answer
+    /// carries one, lowered to match. Untouched (byte for byte) while nothing was read.
+    private static func applyingOwnerReads(_ reads: Set<String>, to list: String) -> String {
+        guard !reads.isEmpty,
+              var object = (try? JSONSerialization.jsonObject(with: Data(list.utf8))) as? [String: Any],
+              var result = object["result"] as? [String: Any],
+              var messages = result["messages"] as? [[String: Any]]
+        else { return list }
+        var newlyRead = 0
+        for index in messages.indices {
+            guard let id = messages[index]["id"] as? String, reads.contains(id),
+                  messages[index]["direction"] as? String == "agent_to_owner",
+                  messages[index]["read_by_owner"] as? Bool == false else { continue }
+            messages[index]["read_by_owner"] = true
+            newlyRead += 1
+        }
+        result["messages"] = messages
+        if let count = result["unread_count"] as? Int { result["unread_count"] = max(0, count - newlyRead) }
+        object["result"] = result
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return list }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `HERDR_MOCK_GRAM_HOLD_POLL=1`: every head `gram.list` after the page's first (its
+    /// polls, a Refresh) is answered with the read state of when it ARRIVED, held until a
+    /// second after the next `gram.mark_read` (or 4 s without one). A Refresh tapped just
+    /// before Read all is then in flight across the pass and lands after it, as a slow
+    /// round trip can.
+    static var gramHoldsPollAcrossRead: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_HOLD_POLL"] == "1"
+    }
+
+    /// The page's own refresh: not Read all's `unread_only` fetch, not an older page.
+    private static func isGramHeadPoll(_ requestLine: String) -> Bool {
+        !requestLine.contains("\"unread_only\":true") && !requestLine.contains("\"before_id\"")
     }
 
     /// `HERDR_MOCK_GRAM_FILE_DELAY=g3=10`: seconds `gram.get_file` waits before answering
@@ -10312,6 +10370,42 @@ final class GramPostRecorder: @unchecked Sendable {
 
     func append(to: String?, text: String) {
         lock.withLock { stored.append((to: to, text: text)) }
+    }
+}
+
+/// The mock daemon's read state: the ids `gram.mark_read` marked, which later `gram.list`
+/// answers report read (`MockTransport.applyingOwnerReads`), plus what
+/// `HERDR_MOCK_GRAM_HOLD_POLL` needs to hold a poll across the next mark.
+final class GramOwnerReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Set<String> = []
+    private var marks = 0
+    private var headLists = 0
+
+    var ids: Set<String> { lock.withLock { stored } }
+
+    func markRead(_ id: String) {
+        lock.withLock {
+            stored.insert(id)
+            marks += 1
+        }
+    }
+
+    /// The page's first head list answers at once. Every later one (a poll, a Refresh)
+    /// waits up to 4 s for the next `markRead`; when one comes, it answers a second after
+    /// it, past the end of a Read-all pass.
+    func holdPastNextRead() async {
+        let (first, marksBefore) = lock.withLock { () -> (Bool, Int) in
+            headLists += 1
+            return (headLists == 1, marks)
+        }
+        guard !first else { return }
+        let deadline = Date().addingTimeInterval(4)
+        while lock.withLock({ marks }) == marksBefore {
+            guard Date() < deadline else { return }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
 }
 
