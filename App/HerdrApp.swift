@@ -552,6 +552,14 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "backfill",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .keyframeHistory:
+            // A REAL SwiftTerm pane whose stream drops once and reconnects in place. History
+            // exists ONLY in the reconnect's keyframe — the reconnect-history receipt.
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(keyframeHistory: KeyframeHistoryDriver())),
+                                 paneID: "w1:p1", title: "keyframehistory",
+                                 agent: MockTransport.demoPaneAgent)
+            }
         case .paging:
             // Three distinctively-named agents in the real keep-mounted container. A swipe
             // fronts the neighbour and the header heading changes (ALFA→BRAVO→ALFA) — the
@@ -5787,11 +5795,11 @@ struct TerminalPaneContent: View {
                 // review. On iOS the process is SUSPENDED, so `lastFrameAt` freezes at the
                 // instant of suspension and never advances while away. Return within 50s and
                 // staleness reads false — yet the gap is real, because a suspended socket
-                // received nothing. The reconnect does not cover it either: startBackfill()
-                // runs only from `attach`, and the history prepend inside the .reset keyframe
-                // is gated on `firstReset`, so a mid-session reconnect repaints the visible
-                // screen and leaves the scrolled-off output missing. That would narrow #62's
-                // repair to backgrounds longer than 50s.
+                // received nothing. A daemon that windows history into its keyframes repairs
+                // that gap on the in-place reconnect; an older one does not (its reconnect
+                // repaints only the visible screen, the backfill runs only from `attach`), so
+                // a mid-session reconnect against it leaves the scrolled-off output missing.
+                // That would narrow #62's repair to backgrounds longer than 50s.
                 //
                 // So the two platforms are asked different questions, because their facts
                 // differ. On iOS a real background IS a real gap — always reseed, exactly as
@@ -9560,7 +9568,7 @@ struct HtmlPreviewHarness: View {
 #endif
 
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, gram, resize, control, htmlPreview, widgets
+    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, gram, resize, control, htmlPreview, widgets
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost, guestSettings
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
@@ -9620,6 +9628,11 @@ enum ScreenshotMock {
         // short one-screen seed, while agent.read (recent, ansi) returns ~1000 lines of history
         // — so scrollback the swipe reveals can ONLY have come from the connect-time backfill.
         case "backfill": return .backfill
+        // `keyframehistory` drives the reconnect-history receipt: agent.read has NO history,
+        // the first stream DROPS after its keyframe, and history arrives only inside the
+        // keyframes (`history_b64`) — so a swipe can reveal earlier output only if the app
+        // seeds scrollback from the keyframe of the in-place reconnect.
+        case "keyframehistory": return .keyframeHistory
         // `gram` renders the Gram page from a canned owner-view gram.list — the
         // messages, unread badge, claim states, and composer, for a layout FYI.
         case "gram": return .gram
@@ -9728,6 +9741,9 @@ struct MockTransport: HerdrTransport {
     /// guard must still let a tap take focus here, and two earlier versions of it did not.
     var busyOutput = false
     var backfill = false
+    /// When set, `pane.stream` carries history only inside its keyframes and drops the first
+    /// stream after its keyframe; `agent.read` returns no history. For the reconnect receipt.
+    var keyframeHistory: KeyframeHistoryDriver?
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
     var interactionDriver: TerminalInteractionDriver?
@@ -9813,6 +9829,7 @@ struct MockTransport: HerdrTransport {
         // what a quiet live pane looks like. This is what the ccDriver branch below has always
         // done, for the same reason.
         if requestLine.contains("pane.stream") {
+            if let keyframeHistory { return keyframeHistory.stream() }
             if let driver = ccDriver {
                 // Claude-Code stand-in: keep the stream OPEN so the driver can push
                 // redraws in response to wheel events the app sends.
@@ -10485,6 +10502,65 @@ final class RosterStressDriver: @unchecked Sendable {
             return MockTransport.agentList
         }
         return text
+    }
+}
+
+/// Stand-in for a daemon that windows history into its keyframes, for the reconnect receipt.
+/// The FIRST `pane.stream` delivers a screen-only keyframe and then ends — a dropped stream
+/// the app must reconnect in place (no remount, no backfill). Every later stream's keyframe
+/// carries 300 numbered history rows in `history_b64`. `agent.read` has no history, so
+/// scrollback can only come from the reconnect's keyframe.
+final class KeyframeHistoryDriver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opens = 0
+
+    func stream() -> AsyncThrowingStream<String, Error> {
+        let attempt: Int = lock.withLock {
+            opens += 1
+            return opens
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(MockTransport.paneStreamAck)
+            continuation.yield(Self.resetFrame(history: attempt > 1))
+            if attempt == 1 {
+                // Dropped: the app's in-place reconnect must recover the history.
+                continuation.finish()
+                return
+            }
+            let pings = Task {
+                var seq: UInt64 = 1
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    guard !Task.isCancelled else { break }
+                    continuation.yield(MockTransport.paneStreamPing(seq: seq, epoch: 7))
+                    seq += 1
+                }
+            }
+            continuation.onTermination = { _ in pings.cancel() }
+        }
+    }
+
+    /// Varied rows (like the backfill fixture) so distinct regions of history render
+    /// visibly differently and a scroll moves pixels; cursor hidden so frames are static.
+    private static func resetFrame(history: Bool) -> String {
+        let words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"]
+        var past = ""
+        if history {
+            for n in 1...300 {
+                let pad = String(repeating: "=", count: (n * 7) % 30)
+                past += "\u{1b}[3\(1 + n % 6)mhistory \(n) \(words[n % words.count]) \(pad)\u{1b}[0m\r\n"
+            }
+        }
+        var screen = "\u{1b}[?25l"
+        for n in 1...8 { screen += "live row \(n)\r\n" }
+        screen += "$ "
+        var object: [String: Any] = [
+            "stream": "pane.bytes", "frame": "reset", "seq": 0, "epoch": 7, "cols": 80, "rows": 24,
+            "data_b64": Data(screen.utf8).base64EncodedString(),
+        ]
+        if history { object["history_b64"] = Data(past.utf8).base64EncodedString() }
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
     }
 }
 
