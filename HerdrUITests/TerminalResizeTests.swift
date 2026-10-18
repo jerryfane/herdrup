@@ -54,12 +54,20 @@ class TerminalInteractionTestCase: XCTestCase {
     }
 
     /// Whether the probe satisfies `condition` within `timeout`, without failing the test.
+    ///
+    /// POLLS, AND JUDGES EVERY READ THAT WAS STARTED BEFORE THE DEADLINE. An
+    /// `XCTNSPredicateExpectation` gives up at its timeout even while a read is still in
+    /// flight: on a slow hosted runner one probe query took 14.3 s (CI 39150458634,
+    /// testDeleteNonASCIICompositionAndPasteDisarm, t=60.20→74.48). The receipt it then
+    /// returned already met the condition and had been stable for 73 s, yet the waiter
+    /// failed the test. Same timeout; the GramTests `waitForPredicate` pattern (#440).
     func holds(within timeout: TimeInterval, _ condition: @escaping ([String: Any]) -> Bool) -> Bool {
-        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { [weak self] _, _ in
-            guard let self else { return false }
-            return condition(self.probe())
-        }, object: nil)
-        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if condition(probe()) { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        return condition(probe())
     }
 
     /// Check geometry before hit testing: clipped quick keys can raise
