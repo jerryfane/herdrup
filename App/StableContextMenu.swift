@@ -88,6 +88,8 @@ private struct StableContextMenu: ViewModifier {
     /// view itself is hidden, as SwiftUI's `.contextMenu` does: nothing of it (a bubble's
     /// tail, a badge) shows beside the clipped preview.
     @State private var lifted = false
+    /// A disabled view offers no menu, and so no menu actions to VoiceOver either.
+    @Environment(\.isEnabled) private var isEnabled
 
     func body(content: Content) -> some View {
         content
@@ -101,7 +103,8 @@ private struct StableContextMenu: ViewModifier {
             // lists accessibility actions last-declared first, so they are declared in reverse
             // to read in the menu's order.
             .accessibilityActions {
-                ForEach(Array(Self.flattened(items()).reversed().enumerated()), id: \.offset) { _, entry in
+                ForEach(Array((isEnabled ? Self.flattened(items()) : []).reversed().enumerated()),
+                        id: \.offset) { _, entry in
                     Button(entry.title, action: entry.action)
                 }
             }
