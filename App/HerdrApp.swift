@@ -9898,14 +9898,25 @@ struct MockTransport: HerdrTransport {
                 // throws, which tears the stream down and reconnects, so my invented "append"
                 // yielded a reconnect loop and no output at all. The busy-pane test caught it by
                 // measuring its own premise (ydisp must advance) rather than assuming it.
+                //
+                // EVERY LINE LOOKS DIFFERENT, for the reason `scrollbackResetFrame` records.
+                // The lines used to share one sentence, so once the screen was full of them a
+                // 2 s window of real streaming (~16 rows of scroll) changed only the digits:
+                // CI 37732782216 measured diff=0.002 against the receipt's 0.005 floor while
+                // its attached screenshots showed lines 0003-0036 become 0023-0056. A per-line
+                // letter and bar length make a scroll change most rows, and the bar stays short
+                // enough not to wrap on a portrait iPhone grid.
                 let busy = Task { [busyOutput] in
                     guard busyOutput else { return }
                     var n = 1
                     var seq: UInt64 = 10_000
+                    let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
                     while !Task.isCancelled {
                         try? await Task.sleep(nanoseconds: 120_000_000)
                         guard !Task.isCancelled else { break }
-                        let line = String(format: "BUSY line %04d  the agent is still working\r\n", n)
+                        let letter = letters[n % letters.count]
+                        let bar = String(repeating: letter, count: 4 + (n * 7) % 26)
+                        let line = String(format: "BUSY line %04d %@ %@\r\n", n, String(letter), bar)
                         let b64 = Data(line.utf8).base64EncodedString()
                         continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"data\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
                         n += 1; seq += 1
