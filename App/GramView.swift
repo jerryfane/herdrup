@@ -272,6 +272,11 @@ struct GramView: View {
     /// The message id whose file the owner is opening or saving, to show its card's ring.
     /// One at a time; the image prefetch never takes this slot.
     @State private var downloadingFileFor: String?
+    #if DEBUG
+    /// Bumped at each touch-down under the HERDR_REDRAW_ON_TOUCH mock knob: a page pass, as
+    /// a poll landing mid-tap would make (DebugTouchRedraw).
+    @State private var debugTouchRedraws = 0
+    #endif
     /// Bytes of the reply received so far for the in-flight download, against the
     /// bytes expected. The daemon returns a file in ONE base64 reply, so this counts
     /// SSH channel bytes — about 4/3 of the file — which is the only progress signal
@@ -487,6 +492,9 @@ struct GramView: View {
     var body: some View {
         // Observe the text-size setting so Gram re-renders at the new Typography.scale.
         let _ = uiFontScale
+        #if DEBUG
+        let _ = debugTouchRedraws
+        #endif
         return Group {
             if hSizeClass == .regular {
                 iPadBody
@@ -498,6 +506,11 @@ struct GramView: View {
         .background { gramKeyboardShortcuts }
         #if DEBUG
         .overlay(alignment: .topLeading) { postCallsProbeView }
+        // Mock knob HERDR_REDRAW_ON_TOUCH: a Gram pass at every touch-down (DebugTouchRedraw).
+        .onAppear { DebugTouchRedraw.installIfEnabled() }
+        .onReceive(NotificationCenter.default.publisher(for: DebugTouchRedraw.touchDown)) { _ in
+            debugTouchRedraws &+= 1
+        }
         #endif
         // Poll while the page is open so new agent messages appear without a manual
         // refresh (the gram store has no event stream); the loop ends when the view
@@ -3747,33 +3760,27 @@ struct GramRow: View, Equatable {
                     GramSavedBadge().offset(x: 15, y: -17)
                 }
             }
-            .contentShape(.contextMenuPreview, bubbleShape)
-            .contextMenu { menu }
+            // Never rebuilt by a feed pass while open (see StableContextMenu.swift); the
+            // preview lifts the bubble's shape.
+            .stableContextMenu(previewCornerRadius: GramBubble.radius) { menu }
             .frame(maxWidth: maxWidth, alignment: mine ? .trailing : .leading)
     }
 
     /// The message's one menu, on every part of it (the attachment cards included): the
     /// file's Save to Files, then the message actions.
-    @ViewBuilder
-    private var menu: some View {
+    @StableMenuBuilder
+    private var menu: [StableMenuItem] {
         if message.file != nil {
-            Button(action: onSaveFile) {
-                Label("Save to Files", systemImage: "square.and.arrow.down")
-            }
+            StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
         }
         if !message.text.isEmpty {
-            Button {
+            StableMenuItem("Copy", systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = message.text
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
             }
         }
-        Button(action: onToggleSave) {
-            Label(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark")
-        }
-        Button(role: .destructive, action: onDelete) {
-            Label("Delete", systemImage: "trash")
-        }
+        StableMenuItem(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark",
+                       action: onToggleSave)
+        StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
     }
 
     /// The text and any card file (a document, or a file the store expired): a plain bubble

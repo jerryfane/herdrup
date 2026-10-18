@@ -264,12 +264,11 @@ private struct GuestGramRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.hairlineQuiet, lineWidth: 1))
-        // Not rebuilt by the feed's polls while open (see StableMenuItems); Copy has no
-        // client to go stale.
-        .stableContextMenu(key: message.text) {
+        // Never rebuilt by the feed's polls while open (see StableContextMenu.swift).
+        .stableContextMenu {
             if !message.text.isEmpty {
-                Button { UIPasteboard.general.string = message.text } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+                StableMenuItem("Copy", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = message.text
                 }
             }
         }

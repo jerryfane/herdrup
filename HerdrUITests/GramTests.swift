@@ -929,7 +929,9 @@ final class GramTests: XCTestCase {
     /// Saving a message from its menu redraws that row with the saved badge, and unsaving
     /// removes it. Guards GramRow's `==`: a row that skipped `isSaved` would stay stale.
     func testSavingAMessageRedrawsItsBadge() {
-        let app = launchGram()
+        // A Gram pass at every touch-down (as a poll landing mid-tap): the open menu must
+        // still take the tap (#437).
+        let app = launchGram(environment: ["HERDR_REDRAW_ON_TOUCH": "1"])
         let bubble = app.descendants(matching: .any)["gram-bubble-g1"]
         XCTAssertTrue(bubble.waitForExistence(timeout: 10), "the newest message should draw")
         let badge = bubble.descendants(matching: .any)["gram-saved-badge"]
