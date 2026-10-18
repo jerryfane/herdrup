@@ -165,50 +165,61 @@ final class GramTests: XCTestCase {
     /// iPhone it is in the sheet the header's "Gram ›" pill opens, and its value is the unread
     /// count ("3 unread", empty at zero).
     ///
-    /// The button's presence is only STABLE after the first poll, and the test waits for that
-    /// deliberately: at launch the unread messages' own rows mark themselves read within a
-    /// moment (`markReadIfNeeded` from `onAppear`), which drives the count to zero and removes
-    /// the button — so a tap aimed at the launch-time button can miss. The mock's `gram.list` is
-    /// a CONSTANT that always reports g2–g4 unread, so the 6-second poll restores it, and because
-    /// the rows' identity is unchanged `onAppear` does not fire again: from then on the button
-    /// stays up. The retry exists because the same poll also re-creates it a few seconds after a
-    /// successful pass; each attempt guards `exists`/`isHittable` so a vanished button re-enters
-    /// the loop instead of failing the test on an unrecoverable `tap()`.
+    /// Fourteen newer messages (`HERDR_MOCK_GRAM_NEWER`) keep the unread ones above the fold,
+    /// so their rows do not mark themselves read on screen first and Read all has them to
+    /// clear. The mock keeps what `gram.mark_read` marked, as the daemon does, so the count
+    /// stays at zero once cleared.
     func testGramReadAllClearsTheUnreadCount() {
-        let app = launchGram()
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_NEWER": "1"])
+        let readAll = tapReadAll(app)
+        XCTAssertTrue(waitUntilNothingUnread(readAll, timeout: 4),
+                      "tapping Read all should drive the unread count to zero")
+    }
 
-        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10),
+    /// A poll in flight across Read all must not bring the count back: its answer was
+    /// computed before the marks landed. `HERDR_MOCK_GRAM_HOLD_POLL` holds a head list
+    /// until a second after the first `gram.mark_read`; Refresh, in the same sheet just
+    /// above Read all, starts one right before the tap. iPhone only: the sheet holds both.
+    func testAPollInFlightDuringReadAllDoesNotBringTheCountBack() throws {
+        try XCTSkipIf(hasSidebar, "Refresh and Read all share the iPhone pill's sheet")
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_NEWER": "1", "HERDR_MOCK_GRAM_HOLD_POLL": "1"])
+        let refresh = app.buttons["Refresh"].firstMatch
+        let readAll = tapReadAll(app, after: refresh)
+        XCTAssertTrue(waitUntilNothingUnread(readAll, timeout: 4),
+                      "tapping Read all should drive the unread count to zero")
+        // The held list lands a second after the first mark: past it, the count is still zero.
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            XCTAssertTrue(waitUntilNothingUnread(readAll, timeout: 0),
+                          "a poll requested before Read all brought the count back: \(readAll.exists ? (readAll.value as? String ?? "") : "Read all is back")")
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+
+    /// Waits for the mock inbox, opens Read all (iPhone: in the pill's sheet), checks it has
+    /// a count to clear, taps `first` if given (a button beside it), then taps Read all once.
+    private func tapReadAll(_ app: XCUIApplication, after first: XCUIElement? = nil) -> XCUIElement {
+        XCTAssertTrue(app.descendants(matching: .any)["gram-bubble-gn14"].waitForExistence(timeout: 10),
                       "the Gram page should load the mock inbox")
-
         let readAll = app.buttons["Read all"].firstMatch
-        let pill = app.buttons["gram-header-pill"]
         if !hasSidebar {
+            let pill = app.buttons["gram-header-pill"]
             XCTAssertTrue(pill.waitForExistence(timeout: 5), "the header should show the Gram pill")
             XCTAssertEqual(pill.label, "Gram")
+            pill.tap()
         }
-        var cleared = false
-        for _ in 0..<4 {
-            // iPhone: Read all lives in the pill's sheet; (re)open it when it is not up.
-            if !hasSidebar, !readAll.exists, pill.exists, pill.isHittable {
-                pill.tap()
-            }
-            // One poll interval plus slack, so this waits out the launch-time flip described
-            // above rather than racing it.
-            guard readAll.waitForExistence(timeout: 14), readAll.isHittable, readAll.isEnabled else {
-                Thread.sleep(forTimeInterval: 1.0)
-                continue
-            }
-            if !hasSidebar {
-                // The count is there to clear: the value names it before the tap.
-                guard (readAll.value as? String)?.contains("unread") == true else {
-                    Thread.sleep(forTimeInterval: 1.0)
-                    continue
-                }
-            }
-            readAll.tap()
-            if waitUntilNothingUnread(readAll, timeout: 4) { cleared = true; break }
+        // The count is there to clear: iPhone's value names it, iPad's button shows only then.
+        let pending = hasSidebar
+            ? NSPredicate(format: "exists == true")
+            : NSPredicate(format: "exists == true AND value CONTAINS %@", "unread")
+        XCTAssertTrue(waitForPredicate(pending, object: readAll, timeout: 5),
+                      "Read all should offer unread messages to clear; says \(readAll.exists ? (readAll.value as? String ?? "") : "nothing")")
+        if let first {
+            XCTAssertTrue(first.isHittable, "\(first) should sit beside Read all")
+            first.tap()
         }
-        XCTAssertTrue(cleared, "tapping Read all should drive the unread count to zero")
+        readAll.tap()
+        return readAll
     }
 
     /// iPhone: with Saved showing, the header pill says so ("Saved ›", spoken "Saved"); back
@@ -918,7 +929,9 @@ final class GramTests: XCTestCase {
     /// Saving a message from its menu redraws that row with the saved badge, and unsaving
     /// removes it. Guards GramRow's `==`: a row that skipped `isSaved` would stay stale.
     func testSavingAMessageRedrawsItsBadge() {
-        let app = launchGram()
+        // A Gram pass at every touch-down (as a poll landing mid-tap): the open menu must
+        // still take the tap (#437).
+        let app = launchGram(environment: ["HERDR_REDRAW_ON_TOUCH": "1"])
         let bubble = app.descendants(matching: .any)["gram-bubble-g1"]
         XCTAssertTrue(bubble.waitForExistence(timeout: 10), "the newest message should draw")
         let badge = bubble.descendants(matching: .any)["gram-saved-badge"]

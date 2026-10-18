@@ -326,4 +326,69 @@ final class GramInboxTests: XCTestCase {
         inbox.appendPage(page([try message("b")], hasMore: false, digest: "page"), generation: inbox.generation)
         XCTAssertEqual(inbox.conditionalDigest, "head")
     }
+
+    // MARK: - Reads a poll answer could not have seen
+
+    private func counted(_ messages: [GramMessage], unread: Int) -> GramListAnswer {
+        GramListAnswer(messages: messages, digest: "d", storeID: "store-1", unreadCount: unread)
+    }
+
+    /// A poll sent BEFORE a confirmed read answers with the row still unread. Read all
+    /// finished, then that answer landed and put the count back up for a poll interval.
+    func testAnswerRequestedBeforeAReadKeepsItRead() throws {
+        var inbox = GramInbox()
+        inbox.apply(counted([try message("a"), try message("b")], unread: 2))
+        let asked = inbox.readStamp
+        inbox.markRead(id: "a")
+        inbox.markRead(id: "b")
+        XCTAssertEqual(inbox.unreadCount, 0)
+
+        inbox.apply(counted([try message("a"), try message("b")], unread: 2), readStamp: asked)
+        XCTAssertEqual(inbox.unreadCount, 0, "a stale answer must not undo a confirmed read")
+        XCTAssertFalse(inbox.messages.contains(where: \.isUnread))
+        XCTAssertNil(inbox.conditionalDigest,
+                     "the held rows are not the list the daemon fingerprinted: the next poll is unconditional")
+    }
+
+    /// An answer requested AFTER the read is the daemon's word, even when it says unread
+    /// (another client, or a daemon that lost the mark): it wins, and the read is settled.
+    func testAnswerRequestedAfterAReadWins() throws {
+        var inbox = GramInbox()
+        inbox.apply(counted([try message("a")], unread: 1))
+        inbox.markRead(id: "a")
+        let asked = inbox.readStamp
+        inbox.apply(counted([try message("a")], unread: 1), readStamp: asked)
+        XCTAssertEqual(inbox.unreadCount, 1)
+        XCTAssertTrue(inbox.messages[0].isUnread)
+        XCTAssertEqual(inbox.conditionalDigest, "d")
+
+        // Settled: a later answer, however old its request, no longer carries the read.
+        inbox.apply(counted([try message("a")], unread: 1), readStamp: 0)
+        XCTAssertEqual(inbox.unreadCount, 1)
+    }
+
+    /// A stale answer that already reports the row read is taken as is: the daemon's
+    /// count reflects it, so it is not decremented a second time.
+    func testStaleAnswerThatAlreadySawTheReadIsNotCountedTwice() throws {
+        var inbox = GramInbox()
+        inbox.apply(counted([try message("a"), try message("b")], unread: 2))
+        let asked = inbox.readStamp
+        inbox.markRead(id: "a")
+        inbox.apply(counted([try message("a", unread: false), try message("b")], unread: 1), readStamp: asked)
+        XCTAssertEqual(inbox.unreadCount, 1)
+        XCTAssertEqual(inbox.conditionalDigest, "d")
+    }
+
+    /// An id outside the window (Read all marks older unread ones too) is evidence of
+    /// nothing in an answer that does not carry it: the daemon's count stands.
+    func testStaleAnswerLeavesAnOutOfWindowReadToTheDaemonsCount() throws {
+        var inbox = GramInbox()
+        inbox.apply(counted([try message("a")], unread: 2))
+        let asked = inbox.readStamp
+        inbox.markRead(id: "old")
+        XCTAssertEqual(inbox.unreadCount, 1)
+        inbox.apply(counted([try message("a")], unread: 1), readStamp: asked)
+        XCTAssertEqual(inbox.unreadCount, 1)
+        XCTAssertTrue(inbox.messages[0].isUnread)
+    }
 }

@@ -486,12 +486,17 @@ struct RootView: View {
                 // Let the UI test establish a real top-of-list precondition before
                 // scroll-time refreshes begin. This DEBUG-only transparent control
                 // avoids making corrective precondition gestures change the roster.
-                Button(action: Self.rosterStressDriver.arm) {
-                    Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Arm roster refresh stress")
-                .accessibilityIdentifier("roster-stress-arm")
+                RosterStressArmControl(driver: Self.rosterStressDriver)
+                    // CLEAR OF THE CONTROL CENTER CORNER. Pinned top-trailing it sat at
+                    // (380,84), inside the top-right region where a downward system swipe
+                    // starts, and a synthesized tap whose touch-up arrived late was taken
+                    // by the system gesture gate: CI 39116174699 logged `touch cancelled
+                    // ... _UISystemGestureGateGestureRecognizer=ended` for it, the driver
+                    // never armed, and the receipt failed later as "not promoted after
+                    // returning to idle". Inset from both edges, and trailing of the
+                    // rows' centre so it never covers a row's hit point.
+                    .padding(.top, 160)
+                    .padding(.trailing, 48)
             }
         case .pane:
             NavigationStack {
@@ -923,12 +928,10 @@ struct ConnectView: View {
                     .buttonStyle(ConnectRowButtonStyle(held: false))
                     .disabled(connecting != nil)
                     .accessibilityIdentifier("shared-machine-row")
-                    // Not rebuilt by unrelated redraws while open: see StableMenuItems.
-                    // The store is a singleton, so an older copy of the item acts the same.
-                    .stableContextMenu(key: access) {
-                        Button(role: .destructive) { sharedMachines.remove(access) } label: {
-                            Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
-                        }
+                    // Never rebuilt while open: see StableContextMenu.swift.
+                    .stableContextMenu {
+                        StableMenuItem("Leave share", systemImage: "rectangle.portrait.and.arrow.right",
+                                       role: .destructive) { sharedMachines.remove(access) }
                     }
                 }
             }
@@ -1185,16 +1188,11 @@ struct ConnectView: View {
         .buttonStyle(ConnectRowButtonStyle(held: busy))
         .disabled(connecting != nil)
         .accessibilityValue(busy ? "Connecting" : "")
-        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Not rebuilt by
-        // unrelated redraws while open (see StableMenuItems); the items write state or the
-        // singleton store only.
-        .stableContextMenu(key: saved) {
-            Button { editorTarget = .edit(saved) } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            Button(role: .destructive) { savedHosts.delete(saved) } label: {
-                Label("Remove", systemImage: "trash")
-            }
+        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Never rebuilt
+        // while open (see StableContextMenu.swift).
+        .stableContextMenu {
+            StableMenuItem("Edit", systemImage: "pencil") { editorTarget = .edit(saved) }
+            StableMenuItem("Remove", systemImage: "trash", role: .destructive) { savedHosts.delete(saved) }
         }
     }
 
@@ -1927,18 +1925,10 @@ struct TerminalHomeView: View {
     /// The archived row awaiting Close confirmation.
     @State private var forgetCandidate: AgentRow?
     /// A long-press menu action that talks to the daemon, run by `.onChange(of: menuAction)`
-    /// on the current client. The menus only set it: an open menu may hold an older copy of
-    /// this view (StableMenuItems), whose `client` may be a replaced one.
+    /// on the current client. The menus only set it.
     @State private var menuAction: RosterMenuAction?
     enum RosterMenuAction: Equatable {
         case stop(AgentRow), archive(AgentRow), unarchive(AgentRow), closeTerminal(SavedTerminal)
-    }
-    /// What an agent row's long-press menu shows; it is rebuilt only when this changes.
-    struct AgentMenuKey: Equatable {
-        let row: AgentRow
-        let transferSupported: Bool
-        let transferTargets: [AgentSessionTransferHarness]
-        let swapTargets: [CredentialAccount]
     }
     @State private var sessionTransferHarnesses: Set<AgentSessionTransferHarness> = []
     @State private var checkedSessionTransferCapability = false
@@ -3940,16 +3930,17 @@ struct TerminalHomeView: View {
                         terminalCard(terminal)
                     }
                     .buttonStyle(.plain)
-                    // Items only write state (see StableMenuItems and `menuAction`).
-                    .stableContextMenu(key: terminal) {
+                    // Items only write state (see `menuAction`); never rebuilt while open
+                    // (StableContextMenu.swift).
+                    .stableContextMenu {
                         // Rename = set the pane's daemon `label` (shown in `herdr pane list`) so you
                         // can tell an agent to check this terminal by name, + the app-local row label.
-                        Button {
+                        StableMenuItem("Rename", systemImage: "pencil") {
                             renameTarget = .terminal(terminal)
-                        } label: { Label("Rename", systemImage: "pencil") }
-                        Button(role: .destructive) {
+                        }
+                        StableMenuItem("Close terminal", systemImage: "xmark.circle", role: .destructive) {
                             menuAction = .closeTerminal(terminal)
-                        } label: { Label("Close terminal", systemImage: "xmark.circle") }
+                        }
                     }
                 }
             }
@@ -3974,14 +3965,15 @@ struct TerminalHomeView: View {
             if !archivedCollapsed {
                 ForEach(fullList.archived) { row in
                     archivedCard(row)
-                        // Items only write state (see StableMenuItems and `menuAction`).
-                        .stableContextMenu(key: StableMenuKey(row, forgetSupported)) {
-                            Button { menuAction = .unarchive(row) } label: {
-                                Label("Unarchive", systemImage: "arrow.uturn.up")
+                        // Items only write state (see `menuAction`); never rebuilt while open
+                        // (StableContextMenu.swift).
+                        .stableContextMenu {
+                            StableMenuItem("Unarchive", systemImage: "arrow.uturn.up") {
+                                menuAction = .unarchive(row)
                             }
                             if forgetSupported {
-                                Button(role: .destructive) { forgetCandidate = row } label: {
-                                    Label("Close", systemImage: "xmark")
+                                StableMenuItem("Close", systemImage: "xmark", role: .destructive) {
+                                    forgetCandidate = row
                                 }
                             }
                         }
@@ -4151,29 +4143,24 @@ struct TerminalHomeView: View {
                     // to prove an existing row moved, independently of row count.
                     .accessibilityValue(row.group.label)
                     // Long-press an agent → quick actions. Items only write state (see
-                    // StableMenuItems and `menuAction`); the key is everything they show.
-                    .stableContextMenu(key: AgentMenuKey(
-                        row: row,
-                        transferSupported: sessionTransferSupported,
-                        transferTargets: sessionTransferTargets(for: row.info),
-                        swapTargets: accounts.filter { $0.kind == row.info.agent }
-                    )) {
+                    // `menuAction`); never rebuilt while open (StableContextMenu.swift).
+                    .stableContextMenu {
                         // Stop = close the pane (`pane.close`, the only stop RPC — its
                         // inverse is start), then reload.
-                        Button(role: .destructive) {
+                        StableMenuItem("Stop agent", systemImage: "stop.circle", role: .destructive) {
                             menuAction = .stop(row)
-                        } label: { Label("Stop agent", systemImage: "stop.circle") }
+                        }
                         // Rename = set the agent's daemon `name`, which becomes a resolvable
                         // mention target (another agent can `herdr agent read <name>`).
-                        Button {
+                        StableMenuItem("Rename", systemImage: "pencil") {
                             renameTarget = .agent(row)
-                        } label: { Label("Rename", systemImage: "pencil") }
+                        }
                         // Restart = close the agent's session and reopen it with
                         // --resume in place (keeps the pane). It interrupts a busy
                         // agent's turn, so it routes through a confirmation.
-                        Button {
+                        StableMenuItem("Restart agent", systemImage: "arrow.clockwise") {
                             restartCandidate = row
-                        } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
+                        }
                         // Harness transfer is deliberately not a restart shortcut. It
                         // first builds and verifies a native destination transcript,
                         // then opens a review sheet whose explicit confirm performs the
@@ -4186,25 +4173,21 @@ struct TerminalHomeView: View {
                            (sessionTransferSupported || hasActiveTransfer),
                            let source = sessionTransferSource(for: row.info),
                            !transferTargets.isEmpty {
-                            Menu {
-                                ForEach(transferTargets, id: \.rawValue) { target in
-                                    Button {
+                            StableMenuItem(
+                                submenu: transferTargets.count == 1
+                                    ? "Switch to \(transferTargets[0].displayName)"
+                                    : "Switch harness",
+                                systemImage: "arrow.left.arrow.right"
+                            ) {
+                                for target in transferTargets {
+                                    StableMenuItem(target.displayName, systemImage: "arrow.right") {
                                         transferCandidate = PendingHarnessTransfer(
                                             row: row,
                                             source: source,
                                             target: target
                                         )
-                                    } label: {
-                                        Label(target.displayName, systemImage: "arrow.right")
                                     }
                                 }
-                            } label: {
-                                Label(
-                                    transferTargets.count == 1
-                                        ? "Switch to \(transferTargets[0].displayName)"
-                                        : "Switch harness",
-                                    systemImage: "arrow.left.arrow.right"
-                                )
                             }
                         }
                         // Swap = restart the agent onto a DIFFERENT credential account
@@ -4220,31 +4203,29 @@ struct TerminalHomeView: View {
                         // account restarts (interrupts) the agent rather than being a no-op.
                         let swapTargets = accounts.filter { $0.kind == row.info.agent }
                         if !swapTargets.isEmpty {
-                            Menu {
-                                ForEach(swapTargets) { acct in
-                                    Button {
+                            StableMenuItem(submenu: "Swap subscription", systemImage: "arrow.left.arrow.right") {
+                                for acct in swapTargets {
+                                    StableMenuItem(
+                                        acct.label
+                                            + (acct.id == row.info.account ? " (current)" : "")
+                                            + (acct.active ? "" : " (exhausted)"),
+                                        systemImage: acct.id == row.info.account
+                                            ? "person.crop.circle.fill"
+                                            : "person.crop.circle"
+                                    ) {
                                         swapCandidate = PendingSwap(row: row, account: acct)
-                                    } label: {
-                                        Label(
-                                            acct.label
-                                                + (acct.id == row.info.account ? " (current)" : "")
-                                                + (acct.active ? "" : " (exhausted)"),
-                                            systemImage: acct.id == row.info.account
-                                                ? "person.crop.circle.fill"
-                                                : "person.crop.circle"
-                                        )
                                     }
                                 }
-                            } label: { Label("Swap subscription", systemImage: "arrow.left.arrow.right") }
+                            }
                         }
                         // Archive = release the pane but PRESERVE the session so it can be
                         // resumed later (`agent.archive`, issue #173). Reversible via the
                         // Archived section's Unarchive, so it fires directly (no confirm).
                         // The daemon REJECTS archiving a mid-turn agent unless forced, so a
                         // working agent surfaces that error rather than being torn off a turn.
-                        Button {
+                        StableMenuItem("Archive", systemImage: "archivebox") {
                             menuAction = .archive(row)
-                        } label: { Label("Archive", systemImage: "archivebox") }
+                        }
                     }
                 }
             }
@@ -4839,45 +4820,6 @@ struct TerminalHomeView: View {
             } while buffer.reloadAgain && !Task.isCancelled
             buffer.reloadTask = nil
         }
-    }
-}
-
-/// A long-press menu's items, rebuilt only when `key` (what the menu shows) changes.
-///
-/// A MENU MUST NOT BE REBUILT WHILE IT IS OPEN. Built inline, a `.contextMenu` builder runs
-/// on every body pass of the view that holds it: in TerminalHomeView each roster poll (5 s,
-/// with `rosterNow`), each load, each state write. A pass landing while the menu was up
-/// rebuilt its items under the finger, and a tap in flight was dropped: the menu stayed
-/// open and nothing happened (ArchivedCloseTests on CI's iPhone; the DEBUG
-/// `HERDR_REDRAW_ON_TOUCH` knob makes it happen on every tap). The item closures are left
-/// out of `==`, so an open menu may hold an older copy: they must only write @State
-/// (stable storage), and the work runs from the holder's `.onChange`, on its current
-/// client.
-struct StableMenuItems<Key: Equatable, Items: View>: View, Equatable {
-    let key: Key
-    @ViewBuilder let items: () -> Items
-
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
-
-    var body: some View { items() }
-}
-
-/// Two values as one menu key.
-struct StableMenuKey<First: Equatable, Second: Equatable>: Equatable {
-    let first: First
-    let second: Second
-    init(_ first: First, _ second: Second) {
-        self.first = first
-        self.second = second
-    }
-}
-
-extension View {
-    /// `.contextMenu` whose items are rebuilt only when `key` changes: see StableMenuItems.
-    func stableContextMenu<Key: Equatable, Items: View>(
-        key: Key, @ViewBuilder items: @escaping () -> Items
-    ) -> some View {
-        contextMenu { StableMenuItems(key: key, items: items).equatable() }
     }
 }
 
@@ -8373,39 +8315,37 @@ struct SettingsView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                         accountRow(account)
-                            // Items only write state; rebuilt only when what they show
-                            // changes (see StableMenuItems).
-                            .stableContextMenu(key: StableMenuKey(
-                                account, agents.contains(where: { $0.agent == account.kind }))) {
+                            // Items only write state; never rebuilt while open (see
+                            // StableContextMenu.swift).
+                            .stableContextMenu {
                                 // Bulk swap: move every same-kind agent onto this
                                 // account at once (e.g. an exhausted Claude → the
                                 // spare). Shown only when there are agents to move.
                                 if agents.contains(where: { $0.agent == account.kind }) {
-                                    Button {
+                                    StableMenuItem("Use for all \(account.kind.capitalized) agents",
+                                                   systemImage: "arrow.left.arrow.right") {
                                         bulkSwapTarget = account
-                                    } label: {
-                                        Label("Use for all \(account.kind.capitalized) agents",
-                                              systemImage: "arrow.left.arrow.right")
                                     }
                                 }
                                 // Sign in / out of the account from the app — runs
                                 // claude's own auth flow pinned to this account's
                                 // config-home (claude only for now; needs config_dir).
                                 if account.kind == "claude", account.configDir != nil {
-                                    Button {
+                                    StableMenuItem("Log in", systemImage: "person.crop.circle.badge.plus") {
                                         loginAccount = account
-                                    } label: { Label("Log in", systemImage: "person.crop.circle.badge.plus") }
-                                    Button(role: .destructive) {
+                                    }
+                                    StableMenuItem("Log out", systemImage: "rectangle.portrait.and.arrow.right",
+                                                   role: .destructive) {
                                         logoutAccount = account
-                                    } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
+                                    }
                                 }
                                 // Remove the account from the list entirely (any kind) —
                                 // drops it from config.toml; the config-home + creds stay,
                                 // so it can be re-added. For clearing out junk/duplicate
                                 // entries.
-                                Button(role: .destructive) {
+                                StableMenuItem("Remove account", systemImage: "trash", role: .destructive) {
                                     removeAccount = account
-                                } label: { Label("Remove account", systemImage: "trash") }
+                                }
                             }
                         if index < accounts.count - 1 { rowDivider }
                     }
@@ -9771,11 +9711,23 @@ struct MockTransport: HerdrTransport {
             return Self.agentList
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
+        if requestLine.contains("gram.mark_read") {
+            Self.gramOwnerReads.markRead(Self.requestParamID(requestLine))
+            return #"{"id":"mock","result":{}}"#
+        }
         if requestLine.contains("gram.list") {
-            if Self.gramPaged { return Self.gramPagedList(requestLine) }
-            if Self.gramImageCount > 0 { return Self.gramListWithImages }
-            if Self.gramExpiresSaved { return await Self.gramListExpiringSaved() }
-            return Self.gramNewer ? Self.gramListWithNewer : Self.gramList
+            // Read state as of when the request arrived, as the daemon computes it.
+            let reads = Self.gramOwnerReads.ids
+            let list: String
+            if Self.gramPaged { list = Self.gramPagedList(requestLine) }
+            else if Self.gramImageCount > 0 { list = Self.gramListWithImages }
+            else if Self.gramExpiresSaved { list = await Self.gramListExpiringSaved() }
+            else { list = Self.gramNewer ? Self.gramListWithNewer : Self.gramList }
+            let answer = Self.applyingOwnerReads(reads, to: list)
+            if Self.gramHoldsPollAcrossRead, Self.isGramHeadPoll(requestLine) {
+                await Self.gramOwnerReads.holdPastNextRead()
+            }
+            return answer
         }
         if requestLine.contains("gram.post") {
             Self.recordGramPost(requestLine)
@@ -9898,14 +9850,25 @@ struct MockTransport: HerdrTransport {
                 // throws, which tears the stream down and reconnects, so my invented "append"
                 // yielded a reconnect loop and no output at all. The busy-pane test caught it by
                 // measuring its own premise (ydisp must advance) rather than assuming it.
+                //
+                // EVERY LINE LOOKS DIFFERENT, for the reason `scrollbackResetFrame` records.
+                // The lines used to share one sentence, so once the screen was full of them a
+                // 2 s window of real streaming (~16 rows of scroll) changed only the digits:
+                // CI 37732782216 measured diff=0.002 against the receipt's 0.005 floor while
+                // its attached screenshots showed lines 0003-0036 become 0023-0056. A per-line
+                // letter and bar length make a scroll change most rows, and the bar stays short
+                // enough not to wrap on a portrait iPhone grid.
                 let busy = Task { [busyOutput] in
                     guard busyOutput else { return }
                     var n = 1
                     var seq: UInt64 = 10_000
+                    let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
                     while !Task.isCancelled {
                         try? await Task.sleep(nanoseconds: 120_000_000)
                         guard !Task.isCancelled else { break }
-                        let line = String(format: "BUSY line %04d  the agent is still working\r\n", n)
+                        let letter = letters[n % letters.count]
+                        let bar = String(repeating: letter, count: 4 + (n * 7) % 26)
+                        let line = String(format: "BUSY line %04d %@ %@\r\n", n, String(letter), bar)
                         let b64 = Data(line.utf8).base64EncodedString()
                         continuation.yield("{\"stream\":\"pane.bytes\",\"frame\":\"data\",\"seq\":\(seq),\"epoch\":7,\"data_b64\":\"\(b64)\"}")
                         n += 1; seq += 1
@@ -10179,10 +10142,56 @@ struct MockTransport: HerdrTransport {
     private static let gramGetFileRecorder = GramGetFileRecorder()
 
     private static func recordGramGetFile(_ requestLine: String) -> String {
-        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
-        let id = (object?["params"] as? [String: Any])?["id"] as? String ?? ""
+        let id = requestParamID(requestLine)
         gramGetFileRecorder.record(id)
         return id
+    }
+
+    /// The request's `params.id` ("" when absent).
+    private static func requestParamID(_ requestLine: String) -> String {
+        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+        return (object?["params"] as? [String: Any])?["id"] as? String ?? ""
+    }
+
+    /// The ids `gram.mark_read` has marked: like the daemon, later `gram.list` answers report
+    /// them read. Without this every poll after a Read all put the count straight back.
+    private static let gramOwnerReads = GramOwnerReads()
+
+    /// `list` with the messages in `reads` marked read and `unread_count`, when the answer
+    /// carries one, lowered to match. Untouched (byte for byte) while nothing was read.
+    private static func applyingOwnerReads(_ reads: Set<String>, to list: String) -> String {
+        guard !reads.isEmpty,
+              var object = (try? JSONSerialization.jsonObject(with: Data(list.utf8))) as? [String: Any],
+              var result = object["result"] as? [String: Any],
+              var messages = result["messages"] as? [[String: Any]]
+        else { return list }
+        var newlyRead = 0
+        for index in messages.indices {
+            guard let id = messages[index]["id"] as? String, reads.contains(id),
+                  messages[index]["direction"] as? String == "agent_to_owner",
+                  messages[index]["read_by_owner"] as? Bool == false else { continue }
+            messages[index]["read_by_owner"] = true
+            newlyRead += 1
+        }
+        result["messages"] = messages
+        if let count = result["unread_count"] as? Int { result["unread_count"] = max(0, count - newlyRead) }
+        object["result"] = result
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return list }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `HERDR_MOCK_GRAM_HOLD_POLL=1`: every head `gram.list` after the page's first (its
+    /// polls, a Refresh) is answered with the read state of when it ARRIVED, held until a
+    /// second after the next `gram.mark_read` (or 4 s without one). A Refresh tapped just
+    /// before Read all is then in flight across the pass and lands after it, as a slow
+    /// round trip can.
+    static var gramHoldsPollAcrossRead: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_HOLD_POLL"] == "1"
+    }
+
+    /// The page's own refresh: not Read all's `unread_only` fetch, not an older page.
+    private static func isGramHeadPoll(_ requestLine: String) -> Bool {
+        !requestLine.contains("\"unread_only\":true") && !requestLine.contains("\"before_id\"")
     }
 
     /// `HERDR_MOCK_GRAM_FILE_DELAY=g3=10`: seconds `gram.get_file` waits before answering
@@ -10304,6 +10313,42 @@ final class GramPostRecorder: @unchecked Sendable {
     }
 }
 
+/// The mock daemon's read state: the ids `gram.mark_read` marked, which later `gram.list`
+/// answers report read (`MockTransport.applyingOwnerReads`), plus what
+/// `HERDR_MOCK_GRAM_HOLD_POLL` needs to hold a poll across the next mark.
+final class GramOwnerReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Set<String> = []
+    private var marks = 0
+    private var headLists = 0
+
+    var ids: Set<String> { lock.withLock { stored } }
+
+    func markRead(_ id: String) {
+        lock.withLock {
+            stored.insert(id)
+            marks += 1
+        }
+    }
+
+    /// The page's first head list answers at once. Every later one (a poll, a Refresh)
+    /// waits up to 4 s for the next `markRead`; when one comes, it answers a second after
+    /// it, past the end of a Read-all pass.
+    func holdPastNextRead() async {
+        let (first, marksBefore) = lock.withLock { () -> (Bool, Int) in
+            headLists += 1
+            return (headLists == 1, marks)
+        }
+        guard !first else { return }
+        let deadline = Date().addingTimeInterval(4)
+        while lock.withLock({ marks }) == marksBefore {
+            guard Date() < deadline else { return }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+    }
+}
+
 /// The `gram.get_file` calls MockTransport answered, counted per message id. Read through
 /// `MockTransport.gramGetFileSummary`.
 final class GramGetFileRecorder: @unchecked Sendable {
@@ -10335,6 +10380,27 @@ final class GramPagingMock: @unchecked Sendable {
             servedPages = max(servedPages, page)
             requests += 1
         }
+    }
+}
+
+/// The roster stress fixture's arm control. Its accessibility value says whether
+/// the arm action actually ran, so the UI test can confirm the precondition it depends
+/// on instead of finding a dropped tap only as a missing deferred row much later.
+struct RosterStressArmControl: View {
+    let driver: RosterStressDriver
+    @State private var armed = false
+
+    var body: some View {
+        Button {
+            driver.arm()
+            armed = true
+        } label: {
+            Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Arm roster refresh stress")
+        .accessibilityValue(armed ? "armed" : "idle")
+        .accessibilityIdentifier("roster-stress-arm")
     }
 }
 

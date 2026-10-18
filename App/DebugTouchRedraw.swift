@@ -1,10 +1,10 @@
 import UIKit
 
 /// DEBUG mock knob `HERDR_REDRAW_ON_TOUCH` (mock modes only): every touch-down in the app
-/// posts `touchDown`, and the Agents home redraws on it, as a roster poll landing mid-tap
-/// would. It makes the dropped-menu-tap race (a long-press menu rebuilt under the finger
-/// swallowed the tap) happen on every tap, so the UI tests catch a menu that is rebuilt by
-/// unrelated redraws. Release builds compile it out.
+/// posts `touchDown`, and the Agents home and Gram redraw on it, as a roster or Gram poll
+/// landing mid-tap would. It makes the dropped-menu-tap race (a long-press menu rebuilt under
+/// the finger swallowed the tap) happen on every tap, so the UI tests catch a menu that is
+/// rebuilt by unrelated redraws. Release builds compile it out.
 enum DebugTouchRedraw {
     static let touchDown = Notification.Name("herdr.debugTouchDown")
 
