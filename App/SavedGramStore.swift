@@ -286,9 +286,11 @@ struct SavedGramRow: View {
         }
         .buttonStyle(.plain)
         .disabled(isDownloadingFile)
-        .contextMenu {
-            Button { onOpenFile() } label: { Label("Open", systemImage: "eye") }
-            Button { onSaveFile() } label: { Label("Save to Files…", systemImage: "square.and.arrow.down") }
+        // Never rebuilt by a Gram pass while open (see StableContextMenu.swift); an item runs
+        // this row's current closure.
+        .stableContextMenu {
+            StableMenuItem("Open", systemImage: "eye") { onOpenFile() }
+            StableMenuItem("Save to Files…", systemImage: "square.and.arrow.down") { onSaveFile() }
         }
         .padding(.top, 2)
     }

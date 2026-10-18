@@ -3758,33 +3758,27 @@ struct GramRow: View, Equatable {
                     GramSavedBadge().offset(x: 15, y: -17)
                 }
             }
-            .contentShape(.contextMenuPreview, bubbleShape)
-            .contextMenu { menu }
+            // Never rebuilt by a feed pass while open (see StableContextMenu.swift); the
+            // preview lifts the bubble's shape.
+            .stableContextMenu(previewCornerRadius: GramBubble.radius) { menu }
             .frame(maxWidth: maxWidth, alignment: mine ? .trailing : .leading)
     }
 
     /// The message's one menu, on every part of it (the attachment cards included): the
     /// file's Save to Files, then the message actions.
-    @ViewBuilder
-    private var menu: some View {
+    @StableMenuBuilder
+    private var menu: [StableMenuItem] {
         if message.file != nil {
-            Button(action: onSaveFile) {
-                Label("Save to Files", systemImage: "square.and.arrow.down")
-            }
+            StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
         }
         if !message.text.isEmpty {
-            Button {
+            StableMenuItem("Copy", systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = message.text
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
             }
         }
-        Button(action: onToggleSave) {
-            Label(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark")
-        }
-        Button(role: .destructive, action: onDelete) {
-            Label("Delete", systemImage: "trash")
-        }
+        StableMenuItem(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark",
+                       action: onToggleSave)
+        StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
     }
 
     /// The text and any card file (a document, or a file the store expired): a plain bubble

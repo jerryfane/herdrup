@@ -923,12 +923,10 @@ struct ConnectView: View {
                     .buttonStyle(ConnectRowButtonStyle(held: false))
                     .disabled(connecting != nil)
                     .accessibilityIdentifier("shared-machine-row")
-                    // Not rebuilt by unrelated redraws while open: see StableMenuItems.
-                    // The store is a singleton, so an older copy of the item acts the same.
-                    .stableContextMenu(key: access) {
-                        Button(role: .destructive) { sharedMachines.remove(access) } label: {
-                            Label("Leave share", systemImage: "rectangle.portrait.and.arrow.right")
-                        }
+                    // Never rebuilt while open: see StableContextMenu.swift.
+                    .stableContextMenu {
+                        StableMenuItem("Leave share", systemImage: "rectangle.portrait.and.arrow.right",
+                                       role: .destructive) { sharedMachines.remove(access) }
                     }
                 }
             }
@@ -1185,16 +1183,11 @@ struct ConnectView: View {
         .buttonStyle(ConnectRowButtonStyle(held: busy))
         .disabled(connecting != nil)
         .accessibilityValue(busy ? "Connecting" : "")
-        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Not rebuilt by
-        // unrelated redraws while open (see StableMenuItems); the items write state or the
-        // singleton store only.
-        .stableContextMenu(key: saved) {
-            Button { editorTarget = .edit(saved) } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            Button(role: .destructive) { savedHosts.delete(saved) } label: {
-                Label("Remove", systemImage: "trash")
-            }
+        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Never rebuilt
+        // while open (see StableContextMenu.swift).
+        .stableContextMenu {
+            StableMenuItem("Edit", systemImage: "pencil") { editorTarget = .edit(saved) }
+            StableMenuItem("Remove", systemImage: "trash", role: .destructive) { savedHosts.delete(saved) }
         }
     }
 
@@ -1927,18 +1920,10 @@ struct TerminalHomeView: View {
     /// The archived row awaiting Close confirmation.
     @State private var forgetCandidate: AgentRow?
     /// A long-press menu action that talks to the daemon, run by `.onChange(of: menuAction)`
-    /// on the current client. The menus only set it: an open menu may hold an older copy of
-    /// this view (StableMenuItems), whose `client` may be a replaced one.
+    /// on the current client. The menus only set it.
     @State private var menuAction: RosterMenuAction?
     enum RosterMenuAction: Equatable {
         case stop(AgentRow), archive(AgentRow), unarchive(AgentRow), closeTerminal(SavedTerminal)
-    }
-    /// What an agent row's long-press menu shows; it is rebuilt only when this changes.
-    struct AgentMenuKey: Equatable {
-        let row: AgentRow
-        let transferSupported: Bool
-        let transferTargets: [AgentSessionTransferHarness]
-        let swapTargets: [CredentialAccount]
     }
     @State private var sessionTransferHarnesses: Set<AgentSessionTransferHarness> = []
     @State private var checkedSessionTransferCapability = false
@@ -3940,16 +3925,17 @@ struct TerminalHomeView: View {
                         terminalCard(terminal)
                     }
                     .buttonStyle(.plain)
-                    // Items only write state (see StableMenuItems and `menuAction`).
-                    .stableContextMenu(key: terminal) {
+                    // Items only write state (see `menuAction`); never rebuilt while open
+                    // (StableContextMenu.swift).
+                    .stableContextMenu {
                         // Rename = set the pane's daemon `label` (shown in `herdr pane list`) so you
                         // can tell an agent to check this terminal by name, + the app-local row label.
-                        Button {
+                        StableMenuItem("Rename", systemImage: "pencil") {
                             renameTarget = .terminal(terminal)
-                        } label: { Label("Rename", systemImage: "pencil") }
-                        Button(role: .destructive) {
+                        }
+                        StableMenuItem("Close terminal", systemImage: "xmark.circle", role: .destructive) {
                             menuAction = .closeTerminal(terminal)
-                        } label: { Label("Close terminal", systemImage: "xmark.circle") }
+                        }
                     }
                 }
             }
@@ -3974,14 +3960,15 @@ struct TerminalHomeView: View {
             if !archivedCollapsed {
                 ForEach(fullList.archived) { row in
                     archivedCard(row)
-                        // Items only write state (see StableMenuItems and `menuAction`).
-                        .stableContextMenu(key: StableMenuKey(row, forgetSupported)) {
-                            Button { menuAction = .unarchive(row) } label: {
-                                Label("Unarchive", systemImage: "arrow.uturn.up")
+                        // Items only write state (see `menuAction`); never rebuilt while open
+                        // (StableContextMenu.swift).
+                        .stableContextMenu {
+                            StableMenuItem("Unarchive", systemImage: "arrow.uturn.up") {
+                                menuAction = .unarchive(row)
                             }
                             if forgetSupported {
-                                Button(role: .destructive) { forgetCandidate = row } label: {
-                                    Label("Close", systemImage: "xmark")
+                                StableMenuItem("Close", systemImage: "xmark", role: .destructive) {
+                                    forgetCandidate = row
                                 }
                             }
                         }
@@ -4151,29 +4138,24 @@ struct TerminalHomeView: View {
                     // to prove an existing row moved, independently of row count.
                     .accessibilityValue(row.group.label)
                     // Long-press an agent → quick actions. Items only write state (see
-                    // StableMenuItems and `menuAction`); the key is everything they show.
-                    .stableContextMenu(key: AgentMenuKey(
-                        row: row,
-                        transferSupported: sessionTransferSupported,
-                        transferTargets: sessionTransferTargets(for: row.info),
-                        swapTargets: accounts.filter { $0.kind == row.info.agent }
-                    )) {
+                    // `menuAction`); never rebuilt while open (StableContextMenu.swift).
+                    .stableContextMenu {
                         // Stop = close the pane (`pane.close`, the only stop RPC — its
                         // inverse is start), then reload.
-                        Button(role: .destructive) {
+                        StableMenuItem("Stop agent", systemImage: "stop.circle", role: .destructive) {
                             menuAction = .stop(row)
-                        } label: { Label("Stop agent", systemImage: "stop.circle") }
+                        }
                         // Rename = set the agent's daemon `name`, which becomes a resolvable
                         // mention target (another agent can `herdr agent read <name>`).
-                        Button {
+                        StableMenuItem("Rename", systemImage: "pencil") {
                             renameTarget = .agent(row)
-                        } label: { Label("Rename", systemImage: "pencil") }
+                        }
                         // Restart = close the agent's session and reopen it with
                         // --resume in place (keeps the pane). It interrupts a busy
                         // agent's turn, so it routes through a confirmation.
-                        Button {
+                        StableMenuItem("Restart agent", systemImage: "arrow.clockwise") {
                             restartCandidate = row
-                        } label: { Label("Restart agent", systemImage: "arrow.clockwise") }
+                        }
                         // Harness transfer is deliberately not a restart shortcut. It
                         // first builds and verifies a native destination transcript,
                         // then opens a review sheet whose explicit confirm performs the
@@ -4186,25 +4168,21 @@ struct TerminalHomeView: View {
                            (sessionTransferSupported || hasActiveTransfer),
                            let source = sessionTransferSource(for: row.info),
                            !transferTargets.isEmpty {
-                            Menu {
-                                ForEach(transferTargets, id: \.rawValue) { target in
-                                    Button {
+                            StableMenuItem(
+                                submenu: transferTargets.count == 1
+                                    ? "Switch to \(transferTargets[0].displayName)"
+                                    : "Switch harness",
+                                systemImage: "arrow.left.arrow.right"
+                            ) {
+                                for target in transferTargets {
+                                    StableMenuItem(target.displayName, systemImage: "arrow.right") {
                                         transferCandidate = PendingHarnessTransfer(
                                             row: row,
                                             source: source,
                                             target: target
                                         )
-                                    } label: {
-                                        Label(target.displayName, systemImage: "arrow.right")
                                     }
                                 }
-                            } label: {
-                                Label(
-                                    transferTargets.count == 1
-                                        ? "Switch to \(transferTargets[0].displayName)"
-                                        : "Switch harness",
-                                    systemImage: "arrow.left.arrow.right"
-                                )
                             }
                         }
                         // Swap = restart the agent onto a DIFFERENT credential account
@@ -4220,31 +4198,29 @@ struct TerminalHomeView: View {
                         // account restarts (interrupts) the agent rather than being a no-op.
                         let swapTargets = accounts.filter { $0.kind == row.info.agent }
                         if !swapTargets.isEmpty {
-                            Menu {
-                                ForEach(swapTargets) { acct in
-                                    Button {
+                            StableMenuItem(submenu: "Swap subscription", systemImage: "arrow.left.arrow.right") {
+                                for acct in swapTargets {
+                                    StableMenuItem(
+                                        acct.label
+                                            + (acct.id == row.info.account ? " (current)" : "")
+                                            + (acct.active ? "" : " (exhausted)"),
+                                        systemImage: acct.id == row.info.account
+                                            ? "person.crop.circle.fill"
+                                            : "person.crop.circle"
+                                    ) {
                                         swapCandidate = PendingSwap(row: row, account: acct)
-                                    } label: {
-                                        Label(
-                                            acct.label
-                                                + (acct.id == row.info.account ? " (current)" : "")
-                                                + (acct.active ? "" : " (exhausted)"),
-                                            systemImage: acct.id == row.info.account
-                                                ? "person.crop.circle.fill"
-                                                : "person.crop.circle"
-                                        )
                                     }
                                 }
-                            } label: { Label("Swap subscription", systemImage: "arrow.left.arrow.right") }
+                            }
                         }
                         // Archive = release the pane but PRESERVE the session so it can be
                         // resumed later (`agent.archive`, issue #173). Reversible via the
                         // Archived section's Unarchive, so it fires directly (no confirm).
                         // The daemon REJECTS archiving a mid-turn agent unless forced, so a
                         // working agent surfaces that error rather than being torn off a turn.
-                        Button {
+                        StableMenuItem("Archive", systemImage: "archivebox") {
                             menuAction = .archive(row)
-                        } label: { Label("Archive", systemImage: "archivebox") }
+                        }
                     }
                 }
             }
@@ -4839,45 +4815,6 @@ struct TerminalHomeView: View {
             } while buffer.reloadAgain && !Task.isCancelled
             buffer.reloadTask = nil
         }
-    }
-}
-
-/// A long-press menu's items, rebuilt only when `key` (what the menu shows) changes.
-///
-/// A MENU MUST NOT BE REBUILT WHILE IT IS OPEN. Built inline, a `.contextMenu` builder runs
-/// on every body pass of the view that holds it: in TerminalHomeView each roster poll (5 s,
-/// with `rosterNow`), each load, each state write. A pass landing while the menu was up
-/// rebuilt its items under the finger, and a tap in flight was dropped: the menu stayed
-/// open and nothing happened (ArchivedCloseTests on CI's iPhone; the DEBUG
-/// `HERDR_REDRAW_ON_TOUCH` knob makes it happen on every tap). The item closures are left
-/// out of `==`, so an open menu may hold an older copy: they must only write @State
-/// (stable storage), and the work runs from the holder's `.onChange`, on its current
-/// client.
-struct StableMenuItems<Key: Equatable, Items: View>: View, Equatable {
-    let key: Key
-    @ViewBuilder let items: () -> Items
-
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
-
-    var body: some View { items() }
-}
-
-/// Two values as one menu key.
-struct StableMenuKey<First: Equatable, Second: Equatable>: Equatable {
-    let first: First
-    let second: Second
-    init(_ first: First, _ second: Second) {
-        self.first = first
-        self.second = second
-    }
-}
-
-extension View {
-    /// `.contextMenu` whose items are rebuilt only when `key` changes: see StableMenuItems.
-    func stableContextMenu<Key: Equatable, Items: View>(
-        key: Key, @ViewBuilder items: @escaping () -> Items
-    ) -> some View {
-        contextMenu { StableMenuItems(key: key, items: items).equatable() }
     }
 }
 
@@ -8373,39 +8310,37 @@ struct SettingsView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                         accountRow(account)
-                            // Items only write state; rebuilt only when what they show
-                            // changes (see StableMenuItems).
-                            .stableContextMenu(key: StableMenuKey(
-                                account, agents.contains(where: { $0.agent == account.kind }))) {
+                            // Items only write state; never rebuilt while open (see
+                            // StableContextMenu.swift).
+                            .stableContextMenu {
                                 // Bulk swap: move every same-kind agent onto this
                                 // account at once (e.g. an exhausted Claude → the
                                 // spare). Shown only when there are agents to move.
                                 if agents.contains(where: { $0.agent == account.kind }) {
-                                    Button {
+                                    StableMenuItem("Use for all \(account.kind.capitalized) agents",
+                                                   systemImage: "arrow.left.arrow.right") {
                                         bulkSwapTarget = account
-                                    } label: {
-                                        Label("Use for all \(account.kind.capitalized) agents",
-                                              systemImage: "arrow.left.arrow.right")
                                     }
                                 }
                                 // Sign in / out of the account from the app — runs
                                 // claude's own auth flow pinned to this account's
                                 // config-home (claude only for now; needs config_dir).
                                 if account.kind == "claude", account.configDir != nil {
-                                    Button {
+                                    StableMenuItem("Log in", systemImage: "person.crop.circle.badge.plus") {
                                         loginAccount = account
-                                    } label: { Label("Log in", systemImage: "person.crop.circle.badge.plus") }
-                                    Button(role: .destructive) {
+                                    }
+                                    StableMenuItem("Log out", systemImage: "rectangle.portrait.and.arrow.right",
+                                                   role: .destructive) {
                                         logoutAccount = account
-                                    } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
+                                    }
                                 }
                                 // Remove the account from the list entirely (any kind) —
                                 // drops it from config.toml; the config-home + creds stay,
                                 // so it can be re-added. For clearing out junk/duplicate
                                 // entries.
-                                Button(role: .destructive) {
+                                StableMenuItem("Remove account", systemImage: "trash", role: .destructive) {
                                     removeAccount = account
-                                } label: { Label("Remove account", systemImage: "trash") }
+                                }
                             }
                         if index < accounts.count - 1 { rowDivider }
                     }
