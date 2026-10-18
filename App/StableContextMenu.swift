@@ -95,6 +95,28 @@ private struct StableContextMenu: ViewModifier {
             .background(StableMenuAnchor(previewCornerRadius: previewCornerRadius, items: items,
                                          setLifted: { lifted = $0 })
                 .accessibilityHidden(true))
+            // The long press belongs to the host's interaction, which VoiceOver does not see
+            // on this element, so the same entries are its Actions rotor. Submenu entries are
+            // flattened as "Submenu, Entry"; titles and actions are the menu's own. SwiftUI
+            // lists accessibility actions last-declared first, so they are declared in reverse
+            // to read in the menu's order.
+            .accessibilityActions {
+                ForEach(Array(Self.flattened(items()).reversed().enumerated()), id: \.offset) { _, entry in
+                    Button(entry.title, action: entry.action)
+                }
+            }
+    }
+
+    /// Every action of a menu, depth first, a submenu's entries prefixed with its title.
+    static func flattened(_ items: [StableMenuItem], prefix: String = "")
+        -> [(title: String, action: () -> Void)] {
+        items.flatMap { item -> [(title: String, action: () -> Void)] in
+            let title = prefix.isEmpty ? item.title : "\(prefix), \(item.title)"
+            switch item.kind {
+            case .action(let action): return [(title, action)]
+            case .submenu(let children): return flattened(children, prefix: title)
+            }
+        }
     }
 }
 
@@ -162,6 +184,17 @@ final class StableMenuAnchorView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        rehost()
+    }
+
+    /// A move between superviews in the same window does not call `didMoveToWindow`, but
+    /// can put the anchor under a different scroll view: re-resolve the host then too.
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        rehost()
+    }
+
+    private func rehost() {
         let next = window == nil ? nil : StableMenuHost.host(for: self)
         guard next !== host else { return }
         host?.remove(self)
