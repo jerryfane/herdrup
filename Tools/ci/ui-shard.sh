@@ -3,7 +3,7 @@
 # parallel jobs; each job has already built the app and test bundles into .build-dd
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
-#   iphone-terminal  TERMINAL_CLASSES, then GramTests in a separate round on iPhone
+#   iphone-terminal  TERMINAL_CLASSES on iPhone
 #   iphone-app       HerdrFontTests, then StatusMotionTests in its own round, then
 #                    every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
 #                    tests on iPhone
@@ -14,10 +14,10 @@
 #                    GramTests on the iPhone with the Debug build
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
-# The two iPhone shards are complementary BY CONSTRUCTION: one runs exactly
-# TERMINAL_CLASSES and GramTests, the other skips those same identifiers,
-# so a new test class lands in iphone-app without anyone listing it. A misspelled or
-# renamed entry would silently drop that class from both shards, so iphone-terminal
+# The iPhone rounds are complementary BY CONSTRUCTION: iphone-terminal runs exactly
+# TERMINAL_CLASSES and settings-gram runs GramTests, while iphone-app skips those same
+# identifiers, so a new test class lands in iphone-app without anyone listing it. A
+# misspelled or renamed entry would silently drop that class, so iphone-terminal
 # fails unless its result bundle shows every listed class executed tests.
 set -uo pipefail
 
@@ -55,12 +55,14 @@ trap stop_recording EXIT
 
 # Bound the entire boot request + readiness wait, not just xcodebuild. A stuck
 # CoreSimulator must leave time for receipt upload. TERM gets 15 s before KILL.
-# First-boot data migration took 5m41s in run 38916529804. Give that one cold
-# attempt 10m; later readiness checks keep the shorter 5m allowance.
-next_boot_budget=10m
+# First-boot data migration took 5m41s in run 38916529804. Each device's first (cold)
+# boot gets 10m; later readiness checks of the same device keep the shorter 5m.
+# Per device, because settings-gram cold-boots the iPad and then the iPhone.
+cold_booted=" "
 boot_simulator() {
-  local udid="$1" log="$2" status=0 budget="$next_boot_budget"
-  next_boot_budget=5m
+  local udid="$1" log="$2" status=0 budget=10m
+  case "$cold_booted" in *" $udid "*) budget=5m ;; esac
+  cold_booted="$cold_booted$udid "
   "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
     # An already-booted device rejects boot; bootstatus is the readiness authority.
     xcrun simctl boot "$1" || true
@@ -272,37 +274,41 @@ case "$shard" in
     # DEBUG keeps the screenshot fixtures; testability lets the UI tests attach.
     # The test-run file uses __TESTROOT__ paths, so Build/Products is self-contained.
     # Never infer a pass from a cache hit or fall back to a different configuration.
+    # A missing prerequisite fails the shard but still lets GramTests below run: they
+    # need neither the iPad nor the Distribution products.
     settings_runs=(.build-dd-settings-stack/Build/Products/Herdr_*.xctestrun)
     if [ "${#settings_runs[@]}" -ne 1 ] || [ ! -f "${settings_runs[0]}" ]; then
       echo "::error::expected one optimized Settings .xctestrun in Build/Products"
-      exit 1
-    fi
-    boot_simulator "$IPAD_UDID" TestReceipts/settings-device-stack-boot.log || exit 1
-    xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
-    xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
-    "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test-without-building -xctestrun "${settings_runs[0]}" \
-        -destination "platform=iOS Simulator,id=$IPAD_UDID" \
-        -parallel-testing-enabled NO \
-        -test-timeouts-enabled YES \
-        -default-test-execution-time-allowance 300 \
-        -maximum-test-execution-time-allowance 600 \
-        -resultBundlePath TestReceipts/settings-device-stack.xcresult \
-        -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
-        2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
-    # XCTest activation can restart a crashed app and still report a pass.
-    # Without a readable export the guard cannot tell, so that fails the shard too.
-    if ! xcrun xcresulttool export attachments \
-        --path TestReceipts/settings-device-stack.xcresult \
-        --output-path TestReceipts/settings-device-stack-crash-check >/dev/null; then
-      echo "::error::could not export the Settings regression's attachments to check for crashes"
+      failed=1
+    elif ! boot_simulator "$IPAD_UDID" TestReceipts/settings-device-stack-boot.log; then
       failed=1
     else
-      crashes=$(find TestReceipts/settings-device-stack-crash-check -name '*.ips')
-      if [ -n "$crashes" ]; then
-        echo "::error::Crashes attached to the Settings regression: $crashes"
+      xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
+      xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
+      "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test-without-building -xctestrun "${settings_runs[0]}" \
+          -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+          -parallel-testing-enabled NO \
+          -test-timeouts-enabled YES \
+          -default-test-execution-time-allowance 300 \
+          -maximum-test-execution-time-allowance 600 \
+          -resultBundlePath TestReceipts/settings-device-stack.xcresult \
+          -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
+          2>&1 | tee TestReceipts/settings-device-stack.log | xcbeautify || failed=1
+      # XCTest activation can restart a crashed app and still report a pass.
+      # Without a readable export the guard cannot tell, so that fails the shard too.
+      if ! xcrun xcresulttool export attachments \
+          --path TestReceipts/settings-device-stack.xcresult \
+          --output-path TestReceipts/settings-device-stack-crash-check >/dev/null; then
+        echo "::error::could not export the Settings regression's attachments to check for crashes"
         failed=1
       else
-        echo "Settings device-stack regression: no crash reports attached"
+        crashes=$(find TestReceipts/settings-device-stack-crash-check -name '*.ips')
+        if [ -n "$crashes" ]; then
+          echo "::error::Crashes attached to the Settings regression: $crashes"
+          failed=1
+        else
+          echo "Settings device-stack regression: no crash reports attached"
+        fi
       fi
     fi
     # Then GramTests on the iPhone with the Debug build. The iPad is shut down first: the
