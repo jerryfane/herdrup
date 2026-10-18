@@ -9,8 +9,9 @@
 #                    tests on iPhone
 #   ipad             iPad-specific rounds, then the SwiftTerm UIKit API tests on iPad
 #   settings-build   optimized simulator build; CI caches its products before testing
-#   settings-stack   iPad Settings resize/resume regression using that Distribution build
-#                    with the device-sized stack (herdrup#416), even on cache hits
+#   settings-gram    iPad Settings resize/resume regression using that Distribution build
+#                    with the device-sized stack (herdrup#416), even on cache hits; then
+#                    GramTests on the iPhone with the Debug build
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
 # The two iPhone shards are complementary BY CONSTRUCTION: one runs exactly
@@ -20,7 +21,7 @@
 # fails unless its result bundle shows every listed class executed tests.
 set -uo pipefail
 
-shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-stack|focused}"
+shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-gram|focused}"
 TERMINAL_CLASSES=(TerminalControlTests TerminalResizeTests TerminalSearchTests TerminalSelectionTests)
 mkdir -p TestReceipts
 
@@ -222,9 +223,9 @@ case "$shard" in
     for class in "${TERMINAL_CLASSES[@]}"; do only+=("-only-testing:HerdrUITests/$class"); done
     run_suite iPhoneTerminal "$IPHONE_UDID" 40m "${only[@]}" || failed=1
     check_classes_ran TestReceipts/iPhoneTerminal-first.xcresult || failed=1
-    # Baseline run 38829646885: terminal finished in 24 min while iphone-app took 63.
-    # Moving Gram's ~20 min round balances them without another runner or test omission.
-    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
+    # GramTests run in settings-gram: after #445 this shard had ~40 min of tests against
+    # ~26 (iphone-app) and ~24 (ipad), and settings-stack finished in ~13 min (runs
+    # 39128731625, 39132955146, 39137628334).
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
@@ -265,7 +266,7 @@ case "$shard" in
         -only-testing:HerdrUITests/SettingsTests/testCompactSettingsSurviveResizeAndResume \
         2>&1 | tee TestReceipts/settings-device-stack-build.log | xcbeautify || failed=1
     ;;
-  settings-stack)
+  settings-gram)
     # Distribution, so the optimizer produces the frame sizes that overflowed a
     # device's 1008 KiB main stack; project.yml gives simulator builds that stack.
     # DEBUG keeps the screenshot fixtures; testability lets the UI tests attach.
@@ -304,6 +305,11 @@ case "$shard" in
         echo "Settings device-stack regression: no crash reports attached"
       fi
     fi
+    # Then GramTests on the iPhone with the Debug build. The iPad is shut down first: the
+    # hosted runner has 7 GB, and a second booted simulator adds to the memory pressure
+    # measured during launch stalls (herdrup#418).
+    xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
+    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in
