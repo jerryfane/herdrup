@@ -10,17 +10,7 @@ import FoundationNetworking
 /// that produces the capability.
 final class PushRelayTests: XCTestCase {
 
-    private final class Capture: HerdrTransport, @unchecked Sendable {
-        var lastLine = ""
-        var reply = #"{"id":"x","result":null}"#
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lastLine = requestLine
-            return reply
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-    }
+    private static let nullResult = #"{"id":"x","result":null}"#
 
     private func params(_ line: String) throws -> [String: Any] {
         let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
@@ -33,34 +23,34 @@ final class PushRelayTests: XCTestCase {
     /// behaves as before; with one, the capability rides next to the raw token, which stays so a
     /// machine with its own APNs key keeps pushing directly.
     func testRegisterDeviceSendsCapabilityOnlyWhenPresentAndAlwaysTheToken() async throws {
-        let capture = Capture()
+        let capture = RecordingTransport(reply: Self.nullResult)
         let client = HerdrClient(transport: capture)
 
         try await client.registerDevice(token: "abcd", needsInput: true, dies: false,
                                         finishes: false, gram: true)
-        var p = try params(capture.lastLine)
+        var p = try params(capture.lastRequest)
         XCTAssertEqual(p["device_token"] as? String, "abcd")
-        XCTAssertNil(p["relay_capability"], "nil capability must be omitted: \(capture.lastLine)")
-        XCTAssertFalse(capture.lastLine.contains("relay_capability"))
+        XCTAssertNil(p["relay_capability"], "nil capability must be omitted: \(capture.lastRequest)")
+        XCTAssertFalse(capture.lastRequest.contains("relay_capability"))
 
         try await client.registerDevice(token: "abcd", needsInput: true, dies: false,
                                         finishes: false, gram: true, relayCapability: "hpr1.cap")
-        p = try params(capture.lastLine)
+        p = try params(capture.lastRequest)
         XCTAssertEqual(p["device_token"] as? String, "abcd", "the raw token must still be sent")
         XCTAssertEqual(p["relay_capability"] as? String, "hpr1.cap")
     }
 
     func testRegisterActivitySendsCapabilityOnlyWhenPresentAndAlwaysTheToken() async throws {
-        let capture = Capture()
+        let capture = RecordingTransport(reply: Self.nullResult)
         let client = HerdrClient(transport: capture)
 
         try await client.registerActivity(token: "beef")
-        var p = try params(capture.lastLine)
+        var p = try params(capture.lastRequest)
         XCTAssertEqual(p["activity_push_token"] as? String, "beef")
-        XCTAssertFalse(capture.lastLine.contains("relay_capability"), capture.lastLine)
+        XCTAssertFalse(capture.lastRequest.contains("relay_capability"), capture.lastRequest)
 
         try await client.registerActivity(token: "beef", relayCapability: "hpr1.act")
-        p = try params(capture.lastLine)
+        p = try params(capture.lastRequest)
         XCTAssertEqual(p["activity_push_token"] as? String, "beef")
         XCTAssertEqual(p["relay_capability"] as? String, "hpr1.act")
     }
@@ -68,10 +58,9 @@ final class PushRelayTests: XCTestCase {
     // MARK: notifications.status
 
     private func availability(reply: String) async -> PushAvailability {
-        let capture = Capture()
-        capture.reply = reply
+        let capture = RecordingTransport(reply: reply)
         let availability = await HerdrClient(transport: capture).pushAvailability()
-        XCTAssertTrue(capture.lastLine.contains(#""method":"notifications.status""#), capture.lastLine)
+        XCTAssertTrue(capture.lastRequest.contains(#""method":"notifications.status""#), capture.lastRequest)
         return availability
     }
 

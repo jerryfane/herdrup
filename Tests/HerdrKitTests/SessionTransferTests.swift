@@ -3,29 +3,11 @@ import XCTest
 @testable import HerdrKit
 
 final class SessionTransferTests: XCTestCase {
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var requests: [String] = []
-        var transferPhase = "ready"
-
-        func roundTrip(_ requestLine: String) async throws -> String {
-            requests.append(requestLine)
-            if requestLine.contains(#""method":"ping""#) {
-                return #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true,"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","codex","omp"]}}}"#
-            }
-            return SessionTransferTests.transferResponse(phase: transferPhase)
-        }
-
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-    }
-
-    private struct FixedTransport: HerdrTransport {
-        let response: String
-        func roundTrip(_ requestLine: String) async throws -> String { response }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
+    /// Answers `ping` with a transfer-capable pong and everything else with a transfer in `phase`.
+    private static func host(phase: String = "ready") -> RecordingTransport {
+        RecordingTransport(
+            replies: ["ping": #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true,"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","codex","omp"]}}}"#],
+            otherwise: transferResponse(phase: phase))
     }
 
     private static let omissions = #"{"tool_records":2,"reasoning_records":3,"system_records":1,"attachment_records":4,"metadata_records":5,"unsupported_blocks":6,"sidechain_records":7}"#
@@ -40,13 +22,13 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testPingFeatureDetectsTransferAndDefaultsMissingFlagsFalse() async throws {
-        let enabled = try await HerdrClient(transport: CapturingTransport()).serverCapabilities()
+        let enabled = try await HerdrClient(transport: Self.host()).serverCapabilities()
         XCTAssertEqual(enabled?.agentSessionTransfer, true)
         XCTAssertEqual(enabled?.liveHandoff, true)
         XCTAssertEqual(enabled?.paneInputStream, false)
         XCTAssertEqual(enabled?.agentSessionTransferHarnesses, [.claude, .codex, .omp])
 
-        let old = FixedTransport(response:
+        let old = RecordingTransport(reply:
             #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"live_handoff":true}}}"#)
         let oldCapabilities = try await HerdrClient(transport: old).serverCapabilities()
         XCTAssertEqual(oldCapabilities?.agentSessionTransfer, false,
@@ -55,18 +37,18 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testPrepareEncodesOmpAsANativeTransferTarget() async throws {
-        let transport = CapturingTransport()
+        let transport = Self.host()
         _ = try await HerdrClient(transport: transport)
             .prepareAgentSessionTransfer(target: "jarvis", to: .omp, account: "omp-main")
 
-        let request = try requestObject(try XCTUnwrap(transport.requests.last))
+        let request = try requestObject(try XCTUnwrap(transport.requestLines.last))
         let params = try XCTUnwrap(request["params"] as? [String: Any])
         XCTAssertEqual(params["to"] as? String, "omp")
         XCTAssertEqual(params["account"] as? String, "omp-main")
     }
 
     func testPrepareEncodesOnlyStageFieldsAndDecodesReviewFacts() async throws {
-        let transport = CapturingTransport()
+        let transport = Self.host()
         let agent = try await HerdrClient(transport: transport)
             .prepareAgentSessionTransfer(target: "jarvis", to: .codex, account: "codex-pro")
 
@@ -79,7 +61,7 @@ final class SessionTransferTests: XCTestCase {
         XCTAssertEqual(transfer.messageCount, 3)
         XCTAssertEqual(transfer.omissions.total, 28)
 
-        let request = try requestObject(try XCTUnwrap(transport.requests.last))
+        let request = try requestObject(try XCTUnwrap(transport.requestLines.last))
         XCTAssertEqual(request["method"] as? String, "agent.transfer_session")
         let params = try XCTUnwrap(request["params"] as? [String: Any])
         XCTAssertEqual(params["target"] as? String, "jarvis")
@@ -90,15 +72,14 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testConfirmEchoesExactTransactionHarnessAndAccount() async throws {
-        let transport = CapturingTransport()
-        transport.transferPhase = "verifying_cutover"
+        let transport = Self.host(phase: "verifying_cutover")
         let agent = try await HerdrClient(transport: transport)
             .confirmAgentSessionTransfer(
                 target: "jarvis", to: .codex, account: "codex-pro",
                 transferID: "transfer-1")
 
         XCTAssertEqual(agent.sessionTransfer?.phase, .verifyingCutover)
-        let request = try requestObject(try XCTUnwrap(transport.requests.last))
+        let request = try requestObject(try XCTUnwrap(transport.requestLines.last))
         let params = try XCTUnwrap(request["params"] as? [String: Any])
         XCTAssertEqual(params["target"] as? String, "jarvis")
         XCTAssertEqual(params["to"] as? String, "codex")
@@ -108,7 +89,7 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testOlderAgentInfoWithoutTransferStillDecodes() async throws {
-        let transport = FixedTransport(response:
+        let transport = RecordingTransport(reply:
             #"{"id":"x","result":{"agents":[{"pane_id":"w1:p1","agent":"claude","agent_status":"idle"}]}}"#)
         let agents = try await HerdrClient(transport: transport).agentList()
         XCTAssertEqual(agents.count, 1)
@@ -116,7 +97,7 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testUnknownPhaseAndMissingOmissionCountersStayVisible() async throws {
-        let transport = FixedTransport(response:
+        let transport = RecordingTransport(reply:
             #"{"id":"x","result":{"agents":[{"pane_id":"w1:p1","agent":"claude","agent_status":"idle","session_transfer":{"id":"transfer-2","source":"claude","target":"codex","phase":"verifying_future_state","message_count":0,"omissions":{}}}]}}"#)
         let agents = try await HerdrClient(transport: transport).agentList()
         let transfer = try XCTUnwrap(agents.first?.sessionTransfer)
@@ -129,7 +110,7 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testUnknownHarnessDoesNotBreakAgentListDecoding() async throws {
-        let transport = FixedTransport(response:
+        let transport = RecordingTransport(reply:
             #"{"id":"x","result":{"agents":[{"pane_id":"w1:p1","agent":"future","agent_status":"idle","session_transfer":{"id":"transfer-3","source":"omp","target":"future-harness","phase":"completed","message_count":1,"omissions":{}}}]}}"#)
         let agents = try await HerdrClient(transport: transport).agentList()
         let transfer = try XCTUnwrap(agents.first?.sessionTransfer)
@@ -138,7 +119,7 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testUnknownAdvertisedHarnessDoesNotBreakCapabilityDecoding() async throws {
-        let transport = FixedTransport(response:
+        let transport = RecordingTransport(reply:
             #"{"id":"x","result":{"type":"pong","version":"0.8.2","protocol":9,"capabilities":{"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","omp","future-harness"]}}}"#)
         let capabilities = try await HerdrClient(transport: transport).serverCapabilities()
         XCTAssertEqual(
@@ -148,7 +129,7 @@ final class SessionTransferTests: XCTestCase {
     }
 
     func testTransferRejectionRemainsARealAPIError() async throws {
-        let transport = FixedTransport(response:
+        let transport = RecordingTransport(reply:
             #"{"id":"x","error":{"code":"session_transfer_changed","message":"source changed; source stayed running"}}"#)
         do {
             _ = try await HerdrClient(transport: transport)

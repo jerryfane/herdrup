@@ -104,22 +104,15 @@ final class LoginOutcomeAndArchiveAttributionTests: XCTestCase {
 
     // MARK: - archive attribution
 
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var lastRequest = ""
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lastRequest = requestLine
-            return #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":"w1:p1"}}}"#
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
+    private static func host() -> RecordingTransport {
+        RecordingTransport(reply: #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":"w1:p1"}}}"#)
     }
 
     /// An archive from the app must say who did it and why. Without both, the daemon
     /// records `by:"api"` and no reason — the same shape it writes for a pane that merely
     /// died, which is what made a deliberate archive indistinguishable from bookkeeping.
     func testArchiveSendsActorAndReason() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         _ = try await HerdrClient(transport: t).archiveAgent(
             target: "w1:p1", reason: appArchiveReason, by: appArchiveActor)
 
@@ -130,7 +123,7 @@ final class LoginOutcomeAndArchiveAttributionTests: XCTestCase {
     /// Omitting them must send NO such keys — an older daemon and every existing caller
     /// keep the exact bytes they had before.
     func testArchiveOmitsAttributionWhenNotGiven() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         _ = try await HerdrClient(transport: t).archiveAgent(target: "w1:p1")
 
         XCTAssertFalse(t.lastRequest.contains("\"by\""), "nil by must be omitted, not null")

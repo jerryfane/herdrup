@@ -7,17 +7,6 @@ import Foundation
 /// the request must name the row the user picked by its unique terminal id.
 final class ForgetAgentTargetTests: XCTestCase {
 
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var lastRequest = ""
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lastRequest = requestLine
-            return #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":""}}}"#
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-    }
-
     private func archived(name: String?, terminalID: String?) throws -> AgentInfo {
         var fields = [#""pane_id":"""#, #""archived":{"at":"2026-10-05T18:00:00Z"}"#]
         if let name { fields.append(#""name":"\#(name)""#) }
@@ -26,7 +15,7 @@ final class ForgetAgentTargetTests: XCTestCase {
     }
 
     private func forgetRequest(for info: AgentInfo) async throws -> [String: Any] {
-        let t = CapturingTransport()
+        let t = RecordingTransport(reply: #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":""}}}"#)
         _ = try await HerdrClient(transport: t).forgetAgent(info)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(t.lastRequest.utf8)) as? [String: Any])
     }

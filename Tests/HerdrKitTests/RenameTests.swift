@@ -7,26 +7,16 @@ import XCTest
 /// wrong key or transposed field fails here rather than on-device.
 final class RenameTests: XCTestCase {
 
-    /// Records the request line and replies with a canned response per method.
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var lastRequest = ""
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lastRequest = requestLine
-            if requestLine.contains("agent.rename") {
-                return #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":"w1:p1","name":"planner","agent":"claude","agent_status":"working"}}}"#
-            }
-            if requestLine.contains("pane.rename") {
-                return #"{"id":"x","result":{"type":"pane_info","pane":{"pane_id":"w1:p2","label":"build logs"}}}"#
-            }
-            return #"{"id":"x","result":{}}"#
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
+    /// Replies with a canned response per method.
+    private static func host() -> RecordingTransport {
+        RecordingTransport(replies: [
+            "agent.rename": #"{"id":"x","result":{"type":"agent_info","agent":{"pane_id":"w1:p1","name":"planner","agent":"claude","agent_status":"working"}}}"#,
+            "pane.rename": #"{"id":"x","result":{"type":"pane_info","pane":{"pane_id":"w1:p2","label":"build logs"}}}"#,
+        ])
     }
 
     func testRenameAgentSendsTargetAndNameAndDecodesTheAgent() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         let agent = try await HerdrClient(transport: t).renameAgent(target: "w1:p1", name: "planner")
 
         XCTAssertEqual(agent.displayName, "planner", "did not decode name from agent.rename's AgentInfo{agent}")
@@ -38,7 +28,7 @@ final class RenameTests: XCTestCase {
     }
 
     func testRenamePaneSendsSnakeCasePaneIDAndLabel() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         try await HerdrClient(transport: t).renamePane(paneID: "w1:p2", label: "build logs")
 
         XCTAssertTrue(t.lastRequest.contains(#""method":"pane.rename""#), "wrong method")
@@ -50,14 +40,9 @@ final class RenameTests: XCTestCase {
     /// AXIS: a duplicate/invalid name surfaces as a thrown APIError (agent_name_taken /
     /// invalid_agent_name) — what the rename UI leans on to show the reason instead of failing silently.
     func testRenameAgentServerErrorSurfacesAsAPIError() async throws {
-        struct ErrorTransport: HerdrTransport {
-            func roundTrip(_ r: String) async throws -> String {
-                #"{"id":"x","error":{"code":"agent_name_taken","message":"another agent already uses that name"}}"#
-            }
-            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
-        }
+        let transport = RecordingTransport.error(code: "agent_name_taken", message: "another agent already uses that name")
         do {
-            _ = try await HerdrClient(transport: ErrorTransport()).renameAgent(target: "w1:p1", name: "planner")
+            _ = try await HerdrClient(transport: transport).renameAgent(target: "w1:p1", name: "planner")
             XCTFail("a duplicate-name rejection must throw, not return silently")
         } catch let e as APIError {
             XCTAssertEqual(e.code, "agent_name_taken")

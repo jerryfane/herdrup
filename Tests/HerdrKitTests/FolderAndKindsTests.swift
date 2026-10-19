@@ -6,31 +6,22 @@ import XCTest
 /// encoding and response decoding are pinned to herdr's actual wire shapes.
 final class FolderAndKindsTests: XCTestCase {
 
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var lastRequest = ""
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lastRequest = requestLine
-            if requestLine.contains("fs.list_dir") {
-                return #"""
+    /// Answers fs.list_dir and agent.kinds with one canned listing each.
+    private static func host() -> RecordingTransport {
+        RecordingTransport(replies: [
+            "fs.list_dir": #"""
                 {"id":"x","result":{"type":"dir_list","path":"/root/project",\#
                 "entries":[{"name":"src","is_dir":true},{"name":"README.md","is_dir":false}]}}
-                """#
-            }
-            if requestLine.contains("agent.kinds") {
-                return #"""
+                """#,
+            "agent.kinds": #"""
                 {"id":"x","result":{"type":"agent_kinds","kinds":[\#
                 {"kind":"claude","installed":true},{"kind":"codex","installed":false}]}}
-                """#
-            }
-            return #"{"id":"x","result":{}}"#
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
+                """#,
+        ])
     }
 
     func testListDirSendsPathAndDecodesEntries() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         let listing = try await HerdrClient(transport: t).listDir(path: "/root/project")
 
         XCTAssertTrue(t.lastRequest.contains(#""method":"fs.list_dir""#), "wrong method")
@@ -42,14 +33,14 @@ final class FolderAndKindsTests: XCTestCase {
     }
 
     func testListDirOmitsPathWhenNil() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         _ = try await HerdrClient(transport: t).listDir(path: nil)
         // A nil path must be omitted (not sent as null) so the daemon defaults to $HOME.
         XCTAssertFalse(t.lastRequest.contains("\"path\""), "nil path should be omitted")
     }
 
     func testAgentKindsDecodesInstalledFlags() async throws {
-        let t = CapturingTransport()
+        let t = Self.host()
         let kinds = try await HerdrClient(transport: t).agentKinds()
 
         XCTAssertTrue(t.lastRequest.contains(#""method":"agent.kinds""#), "wrong method")
@@ -62,14 +53,9 @@ final class FolderAndKindsTests: XCTestCase {
     /// AXIS: a non-directory surfaces as a thrown APIError (`not_a_directory`) so the browser can
     /// show the reason instead of failing silently.
     func testListDirNonDirectorySurfacesAsAPIError() async throws {
-        struct ErrorTransport: HerdrTransport {
-            func roundTrip(_ r: String) async throws -> String {
-                #"{"id":"x","error":{"code":"not_a_directory","message":"/etc/hosts is not a directory"}}"#
-            }
-            func stream(_ r: String) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
-        }
+        let transport = RecordingTransport.error(code: "not_a_directory", message: "/etc/hosts is not a directory")
         do {
-            _ = try await HerdrClient(transport: ErrorTransport()).listDir(path: "/etc/hosts")
+            _ = try await HerdrClient(transport: transport).listDir(path: "/etc/hosts")
             XCTFail("a non-directory must throw")
         } catch let e as APIError {
             XCTAssertEqual(e.code, "not_a_directory")

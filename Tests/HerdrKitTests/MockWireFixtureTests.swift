@@ -320,27 +320,18 @@ final class MockWireFixtureTests: XCTestCase {
     /// (an older daemon is unaffected), and INCLUDE it — snake-free key `account` —
     /// when swapping. Asserts the encoded request line directly.
     func testRestartAccountParamOmittedWhenNilPresentWhenSet() async throws {
-        final class Capture: HerdrTransport, @unchecked Sendable {
-            var lastLine = ""
-            func roundTrip(_ requestLine: String) async throws -> String {
-                lastLine = requestLine
-                return #"{"id":"x","result":{"type":"agent_restarted","agent":{"pane_id":"w1:p1"}}}"#
-            }
-            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-                AsyncThrowingStream { $0.finish() }
-            }
-        }
-        let capture = Capture()
+        let capture = RecordingTransport(
+            reply: #"{"id":"x","result":{"type":"agent_restarted","agent":{"pane_id":"w1:p1"}}}"#)
         let client = HerdrClient(transport: capture)
 
         _ = try await client.restartAgent(target: "w1:p1")
-        XCTAssertTrue(capture.lastLine.contains("\"target\":\"w1:p1\""), "target must be sent")
-        XCTAssertFalse(capture.lastLine.contains("account"),
-                       "a no-account restart must not send an account key: \(capture.lastLine)")
+        XCTAssertTrue(capture.lastRequest.contains("\"target\":\"w1:p1\""), "target must be sent")
+        XCTAssertFalse(capture.lastRequest.contains("account"),
+                       "a no-account restart must not send an account key: \(capture.lastRequest)")
 
         _ = try await client.restartAgent(target: "w1:p1", account: "acc-claude-2")
-        XCTAssertTrue(capture.lastLine.contains("\"account\":\"acc-claude-2\""),
-                      "swapping must send the account id: \(capture.lastLine)")
+        XCTAssertTrue(capture.lastRequest.contains("\"account\":\"acc-claude-2\""),
+                      "swapping must send the account id: \(capture.lastRequest)")
     }
 
     /// The `gram.list` fixture must decode through the real client path, and the
@@ -551,30 +542,21 @@ final class MockWireFixtureTests: XCTestCase {
     /// inflate the request line: the request encoder must emit unescaped "/", or a
     /// binary chunk would blow the SSH command-size cap. Guards the chunk-size math.
     func testGramUploadChunkRequestStaysCompactForSlashHeavyData() async throws {
-        final class Capture: HerdrTransport, @unchecked Sendable {
-            var maxLen = 0
-            func roundTrip(_ requestLine: String) async throws -> String {
-                maxLen = max(maxLen, requestLine.utf8.count)
-                return #"{"id":"x","result":{"type":"ok"}}"#
-            }
-            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-                AsyncThrowingStream { $0.finish() }
-            }
-        }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("gram-upload-chunk-slashes-\(UUID().uuidString).bin")
         try Data(repeating: 0xFF, count: HerdrClient.gramUploadChunkBytes).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let capture = Capture()
+        let capture = RecordingTransport(reply: RecordingTransport.okResult)
         let client = HerdrClient(transport: capture)
         _ = try await client.gramUploadFile(fileURL: url)
         // ~49 KiB raw → ~65.5 KB unescaped base64 + envelope. Escaping every "/"
         // would nearly double it; assert it stays well under the point where the
         // outer argv base64 (~1.33x) would breach the 120 KB command cap.
+        let maxLen = capture.requestLines.map(\.utf8.count).max() ?? 0
         XCTAssertLessThan(
-            capture.maxLen, 80_000,
-            "slash escaping inflated the upload request line to \(capture.maxLen) bytes")
+            maxLen, 80_000,
+            "slash escaping inflated the upload request line to \(maxLen) bytes")
     }
 
     /// Collects `onProgress` callbacks, which arrive on the main actor from a
@@ -594,66 +576,29 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
-    /// The SAME slash-escaping property at the stream frame size. `Capture` is not a
+    /// The SAME slash-escaping property at the stream frame size. `RecordingTransport` is not a
     /// `CitadelTransport`, so `gramOpenUploadChannel` returns nil and this exercises
     /// the per-chunk fallback — the CI-visible proof that reading a stream-sized file
     /// from disk does not inflate the request line either.
     func testGramUploadFromDiskRequestStaysCompactForSlashHeavyData() async throws {
-        final class Capture: HerdrTransport, @unchecked Sendable {
-            var maxLen = 0
-            func roundTrip(_ requestLine: String) async throws -> String {
-                maxLen = max(maxLen, requestLine.utf8.count)
-                return #"{"id":"x","result":{"type":"ok"}}"#
-            }
-            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-                AsyncThrowingStream { $0.finish() }
-            }
-        }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("gram-upload-slashes-\(UUID().uuidString).bin")
         try Data(repeating: 0xFF, count: HerdrClient.gramStreamChunkBytes).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let capture = Capture()
+        let capture = RecordingTransport(reply: RecordingTransport.okResult)
         let client = HerdrClient(transport: capture)
         _ = try await client.gramUploadFile(fileURL: url)
+        let maxLen = capture.requestLines.map(\.utf8.count).max() ?? 0
         XCTAssertLessThan(
-            capture.maxLen, 80_000,
-            "slash escaping inflated the from-disk request line to \(capture.maxLen) bytes")
+            maxLen, 80_000,
+            "slash escaping inflated the from-disk request line to \(maxLen) bytes")
     }
 
     /// The from-disk fallback path must walk the file in CONTIGUOUS chunks: staging
     /// is append-only, so the daemon rejects any offset that is not the running
     /// staged size. A gap (or a repeat) is the bug this pins.
     func testGramUploadFromDiskSendsContiguousOffsets() async throws {
-        final class Capture: HerdrTransport, @unchecked Sendable {
-            struct Chunk: Decodable {
-                struct Params: Decodable {
-                    let offset: UInt64
-                    let dataBase64: String
-                    enum CodingKeys: String, CodingKey {
-                        case offset
-                        case dataBase64 = "data_base64"
-                    }
-                }
-                let method: String
-                let params: Params
-            }
-            var offsets: [UInt64] = []
-            var bytes = Data()
-            func roundTrip(_ requestLine: String) async throws -> String {
-                if let chunk = try? JSONDecoder().decode(Chunk.self, from: Data(requestLine.utf8)),
-                    chunk.method == "gram.upload_chunk"
-                {
-                    offsets.append(chunk.params.offset)
-                    bytes.append(Data(base64Encoded: chunk.params.dataBase64) ?? Data())
-                }
-                return #"{"id":"x","result":{"type":"ok"}}"#
-            }
-            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-                AsyncThrowingStream { $0.finish() }
-            }
-        }
         let chunkBytes = HerdrClient.gramUploadChunkBytes
         let payload = Data((0..<(chunkBytes * 2 + 7)).map { UInt8($0 % 251) })
         let url = FileManager.default.temporaryDirectory
@@ -661,27 +606,28 @@ final class MockWireFixtureTests: XCTestCase {
         try payload.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let capture = Capture()
+        let capture = RecordingTransport(reply: RecordingTransport.okResult)
         let client = HerdrClient(transport: capture)
         _ = try await client.gramUploadFile(fileURL: url)
 
+        let chunks = capture.requests.compactMap { request -> (offset: UInt64, data: Data)? in
+            guard request.method == "gram.upload_chunk",
+                  let offset = request.params["offset"] as? Int,
+                  let base64 = request.params["data_base64"] as? String
+            else { return nil }
+            return (UInt64(offset), Data(base64Encoded: base64) ?? Data())
+        }
+        let offsets = chunks.map(\.offset)
+        let bytes = chunks.reduce(into: Data()) { $0.append($1.data) }
         XCTAssertEqual(
-            capture.offsets, [0, UInt64(chunkBytes), UInt64(chunkBytes * 2)],
+            offsets, [0, UInt64(chunkBytes), UInt64(chunkBytes * 2)],
             "offsets must be contiguous multiples of the chunk size")
-        XCTAssertEqual(capture.bytes, payload, "the streamed bytes must reassemble the file")
+        XCTAssertEqual(bytes, payload, "the streamed bytes must reassemble the file")
     }
 
     /// Progress is reported from the file's own size, once at 0 and once at the end,
     /// so a determinate progress bar cannot be driven past 100% or left short.
     func testGramUploadFromDiskReportsProgressToTotal() async throws {
-        final class Sink: HerdrTransport, @unchecked Sendable {
-            func roundTrip(_ requestLine: String) async throws -> String {
-                #"{"id":"x","result":{"type":"ok"}}"#
-            }
-            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-                AsyncThrowingStream { $0.finish() }
-            }
-        }
         let payload = Data(repeating: 7, count: HerdrClient.gramUploadChunkBytes + 128)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("gram-upload-progress-\(UUID().uuidString).bin")
@@ -689,7 +635,8 @@ final class MockWireFixtureTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let reports = Reports()
-        _ = try await HerdrClient(transport: Sink()).gramUploadFile(fileURL: url) { sent, total in
+        let sink = RecordingTransport(reply: RecordingTransport.okResult)
+        _ = try await HerdrClient(transport: sink).gramUploadFile(fileURL: url) { sent, total in
             reports.append(sent: sent, total: total)
         }
         let observed = reports.snapshot()

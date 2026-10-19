@@ -6,35 +6,6 @@ import XCTest
 /// the hello, how the guest's Gram decodes and downloads, and where a tapped push goes.
 final class GuestGramTests: XCTestCase {
 
-    /// Answers each request by method, and keeps every request line.
-    private final class ScriptedTransport: HerdrTransport, @unchecked Sendable {
-        private let lock = NSLock()
-        private var lines: [String] = []
-        let answer: (_ method: String, _ params: [String: Any]) -> String
-
-        init(answer: @escaping (_ method: String, _ params: [String: Any]) -> String) {
-            self.answer = answer
-        }
-
-        var requests: [(method: String, params: [String: Any])] {
-            lock.withLock { lines }.compactMap { line in
-                guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                      let method = object["method"] as? String else { return nil }
-                return (method, object["params"] as? [String: Any] ?? [:])
-            }
-        }
-
-        func roundTrip(_ requestLine: String) async throws -> String {
-            lock.withLock { lines.append(requestLine) }
-            let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
-            return answer(object?["method"] as? String ?? "", object?["params"] as? [String: Any] ?? [:])
-        }
-
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-    }
-
     private final class FeatureLog: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [GuestFeatures] = []
@@ -78,7 +49,7 @@ final class GuestGramTests: XCTestCase {
     // MARK: Gram list
 
     func testGuestGramListDecodesTheHostsProjection() async throws {
-        let transport = ScriptedTransport { _, _ in #"""
+        let transport = RecordingTransport { _, _ in #"""
         {"id":"x","result":{"type":"guest_gram_list","has_more":true,"messages":[
           {"id":"m3","direction":"agent_to_owner","from":"llm-opt","text":"Q5 table attached",
            "created_unix_ms":1790000300000,"read":false,
@@ -111,7 +82,7 @@ final class GuestGramTests: XCTestCase {
     /// herdr#298: the guest projection carries `expired_file` for a file the host's store
     /// expired. It decodes as metadata only, never as an openable `file`; absent stays nil.
     func testGuestGramListDecodesAnExpiredFile() async throws {
-        let transport = ScriptedTransport { _, _ in #"""
+        let transport = RecordingTransport { _, _ in #"""
         {"id":"x","result":{"type":"guest_gram_list","messages":[
           {"id":"m3","direction":"agent_to_owner","from":"llm-opt","text":"",
            "created_unix_ms":1790000300000,"read":true,
@@ -136,7 +107,7 @@ final class GuestGramTests: XCTestCase {
     }
 
     func testGuestGramListOmitsUnsetParamsAndClampsTheLimit() async throws {
-        let transport = ScriptedTransport { _, _ in #"{"id":"x","result":{"type":"guest_gram_list","messages":[]}}"# }
+        let transport = RecordingTransport { _, _ in #"{"id":"x","result":{"type":"guest_gram_list","messages":[]}}"# }
         let client = HerdrClient(transport: transport)
         let page = try await client.guestGramList()
         XCTAssertEqual(page, GuestGramPage(messages: [], hasMore: false), "no has_more means everything")
@@ -146,7 +117,7 @@ final class GuestGramTests: XCTestCase {
     }
 
     func testMarkReadSendsTheIDs() async throws {
-        let transport = ScriptedTransport { _, _ in #"{"id":"x","result":{"type":"ok"}}"# }
+        let transport = RecordingTransport { _, _ in #"{"id":"x","result":{"type":"ok"}}"# }
         try await HerdrClient(transport: transport).guestGramMarkRead(ids: ["m3", "m1"])
         let request = try XCTUnwrap(transport.requests.last)
         XCTAssertEqual(request.method, "gram.mark_read")
@@ -159,7 +130,7 @@ final class GuestGramTests: XCTestCase {
     static let liveGuestPostReply = #"{"id":"e2e:gram.post","result":{"type":"gram_sent","message":{"created_unix_ms":1790849045630,"file":{"mime":"text/markdown","name":"brief.md","sha256":"1b000f…","size":6009},"from":"upload-e2e (via HerdrUp)","id":"gram-1a0f6ebd47e-320048-d","text":"Attachment from upload-e2e.","to":"mac-studio"}}}"#
 
     func testGuestPostDecodesTheHostsProjectedReply() async throws {
-        let transport = ScriptedTransport { _, _ in Self.liveGuestPostReply }
+        let transport = RecordingTransport { _, _ in Self.liveGuestPostReply }
         let receipt = try await HerdrClient(transport: transport).guestGramPost(
             text: "Attachment from upload-e2e.", to: "mac-studio",
             attachment: HerdrClient.GramFileAttachment(uploadID: "app-1", name: "brief.md", mime: "text/markdown"))
@@ -177,7 +148,7 @@ final class GuestGramTests: XCTestCase {
     }
 
     func testOnlyTheMissingStagedUploadErrorAsksForAFreshUpload() async throws {
-        let stale = ScriptedTransport { _, _ in
+        let stale = RecordingTransport { _, _ in
             #"{"id":"x","error":{"code":"invalid_params","message":"no staged upload with that id; upload the file chunks first"}}"#
         }
         do {
@@ -228,7 +199,7 @@ final class GuestGramTests: XCTestCase {
     }
 
     func testForbiddenGramSurfacesAsTheGuestError() async throws {
-        let transport = ScriptedTransport { _, _ in
+        let transport = RecordingTransport { _, _ in
             #"{"id":"x","error":{"code":"guest_forbidden","message":"gram is not shared with you"}}"#
         }
         do {
@@ -245,7 +216,7 @@ final class GuestGramTests: XCTestCase {
     func testChunkedDownloadAssemblesTheFileFromOffsets() async throws {
         let file = Data((0..<1_200_000).map { UInt8($0 % 251) })
         let piece = 512 * 1024
-        let transport = ScriptedTransport { method, params in
+        let transport = RecordingTransport { method, params in
             let offset = params["offset"] as? Int ?? -1
             guard method == "gram.get_file_chunk", params["id"] as? String == "m3", offset >= 0 else {
                 return #"{"id":"x","error":{"code":"invalid_params","message":"bad"}}"#
@@ -263,7 +234,7 @@ final class GuestGramTests: XCTestCase {
     }
 
     func testChunkedDownloadRejectsAHostThatStopsShort() async throws {
-        let transport = ScriptedTransport { _, params in
+        let transport = RecordingTransport { _, params in
             let offset = params["offset"] as? Int ?? 0
             let bytes = offset == 0 ? Data(repeating: 1, count: 10) : Data()
             return #"{"id":"x","result":{"type":"gram_file_chunk","name":"a","mime":"","size":20,"sha256":"x","offset":\#(offset),"data_base64":"\#(bytes.base64EncodedString())"}}"#
@@ -277,14 +248,14 @@ final class GuestGramTests: XCTestCase {
     }
 
     /// A host answering with a scripted piece at every offset.
-    private func chunkHost(size: String, piece: @escaping (Int) -> Data) -> ScriptedTransport {
-        ScriptedTransport { _, params in
+    private func chunkHost(size: String, piece: @escaping (Int) -> Data) -> RecordingTransport {
+        RecordingTransport { _, params in
             let offset = params["offset"] as? Int ?? 0
             return #"{"id":"x","result":{"type":"gram_file_chunk","name":"a","mime":"","size":\#(size),"sha256":"x","offset":\#(offset),"data_base64":"\#(piece(offset).base64EncodedString())"}}"#
         }
     }
 
-    private func assertRejected(_ transport: ScriptedTransport, expectedSize: UInt64, requests: Int,
+    private func assertRejected(_ transport: RecordingTransport, expectedSize: UInt64, requests: Int,
                                 _ why: String, line: UInt = #line) async {
         do {
             _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1", expectedSize: expectedSize)
