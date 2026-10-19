@@ -101,13 +101,6 @@ public struct GuestGramPostReceipt: Decodable, Sendable, Equatable {
         case id, from, to, text, file
         case createdUnixMs = "created_unix_ms"
     }
-
-    /// The host has no staged upload under the posted `upload_id`: it was already consumed by
-    /// an earlier post, or never finished. The file must be uploaded again before posting.
-    public static func isStaleUpload(_ error: Error) -> Bool {
-        guard let api = error as? APIError else { return false }
-        return api.code == "invalid_params" && api.message.contains("no staged upload")
-    }
 }
 
 /// `gram.post` result as a guest sees it: only `message` is decoded.

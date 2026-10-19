@@ -645,7 +645,7 @@ struct GuestPaneView: View {
                 let posted: GuestGramPostReceipt
                 do {
                     posted = try await post(file)
-                } catch let error where GuestGramPostReceipt.isStaleUpload(error) {
+                } catch let error where GramAttachmentSender.isStaleUpload(error) {
                     // The host holds nothing under that upload id (an earlier post used it
                     // up): upload the file again and post once more.
                     file.uploadID = nil

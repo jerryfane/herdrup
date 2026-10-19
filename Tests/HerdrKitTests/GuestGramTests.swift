@@ -155,11 +155,11 @@ final class GuestGramTests: XCTestCase {
             try await HerdrClient(transport: stale).guestGramPost(text: "", to: "llm-opt")
             XCTFail("the post should be refused")
         } catch {
-            XCTAssertTrue(GuestGramPostReceipt.isStaleUpload(error))
+            XCTAssertTrue(GramAttachmentSender.isStaleUpload(error))
         }
-        XCTAssertFalse(GuestGramPostReceipt.isStaleUpload(
+        XCTAssertFalse(GramAttachmentSender.isStaleUpload(
             APIError(code: "invalid_params", message: "text too long")))
-        XCTAssertFalse(GuestGramPostReceipt.isStaleUpload(
+        XCTAssertFalse(GramAttachmentSender.isStaleUpload(
             APIError(code: "gram_file_error", message: "no staged upload with that id")))
     }
 

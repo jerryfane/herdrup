@@ -575,6 +575,23 @@ enum ComposerAttachmentState {
     case sent
     case failed
 
+    /// One staged file's chip, the same rule in every composer: the file a send stopped
+    /// on is `failed` until the next send, a posted one is `sent`, and while a send runs
+    /// the file in flight shows its upload ring and the rest wait.
+    static func `for`(
+        _ attachment: ComposerAttachment, sending: Bool, sendingID: UUID?, failedID: UUID?,
+        uploadBytes: (sent: Int, total: Int)?
+    ) -> ComposerAttachmentState {
+        if attachment.id == failedID { return .failed }
+        if attachment.messageID != nil { return .sent }
+        guard sending else { return .ready }
+        guard attachment.id == sendingID else { return .waiting }
+        if let upload = uploadBytes {
+            return .uploading(sent: upload.sent, total: upload.total)
+        }
+        return .sending
+    }
+
     var progress: Double? {
         guard case let .uploading(sent, total) = self, total > 0 else { return nil }
         return min(1, max(0, Double(sent) / Double(total)))
