@@ -172,7 +172,7 @@ struct SavedGramRow: View {
                 Text(saved.fromAgent ? saved.from : "You")
                     .font(Typography.app(12, .semibold))
                     .foregroundStyle(Palette.textDim)
-                Text(age)
+                Text(GramRow.age(from: saved.createdAt))
                     .font(Typography.machine(11))
                     .foregroundStyle(Palette.textFaint)
                 Button(action: onUnsave) {
@@ -307,14 +307,5 @@ struct SavedGramRow: View {
         .accessibilityLabel("\(file.name), no longer available")
         .accessibilityIdentifier("gram-attachment-expired")
         .padding(.top, 2)
-    }
-
-    /// Compact relative age ("now" / "5m" / "3h" / "2d"), matching the inbox row's terse style.
-    private var age: String {
-        let secs = Date().timeIntervalSince(saved.createdAt)
-        if secs < 60 { return "now" }
-        if secs < 3600 { return "\(Int(secs / 60))m" }
-        if secs < 86400 { return "\(Int(secs / 3600))h" }
-        return "\(Int(secs / 86400))d"
     }
 }
