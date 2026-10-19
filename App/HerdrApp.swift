@@ -561,6 +561,17 @@ struct RootView: View {
                                  paneID: "w1:p1", title: "keyframehistory",
                                  agent: MockTransport.demoPaneAgent)
             }
+        case .keyframeHistoryRead:
+            // A REAL SwiftTerm pane on a current (herdr#301) server: every keyframe carries
+            // history and the mount-time history read is held, so the probe shows whether the
+            // app cancels that read once the first keyframe has made it redundant.
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(
+                                        keyframeHistory: KeyframeHistoryDriver(historyFromFirstKeyframe: true))),
+                                 paneID: "w1:p1", title: "keyframehistoryread",
+                                 agent: MockTransport.demoPaneAgent)
+            }
+            .overlay(alignment: .topLeading) { KeyframeHistoryReadProbe() }
         case .paging:
             // Three distinctively-named agents in the real keep-mounted container. A swipe
             // fronts the neighbour and the header heading changes (ALFA→BRAVO→ALFA) — the
@@ -9458,7 +9469,7 @@ struct HtmlPreviewHarness: View {
 /// env `HERDR_SCREENSHOT_MOCK=<mode>` (one of the names `mode` parses; anything else is
 /// `list`), or the `-herdrScreenshotMock` launch argument, which also gives `list`.
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, gram, resize, control, htmlPreview, widgets
+    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, keyframeHistoryRead, gram, resize, control, htmlPreview, widgets
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
@@ -9522,6 +9533,11 @@ enum ScreenshotMock {
         // keyframes (`history_b64`) — so a swipe can reveal earlier output only if the app
         // seeds scrollback from the keyframe of the in-place reconnect.
         case "keyframehistory": return .keyframeHistory
+        // `keyframehistoryread` drives the redundant-history-read receipt: EVERY keyframe
+        // carries history, as on a current server, and agent.read (source=recent) is held
+        // before it answers, so the `keyframe-history-reads` probe shows whether the app
+        // cancelled the mount-time read once the first keyframe made it redundant.
+        case "keyframehistoryread": return .keyframeHistoryRead
         // `gram` renders the Gram page from a canned owner-view gram.list — the
         // messages, unread badge, claim states, and composer, for a layout FYI.
         case "gram": return .gram
@@ -9630,8 +9646,8 @@ struct MockTransport: HerdrTransport {
     /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
     /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
     var backfill = false
-    /// When set, `pane.stream` carries history only inside its keyframes and drops the first
-    /// stream after its keyframe; `agent.read` returns no history. For the reconnect receipt.
+    /// When set, `pane.stream` carries history only inside its keyframes and `agent.read`
+    /// returns none; see `KeyframeHistoryDriver`. For the reconnect and redundant-read receipts.
     var keyframeHistory: KeyframeHistoryDriver?
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
@@ -9659,7 +9675,10 @@ struct MockTransport: HerdrTransport {
             }
             return MockWireFixtures.agentList
         }
-        if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
+        if requestLine.contains("agent.read") {
+            if let keyframeHistory { return try await keyframeHistory.read(requestLine) }
+            return backfill ? Self.backfillRead() : Self.agentRead
+        }
         if requestLine.contains("gram.mark_read") {
             Self.gramOwnerReads.markRead(Self.requestParamID(requestLine))
             return #"{"id":"mock","result":{}}"#
@@ -10402,24 +10421,73 @@ final class RosterStressDriver: @unchecked Sendable {
     }
 }
 
-/// Stand-in for a daemon that windows history into its keyframes, for the reconnect receipt.
-/// The FIRST `pane.stream` delivers a screen-only keyframe and then ends — a dropped stream
-/// the app must reconnect in place (no remount, no backfill). Every later stream's keyframe
-/// carries 300 numbered history rows in `history_b64`. `agent.read` has no history, so
-/// scrollback can only come from the reconnect's keyframe.
+/// Stand-in for a daemon that windows history into its keyframes (herdr#301). `agent.read`
+/// has no history; every history read (agent.read, source=recent) is counted in `reads`.
+///
+/// By default (`keyframehistory`, the reconnect receipt) the FIRST `pane.stream` delivers a
+/// screen-only keyframe and then ends — a dropped stream the app must reconnect in place (no
+/// remount, no backfill). Every later stream's keyframe carries 300 numbered history rows in
+/// `history_b64`, so scrollback can only come from the reconnect's keyframe.
+///
+/// With `historyFromFirstKeyframe` (`keyframehistoryread`, the redundant-read receipt) every
+/// keyframe carries the history and the first stream stays open, as on a current server, and
+/// each history read is held for `heldReadNanos` before it answers. `reads` then shows whether
+/// the app cancelled the read once the first keyframe arrived, or let it run to its answer.
 final class KeyframeHistoryDriver: @unchecked Sendable {
+    /// Counts of history reads: requested, answered, and cancelled while held.
+    final class ReadLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var requested = 0, answered = 0, cancelled = 0
+
+        fileprivate func requestedOne() { lock.withLock { requested += 1 } }
+        fileprivate func answeredOne() { lock.withLock { answered += 1 } }
+        fileprivate func cancelledOne() { lock.withLock { cancelled += 1 } }
+
+        var summary: String {
+            lock.withLock { "requested=\(requested) answered=\(answered) cancelled=\(cancelled)" }
+        }
+    }
+
+    /// Process-wide, like the gram mock's call logs: the mock view may rebuild its transport.
+    static let reads = ReadLog()
+    /// Shorter than the app's 6 s backfill timeout, whose expiry also cancels the read: a read
+    /// cancelled while held was cancelled by something other than that timeout.
+    static let heldReadNanos: UInt64 = 3_000_000_000
+
+    private let historyFromFirstKeyframe: Bool
     private let lock = NSLock()
     private var opens = 0
+
+    init(historyFromFirstKeyframe: Bool = false) {
+        self.historyFromFirstKeyframe = historyFromFirstKeyframe
+    }
+
+    /// Answers an `agent.read`. Only source=recent is the backfill's history read.
+    func read(_ requestLine: String) async throws -> String {
+        guard requestLine.contains(#""source":"recent""#) else { return MockTransport.agentRead }
+        Self.reads.requestedOne()
+        if historyFromFirstKeyframe {
+            do {
+                try await Task.sleep(nanoseconds: Self.heldReadNanos)
+            } catch {
+                Self.reads.cancelledOne()
+                throw error
+            }
+        }
+        Self.reads.answeredOne()
+        return MockTransport.agentRead
+    }
 
     func stream() -> AsyncThrowingStream<String, Error> {
         let attempt: Int = lock.withLock {
             opens += 1
             return opens
         }
+        let history = historyFromFirstKeyframe || attempt > 1
         return AsyncThrowingStream { continuation in
             continuation.yield(MockTransport.paneStreamAck)
-            continuation.yield(Self.resetFrame(history: attempt > 1))
-            if attempt == 1 {
+            continuation.yield(Self.resetFrame(history: history))
+            if !history {
                 // Dropped: the app's in-place reconnect must recover the history.
                 continuation.finish()
                 return
@@ -10450,6 +10518,28 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
         if history { object["history_b64"] = Data(past.utf8).base64EncodedString() }
         let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// DEBUG receipt for the redundant-history-read test: `KeyframeHistoryDriver.reads` as the
+/// label of `keyframe-history-reads`, refreshed while the mock pane is up.
+struct KeyframeHistoryReadProbe: View {
+    @State private var summary = KeyframeHistoryDriver.reads.summary
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityIdentifier("keyframe-history-reads")
+            .accessibilityLabel(summary)
+            .task {
+                while !Task.isCancelled {
+                    let now = KeyframeHistoryDriver.reads.summary
+                    if now != summary { summary = now }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
     }
 }
 
