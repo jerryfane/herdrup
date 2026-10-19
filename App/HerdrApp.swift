@@ -5304,26 +5304,12 @@ struct TerminalPaneContent: View {
     /// Back out to the agents list (header chevron / left-edge swipe). Replaces the old
     /// NavigationStack `dismiss` now that panes live in a keep-alive container, not a push.
     let onClose: () -> Void
-    /// One staged file on its way to the agent: a pasted photo, a PDF, a log, anything
-    /// the pasteboard can vend as a file. `isImage` only chooses the chip glyph and the
-    /// wording of the prompt reference; the delivery path is identical either way.
-    private struct PromptAttachment: Identifiable, Sendable {
-        let id: UUID
-        let name: String
-        let mime: String
-        let isImage: Bool
-        let size: Int
-        let staged: StagedAttachment?
-        let uploadID: String?
-        let gramMessageID: String?
-    }
-
     @State private var reply: String
     @StateObject private var composerKeyboard = ComposerKeyboard()
     /// Every staged attachment, in paste order. Each sends as its own gram message and
     /// they are all named by ONE prompt, so the agent gets a single turn that points at
     /// the whole set. Capped at `GramView.Staging.maxAttachments`.
-    @State private var replyAttachments: [PromptAttachment] = []
+    @State private var replyAttachments: [ComposerAttachment] = []
     /// The ••• "Share with someone" sheet and the guests who hold this agent (the header chip).
     @StateObject private var guestShare = GuestSharePaneModel()
     @State private var loadingReplyAttachment = false
@@ -6256,24 +6242,15 @@ struct TerminalPaneContent: View {
         }
     }
 
-    private func replyAttachmentChip(_ attachment: PromptAttachment) -> some View {
+    private func replyAttachmentChip(_ attachment: ComposerAttachment) -> some View {
         ComposerAttachmentChip(
             name: attachment.name, size: attachment.size, isImage: attachment.isImage,
-            state: replyAttachmentState(attachment), canRemove: !sending,
+            state: .for(attachment, sending: sending, sendingID: replySendingAttachmentID,
+                        failedID: replyFailedAttachmentID, uploadBytes: replyUploadBytes),
+            canRemove: !sending,
             onRemove: { removeReplyAttachment(attachment) }
         )
         .accessibilityIdentifier("terminal-attachment")
-    }
-
-    private func replyAttachmentState(_ attachment: PromptAttachment) -> ComposerAttachmentState {
-        if attachment.id == replyFailedAttachmentID { return .failed }
-        if attachment.gramMessageID != nil { return .sent }
-        guard sending else { return .ready }
-        guard attachment.id == replySendingAttachmentID else { return .waiting }
-        if let upload = replyUploadBytes {
-            return .uploading(sent: upload.sent, total: upload.total)
-        }
-        return .sending
     }
 
 
@@ -6372,8 +6349,7 @@ struct TerminalPaneContent: View {
             room: { GramView.Staging.maxAttachments - replyAttachments.count }
         ) { outcome in
             replyAttachments += outcome.files.map {
-                PromptAttachment(id: UUID(), name: $0.name, mime: $0.mime, isImage: $0.isImage,
-                                 size: $0.staged.size, staged: $0.staged, uploadID: nil, gramMessageID: nil)
+                ComposerAttachment(name: $0.name, mime: $0.mime, isImage: $0.isImage, staged: $0.staged)
             }
             actionNote = outcome.note
         }
@@ -6456,7 +6432,7 @@ struct TerminalPaneContent: View {
             ctrlArmed = false
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 var refusal: String?
-                let attachment: PromptAttachment? = url.flatMap { source in
+                let attachment: ComposerAttachment? = url.flatMap { source in
                     let scoped = source.startAccessingSecurityScopedResource()
                     defer { if scoped { source.stopAccessingSecurityScopedResource() } }
                     let keys: Set<URLResourceKey> = [
@@ -6485,11 +6461,11 @@ struct TerminalPaneContent: View {
                           let staged = GramView.Staging.copy(of: source, named: name)
                     else { return nil }
                     let fileType = UTType(filenameExtension: source.pathExtension)
-                    return PromptAttachment(
-                        id: UUID(), name: name,
+                    return ComposerAttachment(
+                        name: name,
                         mime: fileType?.preferredMIMEType ?? "application/octet-stream",
                         isImage: fileType?.conforms(to: .image) ?? false,
-                        size: staged.size, staged: staged, uploadID: nil, gramMessageID: nil)
+                        staged: staged)
                 }
                 Task { @MainActor in
                     finishReplyAttachmentPaste(attachment)
@@ -6516,11 +6492,9 @@ struct TerminalPaneContent: View {
         let mime = type.preferredMIMEType ?? (isImage ? "image/jpeg" : "application/octet-stream")
 
         provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { source, _ in
-            let fileAttachment: PromptAttachment? = source.flatMap { url in
+            let fileAttachment: ComposerAttachment? = source.flatMap { url in
                 guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
-                return PromptAttachment(
-                    id: UUID(), name: name, mime: mime, isImage: isImage, size: staged.size, staged: staged,
-                    uploadID: nil, gramMessageID: nil)
+                return ComposerAttachment(name: name, mime: mime, isImage: isImage, staged: staged)
             }
             if let fileAttachment {
                 Task { @MainActor in finishReplyAttachmentPaste(fileAttachment) }
@@ -6529,14 +6503,12 @@ struct TerminalPaneContent: View {
 
             // In-memory pasteboards can vend encoded bytes but no file URL.
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
-                let dataAttachment: PromptAttachment? = data.flatMap {
+                let dataAttachment: ComposerAttachment? = data.flatMap {
                     guard let staged = GramStaging.stageData(
                         $0, named: name, in: GramView.Staging.session,
                         maxBytes: GramView.Staging.maxFileBytes)
                     else { return nil }
-                    return PromptAttachment(
-                        id: UUID(), name: name, mime: mime, isImage: isImage, size: staged.size, staged: staged,
-                        uploadID: nil, gramMessageID: nil)
+                    return ComposerAttachment(name: name, mime: mime, isImage: isImage, staged: staged)
                 }
                 Task { @MainActor in finishReplyAttachmentPaste(dataAttachment) }
             }
@@ -6567,7 +6539,7 @@ struct TerminalPaneContent: View {
         showReplyAttachSheet = true
     }
 
-    private func finishReplyAttachmentPaste(_ attachment: PromptAttachment?) {
+    private func finishReplyAttachmentPaste(_ attachment: ComposerAttachment?) {
         loadingReplyAttachment = false
         guard let attachment else {
             actionNote = "Couldn't add that attachment."
@@ -6578,9 +6550,7 @@ struct TerminalPaneContent: View {
         // staged bytes exist, and a future concurrent paste path would otherwise append
         // past the cap and leak the temp file.
         guard replyAttachments.count < GramView.Staging.maxAttachments else {
-            if let staged = attachment.staged {
-                try? FileManager.default.removeItem(at: staged.dir)
-            }
+            try? FileManager.default.removeItem(at: attachment.staged.dir)
             actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
             return
         }
@@ -6588,15 +6558,13 @@ struct TerminalPaneContent: View {
         actionNote = nil
     }
 
-    private func removeReplyAttachment(_ attachment: PromptAttachment) {
+    private func removeReplyAttachment(_ attachment: ComposerAttachment) {
         guard replyAttachments.contains(where: { $0.id == attachment.id }) else { return }
         replyAttachments.removeAll { $0.id == attachment.id }
-        if let staged = attachment.staged {
-            try? FileManager.default.removeItem(at: staged.dir)
-        }
+        try? FileManager.default.removeItem(at: attachment.staged.dir)
         // An attachment dropped AFTER its gram message posted (a batch that failed
         // halfway) must not leave that message behind in the agent's inbox.
-        if let messageID = attachment.gramMessageID {
+        if let messageID = attachment.messageID {
             Task { try? await client.gramDelete(id: messageID) }
         }
     }
@@ -6735,19 +6703,14 @@ struct TerminalPaneContent: View {
         }
         if isKeyAction { keySendTask = task }
     }
-    /// Uploads and posts every staged attachment, then submits ONE prompt naming them
-    /// all.
+    /// Uploads and posts every staged attachment (`GramAttachmentSender`), then submits
+    /// ONE prompt naming them all.
     ///
-    /// SERIAL on purpose. `gram.post` consumes each staging file, so one upload in
-    /// flight at a time keeps the daemon's 1 GiB aggregate staging budget clear no
-    /// matter how many files are staged; ten parallel 100 MiB uploads would fill it and
-    /// fail gram uploads for every client on the box.
-    ///
-    /// A file that already uploaded or already posted is skipped on a retry: each
-    /// attachment carries its own `uploadID` / `gramMessageID`, written back into
-    /// `replyAttachments` as soon as it is known, so tapping Send again after a mid-batch
-    /// failure re-sends only what did not land.
-    private func sendPromptWithAttachments(_ text: String, attachments: [PromptAttachment]) {
+    /// A file that already uploaded or already posted is skipped on a retry: the sender
+    /// writes each attachment's `uploadID` / `messageID` back into `replyAttachments` as
+    /// soon as it is known, so tapping Send again after a mid-batch failure re-sends only
+    /// what did not land.
+    private func sendPromptWithAttachments(_ text: String, attachments: [ComposerAttachment]) {
         // The destination is captured BEFORE the first await: `agent` is re-resolved on
         // every refresh, and a batch can span minutes.
         guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
@@ -6760,140 +6723,72 @@ struct TerminalPaneContent: View {
 
         sending = true
         let precedingKeySend = keySendTask
+        let sender = GramAttachmentSender(
+            upload: { file in
+                replyUploadBytes = (sent: 0, total: file.size)
+                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
+                    replyUploadBytes = (sent: sent, total: total)
+                }
+                replyUploadBytes = nil
+                return uploadID
+            },
+            post: { _, attachment in
+                try await client.gramPost(
+                    text: "Attachment from the terminal composer.", to: target, attachment: attachment
+                ).id
+            })
         Task {
             if let precedingKeySend { await precedingKeySend.value }
             replyFailedAttachmentID = nil
             defer { sending = false; replyUploadBytes = nil; replySendingAttachmentID = nil }
-            var delivered: [(attachment: PromptAttachment, messageID: String)] = []
+            let result = await sender.send(
+                attachments,
+                sending: { replySendingAttachmentID = $0.id }
+            ) { file in
+                guard let index = replyAttachments.firstIndex(where: { $0.id == file.id }) else { return }
+                replyAttachments[index] = file
+            }
+            let delivered: [GramAttachmentPrompt.Delivered]
+            switch result {
+            case .success(let files):
+                delivered = files
+            case .failure(let failure):
+                replyFailedAttachmentID = failure.attachment.id
+                actionNote = failure.note("send failed: \(failure.error)")
+                return
+            }
+            replyUploadBytes = nil
+            replySendingAttachmentID = nil
+
+            let prompt = GramAttachmentPrompt.text(text, delivered: delivered)
+            // A rejection that may still have reached the agent (`PromptRejection`)
+            // counts as DELIVERED here, exactly like a confirmed submit: the prompt is
+            // in the agent's PTY, so keeping the chips and the caption would make the
+            // one-tap retry submit it a second time (the grams themselves are
+            // remembered by message id; it is the prompt that would duplicate). Only a
+            // genuine non-delivery keeps everything for the retry.
             do {
-                for attachment in attachments {
-                    replySendingAttachmentID = attachment.id
-                    var current = attachment
-                    var messageID = current.gramMessageID
-                    if messageID == nil {
-                        let uploadID: String
-                        if let existing = current.uploadID {
-                            uploadID = existing
-                        } else {
-                            guard let staged = current.staged else {
-                                replyFailedAttachmentID = current.id
-                                actionNote = Self.attachmentFailureNote(
-                                    "Couldn't read \(current.name).",
-                                    delivered: delivered.count, total: attachments.count)
-                                return
-                            }
-                            replyUploadBytes = (sent: 0, total: staged.size)
-                            uploadID = try await client.gramUploadFile(fileURL: staged.url) { sent, total in
-                                replyUploadBytes = (sent: sent, total: total)
-                            }
-                            replyUploadBytes = nil
-                            current = PromptAttachment(
-                                id: current.id, name: current.name, mime: current.mime,
-                                isImage: current.isImage, size: current.size, staged: staged, uploadID: uploadID,
-                                gramMessageID: nil)
-                            rememberReplyAttachment(current)
-                        }
-
-                        let file = HerdrClient.GramFileAttachment(
-                            uploadID: uploadID, name: current.name, mime: current.mime)
-                        let posted = try await Self.postReplyAttachment(
-                            client: client, target: target, attachment: file)
-                        messageID = posted.id
-                        if let staged = current.staged {
-                            try? FileManager.default.removeItem(at: staged.dir)
-                        }
-                        current = PromptAttachment(
-                            id: current.id, name: current.name, mime: current.mime,
-                            isImage: current.isImage, size: current.size, staged: nil, uploadID: nil,
-                            gramMessageID: posted.id)
-                        rememberReplyAttachment(current)
-                    }
-
-                    guard let messageID else {
-                        replyFailedAttachmentID = current.id
-                        actionNote = Self.attachmentFailureNote(
-                            "Couldn't deliver \(current.name).",
-                            delivered: delivered.count, total: attachments.count)
-                        return
-                    }
-                    delivered.append((attachment: current, messageID: messageID))
+                try await submitPrompt(pane: paneID, text: prompt)
+            } catch let apiError as APIError {
+                guard PromptRejection(apiError).mayHaveReachedAgent else {
+                    actionNote = GramAttachmentSender.progressNote(
+                        Self.promptRejectionNote(for: apiError),
+                        delivered: delivered.count, total: attachments.count)
+                    return
                 }
-                replyUploadBytes = nil
-                replySendingAttachmentID = nil
-
-                let prompt = GramAttachmentPrompt.text(text, delivered: delivered.map {
-                    GramAttachmentPrompt.Delivered(
-                        name: $0.attachment.name, isImage: $0.attachment.isImage, messageID: $0.messageID)
-                })
-                // A rejection that may still have reached the agent (`PromptRejection`)
-                // counts as DELIVERED here, exactly like a confirmed submit: the prompt is
-                // in the agent's PTY, so keeping the chips and the caption would make the
-                // one-tap retry submit it a second time (the grams themselves are
-                // remembered by message id; it is the prompt that would duplicate). Only a
-                // genuine non-delivery keeps everything for the retry.
-                do {
-                    try await submitPrompt(pane: paneID, text: prompt)
-                } catch let apiError as APIError {
-                    guard PromptRejection(apiError).mayHaveReachedAgent else {
-                        actionNote = Self.attachmentFailureNote(
-                            Self.promptRejectionNote(for: apiError),
-                            delivered: delivered.count, total: attachments.count)
-                        return
-                    }
-                    actionNote = Self.promptRejectionNote(for: apiError)
-                } catch {
-                    actionNote = "couldn't confirm delivery — check the terminal before sending again"
-                }
-                // Only a definite pre-write rejection keeps the chips and caption
-                // for a one-tap retry. A lost response may follow a PTY write, so
-                // unknown delivery also clears them rather than duplicating a prompt.
-                let deliveredIDs = Set(delivered.map(\.attachment.id))
-                replyAttachments.removeAll { deliveredIDs.contains($0.id) }
-                if reply == text { reply = "" }
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                await refresh()
+                actionNote = Self.promptRejectionNote(for: apiError)
             } catch {
-                replyFailedAttachmentID = replySendingAttachmentID
-                actionNote = Self.attachmentFailureNote(
-                    "send failed: \(error)",
-                    delivered: delivered.count, total: attachments.count)
+                actionNote = "couldn't confirm delivery — check the terminal before sending again"
             }
+            // Only a definite pre-write rejection keeps the chips and caption
+            // for a one-tap retry. A lost response may follow a PTY write, so
+            // unknown delivery also clears them rather than duplicating a prompt.
+            let deliveredIDs = Set(attachments.map(\.id))
+            replyAttachments.removeAll { deliveredIDs.contains($0.id) }
+            if reply == text { reply = "" }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await refresh()
         }
-    }
-
-    /// Write an attachment's new upload/post state back into the staged list, so a retry
-    /// after a mid-batch failure skips the work that already succeeded.
-    private func rememberReplyAttachment(_ attachment: PromptAttachment) {
-        guard let index = replyAttachments.firstIndex(where: { $0.id == attachment.id })
-        else { return }
-        replyAttachments[index] = attachment
-    }
-
-    /// Says how much of a batch landed before the failure, so a retry is an informed act
-    /// rather than a guess. Posted grams are NOT rolled back: their chips keep their
-    /// message id and the retry skips straight to the prompt.
-    static func attachmentFailureNote(_ reason: String, delivered: Int, total: Int) -> String {
-        guard total > 1, delivered > 0 else { return reason }
-        return "Sent \(delivered) of \(total). \(reason)"
-    }
-
-    private static func postReplyAttachment(
-        client: HerdrClient,
-        target: String,
-        attachment: HerdrClient.GramFileAttachment
-    ) async throws -> GramMessage {
-        for attempt in 0..<3 {
-            do {
-                return try await client.gramPost(
-                    text: "Attachment from the terminal composer.",
-                    to: target,
-                    attachment: attachment)
-            } catch let error as APIError where error.code == "upload_in_progress" {
-                if attempt == 2 { throw error }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        }
-        throw GramError.invalidFileData
     }
 
 
