@@ -2654,7 +2654,7 @@ struct GramView: View {
                 if let cachedAt {
                     raw = cachedAt   // already on disk; do not rewrite it per open
                 } else {
-                    raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                    raw = tmp.appendingPathComponent(GramStaging.safeFileName(name))
                     try data.write(to: raw, options: [.atomic, .completeFileProtection])
                 }
                 // We present webDoc, not a QuickLook preview — clear any stale
@@ -2672,7 +2672,7 @@ struct GramView: View {
             } else {
                 // Never trust the server name to be a safe path component; reduce
                 // it to a bare basename. Write encrypted-at-rest.
-                let url = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                let url = tmp.appendingPathComponent(GramStaging.safeFileName(name))
                 try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
                 previewURL = url
             }
@@ -2727,7 +2727,7 @@ struct GramView: View {
                 let dir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let fileURL = dir.appendingPathComponent(Self.safeTempFileName(name))
+                let fileURL = dir.appendingPathComponent(GramStaging.safeFileName(name))
                 try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
                 exportFile = ExportFile(url: fileURL, dir: dir)
             } catch is CancellationError {
@@ -2821,17 +2821,6 @@ struct GramView: View {
     static func expectedReplyBytes(for size: UInt64) -> Int? {
         guard size > 0 else { return nil }
         return Int(Double(size) * 4.0 / 3.0) + 512
-    }
-
-    /// Reduce a server-supplied file name to a safe single path component for the
-    /// temp directory: strip any directory parts and reject `.`/`..`.
-    static func safeTempFileName(_ name: String) -> String {
-        let base = URL(fileURLWithPath: name).lastPathComponent
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "\\", with: "_")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if base.isEmpty || base == "." || base == ".." { return "file" }
-        return base
     }
 
     /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
@@ -3055,7 +3044,7 @@ struct GramView: View {
     /// The markdown file's name without its `.md`/`.markdown` extension, for the
     /// preview title.
     static func displayTitle(_ name: String) -> String {
-        let base = safeTempFileName(name)
+        let base = GramStaging.safeFileName(name)
         for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
         }
@@ -3083,7 +3072,7 @@ struct GramView: View {
 
     /// The web file's name without its extension, for the preview title.
     static func webBaseName(_ name: String) -> String {
-        let base = safeTempFileName(name)
+        let base = GramStaging.safeFileName(name)
         for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
         }

@@ -208,12 +208,12 @@ struct GuestGramList: View {
             try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
             previewURL = url
         } else if GramView.isWebDocument(name: name, mime: mime) {
-            let url = dir.appendingPathComponent(GramView.safeTempFileName(name))
+            let url = dir.appendingPathComponent(GramStaging.safeFileName(name))
             try data.write(to: url, options: [.atomic, .completeFileProtection])
             webDoc = WebDoc(title: GramView.webBaseName(name), html: String(decoding: data, as: UTF8.self),
                             fileURL: url)
         } else {
-            let url = dir.appendingPathComponent(GramView.safeTempFileName(name))
+            let url = dir.appendingPathComponent(GramStaging.safeFileName(name))
             try data.write(to: url, options: [.atomic, .completeFileProtection])
             previewURL = url
         }
