@@ -225,10 +225,10 @@ struct GramView: View {
     /// which the 6-second poll clears on every success — same reasoning as `sendError`.
     @State private var markAllNote: String?
 
-    /// Files the owner picked to attach to the next post (read into memory at pick
-    /// time), empty when none are staged. Several can be staged at once; each sends as
-    /// its own gram message (the wire is one-file-per-message).
-    @State private var attachedFiles: [PickedAttachment] = []
+    /// Files the owner picked to attach to the next post (staged on disk at pick time),
+    /// empty when none are staged. Several can be staged at once; each sends as its own
+    /// gram message (the wire is one-file-per-message).
+    @State private var attachedFiles: [ComposerAttachment] = []
     /// The paperclip's attach sheet (`composerAttachPicker`).
     @State private var showAttachSheet = false
     /// True while a photo-library batch is loading (iCloud items can take a moment).
@@ -237,8 +237,8 @@ struct GramView: View {
     @State private var loadingPhoto = false
     /// Byte progress for the active file's icon ring.
     @State private var uploadBytes: (sent: Int, total: Int)?
-    /// Already-sent file count and batch size, while the snapshot remains displayed.
-    @State private var sendProgress: (sent: Int, total: Int)?
+    /// The file in flight, while a send runs.
+    @State private var sendingAttachmentID: UUID?
     @State private var failedAttachmentID: UUID?
     /// Dismissed the "set up gram for your agents" card. It also auto-hides once any
     /// agent has messaged (proof they've set the skill up), so this is the manual out.
@@ -300,20 +300,6 @@ struct GramView: View {
         let title: String
         let html: String
         let fileURL: URL
-    }
-
-    /// A file staged for sending, held as a COPY ON DISK rather than in memory, so a
-    /// batch of large picks costs one open file handle at send time rather than
-    /// N × 100 MB resident. `dir` is the per-item staging directory (same idiom as
-    /// `ExportFile`); removing it removes the staged bytes.
-    /// Identifiable so the composer strip can render + remove chips by identity.
-    private struct PickedAttachment: Identifiable {
-        let id = UUID()
-        let name: String
-        let mime: String
-        let url: URL
-        let dir: URL
-        let size: Int
     }
 
     // The pre-send size gate and the count cap both live on `Staging` (nonisolated, so
@@ -554,8 +540,8 @@ struct GramView: View {
             room: { Staging.maxAttachments - attachedFiles.count }
         ) { outcome in
             attachedFiles += outcome.files.map {
-                PickedAttachment(name: $0.name, mime: $0.mime, url: $0.staged.url,
-                                 dir: $0.staged.dir, size: $0.staged.size)
+                ComposerAttachment(name: $0.name, mime: $0.mime,
+                                   isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
             }
             sendError = outcome.note
         }
@@ -1993,29 +1979,20 @@ struct GramView: View {
     }
     #endif
 
-    private func attachmentChip(_ file: PickedAttachment) -> some View {
+    private func attachmentChip(_ file: ComposerAttachment) -> some View {
         ComposerAttachmentChip(
-            name: file.name, size: file.size, isImage: file.mime.hasPrefix("image/"),
+            name: file.name, size: file.size, isImage: file.isImage,
             state: attachmentState(file), canRemove: !sending
         ) {
-            try? FileManager.default.removeItem(at: file.dir)
+            try? FileManager.default.removeItem(at: file.staged.dir)
             attachedFiles.removeAll { $0.id == file.id }
         }
         .accessibilityIdentifier("gram-attachment")
     }
 
-    private func attachmentState(_ file: PickedAttachment) -> ComposerAttachmentState {
-        if file.id == failedAttachmentID { return .failed }
-        guard sending else { return .ready }
-        guard let progress = sendProgress,
-              let index = attachedFiles.firstIndex(where: { $0.id == file.id })
-        else { return .waiting }
-        if index < progress.sent { return .sent }
-        guard index == progress.sent else { return .waiting }
-        if let upload = uploadBytes {
-            return .uploading(sent: upload.sent, total: upload.total)
-        }
-        return .sending
+    private func attachmentState(_ file: ComposerAttachment) -> ComposerAttachmentState {
+        .for(file, sending: sending, sendingID: sendingAttachmentID,
+             failedID: failedAttachmentID, uploadBytes: uploadBytes)
     }
 
     // MARK: - Actions
@@ -2331,7 +2308,7 @@ struct GramView: View {
         composerFocused = false
         defer {
             sending = false
-            sendProgress = nil
+            sendingAttachmentID = nil
             uploadBytes = nil
             #if DEBUG
             postCallsProbe = MockTransport.gramPostLogSummary
@@ -2355,98 +2332,56 @@ struct GramView: View {
             return
         }
 
-        // One upload+post per file (the wire is one-file-per-message). The text rides
-        // as the FIRST message's caption; the rest post with no text. `draft` is
-        // cleared the instant message 0 succeeds, so a retry of the remaining files
-        // never re-sends the caption onto a different file.
-        var sentCount = 0
-        var remaining: [PickedAttachment] = []
-        var failure: String?
-        for (index, file) in files.enumerated() {
-            sendProgress = (sent: sentCount, total: files.count)
-            let caption = index == 0 ? text : ""
-            do {
+        // One upload+post per file (the wire is one-file-per-message), through the shared
+        // `GramAttachmentSender`. The text rides as the FIRST file's caption; the rest
+        // post with no text. `draft` is cleared the instant that first message posts, so
+        // a retry of the remaining files never re-sends the caption onto a different file.
+        let captionID = files.first?.id
+        let sender = GramAttachmentSender(
+            upload: { file in
                 uploadBytes = (sent: 0, total: file.size)
-                let uploadID = try await client.gramUploadFile(fileURL: file.url) { sent, total in
+                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
                     uploadBytes = (sent: sent, total: total)
                 }
                 uploadBytes = nil
-                let attachment = HerdrClient.GramFileAttachment(
-                    uploadID: uploadID, name: file.name, mime: file.mime)
-                let posted = try await Self.postAttachment(
-                    client: client, text: caption, to: to, attachment: attachment)
+                return uploadID
+            },
+            post: { file, attachment in
+                let posted = try await client.gramPost(
+                    text: file.id == captionID ? text : "", to: to, attachment: attachment)
                 // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
                 // cannot drop it; de-duped by id, reconciled once the server reflects it.
                 pendingPosts.removeAll { $0.id == posted.id }
                 pendingPosts.insert(posted, at: 0)
-                sentCount += 1
-                if index == 0 { draft = "" }
-            } catch let error as APIError {
-                failedAttachmentID = file.id
-                // A post still refused after the retries above means the daemon has
+                if file.id == captionID { draft = "" }
+                return posted.id
+            })
+        let result = await sender.send(files, sending: { sendingAttachmentID = $0.id }) { file in
+            guard let index = attachedFiles.firstIndex(where: { $0.id == file.id }) else { return }
+            attachedFiles[index] = file
+        }
+        // Keep only the not-yet-sent files staged, so a failure leaves the rest ready
+        // for a one-tap retry (the failed file keeps its upload id, so the retry posts
+        // the bytes already uploaded); a full success clears the strip. Already-sent
+        // messages are live and are not rolled back.
+        attachedFiles.removeAll { $0.messageID != nil }
+        if case .failure(let failure) = result {
+            failedAttachmentID = failure.attachment.id
+            let reason: String
+            if let error = failure.error as? APIError {
+                // A post still refused after the sender's retries means the daemon has
                 // not reaped the upload connection at all. The bytes are staged and
                 // complete, so this is a retry rather than a failure — but the raw
                 // daemon sentence ("read the upload connection to EOF") would be
                 // meaningless to the owner.
-                failure = error.code == "upload_in_progress"
+                reason = error.code == "upload_in_progress"
                     ? "Still finishing the last upload. Tap Send again."
                     : error.message
-                remaining.append(contentsOf: files[index...])
-                break
-            } catch {
-                failedAttachmentID = file.id
-                failure = "Couldn't send. Try again."
-                remaining.append(contentsOf: files[index...])
-                break
+            } else {
+                reason = "Couldn't send. Try again."
             }
+            sendError = failure.note(reason)
         }
-        // Keep only the not-yet-sent files staged, so a failure leaves the rest ready
-        // for a one-tap retry; a full success clears the strip. Already-sent messages
-        // are live and are not rolled back.
-        attachedFiles = remaining
-        // Drop the staged bytes of everything that DID send — after reassigning, so
-        // a failed delete cannot corrupt the retry set. Files still in `remaining`
-        // keep their temp dirs for the one-tap retry.
-        let keptIDs = Set(remaining.map(\.id))
-        for file in files where !keptIDs.contains(file.id) {
-            try? FileManager.default.removeItem(at: file.dir)
-        }
-        if let failure {
-            sendError = sentCount > 0
-                ? "Sent \(sentCount) of \(files.count). \(failure)"
-                : failure
-        }
-    }
-
-    /// Posts an attachment, retrying the POST — never the upload — while the daemon
-    /// still owns the `upload_id`.
-    ///
-    /// The daemon frees its single-writer claim only when it observes EOF on the
-    /// upload connection, and the client's close wait is bounded, so a stalled link
-    /// can put the post in front of that release. Re-entering `gramUploadFile` would
-    /// mint a FRESH `upload_id` and transfer the whole file again, leaving the
-    /// previous — complete — staging file to age out over 24 hours; ten taps of a
-    /// 100 MB attachment would exhaust the daemon's 1 GiB staging budget and fail
-    /// every gram upload from every client. The bytes are already there, so all that
-    /// is needed is to ask again.
-    private static func postAttachment(
-        client: HerdrClient,
-        text: String,
-        to: String?,
-        attachment: HerdrClient.GramFileAttachment
-    ) async throws -> GramMessage {
-        // Three tries over ~3 s: the daemon's own reap is 60 s, but the case this
-        // covers is a teardown a few hundred ms behind the post.
-        for attempt in 0..<3 {
-            do {
-                return try await client.gramPost(text: text, to: to, attachment: attachment)
-            } catch let error as APIError where error.code == "upload_in_progress" {
-                if attempt == 2 { throw error }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        }
-        // Unreachable: the loop either returns or throws on its last attempt.
-        throw GramError.invalidFileData
     }
 
     /// Open a message's file, downloading it only the FIRST time.
