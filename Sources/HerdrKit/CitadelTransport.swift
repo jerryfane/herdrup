@@ -26,8 +26,7 @@ import NIOCore
 ///   stdin, and base64 keeps arbitrary JSON off the remote shell's quoting rules).
 ///
 /// One `SSHClient` is held and reused across calls (no per-request handshake —
-/// closing issue #25). Conforms to the two-method `HerdrTransport` seam;
-/// `SessionRecovery`/`RecoveryExecutor` sit above it unchanged.
+/// closing issue #25). Conforms to the two-method `HerdrTransport` seam.
 /// Lets exactly one racer resume a continuation. Resuming a continuation twice is
 /// undefined behaviour rather than a catchable error, so the guard has to be
 /// atomic — a plain Bool read-then-write is a race in exactly the interleaving
