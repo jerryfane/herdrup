@@ -72,9 +72,16 @@ final class TerminalSelectionTests: XCTestCase {
     /// reject. Relaxing it can only admit more colours, which is why the test asserts the
     /// BASELINE count is near zero before drawing any conclusion from a later count — that
     /// premise, not this constant, is what makes the detector specific to the selection.
-    private func tealPixelCount(_ shot: XCUIScreenshot) -> Int {
+    ///
+    /// FAILS THE TEST when the screenshot cannot be decoded: a count of 0 would satisfy every
+    /// "no teal" assertion without measuring anything.
+    private func tealPixelCount(_ shot: XCUIScreenshot,
+                                file: StaticString = #filePath, line: UInt = #line) -> Int {
         let w = 300, h = 600
-        guard let buf = rgbaBuffer(shot.image, w: w, h: h) else { return 0 }
+        guard let buf = rgbaBuffer(shot.image, w: w, h: h) else {
+            XCTFail("Could not decode the screenshot to count selection-teal pixels", file: file, line: line)
+            return 0
+        }
         var n = 0
         var i = 0
         while i < buf.count {
@@ -649,36 +656,5 @@ final class TerminalSelectionTests: XCTestCase {
         guard let start = reading.range(of: "\(key)=") else { return nil }
         let digits = reading[start.upperBound...].prefix { $0.isNumber || $0 == "-" }
         return Int(digits)
-    }
-    // MARK: - helpers (duplicated from ScrollTests, which keeps them private)
-
-    /// Fraction of pixels differing beyond a small per-pixel threshold, compared at a fixed
-    /// small resolution so PNG jitter and antialiasing do not register as change.
-    private func pixelDiffFraction(_ a: XCUIScreenshot, _ b: XCUIScreenshot) -> Double {
-        let w = 90, h = 180
-        guard let bufA = rgbaBuffer(a.image, w: w, h: h),
-              let bufB = rgbaBuffer(b.image, w: w, h: h) else { return 1.0 }
-        var differing = 0
-        var i = 0
-        while i < bufA.count {
-            let d = abs(Int(bufA[i]) - Int(bufB[i]))
-                  + abs(Int(bufA[i + 1]) - Int(bufB[i + 1]))
-                  + abs(Int(bufA[i + 2]) - Int(bufB[i + 2]))
-            if d > 30 { differing += 1 }
-            i += 4
-        }
-        return Double(differing) / Double(w * h)
-    }
-
-    private func rgbaBuffer(_ image: UIImage, w: Int, h: Int) -> [UInt8]? {
-        guard let cg = image.cgImage else { return nil }
-        var data = [UInt8](repeating: 0, count: w * h * 4)
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &data, width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: w * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.interpolationQuality = .low
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return data
     }
 }
