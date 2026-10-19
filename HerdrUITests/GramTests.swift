@@ -4,7 +4,7 @@ import XCTest
 /// omits the regular-width header: Read all, search and the conversations belong to the
 /// host's sidebar there.
 ///
-/// Strings come from the mock `gram.list` (MockTransport.gramList), the design's sample
+/// Strings come from the mock `gram.list` (MockWireFixtures.gramList), the design's sample
 /// conversation, newest first: g1 your "Great, ship it." to vetrina; g2 clientloop (relayed
 /// from hetzner-1) with a one-line code fence and a zip; g3 a vetrina image; g4 vetrina's
 /// 11-line "Deployed." report that folds at 8 lines; g5 a queue post grabbed by ci-watch; g6

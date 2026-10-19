@@ -1981,53 +1981,15 @@ struct GramView: View {
     /// The pill sheet's "Write to" an agent: that exact agent addresses the draft, as "@name "
     /// at the start in place of a leading mention (or a leading "@token" naming no one).
     private func address(_ agent: GramAgent) {
-        let current = draftAddress
-        var rest = draft
-        if current.leading {
-            rest = current.body
-        } else if let token = GramMention.leadingToken(in: draft) {
-            rest = String(draft.drop(while: \.isWhitespace).dropFirst(1 + token.count)
-                .drop(while: \.isWhitespace))
-        }
-        draft = "@\(agent.name) " + rest
+        draft = GramMention.addressing(draft, to: agent.name, knownNames: mentionNames)
         pickedAgent = agent
     }
 
     /// The pill sheet's "Shared queue": takes off every mention that would address the
     /// draft, wherever it is, and a leading "@token" naming no one.
     private func addressQueue() {
-        let names = mentionNames
-        var text = draft
-        for _ in 0...GramMention.ranges(in: draft, knownNames: names).count {
-            let resolved = GramMention.resolve(text, knownNames: names)
-            guard resolved.recipient != nil else { break }
-            if resolved.body != text {
-                text = resolved.body
-            } else if let range = GramMention.ranges(in: text, knownNames: names).first {
-                text = Self.removingMention(range, from: text)
-            }
-        }
-        if let token = GramMention.leadingToken(in: text) {
-            text = String(text.drop(while: \.isWhitespace).dropFirst(1 + token.count)
-                .drop(while: \.isWhitespace))
-        }
-        draft = text
+        draft = GramMention.unaddressed(draft, knownNames: mentionNames)
         pickedAgent = nil
-    }
-
-    /// `text` without the mention at `range` and one space next to it ("ship it @vetrina" ->
-    /// "ship it", "ask @vetrina to ship" -> "ask to ship").
-    private static func removingMention(_ range: Range<String.Index>, from text: String) -> String {
-        var lower = range.lowerBound
-        var upper = range.upperBound
-        if lower > text.startIndex, text[text.index(before: lower)] == " " {
-            lower = text.index(before: lower)
-        } else if upper < text.endIndex, text[upper] == " " {
-            upper = text.index(after: upper)
-        }
-        var result = text
-        result.removeSubrange(lower..<upper)
-        return result
     }
 
     /// Something typed or attached: send takes the saved-prompts place.
@@ -2654,7 +2616,7 @@ struct GramView: View {
                 if let cachedAt {
                     raw = cachedAt   // already on disk; do not rewrite it per open
                 } else {
-                    raw = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                    raw = tmp.appendingPathComponent(GramStaging.safeFileName(name))
                     try data.write(to: raw, options: [.atomic, .completeFileProtection])
                 }
                 // We present webDoc, not a QuickLook preview — clear any stale
@@ -2672,7 +2634,7 @@ struct GramView: View {
             } else {
                 // Never trust the server name to be a safe path component; reduce
                 // it to a bare basename. Write encrypted-at-rest.
-                let url = tmp.appendingPathComponent(Self.safeTempFileName(name))
+                let url = tmp.appendingPathComponent(GramStaging.safeFileName(name))
                 try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
                 previewURL = url
             }
@@ -2727,7 +2689,7 @@ struct GramView: View {
                 let dir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let fileURL = dir.appendingPathComponent(Self.safeTempFileName(name))
+                let fileURL = dir.appendingPathComponent(GramStaging.safeFileName(name))
                 try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
                 exportFile = ExportFile(url: fileURL, dir: dir)
             } catch is CancellationError {
@@ -2821,17 +2783,6 @@ struct GramView: View {
     static func expectedReplyBytes(for size: UInt64) -> Int? {
         guard size > 0 else { return nil }
         return Int(Double(size) * 4.0 / 3.0) + 512
-    }
-
-    /// Reduce a server-supplied file name to a safe single path component for the
-    /// temp directory: strip any directory parts and reject `.`/`..`.
-    static func safeTempFileName(_ name: String) -> String {
-        let base = URL(fileURLWithPath: name).lastPathComponent
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "\\", with: "_")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if base.isEmpty || base == "." || base == ".." { return "file" }
-        return base
     }
 
     /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
@@ -3055,7 +3006,7 @@ struct GramView: View {
     /// The markdown file's name without its `.md`/`.markdown` extension, for the
     /// preview title.
     static func displayTitle(_ name: String) -> String {
-        let base = safeTempFileName(name)
+        let base = GramStaging.safeFileName(name)
         for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
         }
@@ -3083,7 +3034,7 @@ struct GramView: View {
 
     /// The web file's name without its extension, for the preview title.
     static func webBaseName(_ name: String) -> String {
-        let base = safeTempFileName(name)
+        let base = GramStaging.safeFileName(name)
         for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
             return String(base.dropLast(ext.count))
         }
@@ -3928,17 +3879,18 @@ struct GramRow: View, Equatable {
     }
 
     /// This row's open or save as its card draws and speaks it: the share of the reply
-    /// received, or a spinning ring while there is no measurement. The reply is base64, so
-    /// received channel bytes are scaled by 3/4 to approximate file bytes.
+    /// received, or a spinning ring while there is no measurement. The spoken figure is in
+    /// file bytes (`GramFile.downloadedLabel` scales the base64 reply back).
     private var download: GramCardDownload? {
         guard isDownloadingFile, let file = message.file else { return nil }
-        guard let p = downloadProgress, p.total > 0 else {
+        guard let p = downloadProgress,
+              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
+        else {
             return GramCardDownload(fraction: nil, spoken: "Downloading")
         }
-        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
         return GramCardDownload(
             fraction: min(1, Double(p.received) / Double(p.total)),
-            spoken: "Downloading, \(GramFile.displaySize(of: done)) of \(file.displaySize)")
+            spoken: "Downloading, \(label)")
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same

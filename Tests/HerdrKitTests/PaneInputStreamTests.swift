@@ -388,6 +388,21 @@ final class PaneInputOpenTests: XCTestCase {
         XCTAssertEqual(host.pings, 1, "the capability is probed once per client")
     }
 
+    /// Pane input and gram upload read one cached probe: an old daemon costs one `ping`
+    /// for both openers, not one each.
+    func testPaneInputAndGramUploadShareOneProbe() async {
+        let host = InputStreamHost(capabilities: #"{"events_v2":true}"#)
+        let client = host.client()
+        let input = await client.openPaneInput(pane: "w1:p1")
+        let upload = await client.gramOpenUploadChannel(uploadID: "app-1")
+        let again = await client.openPaneInput(pane: "w1:p1")
+        XCTAssertNil(input)
+        XCTAssertNil(upload)
+        XCTAssertNil(again)
+        XCTAssertTrue(host.opened.isEmpty)
+        XCTAssertEqual(host.pings, 1, "one capability probe per client, shared by both openers")
+    }
+
     func testRefusedOpenGivesNoChannel() async {
         let host = InputStreamHost(openReply: InputStreamHost.refuseOpen)
         let channel = await host.client().openPaneInput(pane: "w1:p1")

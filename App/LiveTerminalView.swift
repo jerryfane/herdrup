@@ -1015,13 +1015,14 @@ struct LiveTerminalView: UIViewRepresentable {
             view.feed(byteArray: push[...])
         }
 
-        /// Auto-reconnect. `reconnectAttempts` drives capped exponential backoff (reset once a
+        /// Auto-reconnect. `reconnectBackoff` drives capped, jittered exponential backoff (reset once a
         /// fresh stream delivers a real `.reset`, i.e. it genuinely re-established). `lastStreamActivity`
         /// feeds the heartbeat watchdog: the server pings every 20s (`PING_INTERVAL`), so a long
         /// silence means a stuck / half-open stream that never errors. `streamRunID` tags each stream
         /// so a superseded (cancelled/restarted) task's `streamEnded` cannot trigger a second reconnect.
         /// `reconnectTask` is the pending backoff-delayed restart; `watchdogTask` the periodic checker.
-        private var reconnectAttempts = 0
+        private var reconnectBackoff = ReconnectBackoff(initial: .milliseconds(500), maximum: .seconds(20),
+                                                        jitter: 0.6...1.0)   // 0.5,1,2,4,8,16,20 s, ×0.6–1.0
         private var lastStreamActivity = Date()
         private var streamRunID = 0
         private var reconnectTask: Task<Void, Never>?
@@ -2506,15 +2507,13 @@ struct LiveTerminalView: UIViewRepresentable {
         @MainActor
         private func scheduleReconnect(_ reason: String) {
             guard !stopped, !sawExited, !paneGone, reconnectTask == nil else { return }
-            reconnectAttempts += 1
-            let capped = min(20.0, 0.5 * pow(2.0, Double(max(0, reconnectAttempts - 1))))  // 0.5,1,2,4,8,16,20
-            let delay = capped * Double.random(in: 0.6...1.0)                               // full-ish jitter
+            let delay = reconnectBackoff.next()
             if let view {
                 let notice = "\r\n\u{1b}[2m\(reason); reconnecting…\u{1b}[0m\r\n"
                 view.feed(byteArray: [UInt8](notice.utf8)[...])
             }
             reconnectTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                try? await Task.sleep(for: delay)
                 guard let self, !self.stopped, !self.sawExited else { return }
                 self.reconnectTask = nil
                 self.start()   // re-open the stream (cancels any lingering task, re-arms the watchdog)
@@ -2552,7 +2551,7 @@ struct LiveTerminalView: UIViewRepresentable {
             case .frame(let frame):
                 switch frame {
                 case .reset(_, _, let cols, let rows, let data, let history, _):
-                    reconnectAttempts = 0   // a full keyframe = the stream genuinely (re)established
+                    reconnectBackoff.reset()   // a full keyframe = the stream genuinely (re)established
                     graphicsFilter.reset()  // fresh screen: abandon any graphics string split before this keyframe
                     let firstReset = !didSeedOnce
                     if firstReset {

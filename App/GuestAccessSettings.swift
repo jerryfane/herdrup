@@ -195,7 +195,7 @@ struct GuestAccessSection: View {
         }
         .confirmationDialog(
             revoking.map { "Revoke \($0.guest.name)?" } ?? "",
-            isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
+            isPresented: $revoking.isPresent(),
             titleVisibility: .visible,
             presenting: revoking
         ) { person in
@@ -205,7 +205,7 @@ struct GuestAccessSection: View {
         } message: { person in
             Text("\(person.guest.name) loses access to \(person.guest.grant?.agentName ?? "the agent") right away, and any open session closes.")
         }
-        .alert("Shared access", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+        .alert("Shared access", isPresented: $actionError.isPresent()) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(actionError ?? "")

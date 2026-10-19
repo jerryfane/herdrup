@@ -49,6 +49,15 @@ public struct GramFile: Decodable, Sendable, Equatable {
         return String(format: "%.1f MB", bytes / (1024 * 1024))
     }
 
+    /// A download's progress as "<done> of <size>", in FILE bytes: the reply is base64, so
+    /// the wire carries about 4/3 of the file and `received` channel bytes are scaled by 3/4
+    /// (never past `fileSize`). Nil while there is no measurement (`total` is 0).
+    public static func downloadedLabel(received: Int, total: Int, fileSize: UInt64) -> String? {
+        guard total > 0 else { return nil }
+        let done = min(UInt64(Double(received) * 3.0 / 4.0), fileSize)
+        return "\(displaySize(of: done)) of \(displaySize(of: fileSize))"
+    }
+
     /// A one-line preview of an attachment the store expired: "<name> (expired)".
     public static func expiredPreview(of name: String) -> String {
         "\(name) (expired)"
@@ -211,6 +220,12 @@ public struct GramListAnswer: Sendable, Equatable {
     }
 
     public var isUnchanged: Bool { messages == nil }
+
+    /// The tab badge's count from an `unread_only` answer: the daemon's whole-store
+    /// `unreadCount` when it sends one, since a paging daemon's answer holds only a page;
+    /// otherwise the messages it returned, which on a daemon without paging are all of
+    /// them. Nil when the answer carries neither (unchanged).
+    public var unreadBadgeCount: Int? { unreadCount ?? messages?.count }
 }
 
 /// `gram.post` / `gram.send` / `gram.grab` result (`type` varies). Only the echoed

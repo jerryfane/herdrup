@@ -9,7 +9,8 @@ import Foundation
 /// pane input channels each hold a connection open while they run.
 public actor HerdrClient {
     private let transport: HerdrTransport
-    private let encoder: JSONEncoder = {
+    /// One encoder for every request, including the nonisolated stream openers.
+    private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         // Do NOT escape "/" as "\/". A base64 gram file chunk is slash-heavy (an
         // all-0xFF chunk is ALL "/"), and the default escaping would nearly double
@@ -21,22 +22,19 @@ public actor HerdrClient {
     }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
-    /// Whether this daemon serves `gram.upload.stream`, cached per client so a
-    /// multi-file send pays ONE `ping`.
+    /// The daemon's `ping` capabilities, cached per client so the pane-input and
+    /// gram-upload openers pay ONE `ping` between them (and a ten-file send one in all).
     ///
-    /// Three states on purpose: a successful probe is cached either way (so an old
-    /// daemon is not re-probed per file), while a FAILED probe stays `unknown` (so a
-    /// transient error cannot pin this client to the per-chunk path for its whole
-    /// lifetime, and a daemon upgraded under a long-lived app is picked up).
-    private enum StreamCapability {
+    /// Two states on purpose: a successful probe is cached either way (so an old
+    /// daemon, which reports no capabilities, is not re-probed per open), while a
+    /// FAILED probe leaves it `unknown` (so a transient error cannot pin this client to
+    /// the fallback path for its whole lifetime, and a daemon upgraded under a
+    /// long-lived app is picked up).
+    private enum CapabilityCache {
         case unknown
-        case supported
-        case unsupported
+        case probed(ServerCapabilities?)
     }
-    private var streamCapability: StreamCapability = .unknown
-    /// Whether this daemon serves `pane.input.stream` (`pane_input_stream`), with the
-    /// same three states and caching rules as `streamCapability`.
-    private var inputStreamCapability: StreamCapability = .unknown
+    private var capabilityCache: CapabilityCache = .unknown
 
     public init(transport: HerdrTransport) {
         self.transport = transport
@@ -49,7 +47,7 @@ public actor HerdrClient {
 
     private func encodeRequest<P: Encodable>(_ method: String, _ params: P) throws -> String {
         let env = RequestEnvelope(id: nextID(method), method: method, params: params)
-        let data = try encoder.encode(env)
+        let data = try Self.encoder.encode(env)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -138,6 +136,26 @@ public actor HerdrClient {
     /// older daemon; callers treat every new feature as unsupported in that case.
     public func serverCapabilities() async throws -> ServerCapabilities? {
         try await call("ping", EmptyParams(), as: PingResult.self).capabilities
+    }
+
+    /// Whether the daemon advertises `flag`, from the per-client `capabilityCache`.
+    /// False when the probe fails, which leaves the cache `unknown` for the next call.
+    ///
+    /// The probe is NOT written with `try?`: `serverCapabilities()` both throws AND
+    /// returns an Optional, so `try?` flattens "the ping failed" into the same nil as
+    /// "the daemon sent no capabilities", and would cache a transient error as the
+    /// unsupported answer — the outcome the `unknown` state exists to prevent.
+    private func supports(_ flag: KeyPath<ServerCapabilities, Bool>) async -> Bool {
+        if case .probed(let capabilities) = capabilityCache {
+            return capabilities?[keyPath: flag] == true
+        }
+        do {
+            let probed = try await serverCapabilities()
+            capabilityCache = .probed(probed)
+            return probed?[keyPath: flag] == true
+        } catch {
+            return false
+        }
     }
 
     struct AccountsCreateParams: Encodable {
@@ -340,17 +358,8 @@ public actor HerdrClient {
     public func openPaneInput(pane: String) async -> PaneInputChannel? {
         guard PaneInputChannel.canStream(pane: pane),
               let citadel = transport as? CitadelTransport else { return nil }
-        // Probed once per client like `gramOpenUploadChannel`: a failed ping stays
-        // `unknown` and is retried on the next open.
-        if case .unknown = inputStreamCapability {
-            do {
-                let probed = try await serverCapabilities()
-                inputStreamCapability = probed?.paneInputStream == true ? .supported : .unsupported
-            } catch {
-                return nil
-            }
-        }
-        guard case .supported = inputStreamCapability else { return nil }
+        // Probed once per client (`supports(_:)`): a failed ping is retried on the next open.
+        guard await supports(\.paneInputStream) else { return nil }
         let openLine: String
         do {
             openLine = try encodeRequest("pane.input.stream", PaneInputStreamParams(paneID: pane))
@@ -668,29 +677,13 @@ public actor HerdrClient {
     /// the connection closed, so the reply cannot be correlated to the attempt.
     public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
         guard let citadel = transport as? CitadelTransport else { return nil }
-        // Three cache states, not two, and the probe is NOT written with `try?`:
-        // `serverCapabilities()` both throws AND returns an Optional, so `try?`
-        // flattens "the ping failed" into the same nil as "the daemon sent no
-        // capabilities" — which would cache a transient error as `unsupported` and pin
-        // this client to the per-chunk path for its whole lifetime, the exact outcome
-        // the `unknown` state exists to prevent. A ping that SUCCEEDS is cached either
-        // way, so a ten-file send pays one probe even against an old daemon; a ping
-        // that THROWS leaves the cache `unknown` and is re-probed on the next upload.
-        if case .unknown = streamCapability {
-            do {
-                let probed = try await serverCapabilities()
-                streamCapability = probed?.gramUploadStream == true ? .supported : .unsupported
-            } catch {
-                return nil
-            }
-        }
-        guard case .supported = streamCapability else { return nil }
+        guard await supports(\.gramUploadStream) else { return nil }
         let env = RequestEnvelope(
             id: "herdrkit:gram.upload.stream:\(uploadID)",
             method: "gram.upload.stream",
             params: GramUploadStreamParams(uploadID: uploadID)
         )
-        guard let data = try? encoder.encode(env) else { return nil }
+        guard let data = try? Self.encoder.encode(env) else { return nil }
         return citadel.openUploadChannel(String(decoding: data, as: UTF8.self))
     }
 
@@ -1408,30 +1401,49 @@ public actor HerdrClient {
     public nonisolated func subscribe(
         _ subscriptions: [Subscription]
     ) -> AsyncThrowingStream<StreamLine, Error> {
-        let encoder = JSONEncoder()
-        let env = RequestEnvelope(
-            id: "herdrkit:events.subscribe",
-            method: "events.subscribe",
-            params: SubscribeParams(subscriptions: subscriptions)
-        )
-        guard let data = try? encoder.encode(env) else {
+        openLineStream(id: "herdrkit:events.subscribe", method: "events.subscribe",
+                       params: SubscribeParams(subscriptions: subscriptions)) {
+            { Self.classify($0) }
+        }
+    }
+
+    /// Opens one of the long-lived streams (`subscribe`, `subscribeAgentStatus`,
+    /// `streamTerminal`). Its request has a fixed `id`, because these methods are
+    /// nonisolated and cannot take `nextID`. Each line is yielded through a transform
+    /// made once per stream (so it may keep state across lines), in order. A transform
+    /// that throws finishes the stream with that error; the transport ending finishes
+    /// it normally. `alongside` starts a companion task (a watchdog), cancelled with
+    /// the reader.
+    private nonisolated func openLineStream<P: Encodable, T: Sendable>(
+        id: String, method: String, params: P,
+        alongside: (@Sendable (AsyncThrowingStream<T, Error>.Continuation) -> Task<Void, Never>)? = nil,
+        transform makeTransform: @escaping @Sendable () -> (String) async throws -> T
+    ) -> AsyncThrowingStream<T, Error> {
+        let env = RequestEnvelope(id: id, method: method, params: params)
+        guard let data = try? Self.encoder.encode(env) else {
             return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
         }
-        let requestLine = String(decoding: data, as: UTF8.self)
-        let raw = transport.stream(requestLine)
+        let raw = transport.stream(String(decoding: data, as: UTF8.self))
 
         return AsyncThrowingStream { continuation in
-            let task = Task {
+            let reader = Task {
+                let transform = makeTransform()
                 do {
                     for try await line in raw {
-                        continuation.yield(Self.classify(line))
+                        continuation.yield(try await transform(line))
                     }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            let companion = alongside?(continuation)
+            // Finishing from either side lands here: the reader stops iterating,
+            // which terminates the transport stream and closes its connection.
+            continuation.onTermination = { _ in
+                reader.cancel()
+                companion?.cancel()
+            }
         }
     }
 
@@ -1483,55 +1495,38 @@ public actor HerdrClient {
     public nonisolated func subscribeAgentStatus(
         silenceTimeout: Duration = .seconds(45)
     ) -> AsyncThrowingStream<AgentStatusStreamLine, Error> {
-        let env = RequestEnvelope(
+        let activity = StreamActivity()
+        return openLineStream(
             id: "herdrkit:events.subscribe:agent-status",
             method: "events.subscribe",
-            params: SubscribeParams(subscriptions: Self.agentStatusSubscriptions, eventsV2: true)
-        )
-        guard let data = try? JSONEncoder().encode(env) else {
-            return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
-        }
-        let raw = transport.stream(String(decoding: data, as: UTF8.self))
-
-        return AsyncThrowingStream { continuation in
-            let activity = StreamActivity()
-            let reader = Task {
-                do {
-                    for try await line in raw {
-                        await activity.touch()
-                        continuation.yield(try AgentStatusStreamLine.decode(line))
+            params: SubscribeParams(subscriptions: Self.agentStatusSubscriptions, eventsV2: true),
+            alongside: { continuation in
+                Task {
+                    while !Task.isCancelled {
+                        let remaining = await activity.remaining(of: silenceTimeout)
+                        if remaining <= .zero {
+                            continuation.finish(throwing: AgentStatusStreamError.silent(silenceTimeout))
+                            return
+                        }
+                        try? await Task.sleep(for: remaining)
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
-            }
-            let watchdog = Task {
-                while !Task.isCancelled {
-                    let remaining = await activity.remaining(of: silenceTimeout)
-                    if remaining <= .zero {
-                        continuation.finish(throwing: AgentStatusStreamError.silent(silenceTimeout))
-                        return
-                    }
-                    try? await Task.sleep(for: remaining)
+            },
+            transform: {
+                { line in
+                    await activity.touch()
+                    return try AgentStatusStreamLine.decode(line)
                 }
-            }
-            // Finishing from either side lands here: the reader stops iterating,
-            // which terminates the transport stream and closes its connection.
-            continuation.onTermination = { _ in
-                reader.cancel()
-                watchdog.cancel()
-            }
-        }
+            })
     }
 
     // MARK: - Live terminal stream
 
     /// Opens `pane.stream` — herdr's persistent server->client raw PTY byte firehose
     /// — and yields the opening `stream_started` ack (geometry + epoch) followed by
-    /// the ordered `\n`-delimited frames. Cloned from `subscribe()`: same Transport
-    /// line framing, no busy-poll (the server pushes as bytes arrive off the PTY). A
-    /// line that fails to decode as a valid frame THROWS and finishes the stream — a
+    /// the ordered `\n`-delimited frames. Opened like `subscribe()` (`openLineStream`):
+    /// same Transport line framing, no busy-poll (the server pushes as bytes arrive
+    /// off the PTY). A line that fails to decode as a valid frame THROWS and finishes the stream — a
     /// stateful byte stream can't skip a corrupt line without desyncing the emulator,
     /// so the view surfaces the failure and re-opening the pane reseeds a fresh reset.
     /// The connection also ends when the peer closes or the task is cancelled (closing
@@ -1543,8 +1538,7 @@ public actor HerdrClient {
         scrollbackLines: Int? = nil,
         viewerID: String? = nil
     ) -> AsyncThrowingStream<TerminalStreamEvent, Error> {
-        let encoder = JSONEncoder()
-        let env = RequestEnvelope(
+        openLineStream(
             id: "herdrkit:pane.stream:\(pane)",
             method: "pane.stream",
             params: PaneStreamParams(
@@ -1552,64 +1546,45 @@ public actor HerdrClient {
                 resumeFrom: nil, epoch: nil,
                 maxFrameBytes: maxFrameBytes, scrollbackLines: scrollbackLines,
                 viewerID: viewerID)
-        )
-        guard let data = try? encoder.encode(env) else {
-            return AsyncThrowingStream { $0.finish(throwing: TransportError.closedBeforeResponse) }
-        }
-        let requestLine = String(decoding: data, as: UTF8.self)
-        let raw = transport.stream(requestLine)
-
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                let decoder = JSONDecoder()
-                var sawAck = false
-                do {
-                    for try await line in raw {
-                        if !sawAck {
-                            sawAck = true
-                            switch Self.decodeStreamAck(line, decoder) {
-                            case .started(let started):
-                                continuation.yield(.started(started))
-                                continue
-                            case .error(let apiError):
-                                // pane_not_found, or an older server rejecting the
-                                // unknown method — surface it and stop cleanly.
-                                continuation.finish(throwing: apiError)
-                                return
-                            case .undecodable:
-                                // Not the ack we expected: fall through and try this
-                                // line as a frame. If it is a valid frame it is
-                                // yielded; if not, the strict decode below THROWS and
-                                // ends the stream (a stray non-frame leading line is
-                                // not silently swallowed).
-                                break
-                            }
-                        }
-                        // A server can END a live stream with an error line after frames
-                        // (a guest stream closes with guest_paused or guest_revoked), so
-                        // every line is checked before the strict frame decode.
-                        let data = Data(line.utf8)
-                        if let err = try? decoder.decode(ErrorEnvelope.self, from: data) {
-                            continuation.finish(throwing: err.error)
-                            return
-                        }
-                        // STRICT: every line after the ack must be a valid pane.bytes
-                        // frame. A stateful byte stream cannot skip a corrupt line
-                        // without desyncing the emulator (feeding the next frame mid
-                        // escape-sequence), so a decode failure THROWS — the stream
-                        // ends with an error, the view surfaces it, and re-opening the
-                        // pane reseeds a fresh full-screen reset. The ack fall-through
-                        // above lands here too, so a non-ack/non-frame leading line
-                        // also fails loudly rather than being silently swallowed.
-                        let frame = try decoder.decode(StreamFrame.self, from: data)
-                        continuation.yield(.frame(frame))
+        ) {
+            let decoder = JSONDecoder()
+            var sawAck = false
+            return { line in
+                if !sawAck {
+                    sawAck = true
+                    switch Self.decodeStreamAck(line, decoder) {
+                    case .started(let started):
+                        return .started(started)
+                    case .error(let apiError):
+                        // pane_not_found, or an older server rejecting the
+                        // unknown method — surface it and stop cleanly.
+                        throw apiError
+                    case .undecodable:
+                        // Not the ack we expected: fall through and try this
+                        // line as a frame. If it is a valid frame it is
+                        // yielded; if not, the strict decode below THROWS and
+                        // ends the stream (a stray non-frame leading line is
+                        // not silently swallowed).
+                        break
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                // A server can END a live stream with an error line after frames
+                // (a guest stream closes with guest_paused or guest_revoked), so
+                // every line is checked before the strict frame decode.
+                let data = Data(line.utf8)
+                if let err = try? decoder.decode(ErrorEnvelope.self, from: data) {
+                    throw err.error
+                }
+                // STRICT: every line after the ack must be a valid pane.bytes
+                // frame. A stateful byte stream cannot skip a corrupt line
+                // without desyncing the emulator (feeding the next frame mid
+                // escape-sequence), so a decode failure THROWS — the stream
+                // ends with an error, the view surfaces it, and re-opening the
+                // pane reseeds a fresh full-screen reset. The ack fall-through
+                // above lands here too, so a non-ack/non-frame leading line
+                // also fails loudly rather than being silently swallowed.
+                return .frame(try decoder.decode(StreamFrame.self, from: data))
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

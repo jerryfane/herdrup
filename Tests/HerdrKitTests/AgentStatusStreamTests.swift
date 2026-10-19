@@ -383,10 +383,65 @@ final class AgentStatusStreamTests: XCTestCase {
         XCTAssertEqual(backoff.next(), .seconds(1))
     }
 
+    /// The live terminal's numbers (LiveTerminalView.scheduleReconnect): steps of 0.5 s
+    /// doubling to a 20 s cap, each scaled by a factor in 0.6...1.0.
+    private static let terminalSteps: [Duration] = [
+        .milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(8),
+        .seconds(16), .seconds(20), .seconds(20),
+    ]
+
+    private static func terminalBackoff(jitter: ClosedRange<Double>? = 0.6...1.0) -> ReconnectBackoff {
+        ReconnectBackoff(initial: .milliseconds(500), maximum: .seconds(20), jitter: jitter)
+    }
+
+    func testTerminalBackoffStepsWithoutJitter() {
+        var backoff = Self.terminalBackoff(jitter: nil)
+        XCTAssertEqual(Self.terminalSteps.map { _ in backoff.next() }, Self.terminalSteps)
+    }
+
+    func testJitteredDelaysStayWithinTheirStepAndReset() {
+        for seed in UInt64(0)..<200 {
+            var generator = SplitMix64(seed: seed)
+            var backoff = Self.terminalBackoff()
+            for _ in 0..<2 {   // the second round runs after reset()
+                for step in Self.terminalSteps {
+                    let delay = backoff.next(using: &generator)
+                    XCTAssertGreaterThanOrEqual(delay, step * 0.6, "seed \(seed)")
+                    XCTAssertLessThanOrEqual(delay, step, "seed \(seed)")
+                }
+                backoff.reset()
+            }
+        }
+    }
+
+    func testJitterIsDrawnFromTheGenerator() {
+        func delays(seed: UInt64) -> [Duration] {
+            var generator = SplitMix64(seed: seed)
+            var backoff = Self.terminalBackoff()
+            return Self.terminalSteps.map { _ in backoff.next(using: &generator) }
+        }
+        XCTAssertEqual(delays(seed: 7), delays(seed: 7))
+        XCTAssertNotEqual(delays(seed: 7), delays(seed: 8))
+        XCTAssertNotEqual(delays(seed: 7), Self.terminalSteps, "jitter must scale the steps")
+    }
+
     // MARK: Helpers
 
     private func decodeAgents(_ json: String) throws -> [AgentInfo] {
         try JSONDecoder().decode([AgentInfo].self, from: Data(json.utf8))
+    }
+}
+
+/// A seedable generator, so the jittered backoff can be checked repeatably.
+private struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }
 

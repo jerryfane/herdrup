@@ -5,19 +5,11 @@ import XCTest
 /// the machine's 32-hex id. herdr#277: the daemon adds the machine's `machine_label`, and the
 /// app shows `<label>/<name>`, exactly like a federated agent's row.
 final class GramSenderTests: XCTestCase {
-    private struct ListTransport: HerdrTransport {
-        let reply: String
-        func roundTrip(_ requestLine: String) async throws -> String { reply }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-    }
-
     private let alias = "8195b6326f748f4da1945364a4e205b9"
 
     private func list(_ messages: String) async throws -> [GramMessage] {
         let reply = #"{"id":"x","result":{"type":"gram_list","messages":["# + messages + "]}}"
-        let answer = try await HerdrClient(transport: ListTransport(reply: reply)).gramList()
+        let answer = try await HerdrClient(transport: RecordingTransport(reply: reply)).gramList()
         return try XCTUnwrap(answer.messages)
     }
 

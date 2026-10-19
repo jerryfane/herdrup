@@ -343,3 +343,11 @@ struct StatusMotionProbe: View {
     }
 }
 #endif
+
+extension Binding {
+    /// A `Bool` binding that is true while the wrapped optional holds a value, and clears it
+    /// when set to false: the `isPresented:` of an alert or dialog driven by optional state.
+    func isPresent<Wrapped>() -> Binding<Bool> where Value == Wrapped? {
+        Binding<Bool>(get: { wrappedValue != nil }, set: { if !$0 { wrappedValue = nil } })
+    }
+}

@@ -17,12 +17,7 @@ struct SavedGramFile: Codable, Hashable {
     let size: UInt64
     let mime: String
 
-    var displaySize: String {
-        let b = Double(size)
-        if b < 1024 { return "\(size) B" }
-        if b < 1024 * 1024 { return String(format: "%.0f KB", b / 1024) }
-        return String(format: "%.1f MB", b / (1024 * 1024))
-    }
+    var displaySize: String { GramFile.displaySize(of: size) }
 }
 
 struct SavedGram: Codable, Identifiable, Hashable {
@@ -177,7 +172,7 @@ struct SavedGramRow: View {
                 Text(saved.fromAgent ? saved.from : "You")
                     .font(Typography.app(12, .semibold))
                     .foregroundStyle(Palette.textDim)
-                Text(age)
+                Text(GramRow.age(from: saved.createdAt))
                     .font(Typography.machine(11))
                     .foregroundStyle(Palette.textFaint)
                 Button(action: onUnsave) {
@@ -245,15 +240,13 @@ struct SavedGramRow: View {
         }
     }
 
-    /// While downloading with a real byte count, the size line becomes progress. The
-    /// received figure is scaled back from base64 — the wire carries about 4/3 of the
-    /// file — so the numbers name file bytes, not transport bytes.
+    /// While downloading with a real byte count, the size line becomes progress, in file
+    /// bytes (`GramFile.downloadedLabel` scales the base64 wire bytes back).
     private func sizeLabel(_ file: SavedGramFile) -> String {
-        guard isDownloadingFile, let p = downloadProgress, p.total > 0 else {
-            return file.displaySize
-        }
-        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
-        return "\(GramFile.displaySize(of: done)) of \(file.displaySize)"
+        guard isDownloadingFile, let p = downloadProgress,
+              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
+        else { return file.displaySize }
+        return label
     }
 
     /// A tappable chip that fetches the attachment from the server on demand (`gramGetFile`) and
@@ -314,14 +307,5 @@ struct SavedGramRow: View {
         .accessibilityLabel("\(file.name), no longer available")
         .accessibilityIdentifier("gram-attachment-expired")
         .padding(.top, 2)
-    }
-
-    /// Compact relative age ("now" / "5m" / "3h" / "2d"), matching the inbox row's terse style.
-    private var age: String {
-        let secs = Date().timeIntervalSince(saved.createdAt)
-        if secs < 60 { return "now" }
-        if secs < 3600 { return "\(Int(secs / 60))m" }
-        if secs < 86400 { return "\(Int(secs / 3600))h" }
-        return "\(Int(secs / 86400))d"
     }
 }

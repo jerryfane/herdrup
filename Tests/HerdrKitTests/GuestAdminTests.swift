@@ -5,29 +5,6 @@ import XCTest
 /// the daemon that runs it) and how leniently the answers decode.
 final class GuestAdminTests: XCTestCase {
 
-    private final class CapturingTransport: HerdrTransport, @unchecked Sendable {
-        var requests: [String] = []
-        let reply: String
-        init(reply: String) { self.reply = reply }
-        func roundTrip(_ requestLine: String) async throws -> String {
-            requests.append(requestLine)
-            return reply
-        }
-        func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
-            AsyncThrowingStream { $0.finish() }
-        }
-
-        /// The last request's method and params, parsed rather than substring-matched so a
-        /// stray key or a wrong value type cannot hide.
-        func last() throws -> (method: String, params: [String: Any]) {
-            let line = try XCTUnwrap(requests.last)
-            let object = try XCTUnwrap(
-                try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
-            return (try XCTUnwrap(object["method"] as? String),
-                    try XCTUnwrap(object["params"] as? [String: Any]))
-        }
-    }
-
     private static let inviteReply = #"""
     {"id":"x","result":{"type":"guest_invite","invite":{"invite_id":"inv1","name":"plotarmordev",
     "grant":{"terminal_id":"t7","agent_name":"llm-opt","agent_session":{"source":"hook","agent":"omp","kind":"session_id","value":"s1"}},"owner_name":"Jerry",
@@ -46,7 +23,7 @@ final class GuestAdminTests: XCTestCase {
     // MARK: guest.invite.create
 
     func testInviteCreateForALocalAgentSendsNoMachine() async throws {
-        let t = CapturingTransport(reply: Self.inviteReply)
+        let t = RecordingTransport(reply: Self.inviteReply)
         let created = try await HerdrClient(transport: t).guestInviteCreate(
             target: "w1:p1", name: "plotarmordev", ownerName: "Jerry", machineLabel: "Jerry's Mac Studio")
 
@@ -77,7 +54,7 @@ final class GuestAdminTests: XCTestCase {
         XCTAssertEqual(route.machine, "2cc0ffe3")
         XCTAssertEqual(route.local("2cc0ffe3/t7"), "t7", "the grant is matched by the peer's own terminal id")
 
-        let t = CapturingTransport(reply: Self.inviteReply)
+        let t = RecordingTransport(reply: Self.inviteReply)
         _ = try await HerdrClient(transport: t).guestInviteCreate(
             target: route.target, name: "plotarmordev", ownerName: "Jerry",
             machineLabel: "Jerry's Mac Studio", ttlSecs: 3600, machine: route.machine)
@@ -121,7 +98,7 @@ final class GuestAdminTests: XCTestCase {
           {"invite_id":"i3","name":"stale","grant":{"terminal_id":"t7"},"expires_ms":1000}],
          "link":{"state":"hibernating","last_error":"dns"}}}
         """#
-        let t = CapturingTransport(reply: reply)
+        let t = RecordingTransport(reply: reply)
         let listing = try await HerdrClient(transport: t).guestList()
 
         let (method, params) = try t.last()
@@ -142,7 +119,7 @@ final class GuestAdminTests: XCTestCase {
     }
 
     func testListOnAPeerCarriesTheMachineAndToleratesMissingArrays() async throws {
-        let t = CapturingTransport(reply: #"{"id":"x","result":{"type":"guest_list","link":{"state":"up"}}}"#)
+        let t = RecordingTransport(reply: #"{"id":"x","result":{"type":"guest_list","link":{"state":"up"}}}"#)
         let listing = try await HerdrClient(transport: t).guestList(machine: "2cc0ffe3")
         XCTAssertEqual(try t.last().params["machine"] as? String, "2cc0ffe3")
         XCTAssertEqual(listing, GuestListing(link: GuestLinkStatus(state: .up)))
@@ -151,7 +128,7 @@ final class GuestAdminTests: XCTestCase {
     // MARK: share_gram (herdrup#338)
 
     func testInviteCreateSendsShareGramAndAnOrdinaryInviteSendsItOff() async throws {
-        let t = CapturingTransport(reply: Self.inviteReply)
+        let t = RecordingTransport(reply: Self.inviteReply)
         let client = HerdrClient(transport: t)
         _ = try await client.guestInviteCreate(
             target: "w1:p1", name: "plotarmordev", ownerName: "Jerry", machineLabel: "Mac", shareGram: true)
@@ -162,7 +139,7 @@ final class GuestAdminTests: XCTestCase {
     }
 
     func testGuestUpdateTogglesShareGramForOneGuestOnItsMachine() async throws {
-        let t = CapturingTransport(reply: #"{"id":"x","result":{"type":"ok"}}"#)
+        let t = RecordingTransport(reply: #"{"id":"x","result":{"type":"ok"}}"#)
         try await HerdrClient(transport: t).guestUpdate(guestID: "g1", shareGram: true, machine: "2cc0ffe3")
         var (method, params) = try t.last()
         XCTAssertEqual(method, "guest.update")
@@ -183,7 +160,7 @@ final class GuestAdminTests: XCTestCase {
           {"guest_id":"g2","name":"sam"}],
          "invites":[{"invite_id":"i1","name":"ana","share_gram":true},{"invite_id":"i2","name":"bo"}]}}
         """#
-        let listing = try await HerdrClient(transport: CapturingTransport(reply: reply)).guestList()
+        let listing = try await HerdrClient(transport: RecordingTransport(reply: reply)).guestList()
         XCTAssertEqual(listing.guests.map(\.shareGram), [true, false])
         XCTAssertEqual(listing.invites.map(\.shareGram), [true, false])
     }
@@ -200,7 +177,7 @@ final class GuestAdminTests: XCTestCase {
     // MARK: guest.revoke
 
     func testRevokeNamesExactlyOneKind() async throws {
-        let t = CapturingTransport(reply: #"{"id":"x","result":{"type":"guest_revoked","guest_id":"g1","closed_streams":1}}"#)
+        let t = RecordingTransport(reply: #"{"id":"x","result":{"type":"guest_revoked","guest_id":"g1","closed_streams":1}}"#)
         let client = HerdrClient(transport: t)
 
         try await client.guestRevoke(.guest("g1"))
@@ -218,7 +195,7 @@ final class GuestAdminTests: XCTestCase {
     }
 
     func testRevokeFailureSurfacesTheDaemonError() async throws {
-        let t = CapturingTransport(reply: #"{"id":"x","error":{"code":"unsupported","message":"guest access is unix only"}}"#)
+        let t = RecordingTransport.error(code: "unsupported", message: "guest access is unix only")
         do {
             try await HerdrClient(transport: t).guestRevoke(.guest("g1"))
             XCTFail("an error envelope must throw")
@@ -230,7 +207,7 @@ final class GuestAdminTests: XCTestCase {
     // MARK: guest.audit
 
     func testAuditClampsTheLimitAndOmitsUnsetFilters() async throws {
-        let t = CapturingTransport(reply: #"{"id":"x","result":{"type":"guest_audit","entries":[]}}"#)
+        let t = RecordingTransport(reply: #"{"id":"x","result":{"type":"guest_audit","entries":[]}}"#)
         let client = HerdrClient(transport: t)
 
         _ = try await client.guestAudit(limit: 10_000)
@@ -258,7 +235,7 @@ final class GuestAdminTests: XCTestCase {
          {"ts_ms":1,"guest_id":"g1","name":"plotarmordev","event":"denied","method":"pane.send_keys"},
          {"ts_ms":0,"event":"quarantined","new":1}]}}
         """#
-        let entries = try await HerdrClient(transport: CapturingTransport(reply: reply)).guestAudit()
+        let entries = try await HerdrClient(transport: RecordingTransport(reply: reply)).guestAudit()
         XCTAssertEqual(entries.map(\.event), [.upload, .prompt, .denied, .other("quarantined")])
         XCTAssertEqual(entries[0].file, GuestAuditFile(name: "prompt-set-v2.jsonl", size: 49152, sha256: "ab"))
         XCTAssertEqual(entries[1].text, "rerun the bench")
