@@ -15,7 +15,7 @@ final class GramUnreadTracker: ObservableObject {
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
 /// sent, plus the owner's own posts and their claim state) newest-first, and a
 /// composer to post to the shared grab-queue or, with an "@name", one agent directly.
-/// Up to `Staging.maxAttachments` files can be staged, and each sends as its own
+/// Up to `ComposerStaging.maxAttachments` files can be staged, and each sends as its own
 /// message. A received file draws as a card (`GramFileCard`, `GramImageCard`) that
 /// downloads and previews it; long-pressing a message opens its menu, whose Delete
 /// removes it — and its file bytes — for good, which is what makes gram safe for a
@@ -302,9 +302,9 @@ struct GramView: View {
         let fileURL: URL
     }
 
-    // The pre-send size gate and the count cap both live on `Staging` (nonisolated, so
-    // the photo importer and the terminal composer can read them):
-    // `GramView.Staging.maxFileBytes` and `GramView.Staging.maxAttachments`.
+    // The pre-send size gate and the count cap both live on `ComposerStaging`
+    // (nonisolated, so the photo importer and the terminal composer can read them):
+    // `ComposerStaging.maxFileBytes` and `ComposerStaging.maxAttachments`.
 
     /// The list the page renders: optimistic posts first, then the server snapshot
     /// with those posts de-duped out once the server reflects them.
@@ -537,7 +537,7 @@ struct GramView: View {
         // `attachedFiles` under the shared size and count limits.
         .composerAttachPicker(
             isPresented: $showAttachSheet, loading: $loadingPhoto,
-            room: { Staging.maxAttachments - attachedFiles.count }
+            room: { ComposerStaging.maxAttachments - attachedFiles.count }
         ) { outcome in
             attachedFiles += outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime,
@@ -2596,74 +2596,6 @@ struct GramView: View {
     static func expectedReplyBytes(for size: UInt64) -> Int? {
         guard size > 0 else { return nil }
         return Int(Double(size) * 4.0 / 3.0) + 512
-    }
-
-    /// Attachment staging, deliberately in a NESTED TYPE rather than on `GramView`.
-    ///
-    /// `View` is `@MainActor`, so everything on `GramView` inherits that isolation —
-    /// but `ComposerPickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
-    /// closure, so calling a main-actor static from it is a cross-actor call (a hard
-    /// error for a method). A nested type does NOT inherit the enclosing isolation,
-    /// which is what is wanted here twice over: the importer can call it directly,
-    /// and copying a 100 MB pick never runs on the main actor.
-    ///
-    /// One staging directory per app SESSION. That level exists for the case where no
-    /// cleanup path runs at all: on a crash or a jetsam kill `onDisappear` never
-    /// fires, so staged bytes would otherwise sit in tmp untracked. A session
-    /// directory makes every earlier session's leftovers a single identifiable
-    /// sibling for the launch-time sweep, while the per-item directories inside it
-    /// still give a per-chip unlink.
-    enum Staging {
-        /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES`
-        /// (100 MiB) and inclusive as the server's is. The upload streams from disk
-        /// in frames, so any size uploads fine regardless of divisibility; this is
-        /// just the pre-send size gate.
-        static let maxFileBytes = 100 * 1024 * 1024
-
-        /// How many files can be staged at once, in any composer (Gram, the terminal
-        /// reply, the guest). Each sends as its own gram message.
-        ///
-        /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
-        /// staged file was held in memory as `Data`: ten 100 MB picks would have been
-        /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads
-        /// them one frame at a time, so the resident ceiling is a single frame no
-        /// matter how many files are staged or how large they are. Every send loop (Gram,
-        /// the terminal reply, the guest) is SERIAL and `gram.post` consumes each staging
-        /// file, so the daemon's 1 GiB aggregate staging budget never sees more than one
-        /// upload in flight.
-        static let maxAttachments = 10
-
-        static let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gram-staging", isDirectory: true)
-        static let session = root
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-
-        /// Copy a picked file into app-owned staging, so the send streams it from
-        /// disk and the app owns its lifetime. nil when the copy fails or the copied
-        /// file is empty / over the cap — the caller reports it as a skip.
-        ///
-        /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is
-        /// iOS-only and cannot run on CI, and a staging bug here is silent (it
-        /// renders as the same "unreadable pick" message as a genuinely bad file).
-        /// In HerdrKit it is tested.
-        static func copy(of source: URL, named name: String) -> StagedAttachment? {
-            GramStaging.stageCopy(of: source, named: name, in: session, maxBytes: maxFileBytes)
-        }
-
-        /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no
-        /// cleanup).
-        ///
-        /// Called from the app root's `.task`, not the Gram page's: bytes from a
-        /// killed session must be reclaimed even in a launch where the Gram tab is
-        /// never opened. Off the main actor because the unlink is a synchronous
-        /// recursive walk and the abandoned set can be ten 100 MB attachments.
-        static func sweepAbandonedOffMainActor() async {
-            let stagingRoot = root
-            let current = session.lastPathComponent
-            await Task.detached(priority: .utility) {
-                GramStaging.sweepAbandoned(root: stagingRoot, keeping: current)
-            }.value
-        }
     }
 
     /// The running file downloads, one per message id, shared by everyone who wants that

@@ -20,7 +20,71 @@ struct ComposerAttachButton: View {
     }
 }
 
-/// One picked file, already copied into app-owned staging (`GramView.Staging`), so the
+/// Attachment staging for every composer (the Gram page, the terminal reply, the guest
+/// pane), deliberately a TOP-LEVEL TYPE rather than statics on a view.
+///
+/// `View` is `@MainActor`, so everything on a view inherits that isolation — but
+/// `ComposerPickedMedia`'s `FileRepresentation` importer is a nonisolated `@Sendable`
+/// closure, so calling a main-actor static from it is a cross-actor call (a hard error
+/// for a method). A type outside the view does NOT inherit that isolation, which is what
+/// is wanted here twice over: the importer can call it directly, and copying a 100 MB
+/// pick never runs on the main actor.
+///
+/// One staging directory per app SESSION. That level exists for the case where no
+/// cleanup path runs at all: on a crash or a jetsam kill `onDisappear` never fires, so
+/// staged bytes would otherwise sit in tmp untracked. A session directory makes every
+/// earlier session's leftovers a single identifiable sibling for the launch-time sweep,
+/// while the per-item directories inside it still give a per-chip unlink.
+enum ComposerStaging {
+    /// Client-side attachment cap, mirroring the server's `MAX_FILE_BYTES` (100 MiB)
+    /// and inclusive as the server's is. The upload streams from disk in frames, so any
+    /// size uploads fine regardless of divisibility; this is just the pre-send size gate.
+    static let maxFileBytes = 100 * 1024 * 1024
+
+    /// How many files can be staged at once, in any composer (Gram, the terminal reply,
+    /// the guest). Each sends as its own gram message.
+    ///
+    /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a staged
+    /// file was held in memory as `Data`: ten 100 MB picks would have been ~1 GB
+    /// resident. Staged bytes now live in a temp file and the upload reads them one frame
+    /// at a time, so the resident ceiling is a single frame no matter how many files are
+    /// staged or how large they are. Every composer sends through the SERIAL
+    /// `GramAttachmentSender` and `gram.post` consumes each staging file, so the daemon's
+    /// 1 GiB aggregate staging budget never sees more than one upload in flight.
+    static let maxAttachments = 10
+
+    static let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("gram-staging", isDirectory: true)
+    static let session = root
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+    /// Copy a picked file into app-owned staging, so the send streams it from disk and
+    /// the app owns its lifetime. nil when the copy fails or the copied file is empty /
+    /// over the cap — the caller reports it as a skip.
+    ///
+    /// The work is `HerdrKit.GramStaging`'s, not this file's: this target is iOS-only
+    /// and cannot run on CI, and a staging bug here is silent (it renders as the same
+    /// "unreadable pick" message as a genuinely bad file). In HerdrKit it is tested.
+    static func copy(of source: URL, named name: String) -> StagedAttachment? {
+        GramStaging.stageCopy(of: source, named: name, in: session, maxBytes: maxFileBytes)
+    }
+
+    /// Remove staging left by PREVIOUS app sessions (a crash or jetsam runs no cleanup).
+    ///
+    /// Called from the app root's `.task`, not the Gram page's: bytes from a killed
+    /// session must be reclaimed even in a launch where the Gram tab is never opened.
+    /// Off the main actor because the unlink is a synchronous recursive walk and the
+    /// abandoned set can be ten 100 MB attachments.
+    static func sweepAbandonedOffMainActor() async {
+        let stagingRoot = root
+        let current = session.lastPathComponent
+        await Task.detached(priority: .utility) {
+            GramStaging.sweepAbandoned(root: stagingRoot, keeping: current)
+        }.value
+    }
+}
+
+/// One picked file, already copied into app-owned staging (`ComposerStaging`), so the
 /// send streams it from disk and the composer owns its lifetime.
 struct ComposerPickedFile {
     let name: String
@@ -42,7 +106,7 @@ extension View {
     /// The paperclip sets `isPresented`; a Telegram-style sheet picks the source, and
     /// the RIGHT system picker opens once that sheet has finished dismissing (presenting
     /// one sheet while another is dismissing drops the second on iOS). Picks are staged
-    /// here, bounded by `GramView.Staging.maxFileBytes` each and by `room()` in number,
+    /// here, bounded by `ComposerStaging.maxFileBytes` each and by `room()` in number,
     /// so every composer enforces the same limits. `loading` is true while a photo batch
     /// loads (iCloud items can take a moment) and gates the composer's own send.
     func composerAttachPicker(
@@ -78,7 +142,7 @@ private struct ComposerAttachPicker: ViewModifier {
             .photosPicker(
                 isPresented: $showPhotoPicker,
                 selection: $photoItems,
-                maxSelectionCount: GramView.Staging.maxAttachments,
+                maxSelectionCount: ComposerStaging.maxAttachments,
                 matching: .any(of: [.images, .videos])
             )
             .onChange(of: photoItems) { _, items in
@@ -168,8 +232,8 @@ private struct ComposerAttachPicker: ViewModifier {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let name = GramStaging.safeFileName(url.lastPathComponent)
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                  size > 0, size <= GramView.Staging.maxFileBytes,
-                  let staged = GramView.Staging.copy(of: url, named: name)
+                  size > 0, size <= ComposerStaging.maxFileBytes,
+                  let staged = ComposerStaging.copy(of: url, named: name)
             else {
                 bad.append(url.lastPathComponent)
                 continue
@@ -220,7 +284,7 @@ private struct ComposerAttachPicker: ViewModifier {
     private static func skipNote(bad: String?, capped: Int) -> String? {
         var parts: [String] = []
         if let bad { parts.append(bad) }
-        if capped > 0 { parts.append("\(capped) over the \(GramView.Staging.maxAttachments)-file limit") }
+        if capped > 0 { parts.append("\(capped) over the \(ComposerStaging.maxAttachments)-file limit") }
         guard !parts.isEmpty else { return nil }
         return "Skipped: " + parts.joined(separator: "; ") + "."
     }
@@ -253,9 +317,9 @@ private struct ComposerPickedMedia: Transferable {
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .item) { received in
             guard let size = try? received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                  size > 0, size <= GramView.Staging.maxFileBytes
+                  size > 0, size <= ComposerStaging.maxFileBytes
             else { return ComposerPickedMedia(staged: nil) }
-            return ComposerPickedMedia(staged: GramView.Staging.copy(
+            return ComposerPickedMedia(staged: ComposerStaging.copy(
                 of: received.file, named: received.file.lastPathComponent))
         }
     }

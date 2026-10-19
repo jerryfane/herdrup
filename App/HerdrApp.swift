@@ -301,7 +301,7 @@ struct RootView: View {
         // jetsam kill runs no cleanup) here rather than on the Gram page: bytes from a
         // killed session — up to ten 100 MB attachments — would otherwise survive every
         // launch in which the user never opens the Gram tab.
-        .task { await GramView.Staging.sweepAbandonedOffMainActor() }
+        .task { await ComposerStaging.sweepAbandonedOffMainActor() }
         // Back in the foreground the held request channels may have died with the
         // network while the app was suspended (#391): have each ping before its next
         // request instead of letting that request find out by timing out.
@@ -5308,7 +5308,7 @@ struct TerminalPaneContent: View {
     @StateObject private var composerKeyboard = ComposerKeyboard()
     /// Every staged attachment, in paste order. Each sends as its own gram message and
     /// they are all named by ONE prompt, so the agent gets a single turn that points at
-    /// the whole set. Capped at `GramView.Staging.maxAttachments`.
+    /// the whole set. Capped at `ComposerStaging.maxAttachments`.
     @State private var replyAttachments: [ComposerAttachment] = []
     /// The ••• "Share with someone" sheet and the guests who hold this agent (the header chip).
     @StateObject private var guestShare = GuestSharePaneModel()
@@ -6346,7 +6346,7 @@ struct TerminalPaneContent: View {
         // `sendPromptWithAttachments` as a paste or a drop.
         .composerAttachPicker(
             isPresented: $showReplyAttachSheet, loading: $loadingReplyAttachment,
-            room: { GramView.Staging.maxAttachments - replyAttachments.count }
+            room: { ComposerStaging.maxAttachments - replyAttachments.count }
         ) { outcome in
             replyAttachments += outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime, isImage: $0.isImage, staged: $0.staged)
@@ -6458,7 +6458,7 @@ struct TerminalPaneContent: View {
                     }
                     let name = GramStaging.safeFileName(source.lastPathComponent)
                     guard !name.isEmpty,
-                          let staged = GramView.Staging.copy(of: source, named: name)
+                          let staged = ComposerStaging.copy(of: source, named: name)
                     else { return nil }
                     let fileType = UTType(filenameExtension: source.pathExtension)
                     return ComposerAttachment(
@@ -6493,7 +6493,7 @@ struct TerminalPaneContent: View {
 
         provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { source, _ in
             let fileAttachment: ComposerAttachment? = source.flatMap { url in
-                guard let staged = GramView.Staging.copy(of: url, named: name) else { return nil }
+                guard let staged = ComposerStaging.copy(of: url, named: name) else { return nil }
                 return ComposerAttachment(name: name, mime: mime, isImage: isImage, staged: staged)
             }
             if let fileAttachment {
@@ -6505,8 +6505,8 @@ struct TerminalPaneContent: View {
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
                 let dataAttachment: ComposerAttachment? = data.flatMap {
                     guard let staged = GramStaging.stageData(
-                        $0, named: name, in: GramView.Staging.session,
-                        maxBytes: GramView.Staging.maxFileBytes)
+                        $0, named: name, in: ComposerStaging.session,
+                        maxBytes: ComposerStaging.maxFileBytes)
                     else { return nil }
                     return ComposerAttachment(name: name, mime: mime, isImage: isImage, staged: staged)
                 }
@@ -6520,8 +6520,8 @@ struct TerminalPaneContent: View {
     /// under the count cap, and a pane whose agent has a name and an intent prompt (the
     /// only destination `sendPromptWithAttachments` can deliver to). Says why when not.
     private func replyTakesAttachment() -> Bool {
-        guard replyAttachments.count < GramView.Staging.maxAttachments else {
-            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+        guard replyAttachments.count < ComposerStaging.maxAttachments else {
+            actionNote = "Up to \(ComposerStaging.maxAttachments) attachments at a time."
             return false
         }
         guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
@@ -6549,9 +6549,9 @@ struct TerminalPaneContent: View {
         // cannot currently fire. It stays because it is the only place that knows the
         // staged bytes exist, and a future concurrent paste path would otherwise append
         // past the cap and leak the temp file.
-        guard replyAttachments.count < GramView.Staging.maxAttachments else {
+        guard replyAttachments.count < ComposerStaging.maxAttachments else {
             try? FileManager.default.removeItem(at: attachment.staged.dir)
-            actionNote = "Up to \(GramView.Staging.maxAttachments) attachments at a time."
+            actionNote = "Up to \(ComposerStaging.maxAttachments) attachments at a time."
             return
         }
         replyAttachments.append(attachment)

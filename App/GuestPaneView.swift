@@ -135,7 +135,7 @@ struct GuestPaneView: View {
         }
         .composerAttachPicker(
             isPresented: $showAttachSheet, loading: $loadingAttachment,
-            room: { GramView.Staging.maxAttachments - attachments.count }
+            room: { ComposerStaging.maxAttachments - attachments.count }
         ) { outcome in
             attachments += outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime,
