@@ -1,7 +1,6 @@
 import HerdrKit
 import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
 import UIKit
 
 /// The unread-gram count, lifted out of `GramView` so the tab bar can badge it
@@ -3597,11 +3596,6 @@ struct GramRow: View, Equatable {
     }
 
     private var mine: Bool { !message.isFromAgent }
-    private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
-    private var ink: Color { mine ? Palette.onAccent : Palette.text }
-    private var bubbleShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
-    }
     private var maxWidth: CGFloat { GramCardMetrics.cardWidth(sizeClass) }
     private var imageFile: GramFile? {
         guard let file = message.file, file.isImage else { return nil }
@@ -3687,16 +3681,7 @@ struct GramRow: View, Equatable {
     /// shows on the group's last message only, in the bubble's own fill.
     private func chrome<Content: View>(_ content: Content, first: Bool, tail: Bool) -> some View {
         content
-            .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
-                if tail && endsGroup {
-                    BubbleTail()
-                        .fill(fill)
-                        .frame(width: 24, height: 22)
-                        .scaleEffect(x: mine ? -1 : 1, y: 1)
-                        .offset(x: mine ? 6 : -6)
-                        .accessibilityHidden(true)
-                }
-            }
+            .gramBubbleTail(mine: mine, shown: tail && endsGroup)
             .overlay(alignment: .topTrailing) {
                 if first && isSaved {
                     GramSavedBadge().offset(x: 15, y: -17)
@@ -3725,50 +3710,19 @@ struct GramRow: View, Equatable {
         StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
     }
 
-    /// The text and any card file (a document, or a file the store expired): a plain bubble
-    /// for prose alone, a card (the card width, or less in a narrower column) once there is
-    /// code or a file, and the bare file card for a file with no text.
-    @ViewBuilder
+    /// The text and any card file (a document, or a file the store expired), drawn by the
+    /// shared `GramTextPart`; the fold state is the page's.
     private func textPart(_ segments: [GramTextSegment]) -> some View {
-        let hasCode = segments.contains { if case .code = $0 { return true } else { return false } }
-        if segments.isEmpty, hasCard {
-            card(embedded: false)
-        } else if hasCode || hasCard {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                    switch segment {
-                    case .text(let text):
-                        foldingText(text, index: index)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 7)
-                    case .code(let code, let language):
-                        GramCodeBlock(code: code, language: language)
-                            .padding(.horizontal, 8)
-                            .padding(.top, 7)
-                    }
-                }
-                if hasCard {
-                    card(embedded: true)
-                        .padding(.top, 9)
-                } else {
-                    Color.clear.frame(height: 8)
-                }
-            }
-            .frame(maxWidth: maxWidth, alignment: .leading)
-            .background(fill)
-            .clipShape(bubbleShape)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                    if case .text(let text) = segment {
-                        foldingText(text, index: index)
-                    }
-                }
-            }
-            .padding(.vertical, 7)
-            .padding(.horizontal, 12)
-            .background(fill, in: bubbleShape)
-        }
+        GramTextPart(
+            segments: segments, mine: mine, hasCard: hasCard,
+            isExpanded: { index in
+                Binding(
+                    get: { expandedSegments.contains(index) },
+                    set: { open in onSetExpanded(index, open) }
+                )
+            },
+            card: card(embedded:)
+        )
     }
 
     /// The text part's file card: the document's, or the expired file's, which has nothing
@@ -3782,22 +3736,10 @@ struct GramRow: View, Equatable {
         }
     }
 
-    private func foldingText(_ text: String, index: Int) -> some View {
-        GramFoldingText(
-            text: linkified(text, tint: mine ? Palette.onAccent : Palette.brand),
-            isExpanded: Binding(
-                get: { expandedSegments.contains(index) },
-                set: { open in onSetExpanded(index, open) }
-            ),
-            toggleTint: mine ? Palette.onAccent : Palette.brand
-        )
-        .foregroundStyle(ink)
-    }
-
     private func fileCard(_ file: GramFile, embedded: Bool) -> some View {
         GramFileCard(
             name: file.name,
-            kind: Self.kindLabel(for: file),
+            kind: GramFileCard.kind(name: file.name, mime: file.mime),
             byteCount: Int(clamping: file.size),
             download: download,
             onOpen: onOpenFile,
@@ -3842,13 +3784,6 @@ struct GramRow: View, Equatable {
         .onDisappear { if onScreen { onScreen = false } }
     }
 
-    /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
-    private static func kindLabel(for file: GramFile) -> String {
-        let type = UTType(filenameExtension: (file.name as NSString).pathExtension)
-            ?? UTType(mimeType: file.mime)
-        return type?.localizedDescription ?? ""
-    }
-
     /// The image attachment's picture: from memory when the feed drew it before, else decoded
     /// from the download cache, which `onPrefetchImage` fills for an image under the prefetch
     /// cap and an open fills for the rest. Runs only while the card is on screen (the task
@@ -3878,19 +3813,10 @@ struct GramRow: View, Equatable {
                                               spec: GramCardMetrics.imageSize(sizeClass), scale: displayScale)
     }
 
-    /// This row's open or save as its card draws and speaks it: the share of the reply
-    /// received, or a spinning ring while there is no measurement. The spoken figure is in
-    /// file bytes (`GramFile.downloadedLabel` scales the base64 reply back).
+    /// This row's open or save as its card draws and speaks it (`GramCardDownload.reply`).
     private var download: GramCardDownload? {
         guard isDownloadingFile, let file = message.file else { return nil }
-        guard let p = downloadProgress,
-              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
-        else {
-            return GramCardDownload(fraction: nil, spoken: "Downloading")
-        }
-        return GramCardDownload(
-            fraction: min(1, Double(p.received) / Double(p.total)),
-            spoken: "Downloading, \(label)")
+        return .reply(downloadProgress, fileSize: file.size)
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same
