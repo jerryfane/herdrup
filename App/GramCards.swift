@@ -2,6 +2,7 @@ import HerdrKit
 import ImageIO
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 // Building blocks for Gram's final design (option D's iMessage layout and agent cards in
 // option C's herdr colours; spec gram-final-d-with-c-colours.html, round 3). Every colour
@@ -251,6 +252,151 @@ struct GramFoldingText: View {
     }
 }
 
+// MARK: - Bubbles
+
+extension View {
+    /// The bubble's tail (`BubbleTail`) behind a part that ends in text, curving out of the
+    /// bottom corner on the sender's side, in the side's fill. `shown` false draws nothing.
+    func gramBubbleTail(mine: Bool, shown: Bool) -> some View {
+        background(alignment: mine ? .bottomTrailing : .bottomLeading) {
+            if shown {
+                BubbleTail()
+                    .fill(mine ? GramBubble.outFill : GramBubble.inFill)
+                    .frame(width: 24, height: 22)
+                    .scaleEffect(x: mine ? -1 : 1, y: 1)
+                    .offset(x: mine ? 6 : -6)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+/// A message's text and its card file (a document, or a file the store expired), as every
+/// Gram page draws them: a plain bubble for prose alone, a card (the card width, or less in
+/// a narrower column) once there is code or a file, and the bare file card for a file with no
+/// text. Prose folds past eight lines (`GramFoldingText`); the caller holds the fold state,
+/// by segment index. `card` draws the file card, `embedded` when text sits above it.
+struct GramTextPart<Card: View>: View {
+    let segments: [GramTextSegment]
+    let mine: Bool
+    let hasCard: Bool
+    let isExpanded: (Int) -> Binding<Bool>
+    @ViewBuilder let card: (_ embedded: Bool) -> Card
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
+    private var bubbleShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
+    }
+
+    var body: some View {
+        let hasCode = segments.contains { if case .code = $0 { return true } else { return false } }
+        if segments.isEmpty, hasCard {
+            card(false)
+        } else if hasCode || hasCard {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                    switch segment {
+                    case .text(let text):
+                        prose(text, index: index)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 7)
+                    case .code(let code, let language):
+                        GramCodeBlock(code: code, language: language)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 7)
+                    }
+                }
+                if hasCard {
+                    card(true)
+                        .padding(.top, 9)
+                } else {
+                    Color.clear.frame(height: 8)
+                }
+            }
+            .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass), alignment: .leading)
+            .background(fill)
+            .clipShape(bubbleShape)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                    if case .text(let text) = segment {
+                        prose(text, index: index)
+                    }
+                }
+            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .background(fill, in: bubbleShape)
+        }
+    }
+
+    /// Your text in `onAccent` on the violet fill, an agent's in the body ink; links and the
+    /// Read more line tinted to match.
+    private func prose(_ text: String, index: Int) -> some View {
+        GramFoldingText(
+            text: linkified(text, tint: mine ? Palette.onAccent : Palette.brand),
+            isExpanded: isExpanded(index),
+            toggleTint: mine ? Palette.onAccent : Palette.brand
+        )
+        .foregroundStyle(mine ? Palette.onAccent : Palette.text)
+    }
+}
+
+/// A message drawn outside the inbox's feed (a Saved copy, a guest's Gram) with the inbox's
+/// parts: the sender's `GramAvatar` beside an agent's message, the text part
+/// (`GramTextPart`) in its side's fill with the tail, and the file as the inbox's file or
+/// expired card. Never grouped: each stands alone, so every agent message carries its avatar
+/// and every part that ends in text its tail. Your messages sit on the right, without an
+/// avatar, as in the inbox. `header` is the page's line above the bubble (who, when, and the
+/// page's own controls); `menu` is the bubble's long-press menu.
+struct GramLoneMessage<Header: View, Card: View>: View {
+    let text: String
+    /// The sender as `GramAvatar` takes it (a federated `<machine>/<name>` shows its name).
+    let sender: String
+    let mine: Bool
+    let hasCard: Bool
+    let menu: () -> [StableMenuItem]
+    @ViewBuilder let header: () -> Header
+    @ViewBuilder let card: (_ embedded: Bool) -> Card
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The text segments the reader opened with Read more. Row state: a row redrawn from
+    /// scratch folds again, which a list of standalone messages can afford.
+    @State private var expanded: Set<Int> = []
+
+    var body: some View {
+        let segments = GramText.segments(text)
+        VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+            header()
+                .padding(mine ? .trailing : .leading, mine ? 2 : GramBubble.groupIndent + 12)
+            HStack(alignment: .bottom, spacing: GramBubble.groupIndent - GramBubble.avatarSize) {
+                if !mine {
+                    GramAvatar(name: sender, size: GramBubble.avatarSize)
+                }
+                if !segments.isEmpty || hasCard {
+                    GramTextPart(segments: segments, mine: mine, hasCard: hasCard,
+                                 isExpanded: isExpanded, card: card)
+                        .gramBubbleTail(mine: mine, shown: !segments.isEmpty && !hasCard)
+                        .stableContextMenu(previewCornerRadius: GramBubble.radius, items: menu)
+                        .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass), alignment: mine ? .trailing : .leading)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+    }
+
+    private func isExpanded(_ index: Int) -> Binding<Bool> {
+        Binding(
+            get: { expanded.contains(index) },
+            set: { open in
+                if open { expanded.insert(index) } else { expanded.remove(index) }
+            }
+        )
+    }
+}
+
 // MARK: - Code
 
 /// A fenced code block: monospaced 13/18 on the machine ground, with Copy. One line shows
@@ -348,13 +494,36 @@ private func sizeLabel(_ byteCount: Int?) -> String? {
     byteCount.map { GramFile.displaySize(of: UInt64(max(0, $0))) }
 }
 
-/// A download the owner asked for (an open or a save), drawn on its card as the composer's
+/// A download the reader asked for (an open or a save), drawn on its card as the composer's
 /// upload ring and spoken as the card's value. `fraction` is nil while the size is unknown,
 /// and the ring spins.
 struct GramCardDownload: Equatable {
     var fraction: Double?
     /// "Downloading, 1.2 MB of 3.4 MB", or "Downloading" while the total is unknown.
     var spoken: String
+
+    /// The owner's download: `gram.get_file`'s ONE base64 reply, so `progress` counts reply
+    /// bytes, about 4/3 of the file (`GramFile.downloadedLabel` scales the spoken figure back).
+    /// No measurement spins the ring rather than drawing a share that nothing drives.
+    static func reply(_ progress: (received: Int, total: Int)?, fileSize: UInt64) -> GramCardDownload {
+        guard let p = progress,
+              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: fileSize)
+        else {
+            return GramCardDownload(fraction: nil, spoken: "Downloading")
+        }
+        return GramCardDownload(fraction: min(1, Double(p.received) / Double(p.total)),
+                                spoken: "Downloading, \(label)")
+    }
+
+    /// The guest's download: `gram.get_file_chunk` pieces, so `progress` is in file bytes.
+    static func chunked(_ progress: (received: Int, total: Int)?) -> GramCardDownload {
+        guard let p = progress, p.total > 0 else {
+            return GramCardDownload(fraction: nil, spoken: "Downloading")
+        }
+        let size = { GramFile.displaySize(of: UInt64(max(0, $0))) }
+        return GramCardDownload(fraction: min(1, Double(p.received) / Double(p.total)),
+                                spoken: "Downloading, \(size(p.received)) of \(size(p.total))")
+    }
 }
 
 /// An attached image: the picture once the feed has fetched it, else a placeholder naming
@@ -518,19 +687,27 @@ enum GramThumbnails {
 
 /// An attached file: a document icon labelled with the extension, the name and
 /// "<kind> · <size>". The whole card is the Open button; Save to Files is in the message's
-/// context menu and the card's accessibility actions. A download the owner started draws
-/// as a ring on the icon. On its own it is an agent card (bubble fill, card radius, card
-/// width); `embedded` draws it inside a card that has text above it, so it has no
-/// background or corners of its own and opens with the hairline that divides the two (the
-/// caller leaves 9 pt between its text and this).
+/// context menu and the card's accessibility actions (none where the page cannot save: the
+/// guest's). A download the reader started draws as a ring on the icon. On its own it is an
+/// agent card (bubble fill, card radius, card width); `embedded` draws it inside a card that
+/// has text above it, so it has no background or corners of its own and opens with the
+/// hairline that divides the two (the caller leaves 9 pt between its text and this).
 struct GramFileCard: View {
     let name: String
     let kind: String
     let byteCount: Int?
     let download: GramCardDownload?
     let onOpen: () -> Void
-    let onSave: () -> Void
+    let onSave: (() -> Void)?
     var embedded = false
+    /// The page's UI-test handle: the inbox and Saved share one, the guest's is per message.
+    var identifier = "gram-attachment-open"
+
+    /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
+    static func kind(name: String, mime: String) -> String {
+        let type = UTType(filenameExtension: (name as NSString).pathExtension) ?? UTType(mimeType: mime)
+        return type?.localizedDescription ?? ""
+    }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -587,8 +764,10 @@ struct GramFileCard: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Open \(name)")
         .accessibilityValue(download?.spoken ?? detail)
-        .accessibilityIdentifier("gram-attachment-open")
-        .accessibilityAction(named: "Save to Files", onSave)
+        .accessibilityIdentifier(identifier)
+        .accessibilityActions {
+            if let onSave { Button("Save to Files", action: onSave) }
+        }
     }
 
     private var rule: some View {
@@ -599,11 +778,12 @@ struct GramFileCard: View {
 /// An attachment the store's size budget expired (herdr#298): the file card's place and
 /// shape, but nothing to open. A muted icon, the file's name and "No longer available ·
 /// <size>"; not a button, no download ring, no Save to Files. Image or file alike: there is
-/// no picture to show. `embedded` as in `GramFileCard`.
+/// no picture to show. `embedded` and `identifier` as in `GramFileCard`.
 struct GramExpiredFileCard: View {
     let name: String
     let byteCount: Int?
     var embedded = false
+    var identifier = "gram-attachment-expired"
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -646,7 +826,7 @@ struct GramExpiredFileCard: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(name), no longer available")
-        .accessibilityIdentifier("gram-attachment-expired")
+        .accessibilityIdentifier(identifier)
     }
 }
 

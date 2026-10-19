@@ -8,16 +8,14 @@ import HerdrKit
 /// re-fetch (only whole-list `gramList` + on-demand `gramGetFile`), so an id-only bookmark
 /// would orphan the moment the original is deleted. The file BYTES are never copied (they can
 /// be up to 100 MiB and are fetched on demand); we only note whether the original had a file.
-/// The metadata of a saved message's attachment — enough to show a chip and re-fetch the bytes
+/// The metadata of a saved message's attachment — enough to draw its card and re-fetch the bytes
 /// on demand via `gramGetFile(id:)`. A local Codable mirror of HerdrKit's `GramFile` (which is
 /// Decodable-only). The bytes are NOT stored (they can be up to 100 MiB); they're fetched when
-/// the chip is tapped, which works while the original message still exists on the server.
+/// the card is tapped, which works while the original message still exists on the server.
 struct SavedGramFile: Codable, Hashable {
     let name: String
     let size: UInt64
     let mime: String
-
-    var displaySize: String { GramFile.displaySize(of: size) }
 }
 
 struct SavedGram: Codable, Identifiable, Hashable {
@@ -146,166 +144,85 @@ final class SavedGramStore: ObservableObject {
     }
 }
 
-/// Renders a locally-saved Gram message (a `SavedGram` copy) in the Saved section, mirroring the
-/// inbox `GramRow` card. Read-only apart from the un-save bookmark; file bytes are not kept, so a
-/// saved attachment shows only a note (its original may already be gone from the server).
+/// Renders a locally-saved Gram message (a `SavedGram` copy) in the Saved section with the
+/// inbox's parts (`GramLoneMessage`): its bubble and tail, the sender's avatar, and the file as
+/// the inbox's file or expired card. Read-only apart from the un-save bookmark. File bytes are
+/// not kept, so opening a saved file fetches it again, which works while the original message
+/// still exists on the server.
 struct SavedGramRow: View {
     let saved: SavedGram
     var isDownloadingFile: Bool
     /// Reply bytes received against bytes expected for THIS row's download. nil means
-    /// the transport reports nothing measurable, and the chip keeps its spinner rather
-    /// than drawing a bar nothing drives. Same contract as `GramRow`.
+    /// the transport reports nothing measurable, and the card's ring spins rather than
+    /// drawing a share nothing drives. Same contract as `GramRow`.
     var downloadProgress: (received: Int, total: Int)?
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
     var onUnsave: () -> Void
 
-    /// #354: drawn in the inbox bubble's style (`GramRow`) but by its own code — its own
-    /// tail, avatar and file chips, no cards — and never joined (Saved is a list of
-    /// separate keepsakes). Your saved posts sit on the right with the sent-arrow avatar:
-    /// a saved copy does not record the recipient.
+    /// #354: never joined (Saved is a list of separate keepsakes). Your saved posts sit on the
+    /// right with no status line: a saved copy does not record the recipient.
     private var mine: Bool { !saved.fromAgent }
 
     var body: some View {
-        VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text(saved.fromAgent ? saved.from : "You")
-                    .font(Typography.app(12, .semibold))
-                    .foregroundStyle(Palette.textDim)
-                Text(GramRow.age(from: saved.createdAt))
-                    .font(Typography.machine(11))
-                    .foregroundStyle(Palette.textFaint)
-                Button(action: onUnsave) {
-                    Image(systemName: "bookmark.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.brand)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(mine ? .trailing : .leading, GramBubble.avatarSlot)
-            HStack(alignment: .bottom, spacing: GramBubble.avatarGap) {
-                if mine { Spacer(minLength: GramBubble.oppositeInset) } else { avatar }
-                bubble
-                if mine { avatar } else { Spacer(minLength: GramBubble.oppositeInset) }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+        GramLoneMessage(
+            text: saved.text, sender: saved.from, mine: mine,
+            hasCard: saved.file != nil || saved.expiredFile != nil,
+            menu: { menu },
+            header: { header },
+            card: card(embedded:)
+        )
     }
 
-    private var bubble: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !saved.text.isEmpty {
-                Text(linkified(saved.text, tint: mine ? .white : Palette.brand))
-                    .font(Typography.app(15))
-                    .foregroundStyle(mine ? Color.white : Palette.text)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let file = saved.file {
-                fileChip(file)
-            } else if let expired = saved.expiredFile {
-                expiredChip(expired)
-            }
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
-            .fill(mine ? GramBubble.outFill : GramBubble.inFill))
-        .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
-            BubbleTail()
-                .fill(mine ? GramBubble.outFill : GramBubble.inFill)
-                .frame(width: 24, height: 22)
-                .scaleEffect(x: mine ? -1 : 1, y: 1)
-                .offset(x: mine ? 6 : -6)
-                .accessibilityHidden(true)
-        }
-    }
-
-    @ViewBuilder
-    private var avatar: some View {
-        if saved.fromAgent {
-            Text(AgentIdentity.glyph(for: saved.from))
-                .font(Typography.app(14, .bold))
-                .foregroundStyle(Palette.text)
-                .frame(width: 30, height: 30)
-                .background(AgentIdentity.gradient(for: saved.from), in: RoundedRectangle(cornerRadius: 8))
-        } else {
-            Image(systemName: "arrow.up.forward")
-                .font(.system(size: 13, weight: .bold))
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text(saved.fromAgent ? saved.from : "You")
+                .font(Typography.app(12, .semibold))
                 .foregroundStyle(Palette.textDim)
-                .frame(width: 30, height: 30)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surfaceRaised))
-        }
-    }
-
-    /// While downloading with a real byte count, the size line becomes progress, in file
-    /// bytes (`GramFile.downloadedLabel` scales the base64 wire bytes back).
-    private func sizeLabel(_ file: SavedGramFile) -> String {
-        guard isDownloadingFile, let p = downloadProgress,
-              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
-        else { return file.displaySize }
-        return label
-    }
-
-    /// A tappable chip that fetches the attachment from the server on demand (`gramGetFile`) and
-    /// previews it — works while the original message still exists (it fails gracefully if the
-    /// owner has since deleted it, since the bytes were never copied locally).
-    private func fileChip(_ file: SavedGramFile) -> some View {
-        Button(action: onOpenFile) {
-            HStack(spacing: 8) {
-                if isDownloadingFile {
-                    ProgressView().controlSize(.mini).tint(Palette.textDim)
-                } else {
-                    Image(systemName: "paperclip").font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Palette.textDim)
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(file.name).font(Typography.app(12, .medium)).foregroundStyle(Palette.text).lineLimit(1)
-                    Text(sizeLabel(file)).font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
-                    if isDownloadingFile, let p = downloadProgress, p.total > 0 {
-                        ProgressView(value: Double(p.received), total: Double(p.total))
-                            .progressViewStyle(.linear)
-                            .tint(Palette.brand)
-                            .frame(height: 2)
-                            .padding(.top, 3)
-                    }
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.down.circle").font(.system(size: 13)).foregroundStyle(Palette.textFaint)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
-        }
-        .buttonStyle(.plain)
-        .disabled(isDownloadingFile)
-        // Never rebuilt by a Gram pass while open (see StableContextMenu.swift); an item runs
-        // this row's current closure.
-        .stableContextMenu {
-            StableMenuItem("Open", systemImage: "eye") { onOpenFile() }
-            StableMenuItem("Save to Files…", systemImage: "square.and.arrow.down") { onSaveFile() }
-        }
-        .padding(.top, 2)
-    }
-
-    /// An attachment the server's store had expired: the chip's shape with nothing to open
-    /// or save, as the inbox's expired card.
-    private func expiredChip(_ file: SavedGramFile) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "clock.badge.xmark").font(.system(size: 13, weight: .semibold))
+            Text(GramRow.age(from: saved.createdAt))
+                .font(Typography.machine(11))
                 .foregroundStyle(Palette.textFaint)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(file.name).font(Typography.app(12, .medium)).foregroundStyle(Palette.textDim).lineLimit(1)
-                Text("No longer available · \(file.displaySize)").font(Typography.machine(10)).foregroundStyle(Palette.textFaint)
+            Button(action: onUnsave) {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.brand)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 13).fill(mine ? Color.black.opacity(0.22) : Palette.surface))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(file.name), no longer available")
-        .accessibilityIdentifier("gram-attachment-expired")
-        .padding(.top, 2)
+    }
+
+    /// The inbox's menu minus what a saved copy cannot do (Delete; Unsave is the bookmark).
+    @StableMenuBuilder
+    private var menu: [StableMenuItem] {
+        if saved.file != nil {
+            StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
+        }
+        if !saved.text.isEmpty {
+            StableMenuItem("Copy", systemImage: "doc.on.doc") {
+                UIPasteboard.general.string = saved.text
+            }
+        }
+    }
+
+    /// The saved file's card: tapping it fetches the file again and opens it. An expired file
+    /// draws the inbox's expired card, with nothing to open or save.
+    @ViewBuilder
+    private func card(embedded: Bool) -> some View {
+        if let file = saved.file {
+            GramFileCard(
+                name: file.name,
+                kind: GramFileCard.kind(name: file.name, mime: file.mime),
+                byteCount: Int(clamping: file.size),
+                download: isDownloadingFile ? GramCardDownload.reply(downloadProgress, fileSize: file.size) : nil,
+                onOpen: onOpenFile,
+                onSave: onSaveFile,
+                embedded: embedded
+            )
+            .disabled(isDownloadingFile)
+        } else if let expired = saved.expiredFile {
+            GramExpiredFileCard(name: expired.name, byteCount: Int(clamping: expired.size), embedded: embedded)
+        }
     }
 }

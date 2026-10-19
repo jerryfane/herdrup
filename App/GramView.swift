@@ -1,7 +1,5 @@
 import HerdrKit
-import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
 import UIKit
 
 /// The unread-gram count, lifted out of `GramView` so the tab bar can badge it
@@ -250,18 +248,11 @@ struct GramView: View {
     /// does not re-run this separate child struct — without this, Gram would show
     /// old-size text after a size change until it re-rendered for another reason.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
-    /// Whether a received html/svg preview may run script (Settings → HTML previews).
-    /// Off unless the reader turned it on; read here so the viewer is built with it.
-    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
     /// Momentary "Copied ✓" on the setup card's copy button.
     @State private var setupCommandCopied = false
-    /// A downloaded file written to a temp URL, presented via QuickLook when set.
-    @State private var previewURL: URL?
-    /// A received web document (HTML/SVG) staged for the in-app viewer. Rendered by
-    /// `HtmlWebView` (no remote loads, navigation frozen, script only if the reader
-    /// turned it on) instead of QuickLook, whose srcdoc-sandbox path showed a blank
-    /// white screen for these files (issue #92).
-    @State private var webDoc: WebDoc?
+    /// The opened file in its viewer (`gramFileViewer`): QuickLook, or the in-app viewer
+    /// for a received web document.
+    @State private var preview: GramPreview?
     /// The in-flight file-open download (see `openFile`), cancelled when the page goes
     /// away so a late completion can't strand a temp file after cleanup already ran.
     @State private var openFileTask: Task<Void, Never>?
@@ -570,7 +561,7 @@ struct GramView: View {
         }
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
-        .quickLookPreview($previewURL)
+        .gramFileViewer($preview)
         // Explicit "Save to Files…" (from a file chip's context menu): export through
         // the system document picker so the file lands where the owner picks — the real
         // Finder ~/Documents / ~/Downloads on Mac, the Files picker on iPhone/iPad.
@@ -584,70 +575,14 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
-        // Received HTML/SVG opens in a dedicated in-app viewer (no remote loads,
-        // navigation frozen, and script off unless the reader turned it on in Settings)
-        // rather than QuickLook, which rendered these blank (#92).
-        // Done dismisses; Share still lets the owner save the raw file.
-        .fullScreenCover(item: $webDoc) { doc in
-            NavigationStack {
-                HtmlWebView(html: doc.html, allowsJavaScript: previewJavaScript)
-                    .ignoresSafeArea(edges: .bottom)
-                    .navigationTitle(doc.title)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { webDoc = nil }
-                        }
-                        ToolbarItem(placement: .primaryAction) {
-                            ShareLink(item: doc.fileURL)
-                        }
-                    }
-            }
-            // Remove the raw temp file when the viewer closes so a viewed document
-            // does not linger in tmp. A cached file is handed to the viewer as the
-            // cache entry itself (`present`'s `cachedAt`): that is not a temp file,
-            // and deleting it would make the next open download it again.
-            .onDisappear {
-                if !Downloads.isCached(doc.fileURL) {
-                    try? FileManager.default.removeItem(at: doc.fileURL)
-                }
-            }
-        }
-        // Delete the previewed temp file when QuickLook dismisses (it nils the
-        // binding) or when it is replaced — so a previewed secret does not linger.
-        .onChange(of: previewURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
-                try? FileManager.default.removeItem(at: oldValue)
-            }
-        }
-        // Same for the web-doc viewer's raw file: remove the previous one whenever
-        // webDoc changes (including → nil on dismiss), so a viewed HTML/SVG never lingers.
-        // Cached downloads are exempt for the same reason as in `onDisappear`.
-        .onChange(of: webDoc?.fileURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
-                try? FileManager.default.removeItem(at: oldValue)
-            }
-        }
-        // Backstop: on the way out, cancel an in-flight file open (so a late completion
-        // can't strand a temp file after cleanup) and remove any lingering TEMP files —
-        // both the QuickLook preview and the web-doc viewer's raw file.
-        //
-        // CACHED FILES ARE NOT TEMP FILES. A downloaded gram file now lives under
-        // `Downloads.root` so reopening it costs nothing; deleting it here would
-        // re-download on the next open and quietly undo the cache. Only paths outside
-        // that root are unlinked.
+        // Backstop: on the way out, cancel an in-flight file open, so a late completion
+        // can't strand a temp file after `gramFileViewer`'s cleanup already ran.
         .onDisappear {
             // Gram went off screen: the next time it shows, the "N unread" rule is captured
             // afresh instead of staying on a message read during this visit.
             unreadRuleCaptured = false
             openFileTask?.cancel()
             saveFileTask?.cancel()
-            if let previewURL, !Downloads.isCached(previewURL) {
-                try? FileManager.default.removeItem(at: previewURL)
-            }
-            if let url = webDoc?.fileURL, !Downloads.isCached(url) {
-                try? FileManager.default.removeItem(at: url)
-            }
             // Staged attachment bytes are deliberately NOT removed here. Gram is a
             // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
             // plain tab switch while this view's `@State` — including the chips in
@@ -2538,9 +2473,7 @@ struct GramView: View {
         // fast. Markdown and web documents do need the bytes, and the routing decision
         // needs only the name and the stored mime.
         if let hit = Downloads.cached(id: id) {
-            if Self.isMarkdown(name: hit.name, mime: hit.mime)
-                || Self.isWebDocument(name: hit.name, mime: hit.mime)
-            {
+            if GramPreviewRouter.needsBytes(name: hit.name, mime: hit.mime) {
                 guard let data = try? Data(contentsOf: hit.url, options: .mappedIfSafe) else {
                     sendError = "Couldn't open the file."
                     return
@@ -2573,71 +2506,16 @@ struct GramView: View {
         }
     }
 
-    /// Route already-held bytes to the right viewer. Shared by the cache-hit and
-    /// post-download paths so both render a markdown or web document identically —
-    /// when this logic lived only inside the download closure, a cached open could not
-    /// reach it at all.
-    ///
-    /// `cachedAt` is the cache entry for the ORIGINAL bytes when one exists. QuickLook
-    /// and the web viewer are handed that file directly, so nothing is re-written per
-    /// open; derived artifacts (markdown rendered to HTML) still go to a temp file,
-    /// because what the cache holds is the source, not the rendering.
+    /// Show already-held bytes in the right viewer (`GramPreviewRouter`). Shared by the
+    /// cache-hit and post-download paths so both render a markdown or web document
+    /// identically. `cachedAt` is the cache entry for the ORIGINAL bytes when one exists.
     @MainActor
     private func present(data: Data?, name: String, mime: String = "", cachedAt: URL? = nil) {
         #if DEBUG
         openedFileProbe = "opened:\(name)"
         #endif
-        // Remove any previously-previewed TEMP file so a viewed secret does not
-        // accumulate; cache entries are left alone.
-        if let previous = previewURL, !Downloads.isCached(previous) {
-            try? FileManager.default.removeItem(at: previous)
-        }
-        let tmp = FileManager.default.temporaryDirectory
         do {
-            if Self.isMarkdown(name: name, mime: mime),
-                let data, let text = String(data: data, encoding: .utf8)
-            {
-                // Render markdown to styled HTML so it previews FORMATTED —
-                // QuickLook shows a raw .md file as plain source otherwise. This is a
-                // DERIVED artifact, so it goes to tmp even on a cache hit; the cache
-                // holds the markdown source.
-                let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
-                let url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
-                try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-                previewURL = url
-            } else if Self.isWebDocument(name: name, mime: mime), let data {
-                // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
-                // (no remote loads, script off by default), NOT QuickLook — the old
-                // srcdoc-sandbox path painted a blank white screen (#92). Decode
-                // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
-                // as text rather than being treated as a plain download. Keep the raw
-                // bytes on disk so the viewer's Share button can save the original.
-                let raw: URL
-                if let cachedAt {
-                    raw = cachedAt   // already on disk; do not rewrite it per open
-                } else {
-                    raw = tmp.appendingPathComponent(GramStaging.safeFileName(name))
-                    try data.write(to: raw, options: [.atomic, .completeFileProtection])
-                }
-                // We present webDoc, not a QuickLook preview — clear any stale
-                // previewURL (its file was removed above) so nothing tries to present
-                // a now-deleted path, and the previewURL onChange doesn't fire on it.
-                previewURL = nil
-                webDoc = WebDoc(
-                    title: Self.webBaseName(name),
-                    html: String(decoding: data, as: UTF8.self),
-                    fileURL: raw)
-            } else if let cachedAt {
-                // The cache entry IS the file, under its real name: hand it straight to
-                // QuickLook rather than copying it into tmp on every open.
-                previewURL = cachedAt
-            } else {
-                // Never trust the server name to be a safe path component; reduce
-                // it to a bare basename. Write encrypted-at-rest.
-                let url = tmp.appendingPathComponent(GramStaging.safeFileName(name))
-                try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
-                previewURL = url
-            }
+            preview = try GramPreviewRouter.preview(data: data, name: name, mime: mime, cachedAt: cachedAt)
         } catch {
             sendError = "Couldn't open the file."
         }
@@ -2993,52 +2871,6 @@ struct GramView: View {
             guard urlParts.count > rootParts.count else { return false }
             return Array(urlParts.prefix(rootParts.count)) == rootParts
         }
-    }
-
-    /// A file we should render as formatted HTML (a markdown source), by extension
-    /// or advisory mime.
-    static func isMarkdown(name: String, mime: String) -> Bool {
-        let lower = name.lowercased()
-        return lower.hasSuffix(".md") || lower.hasSuffix(".markdown")
-            || mime.lowercased() == "text/markdown"
-    }
-
-    /// The markdown file's name without its `.md`/`.markdown` extension, for the
-    /// preview title.
-    static func displayTitle(_ name: String) -> String {
-        let base = GramStaging.safeFileName(name)
-        for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
-        return base
-    }
-
-    /// The temp file name for a rendered markdown preview — a `.html` extension so
-    /// QuickLook renders it as a web page, not source.
-    static func previewHTMLName(for name: String) -> String {
-        displayTitle(name) + ".html"
-    }
-
-    /// A received web document that QuickLook would otherwise render as live,
-    /// scriptable content — routed to the in-app `HtmlWebView` viewer instead.
-    static func isWebDocument(name: String, mime: String) -> Bool {
-        let lower = name.lowercased()
-        if lower.hasSuffix(".html") || lower.hasSuffix(".htm") || lower.hasSuffix(".xhtml")
-            || lower.hasSuffix(".svg")
-        {
-            return true
-        }
-        let m = mime.lowercased()
-        return m == "text/html" || m == "application/xhtml+xml" || m == "image/svg+xml"
-    }
-
-    /// The web file's name without its extension, for the preview title.
-    static func webBaseName(_ name: String) -> String {
-        let base = GramStaging.safeFileName(name)
-        for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
-        return base
     }
 
     /// Delete a message (and its file bytes) after the server confirms — so a
@@ -3597,11 +3429,6 @@ struct GramRow: View, Equatable {
     }
 
     private var mine: Bool { !message.isFromAgent }
-    private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
-    private var ink: Color { mine ? Palette.onAccent : Palette.text }
-    private var bubbleShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous)
-    }
     private var maxWidth: CGFloat { GramCardMetrics.cardWidth(sizeClass) }
     private var imageFile: GramFile? {
         guard let file = message.file, file.isImage else { return nil }
@@ -3687,16 +3514,7 @@ struct GramRow: View, Equatable {
     /// shows on the group's last message only, in the bubble's own fill.
     private func chrome<Content: View>(_ content: Content, first: Bool, tail: Bool) -> some View {
         content
-            .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
-                if tail && endsGroup {
-                    BubbleTail()
-                        .fill(fill)
-                        .frame(width: 24, height: 22)
-                        .scaleEffect(x: mine ? -1 : 1, y: 1)
-                        .offset(x: mine ? 6 : -6)
-                        .accessibilityHidden(true)
-                }
-            }
+            .gramBubbleTail(mine: mine, shown: tail && endsGroup)
             .overlay(alignment: .topTrailing) {
                 if first && isSaved {
                     GramSavedBadge().offset(x: 15, y: -17)
@@ -3725,50 +3543,19 @@ struct GramRow: View, Equatable {
         StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
     }
 
-    /// The text and any card file (a document, or a file the store expired): a plain bubble
-    /// for prose alone, a card (the card width, or less in a narrower column) once there is
-    /// code or a file, and the bare file card for a file with no text.
-    @ViewBuilder
+    /// The text and any card file (a document, or a file the store expired), drawn by the
+    /// shared `GramTextPart`; the fold state is the page's.
     private func textPart(_ segments: [GramTextSegment]) -> some View {
-        let hasCode = segments.contains { if case .code = $0 { return true } else { return false } }
-        if segments.isEmpty, hasCard {
-            card(embedded: false)
-        } else if hasCode || hasCard {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                    switch segment {
-                    case .text(let text):
-                        foldingText(text, index: index)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 7)
-                    case .code(let code, let language):
-                        GramCodeBlock(code: code, language: language)
-                            .padding(.horizontal, 8)
-                            .padding(.top, 7)
-                    }
-                }
-                if hasCard {
-                    card(embedded: true)
-                        .padding(.top, 9)
-                } else {
-                    Color.clear.frame(height: 8)
-                }
-            }
-            .frame(maxWidth: maxWidth, alignment: .leading)
-            .background(fill)
-            .clipShape(bubbleShape)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                    if case .text(let text) = segment {
-                        foldingText(text, index: index)
-                    }
-                }
-            }
-            .padding(.vertical, 7)
-            .padding(.horizontal, 12)
-            .background(fill, in: bubbleShape)
-        }
+        GramTextPart(
+            segments: segments, mine: mine, hasCard: hasCard,
+            isExpanded: { index in
+                Binding(
+                    get: { expandedSegments.contains(index) },
+                    set: { open in onSetExpanded(index, open) }
+                )
+            },
+            card: card(embedded:)
+        )
     }
 
     /// The text part's file card: the document's, or the expired file's, which has nothing
@@ -3782,22 +3569,10 @@ struct GramRow: View, Equatable {
         }
     }
 
-    private func foldingText(_ text: String, index: Int) -> some View {
-        GramFoldingText(
-            text: linkified(text, tint: mine ? Palette.onAccent : Palette.brand),
-            isExpanded: Binding(
-                get: { expandedSegments.contains(index) },
-                set: { open in onSetExpanded(index, open) }
-            ),
-            toggleTint: mine ? Palette.onAccent : Palette.brand
-        )
-        .foregroundStyle(ink)
-    }
-
     private func fileCard(_ file: GramFile, embedded: Bool) -> some View {
         GramFileCard(
             name: file.name,
-            kind: Self.kindLabel(for: file),
+            kind: GramFileCard.kind(name: file.name, mime: file.mime),
             byteCount: Int(clamping: file.size),
             download: download,
             onOpen: onOpenFile,
@@ -3842,13 +3617,6 @@ struct GramRow: View, Equatable {
         .onDisappear { if onScreen { onScreen = false } }
     }
 
-    /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
-    private static func kindLabel(for file: GramFile) -> String {
-        let type = UTType(filenameExtension: (file.name as NSString).pathExtension)
-            ?? UTType(mimeType: file.mime)
-        return type?.localizedDescription ?? ""
-    }
-
     /// The image attachment's picture: from memory when the feed drew it before, else decoded
     /// from the download cache, which `onPrefetchImage` fills for an image under the prefetch
     /// cap and an open fills for the rest. Runs only while the card is on screen (the task
@@ -3878,19 +3646,10 @@ struct GramRow: View, Equatable {
                                               spec: GramCardMetrics.imageSize(sizeClass), scale: displayScale)
     }
 
-    /// This row's open or save as its card draws and speaks it: the share of the reply
-    /// received, or a spinning ring while there is no measurement. The spoken figure is in
-    /// file bytes (`GramFile.downloadedLabel` scales the base64 reply back).
+    /// This row's open or save as its card draws and speaks it (`GramCardDownload.reply`).
     private var download: GramCardDownload? {
         guard isDownloadingFile, let file = message.file else { return nil }
-        guard let p = downloadProgress,
-              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
-        else {
-            return GramCardDownload(fraction: nil, spoken: "Downloading")
-        }
-        return GramCardDownload(
-            fraction: min(1, Double(p.received) / Double(p.total)),
-            spoken: "Downloading, \(label)")
+        return .reply(downloadProgress, fileSize: file.size)
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same
@@ -3939,11 +3698,6 @@ enum GramBubble {
     static let avatarSize: CGFloat = 28
     /// How far an agent group sits in from the feed's edge: the avatar plus an 8 pt gap.
     static let groupIndent: CGFloat = 36
-    /// The saved-message list's avatar gap and slot (avatar 30 + gap).
-    static let avatarGap: CGFloat = 12
-    static let avatarSlot: CGFloat = 42
-    /// The minimum empty space on the side opposite the sender.
-    static let oppositeInset: CGFloat = 48
     /// iPad / Mac: the feed's width cap (#354 follow-up). About the width of a Messages
     /// conversation on iPad, so a long message wraps at a readable measure and your bubbles
     /// on the right stay near the agents' on the left.
@@ -3965,21 +3719,6 @@ struct BubbleTail: Shape {
         path.addLine(to: p(24, 0))
         path.closeSubpath()
         return path
-    }
-}
-
-/// Picks an SF Symbol for a file from its MIME type, for the guest Gram page's file chip.
-enum FileGlyph {
-    static func name(for mime: String, fileName: String) -> String {
-        let mime = mime.lowercased()
-        if mime.hasPrefix("image/") { return "photo" }
-        if mime.hasPrefix("video/") { return "film" }
-        if mime.hasPrefix("audio/") { return "waveform" }
-        if mime == "application/pdf" { return "doc.richtext" }
-        if mime == "application/zip" || mime.contains("compressed") { return "doc.zipper" }
-        if mime == "application/json" { return "curlybraces" }
-        if mime.hasPrefix("text/") { return "doc.text" }
-        return "doc"
     }
 }
 
