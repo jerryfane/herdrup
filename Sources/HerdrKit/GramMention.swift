@@ -75,6 +75,61 @@ public enum GramMention {
         return (first.name, String(text[bodyStart...]))
     }
 
+    /// The draft re-addressed to `name` (the pill sheet's "Write to"): `@name ` at the start,
+    /// in place of a leading addressing mention and what separated it from the message, or
+    /// of a leading `@token` naming no one. A mention later in the text is the message's and
+    /// stays.
+    public static func addressing(_ text: String, to name: String, knownNames: [String]) -> String {
+        let resolved = resolve(text, knownNames: knownNames)
+        var rest = text
+        if resolved.recipient != nil, resolved.body != text {
+            rest = resolved.body
+        } else if let token = leadingToken(in: text) {
+            rest = dropping(leadingToken: token, from: text)
+        }
+        return "@" + name + " " + rest
+    }
+
+    /// The draft sent to the shared queue instead (the pill sheet's "Shared queue"): every
+    /// mention that would address it is taken off, wherever it is, with one space next to
+    /// it, and so is a leading `@token` naming no one.
+    public static func unaddressed(_ text: String, knownNames: [String]) -> String {
+        var text = text
+        for _ in 0...ranges(in: text, knownNames: knownNames).count {
+            let resolved = resolve(text, knownNames: knownNames)
+            guard resolved.recipient != nil else { break }
+            if resolved.body != text {
+                text = resolved.body
+            } else if let range = ranges(in: text, knownNames: knownNames).first {
+                text = removing(range, from: text)
+            }
+        }
+        if let token = leadingToken(in: text) {
+            text = dropping(leadingToken: token, from: text)
+        }
+        return text
+    }
+
+    /// `text` without its leading `@token` and the whitespace around it.
+    private static func dropping(leadingToken token: String, from text: String) -> String {
+        String(text.drop(while: \.isWhitespace).dropFirst(1 + token.count).drop(while: \.isWhitespace))
+    }
+
+    /// `text` without the mention at `range` and one space next to it ("ship it @vetrina" ->
+    /// "ship it", "ask @vetrina to ship" -> "ask to ship").
+    private static func removing(_ range: Range<String.Index>, from text: String) -> String {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+        if lower > text.startIndex, text[text.index(before: lower)] == " " {
+            lower = text.index(before: lower)
+        } else if upper < text.endIndex, text[upper] == " " {
+            upper = text.index(after: upper)
+        }
+        var result = text
+        result.removeSubrange(lower..<upper)
+        return result
+    }
+
     /// What may sit between a leading mention and the message: "@vetrina, ship it",
     /// "@vetrina: go", "@vetrina;go", "@vetrina - go". A dash counts only when a space (or
     /// nothing) follows it, so the message's own "-v", "--dry-run" or "-5%" stays; a comma,

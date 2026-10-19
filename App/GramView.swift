@@ -1981,53 +1981,15 @@ struct GramView: View {
     /// The pill sheet's "Write to" an agent: that exact agent addresses the draft, as "@name "
     /// at the start in place of a leading mention (or a leading "@token" naming no one).
     private func address(_ agent: GramAgent) {
-        let current = draftAddress
-        var rest = draft
-        if current.leading {
-            rest = current.body
-        } else if let token = GramMention.leadingToken(in: draft) {
-            rest = String(draft.drop(while: \.isWhitespace).dropFirst(1 + token.count)
-                .drop(while: \.isWhitespace))
-        }
-        draft = "@\(agent.name) " + rest
+        draft = GramMention.addressing(draft, to: agent.name, knownNames: mentionNames)
         pickedAgent = agent
     }
 
     /// The pill sheet's "Shared queue": takes off every mention that would address the
     /// draft, wherever it is, and a leading "@token" naming no one.
     private func addressQueue() {
-        let names = mentionNames
-        var text = draft
-        for _ in 0...GramMention.ranges(in: draft, knownNames: names).count {
-            let resolved = GramMention.resolve(text, knownNames: names)
-            guard resolved.recipient != nil else { break }
-            if resolved.body != text {
-                text = resolved.body
-            } else if let range = GramMention.ranges(in: text, knownNames: names).first {
-                text = Self.removingMention(range, from: text)
-            }
-        }
-        if let token = GramMention.leadingToken(in: text) {
-            text = String(text.drop(while: \.isWhitespace).dropFirst(1 + token.count)
-                .drop(while: \.isWhitespace))
-        }
-        draft = text
+        draft = GramMention.unaddressed(draft, knownNames: mentionNames)
         pickedAgent = nil
-    }
-
-    /// `text` without the mention at `range` and one space next to it ("ship it @vetrina" ->
-    /// "ship it", "ask @vetrina to ship" -> "ask to ship").
-    private static func removingMention(_ range: Range<String.Index>, from text: String) -> String {
-        var lower = range.lowerBound
-        var upper = range.upperBound
-        if lower > text.startIndex, text[text.index(before: lower)] == " " {
-            lower = text.index(before: lower)
-        } else if upper < text.endIndex, text[upper] == " " {
-            upper = text.index(after: upper)
-        }
-        var result = text
-        result.removeSubrange(lower..<upper)
-        return result
     }
 
     /// Something typed or attached: send takes the saved-prompts place.

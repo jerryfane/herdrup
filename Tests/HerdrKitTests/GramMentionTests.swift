@@ -236,4 +236,64 @@ final class GramMentionTests: XCTestCase {
         XCTAssertEqual(GramMention.ranges(in: "plain text", knownNames: agents), [])
         XCTAssertEqual(GramMention.ranges(in: "@vetrina", knownNames: []), [])
     }
+
+    // MARK: addressing / unaddressed (the pill sheet's "Write to" and "Shared queue")
+
+    private func address(_ text: String, to name: String = "clientloop") -> String {
+        GramMention.addressing(text, to: name, knownNames: agents)
+    }
+
+    private func unaddress(_ text: String) -> String {
+        GramMention.unaddressed(text, knownNames: agents)
+    }
+
+    func testAddressingReplacesALeadingMentionAndItsSeparator() {
+        XCTAssertEqual(address("@vetrina ship it"), "@clientloop ship it")
+        XCTAssertEqual(address("@vetrina, ship it"), "@clientloop ship it")
+        XCTAssertEqual(address("  @VETRINA: go"), "@clientloop go")
+        XCTAssertEqual(address("@vetrina\n- item one"), "@clientloop - item one")
+    }
+
+    func testAddressingKeepsALaterMentionAsPartOfTheMessage() {
+        XCTAssertEqual(address("ship it @vetrina"), "@clientloop ship it @vetrina")
+    }
+
+    func testAddressingReplacesALeadingTokenThatNamesNoOne() {
+        XCTAssertEqual(address("@vetrna hi"), "@clientloop hi")
+        XCTAssertEqual(address("@ hi"), "@clientloop hi")
+        XCTAssertEqual(address("@"), "@clientloop ")
+    }
+
+    func testAddressingPrefixesUnaddressedText() {
+        XCTAssertEqual(address("plain text"), "@clientloop plain text")
+        XCTAssertEqual(address(""), "@clientloop ")
+        XCTAssertEqual(address("me@vetrina.dev ok", to: "vetrina"), "@vetrina me@vetrina.dev ok")
+    }
+
+    func testUnaddressedDropsALeadingMention() {
+        XCTAssertEqual(unaddress("@vetrina ship it"), "ship it")
+        XCTAssertEqual(unaddress("@vetrina, ship it"), "ship it")
+        XCTAssertEqual(unaddress("@vetrina"), "")
+    }
+
+    func testUnaddressedDropsALaterMentionWithOneSpace() {
+        XCTAssertEqual(unaddress("ship it @vetrina"), "ship it")
+        XCTAssertEqual(unaddress("ask @vetrina to ship"), "ask to ship")
+    }
+
+    /// Every mention that would address the draft goes, not just the first: after the
+    /// leading one leaves, the next becomes the address.
+    func testUnaddressedDropsEveryAddressingMention() {
+        XCTAssertEqual(unaddress("@vetrina tell @clientloop hi"), "tell hi")
+    }
+
+    func testUnaddressedDropsALeadingTokenThatNamesNoOne() {
+        XCTAssertEqual(unaddress("@vetrna hi"), "hi")
+        XCTAssertEqual(unaddress("@ hi"), "hi")
+    }
+
+    func testUnaddressedLeavesTextWithoutMentions() {
+        XCTAssertEqual(unaddress("plain text"), "plain text")
+        XCTAssertEqual(unaddress("me@vetrina.dev ok"), "me@vetrina.dev ok")
+    }
 }
