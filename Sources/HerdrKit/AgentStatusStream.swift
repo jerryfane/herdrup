@@ -346,24 +346,36 @@ public struct AgentLiveUpdateLedger: Sendable {
 
 // MARK: - Reconnect backoff
 
-/// Exponential reconnect delay for the status stream: `initial`, doubling, capped at
-/// `maximum`. `reset()` after a stream is acknowledged.
+/// Exponential reconnect delay: `initial`, doubling, capped at `maximum`. With `jitter`,
+/// each delay is that step scaled by a random factor drawn from the range (the live
+/// terminal uses 0.6...1.0). `reset()` once the stream has genuinely re-established; each
+/// caller decides what counts as that (the status stream: its ack; the terminal: a keyframe).
 public struct ReconnectBackoff: Sendable, Equatable {
     public let initial: Duration
     public let maximum: Duration
+    public let jitter: ClosedRange<Double>?
     private var current: Duration
 
-    public init(initial: Duration = .seconds(1), maximum: Duration = .seconds(30)) {
+    public init(initial: Duration = .seconds(1), maximum: Duration = .seconds(30),
+                jitter: ClosedRange<Double>? = nil) {
         self.initial = initial
         self.maximum = maximum
+        self.jitter = jitter
         self.current = initial
     }
 
     /// The delay before the next attempt; each call doubles the following one.
     public mutating func next() -> Duration {
-        let delay = min(current, maximum)
+        var generator = SystemRandomNumberGenerator()
+        return next(using: &generator)
+    }
+
+    /// `next()` drawing its jitter from `generator`, so a test can make it repeatable.
+    public mutating func next<G: RandomNumberGenerator>(using generator: inout G) -> Duration {
+        let step = min(current, maximum)
         current = min(current * 2, maximum)
-        return delay
+        guard let jitter else { return step }
+        return step * Double.random(in: jitter, using: &generator)
     }
 
     public mutating func reset() { current = initial }
