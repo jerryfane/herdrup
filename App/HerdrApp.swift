@@ -456,11 +456,11 @@ struct RootView: View {
                 ConnectView { _ in mockDisconnected = false }
             } else {
                 TerminalHomeView(client: mockClient, onDisconnect: { mockDisconnected = true },
-                                 onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
+                                 onTrustHostKey: { _ in false }, livePaneIDs: MockWireFixtures.demoLivePaneIDs)
             }
         case .archivedClose:
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
-                             onTrustHostKey: { _ in false }, livePaneIDs: MockTransport.demoLivePaneIDs)
+                             onTrustHostKey: { _ in false }, livePaneIDs: MockWireFixtures.demoLivePaneIDs)
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -9608,7 +9608,7 @@ struct SessionsMockHome: View {
             },
             sessionCache: cache,
             onTrustHostKey: { _ in false },
-            livePaneIDs: MockTransport.demoLivePaneIDs)
+            livePaneIDs: MockWireFixtures.demoLivePaneIDs)
         .id(generation)
     }
 }
@@ -9647,9 +9647,10 @@ struct SessionsMockTransport: SessionListingTransport {
     }
 }
 
-/// Canned-response transport for the screenshot mock. The JSON is machine-checked
-/// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
-/// compiled on Linux) — keep the two fixtures in sync.
+/// Canned-response transport for the screenshot mock. Its wire answers are
+/// `MockWireFixtures` (Tests/HerdrKitTests/MockWireFixtures.swift, compiled into this
+/// target too), which MockWireFixtureTests decodes through the real HerdrClient path
+/// (the app target can't be compiled on Linux).
 struct MockTransport: HerdrTransport {
     /// When true, `pane.stream` seeds MANY lines of scrollback (for the omp UI scroll
     /// receipt) instead of the short screenshot seed. Default false keeps the
@@ -9688,12 +9689,12 @@ struct MockTransport: HerdrTransport {
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
         if requestLine.contains("notifications.status") { return Self.notificationsStatus }
-        if requestLine.contains("accounts.list") { return Self.accountsList }
+        if requestLine.contains("accounts.list") { return MockWireFixtures.accountsList }
         if requestLine.contains("agent.list") {
             if let rosterDriver {
                 return try await rosterDriver.nextAgentList()
             }
-            return Self.agentList
+            return MockWireFixtures.agentList
         }
         if requestLine.contains("agent.read") { return backfill ? Self.backfillRead() : Self.agentRead }
         if requestLine.contains("gram.mark_read") {
@@ -9708,7 +9709,7 @@ struct MockTransport: HerdrTransport {
             else if Self.gramImageCount > 0 { list = Self.gramListWithImages }
             else if Self.gramExpiresSaved { list = await Self.gramListExpiringSaved() }
             else if Self.gramHtml { list = Self.gramListWithHtml }
-            else { list = Self.gramNewer ? Self.gramListWithNewer : Self.gramList }
+            else { list = Self.gramNewer ? Self.gramListWithNewer : MockWireFixtures.gramList }
             let answer = Self.applyingOwnerReads(reads, to: list)
             if Self.gramHoldsPollAcrossRead, Self.isGramHeadPoll(requestLine) {
                 await Self.gramOwnerReads.holdPastNextRead()
@@ -9726,13 +9727,13 @@ struct MockTransport: HerdrTransport {
             }
             // g3 is the list fixture's image, and `gi<n>` the image mock's: a real PNG, so
             // the card decodes a preview. gh1 is the HTML mock's report.
-            if id == "gh1" { return Self.gramHtmlContent }
-            return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : Self.gramFileContent
+            if id == "gh1" { return MockWireFixtures.gramHtmlContent }
+            return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : MockWireFixtures.gramFileContent
         }
-        if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
-        if requestLine.contains("gram.delete") { return Self.gramOk }
+        if requestLine.contains("gram.upload_chunk") { return MockWireFixtures.gramOk }
+        if requestLine.contains("gram.delete") { return MockWireFixtures.gramOk }
         if requestLine.contains("agent.prompt") { return Self.agentPrompted }
-        if requestLine.contains("pane.set_pty_size") { return Self.panePtySize }
+        if requestLine.contains("pane.set_pty_size") { return MockWireFixtures.panePtySize }
         return #"{"id":"mock","result":{}}"#
     }
 
@@ -9781,7 +9782,7 @@ struct MockTransport: HerdrTransport {
                 // and leaving one branch of a two-branch function wrong is how the plain branch's
                 // bug survived as long as it did.
                 return AsyncThrowingStream { continuation in
-                    continuation.yield(Self.paneStreamAck)
+                    continuation.yield(MockWireFixtures.paneStreamAck)
                     driver.attach(continuation)
                     let pings = Task {
                         var seq: UInt64 = 1
@@ -9795,9 +9796,9 @@ struct MockTransport: HerdrTransport {
                     continuation.onTermination = { _ in pings.cancel() }
                 }
             }
-            let reset = scrollback ? Self.scrollbackResetFrame() : Self.paneStreamReset
+            let reset = scrollback ? Self.scrollbackResetFrame() : MockWireFixtures.paneStreamReset
             return AsyncThrowingStream { continuation in
-                continuation.yield(Self.paneStreamAck)
+                continuation.yield(MockWireFixtures.paneStreamAck)
                 continuation.yield(reset)
                 // AND THEN KEEP PINGING, because silence is not the same as being alive.
                 //
@@ -9920,40 +9921,8 @@ struct MockTransport: HerdrTransport {
             "pane_id": "w1:p1", "text": body, "truncated": false,
             "source": "recent", "format": "ansi"]]]
         let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? Self.agentRead
+        return String(data: data, encoding: .utf8) ?? MockWireFixtures.agentRead
     }
-
-    // Realistic herdr statuses only (idle|working|blocked|done|unknown). "needs
-    // you" is `blocked`; the STOPPED row is NOT a status string — it comes from
-    // liveness (w2:p1 is absent from demoLivePaneIDs below), exactly as the real
-    // model derives it. done folds into idle.
-    // The mcb-air row is a DEGRADED FEDERATED agent, the shape this fixture lacked: the
-    // daemon blanked `agent_status` to "unknown" after a missed poll and moved the real
-    // state into `last_known_status`, so it escalates into NEEDS YOU on a last-known
-    // value and must render the "stale" marker. It is what the UI receipt asserts.
-    static let agentList = #"""
-    {"id":"mock","result":{"type":"agent_list","agents":[
-      {"pane_id":"w1:p1","name":"jarvis","agent":"claude","agent_status":"blocked","cwd":"/root/herdr-ios","terminal_title_stripped":"asking to run tests"},
-      {"pane_id":"w1:p2","name":"vetrina","agent":"codex","agent_status":"blocked","cwd":"/root/vetrina","terminal_title_stripped":"overwrite config.ts?"},
-      {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","cwd":"/root/trend-scout","terminal_title_stripped":"exited, code 1"},
-      {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs","account":"claudecrazy","account_config_dir":"/root/.claude-9"},
-      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold","account":"retired-account","account_unresolved":true},
-      {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
-      {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
-      {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
-      {"pane_id":"mcb-air/w1:p9","name":"mcb-air/mcb-air","agent":"omp","agent_status":"unknown","last_known_status":"blocked","machine_id":"mcb-air","reachability":"degraded","cwd":"/Users/jerry/omp-workspace","terminal_title_stripped":"clone repo and help deimos"},
-      {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
-    ]}}
-    """#
-
-    /// The panes herdr still lists, for the mock render. Excludes w2:p1 so that
-    /// row lands in STOPPED via liveness (not a status string). Includes the federated
-    /// `mcb-air/w1:p9`, because a pane absent from the census is `.stopped` and a stopped
-    /// row is never escalated, which would silently defeat the degraded-peer receipt.
-    /// MUST stay in sync with the census the fixture test uses.
-    static let demoLivePaneIDs: Set<String> = [
-        "w1:p1", "w1:p2", "w2:p2", "w3:p1", "w3:p2", "w4:p1", "w4:p2", "mcb-air/w1:p9",
-    ]
 
     /// `notifications.status` for the Settings mock. `HERDR_MOCK_PUSH_STATE` picks the daemon's
     /// answer: a status `state` (default `relay_ready`), or `legacy` for a daemon that predates
@@ -9966,48 +9935,9 @@ struct MockTransport: HerdrTransport {
         return #"{"id":"mock","result":{"type":"notifications_status","state":"\#(state)","mode":"auto","relay_url":"https://push.herdrup.themartian.app","devices":1,"relay_devices":1}}"#
     }
 
-    /// `accounts.list` for the Settings mock render: two claude accounts (one active
-    /// with usage, one exhausted), a codex account with tier-only usage, and a kimi
-    /// account with none. Byte-identical to MockWireFixtures.accountsList in the
-    /// tests, where it is machine-checked to decode. If you change one, change both.
-    static let accountsList = #"""
-    {"id":"mock","result":{"type":"accounts_list","accounts":[
-      {"id":"acc-claude-1","kind":"claude","label":"Claude Max (work)","active":true,"email":"work@example.com","usage":{"source":"live","windows":[{"label":"5h","used_percent":42,"resets_at":"2000000000","status":"ok"},{"label":"weekly","used_percent":68,"resets_at":"2030-01-15T18:00:00Z","status":"ok"}],"primary_used_percent":42,"secondary_used_percent":68,"resets_at":"2026-08-20T18:00:00Z","plan":"Max"}},
-      {"id":"acc-claude-2","kind":"claude","label":"Claude Pro (personal)","active":false,"email":"personal@example.com","usage":{"primary_used_percent":100,"secondary_used_percent":100,"plan":"Pro"}},
-      {"id":"acc-codex-1","kind":"codex","label":"Codex (team)","active":true,"email":"team@example.com","usage":{"tier":"Plus"}},
-      {"id":"acc-kimi-1","kind":"kimi","label":"Kimi","active":true}
-    ]}}
-    """#
-
-    static let agentRead = #"""
-    {"id":"mock","result":{"read":{"pane_id":"w1:p1","text":"$ herdr agent attach jarvis\n\n> Ran 146 tests, 0 failures\n> Edited SessionRecoveryTests.swift  +18 -4\n\nRun `swift test` with -Xswiftc -warnings-as-errors?\n  1. yes\n  2. no, skip it\n>\n\n[demo data - mock render mode, no live connection]","truncated":false,"source":"recent_unwrapped","format":"text"}}}
-    """#
-
-    /// `gram.list` owner view for the Gram-page mock render: the sample conversation of the
-    /// approved design (you, vetrina and ci-watch on this machine, clientloop and trend-scout
-    /// relayed from hetzner-1), newest first, plus a second, local clientloop so the composer's
-    /// @ list has two agents with one name. Yesterday's thread is read; today's three agent
-    /// messages are unread: a long report that folds, an image, and a code fence with a zip.
-    /// Yesterday trend-scout also sent two files the store has since expired (herdr#298):
-    /// a chart with no caption (g12) and an export under a line of text (g11).
-    /// Byte-identical to MockWireFixtures.gramList in the tests, where it is machine-checked
-    /// to decode.
-    static let gramList = #"""
-    {"id":"mock","result":{"type":"gram_list","messages":[
-      {"id":"g1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great, ship it.","created_unix_ms":1723041360000,"read_by_owner":true},
-      {"id":"g2","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/clientloop","machine_label":"hetzner-1","text":"Scaffold is up. Run it with:\n```\ncd ~/src/amigo-poc && pnpm dev\n```","created_unix_ms":1723041240000,"read_by_owner":false,"file":{"name":"amigo-poc-scaffold.zip","size":1363149,"mime":"application/zip","sha256":"3d5e7f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"}},
-      {"id":"g3","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":1723041160000,"read_by_owner":false,"file":{"name":"vetrina-live.png","size":421888,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}},
-      {"id":"g4","direction":"agent_to_owner","from":"vetrina","text":"Deployed. vetrina.dev is live.\n• Build 412 passed in 3m 08s\n• 2 migrations ran clean\n• Lighthouse 98 on mobile\n• CDN cache purged, EU and US\n• Sitemap resubmitted\n• Stripe webhooks verified\n• Sentry: no new issues\n• Uptime check green for 10 min\nRollback is one command away:\nherdr rollback vetrina 411","created_unix_ms":1723041130000,"read_by_owner":false},
-      {"id":"g5","direction":"owner_to_agent","from":"owner","text":"Who can triage the failing CI?","grabbed_by":"ci-watch","grabbed_unix_ms":1722970020000,"created_unix_ms":1722969900000,"read_by_owner":true},
-      {"id":"g6","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Digest ready: 7 trends, 2 need your call.","created_unix_ms":1722969600000,"read_by_owner":true},
-      {"id":"g12","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"","created_unix_ms":1722969540000,"read_by_owner":true,"expired_file":{"name":"trend-chart.png","size":873472,"mime":"image/png","sha256":"18ce5c6f97913baa79fe27d910e2f8be0f57ca89104e1ebda73840653e30be7b"}},
-      {"id":"g11","direction":"agent_to_owner","from":"4b1e9c0d7a2f48e6b3c5d8f01a6e2b97/trend-scout","machine_label":"hetzner-1","text":"Raw export of the run, for the record.","created_unix_ms":1722969480000,"read_by_owner":true,"expired_file":{"name":"trend-export.csv","size":2516582,"mime":"text/csv","sha256":"65b440e08c55e62678952c82b42e9e7898f0665f43fb9fe2733f74b7d580d6a9"}},
-      {"id":"g10","direction":"agent_to_owner","from":"clientloop","text":"Lint is clean on my branch.","created_unix_ms":1722969000000,"read_by_owner":true},
-      {"id":"g7","direction":"agent_to_owner","from":"vetrina","text":"On it. Waiting on CI.","created_unix_ms":1722968460000,"read_by_owner":true},
-      {"id":"g8","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Deploy when CI is green.","created_unix_ms":1722968400000,"read_by_owner":true},
-      {"id":"g9","direction":"agent_to_owner","from":"vetrina","text":"Picked up the deploy ticket.\nRebasing onto main first.","created_unix_ms":1722967500000,"read_by_owner":true}
-    ]}}
-    """#
+    /// `MockWireFixtures.agentRead` under its old name, for the agent.read callers not yet
+    /// moved (their lines are being edited on another branch).
+    static let agentRead = MockWireFixtures.agentRead
 
     /// `HERDR_MOCK_GRAM_PAGED=1`: `gram.list` answers as a store two pages deeper than
     /// `gramList`, so the Gram paging UI test can scroll to the top. The first page is
@@ -10022,68 +9952,22 @@ struct MockTransport: HerdrTransport {
     static func gramPagedList(_ requestLine: String) -> String {
         if requestLine.contains(#""before_id":"g9""#) {
             GramPagingMock.shared.served(1)
-            return gramListAnswer(rows: [gramOlderRows], hasMore: true)
+            return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOlderRows], hasMore: true)
         }
         if requestLine.contains(#""before_id":"go24""#) {
             GramPagingMock.shared.served(2)
-            return gramListAnswer(rows: [gramOldestRows], hasMore: false)
+            return MockWireFixtures.gramListAnswer(rows: [MockWireFixtures.gramOldestRows], hasMore: false)
         }
         // A head poll asks for max(page, loaded) rows, so a daemon's answer covers every page
         // the client already holds. Answering with the first page alone would cut the older
         // rows off the list on the next poll.
-        let pages = [gramListRows, gramOlderRows, gramOldestRows].prefix(GramPagingMock.shared.depth + 1)
-        return gramListAnswer(rows: Array(pages), hasMore: pages.count < 3)
+        let pages = [MockWireFixtures.gramListRows, MockWireFixtures.gramOlderRows, MockWireFixtures.gramOldestRows].prefix(GramPagingMock.shared.depth + 1)
+        return MockWireFixtures.gramListAnswer(rows: Array(pages), hasMore: pages.count < 3)
     }
 
-    /// A `gram.list` answer from comma-joined row blocks.
-    static func gramListAnswer(rows: [String], hasMore: Bool) -> String {
-        #"{"id":"mock","result":{"type":"gram_list","messages":["#
-            + rows.joined(separator: ",") + #"],"has_more":"# + (hasMore ? "true" : "false") + "}}"
-    }
-
-    /// `gramList`'s message rows, without the envelope.
-    static var gramListRows: String {
-        let open = gramList.range(of: #""messages":["#)!.upperBound
-        let close = gramList.range(of: "]}}", options: .backwards)!.lowerBound
-        return String(gramList[open..<close])
-    }
-
-    /// The paged mock's second page, newest first, all older than g9.
-    static let gramOlderRows = #"""
-      {"id":"go1","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Thanks. Take the deploy ticket next.","created_unix_ms":1722884400000,"read_by_owner":true},
-      {"id":"go2","direction":"agent_to_owner","from":"vetrina","text":"Smoke tests pass on staging.\nAll 38 checks green.","created_unix_ms":1722884100000,"read_by_owner":true},
-      {"id":"go3","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Run the smoke tests too.","created_unix_ms":1722883800000,"read_by_owner":true},
-      {"id":"go4","direction":"agent_to_owner","from":"vetrina","text":"Added the rollback step.\nStaging is green.","created_unix_ms":1722883500000,"read_by_owner":true},
-      {"id":"go5","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Add a rollback step before the migration.","created_unix_ms":1722883200000,"read_by_owner":true},
-      {"id":"go6","direction":"agent_to_owner","from":"vetrina","text":"Checklist is in docs/release.md.\nEight steps, two need a sign-off.","created_unix_ms":1722882900000,"read_by_owner":true},
-      {"id":"go7","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Draft the release checklist first.","created_unix_ms":1722882600000,"read_by_owner":true},
-      {"id":"go8","direction":"agent_to_owner","from":"vetrina","text":"Bundle size is down 14 percent.\nThe image pipeline was the culprit.","created_unix_ms":1722882300000,"read_by_owner":true},
-      {"id":"go9","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Nice. Keep an eye on the cold start.","created_unix_ms":1722882000000,"read_by_owner":true},
-      {"id":"go10","direction":"agent_to_owner","from":"vetrina","text":"Cold start is 1.2 s on a mid-range phone.\nWithin budget.","created_unix_ms":1722881700000,"read_by_owner":true},
-      {"id":"go11","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"What changed in the cache layer?","created_unix_ms":1722881400000,"read_by_owner":true},
-      {"id":"go12","direction":"agent_to_owner","from":"vetrina","text":"Swapped the LRU for a size-bounded one.\nEvictions dropped by half.","created_unix_ms":1722881100000,"read_by_owner":true},
-      {"id":"go13","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Good. Write that up for the changelog.","created_unix_ms":1722880800000,"read_by_owner":true},
-      {"id":"go14","direction":"agent_to_owner","from":"vetrina","text":"Changelog entry drafted.\nIt is in the release branch.","created_unix_ms":1722880500000,"read_by_owner":true},
-      {"id":"go15","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Did the flaky login test settle?","created_unix_ms":1722880200000,"read_by_owner":true},
-      {"id":"go16","direction":"agent_to_owner","from":"vetrina","text":"It was a timezone bug in the fixture.\nFixed and green 20 runs in a row.","created_unix_ms":1722879900000,"read_by_owner":true},
-      {"id":"go17","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Great catch. Merge it.","created_unix_ms":1722879600000,"read_by_owner":true},
-      {"id":"go18","direction":"agent_to_owner","from":"vetrina","text":"Merged. CI is rebuilding main.","created_unix_ms":1722879300000,"read_by_owner":true},
-      {"id":"go19","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Ping me when main is green.","created_unix_ms":1722879000000,"read_by_owner":true},
-      {"id":"go20","direction":"agent_to_owner","from":"vetrina","text":"Main is green.\nTagging a release candidate.","created_unix_ms":1722878700000,"read_by_owner":true},
-      {"id":"go21","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Hold the tag until the docs land.","created_unix_ms":1722878400000,"read_by_owner":true},
-      {"id":"go22","direction":"agent_to_owner","from":"vetrina","text":"Docs PR is open.\nTwo screenshots still to refresh.","created_unix_ms":1722878100000,"read_by_owner":true},
-      {"id":"go23","direction":"owner_to_agent","from":"owner","to":"vetrina","text":"Start with the release planning.","created_unix_ms":1722877800000,"read_by_owner":true},
-      {"id":"go24","direction":"agent_to_owner","from":"vetrina","text":"Older page: release planning starts here.","created_unix_ms":1722877500000,"read_by_owner":true}
-    """#
-
-    /// The paged mock's last page: one row, older than go24.
-    static let gramOldestRows = #"""
-      {"id":"gx1","direction":"agent_to_owner","from":"vetrina","text":"Oldest page: kickoff notes are in the repo.","created_unix_ms":1722796200000,"read_by_owner":true}
-    """#
-
-    /// A canned `gram.post` echo, so the mock composer's send path resolves.
-    static let gramPosted =
-        #"{"id":"mock","result":{"type":"gram_sent","message":{"id":"gp1","direction":"owner_to_agent","from":"owner","text":"(sent)","created_unix_ms":1723041420000,"read_by_owner":true}}}"#
+    /// `MockWireFixtures.gramPosted` under its old name, for the gram.post caller not yet
+    /// moved (its line is being edited on another branch).
+    static let gramPosted = MockWireFixtures.gramPosted
 
     /// Every `gram.post` the app sent, in order: its `to` (nil for the shared queue) and
     /// its `text`. Read by the Gram UI tests via GramView's DEBUG `gram-post-calls` probe.
@@ -10117,7 +10001,7 @@ struct MockTransport: HerdrTransport {
 
     @MainActor
     static func gramListExpiringSaved() -> String {
-        var list = gramList
+        var list = MockWireFixtures.gramList
         for (id, name) in [("g2", "amigo-poc-scaffold.zip"), ("g3", "vetrina-live.png")]
         where SavedGramStore.shared.isSaved(id) {
             list = list.replacingOccurrences(of: #""file":{"name":"\#(name)""#,
@@ -10200,7 +10084,7 @@ struct MockTransport: HerdrTransport {
     }
 
     static var gramListWithNewer: String {
-        gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
+        MockWireFixtures.gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
     }
 
     /// `HERDR_MOCK_GRAM_HTML=1`: `gram.list` answers `gramList` with `gramHtmlRow` above its
@@ -10210,12 +10094,8 @@ struct MockTransport: HerdrTransport {
     }
 
     static var gramListWithHtml: String {
-        gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramHtmlRow + ",")
+        MockWireFixtures.gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + MockWireFixtures.gramHtmlRow + ",")
     }
-
-    /// vetrina's HTML run report (gh1), read. Byte-identical to MockWireFixtures.gramHtmlRow.
-    static let gramHtmlRow =
-        #"{"id":"gh1","direction":"agent_to_owner","from":"vetrina","text":"Run report attached.","created_unix_ms":1723041420000,"read_by_owner":true,"file":{"name":"run-report.html","size":90,"mime":"text/html","sha256":"d78f7bf51215300da41164a777bd546b14995a93350f629717cfe83458e3f8b3"}}"#
 
     /// `HERDR_MOCK_GRAM_IMAGES=N`: `gram.list` answers `gramList` with N image messages (each
     /// `gram.get_file` answers the g3 PNG) above its newest message, each followed by a
@@ -10231,7 +10111,7 @@ struct MockTransport: HerdrTransport {
             let image = #"{"id":"gi\#(n)","direction":"agent_to_owner","from":"vetrina","text":"","created_unix_ms":\#(at),"read_by_owner":true,"file":{"name":"frame-\#(n).png","size":413,"mime":"image/png","sha256":"9f2c0a1b7d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e"}}"#
             return text + "," + image
         }.joined(separator: ",")
-        return gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + rows + ",")
+        return MockWireFixtures.gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + rows + ",")
     }
 
     /// Fourteen read five-line messages, newer than g1 and newest first: taller together
@@ -10249,37 +10129,18 @@ struct MockTransport: HerdrTransport {
         gramPostRecorder.append(to: params["to"] as? String, text: params["text"] as? String ?? "")
     }
 
-    /// A canned `gram.get_file` reply; the bytes decode to "hello world".
-    /// Byte-identical to MockWireFixtures.gramFileContent.
-    static let gramFileContent =
-        #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":11,"data_base64":"aGVsbG8gd29ybGQ="}}"#
-
     /// The `gram.get_file` reply for the list fixture's image (g3): a 32 x 18 gradient PNG,
     /// small enough to inline, real enough for the card's ImageIO decode.
     static let gramImageContent =
         #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":413,"data_base64":"iVBORw0KGgoAAAANSUhEUgAAACAAAAASCAIAAAC1qksFAAABZElEQVR42o2SPUsDQRCGZ+b+lkUKkQgKKQIKYhpLO4lIAgqmsrK0UBC0sLVXRMTCwsLCwsb/st5tbvfma3NCCHOz7zvPzOzixtovYaiaH1RkAgxEbVDlgAmIKSurJMDNwU+ytU7Kn8TyyeZ0I5UkWgm4vf5N6BQSBlWuhBTsBBgNv7QNA2m1h0QP2axUZHC89akrGltPRc/SAXZGH05FsIZegUFCBOyN38UEYGxghgCNjDxJShmc7L7abOwR3HyM2cWKIzZBBhzsP7dZtyLwHjuADUgtIE2J08On9kOe6YoKCektmbxoFwLeXLwlABttBVIIugx5lgZwd/li1U0G4sXqIzZBgdS1u3xF57PHfExKLQNibDFlCbkETI8e/IqQ3pKty5GOl01Qr+jk+J6LiPMNkjhAKXM30oLz2a1sTU1Qrgh5LUwgATUSz06vxcWqir1IGaSVsgkWiysqqP+DXO2t//8AaXuKJu4OmmAAAAAASUVORK5CYII="}}"#
 
-    /// The `gram.get_file` reply for the HTML mock's report (gh1): a 90-byte HTML page.
-    /// Byte-identical to MockWireFixtures.gramHtmlContent.
-    static let gramHtmlContent =
-        #"{"id":"mock","result":{"type":"gram_file_content","name":"run-report.html","mime":"text/html","size":90,"data_base64":"PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT5SdW4gcmVwb3J0PC90aXRsZT48cD5BbGwgMTQ2IHRlc3RzIHBhc3NlZC48L3A+"}}"#
-
-    /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
-    static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
     static let agentPrompted =
         #"{"id":"mock","result":{"type":"agent_prompted","delivery":"submitted"}}"#
 
 
-    // pane.stream / pane.set_pty_size fixtures for the live terminal. Byte-identical
-    // to MockWireFixtures in Tests/HerdrKitTests/MockWireFixtureTests.swift, which is
-    // where they are machine-checked to decode through the real HerdrClient path.
-    static let paneStreamAck =
-        #"{"id":"mock","result":{"type":"stream_started","pane_id":"w1:p1","epoch":7,"cols":80,"rows":24,"base_seq":0,"resync":true}}"#
-    static let paneStreamReset =
-        #"{"stream":"pane.bytes","frame":"reset","seq":0,"epoch":7,"cols":80,"rows":24,"data_b64":"G1syShtbSBtbMTszODs1OzM5bWhlcmRyG1swbSBsaXZlIHRlcm1pbmFsIOKAlCBtb2NrIHJlbmRlcg0KDQokIGhlcmRyIGFnZW50IGF0dGFjaCBqYXJ2aXMNCj4gUmFuIDE0NiB0ZXN0cywgMCBmYWlsdXJlcw0KDQpbZGVtbyBkYXRhIOKAlCBubyBsaXZlIGNvbm5lY3Rpb25dDQo="}"#
-    static let panePtySize =
-        #"{"id":"mock","result":{"type":"pane_pty_size","pane_id":"w1:p1","cols":80,"rows":24,"locked":false}}"#
-
+    /// `MockWireFixtures.paneStreamAck` under its old name, for the stream caller not yet
+    /// moved (its neighbours are being edited on another branch).
+    static let paneStreamAck = MockWireFixtures.paneStreamAck
     /// A keepalive `pane.stream` ping, the frame a real daemon sends about every 20s and the one
     /// the 50s stall watchdog is sized against. Carries only `seq` and `epoch`
     /// (HerdrKit/Wire.swift:705 decodes exactly those), so it proves the stream is alive without
@@ -10477,7 +10338,7 @@ final class RosterStressDriver: @unchecked Sendable {
         }
         guard let responseState else {
             try await Task.sleep(nanoseconds: 300_000_000_000)
-            return MockTransport.agentList
+            return MockWireFixtures.agentList
         }
 
         let phase = responseState.phase
@@ -10571,7 +10432,7 @@ final class RosterStressDriver: @unchecked Sendable {
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let text = String(data: data, encoding: .utf8) else {
-            return MockTransport.agentList
+            return MockWireFixtures.agentList
         }
         return text
     }

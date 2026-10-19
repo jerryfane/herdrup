@@ -80,6 +80,11 @@ targets:
       # XCUITest cannot see a real Live Activity, so every round so far was judged by
       # arithmetic over a model of the material rather than by looking at pixels.
       - path: HerdrWidgets/AgentLiveActivity.swift
+      # The canned wire answers the DEBUG MockTransport serves, compiled into the app as
+      # well as HerdrKitTests, where MockWireFixtureTests decodes them through the real
+      # HerdrClient path. One copy, so the mock and the tests cannot drift. The file is
+      # wrapped in `#if DEBUG`, so Release builds compile it to nothing.
+      - path: Tests/HerdrKitTests/MockWireFixtures.swift
     dependencies:
       # Declared in step ONE rather than when a screen first needs it. Linking
       # HerdrKit into an iOS app exercises the libssh2 system library, the module

@@ -238,7 +238,7 @@ struct GuestShareMockTransport: HerdrTransport {
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
         guard requestLine.contains("pane.stream") else { return base.stream(requestLine) }
         return AsyncThrowingStream { continuation in
-            continuation.yield(MockTransport.paneStreamAck)
+            continuation.yield(MockWireFixtures.paneStreamAck)
             continuation.yield(Self.resetFrame)
             // Stay open like a live stream; an ended one reads as a drop and reconnects.
             let pings = Task {
