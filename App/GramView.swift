@@ -16,18 +16,17 @@ final class GramUnreadTracker: ObservableObject {
 ///
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
 /// sent, plus the owner's own posts and their claim state) newest-first, and a
-/// composer to post to the shared grab-queue or, with an "@name", one agent directly, with an
-/// optional file attachment. A received file shows a chip that downloads and
-/// previews it (QuickLook); long-pressing a message deletes it — and its file
-/// bytes — for good, which is what makes gram safe for a short-lived secret like
-/// a temporary API key.
+/// composer to post to the shared grab-queue or, with an "@name", one agent directly.
+/// Up to `Staging.maxAttachments` files can be staged, and each sends as its own
+/// message. A received file draws as a card (`GramFileCard`, `GramImageCard`) that
+/// downloads and previews it; long-pressing a message opens its menu, whose Delete
+/// removes it — and its file bytes — for good, which is what makes gram safe for a
+/// short-lived secret like a temporary API key.
 ///
-/// Nav-agnostic: it renders its own content and takes an optional `onClose` — a
-/// modal cover passes one (a close button appears); a persistent tab passes nil.
-/// It owns its polling and never blocks the caller.
+/// Nav-agnostic: it renders its own content, has no close control of its own (it is a
+/// persistent tab), owns its polling and never blocks the caller.
 struct GramView: View {
     let client: HerdrClient
-    var onClose: (() -> Void)?
     /// Shared unread count for the tab-bar badge. Optional (defaulted) so existing
     /// call sites (and the DEBUG harness) compile unchanged; written on load and
     /// mark-read so reading a message clears the badge without leaving the tab.
@@ -858,27 +857,10 @@ struct GramView: View {
         .padding(.bottom, 8)
     }
 
-    /// Back (with the unread count) when the page is a cover, else just the count.
+    /// The unread count, when there is one.
     @ViewBuilder
     private var headerLeading: some View {
-        if let onClose {
-            Button(action: onClose) {
-                HStack(spacing: 3) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Palette.text)
-                    if unreadCount > 0 { unreadCountText }
-                }
-                .padding(.leading, 11)
-                .padding(.trailing, unreadCount > 0 ? 13 : 11)
-                .frame(minWidth: 44, minHeight: 44)
-                .gramGlass(Capsule())
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-            .accessibilityValue(unreadCount > 0 ? "\(unreadCount) unread" : "")
-        } else if unreadCount > 0 {
+        if unreadCount > 0 {
             unreadCountText
                 .padding(.horizontal, 13)
                 .frame(minWidth: 44, minHeight: 44)
