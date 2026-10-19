@@ -12,9 +12,7 @@ final class SettingsTests: XCTestCase {
             throw XCTSkip("Exercises the iPad split-to-compact transition")
         }
         continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         XCTAssertTrue(app.buttons["Settings"].firstMatch.waitForExistence(timeout: 15))
         let window = app.windows.firstMatch
         let initialSize = window.frame.size
@@ -66,9 +64,7 @@ final class SettingsTests: XCTestCase {
     /// Drives both directions from whatever state the simulator was left in, and leaves
     /// it OFF, so neither the assertion nor a later test depends on run order.
     func testJavaScriptPreviewSwitchFlipsAndExplainsItself() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "settings")
 
         let heading = app.staticTexts["HTML PREVIEWS"]
         var scrolls = 0
@@ -159,9 +155,7 @@ final class SettingsTests: XCTestCase {
     /// cannot read a rendered outline, so the mark and a missing-glyph box are the same
     /// element tree. The screenshot is attached for a human to judge.
     func testTheDiscordRowIsPresentAndOnScreen() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "settings")
 
         let row = app.buttons["settings-discord"]
         guard row.waitForExistence(timeout: 15) else {
@@ -174,10 +168,7 @@ final class SettingsTests: XCTestCase {
             scrolls += 1
         }
 
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = "settings-about-discord"
-        shot.lifetime = .keepAlways
-        add(shot)
+        attach(app, "settings-about-discord")
 
         XCTAssertTrue(
             app.frame.contains(row.frame),
@@ -320,10 +311,7 @@ final class SettingsTests: XCTestCase {
             ("legacy", "Update Herdr on this machine to get notifications"),
         ]
         for (state, title) in cases {
-            let app = XCUIApplication()
-            app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "settings"
-            app.launchEnvironment["HERDR_MOCK_PUSH_STATE"] = state
-            app.launch()
+            let app = XCUIApplication.launched(mock: "settings", environment: ["HERDR_MOCK_PUSH_STATE": state])
 
             let manage = app.staticTexts["Notifications"].firstMatch
             XCTAssertTrue(manage.waitForExistence(timeout: 15), "Settings should list Notifications")
@@ -338,10 +326,7 @@ final class SettingsTests: XCTestCase {
                 scrolls += 1
             }
 
-            let shot = XCTAttachment(screenshot: app.screenshot())
-            shot.name = "settings-push-\(state)"
-            shot.lifetime = .keepAlways
-            add(shot)
+            attach(app, "settings-push-\(state)")
 
             XCTAssertTrue(row.exists, "\(state): expected \"\(title)\"")
             XCTAssertFalse(app.staticTexts["Push needs the herdr fork"].exists,

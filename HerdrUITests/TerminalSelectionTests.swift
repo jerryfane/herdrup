@@ -88,8 +88,6 @@ final class TerminalSelectionTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testDoubleTapSelectsAWordAndASingleTapDeselectsIt() {
-        let app = XCUIApplication()
-
         // If ANY system dialog appears, dismiss it rather than letting the run hang to the job
         // timeout with no results — the shape of lesson 2 above, guarded generally.
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
@@ -98,15 +96,14 @@ final class TerminalSelectionTests: XCTestCase {
             return false
         }
 
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "scroll")
 
         // The mock feeds 200 numbered lines into a real SwiftTerm view asynchronously.
         Thread.sleep(forTimeInterval: 3.0)
 
         // (1) PREMISES, both asserted before anything is concluded from them.
         let baseline = app.screenshot()
-        attach(baseline, name: "01-baseline")
+        attach(baseline, "01-baseline")
 
         // 1a. The terminal is static when untouched, so a later change means the gesture did
         // something rather than the stream repainting under us.
@@ -136,7 +133,7 @@ final class TerminalSelectionTests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.30)).tap()
         Thread.sleep(forTimeInterval: 2.5)
         let focused = app.screenshot()
-        attach(focused, name: "02-keyboard-up")
+        attach(focused, "02-keyboard-up")
         let focusDiff = pixelDiffFraction(baseline, focused)
         XCTAssertGreaterThan(focusDiff, 0.10,
                              "the focus tap changed almost nothing (diff=\(focusDiff)); the keyboard did not come up, so the double tap below would run against a layout that is still about to move")
@@ -172,7 +169,7 @@ final class TerminalSelectionTests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.150, dy: 0.30)).doubleTap()
         Thread.sleep(forTimeInterval: 1.5)
         let selected = app.screenshot()
-        attach(selected, name: "03-selection-held")
+        attach(selected, "03-selection-held")
 
         // (4) READ THE STATE, THEN THE PIXELS — in that order, because for four consecutive CI
         // runs "no teal" was all this test could say, and it cannot distinguish: no selection
@@ -314,17 +311,15 @@ final class TerminalSelectionTests: XCTestCase {
         // event under test having happened. `pub=<handler>#<count>` is monotonic, so a changed
         // label is proof of a fresh publish.
         let beforeReading = probe.exists ? probe.label : ""
-        let deselectDeadline = Date().addingTimeInterval(10)
-        while Date() < deselectDeadline {
-            if probe.exists, probe.label.contains("sel=0"), probe.label != beforeReading { break }
-            Thread.sleep(forTimeInterval: 0.25)
+        _ = poll(10, every: 0.25) {
+            probe.exists && probe.label.contains("sel=0") && probe.label != beforeReading
         }
         // One extra settle past the state change, so the screenshot cannot catch a half-drawn
         // repaint: the clear reaches the model synchronously but selectionChanged repaints on the
         // next main-queue hop.
         Thread.sleep(forTimeInterval: 0.75)
         let cleared = app.screenshot()
-        attach(cleared, name: "04-after-single-tap")
+        attach(cleared, "04-after-single-tap")
 
         // STATE BEFORE PIXELS HERE TOO, which this step lacked while step 4 had it — so the one
         // step that failed was the one that could not name its layer.
@@ -394,14 +389,12 @@ final class TerminalSelectionTests: XCTestCase {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
                           "this regression exercises the iPhone terminal keyboard")
 
-        let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
             let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
             if allow.exists { allow.tap(); return true }
             return false
         }
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "scroll")
 
         let probe = app.descendants(matching: .any)["terminal-selection-probe"]
         XCTAssertTrue(probe.waitForExistence(timeout: 20),
@@ -447,10 +440,8 @@ final class TerminalSelectionTests: XCTestCase {
         // the label from before the keyboard ever came up; `pub=<handler>#<count>` is monotonic, so
         // a changed label is proof of a new publish. The resign publishes `pub=collapseResign`,
         // which is the one path no gesture handler covers.
-        let deadline = Date().addingTimeInterval(10)
-        while Date() < deadline {
-            if probe.exists, probe.label.contains("fr=0"), probe.label != beforeReading { break }
-            Thread.sleep(forTimeInterval: 0.25)
+        _ = poll(10, every: 0.25) {
+            probe.exists && probe.label.contains("fr=0") && probe.label != beforeReading
         }
         let afterReading = probe.exists ? probe.label : "PROBE ABSENT"
 
@@ -485,14 +476,12 @@ final class TerminalSelectionTests: XCTestCase {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
                           "the raised software keyboard this protects only exists on iPhone; iPad's terminal inputView is zero-frame")
 
-        let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
             let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
             if allow.exists { allow.tap(); return true }
             return false
         }
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "scroll")
 
         let probe = app.descendants(matching: .any)["terminal-selection-probe"]
         XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
@@ -604,14 +593,12 @@ final class TerminalSelectionTests: XCTestCase {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone,
                           "the raised keyboard this concerns is iPhone-only; iPad's terminal inputView is zero-frame")
 
-        let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "system dialog") { alert in
             let allow = alert.buttons.element(boundBy: alert.buttons.count - 1)
             if allow.exists { allow.tap(); return true }
             return false
         }
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "busyscroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "busyscroll")
 
         let probe = app.descendants(matching: .any)["terminal-selection-probe"]
         XCTAssertTrue(probe.waitForExistence(timeout: 20), "the terminal never came up")
@@ -636,18 +623,14 @@ final class TerminalSelectionTests: XCTestCase {
         Thread.sleep(forTimeInterval: 2.0)
         let busyAfter = app.screenshot()
         let flowing = pixelDiffFraction(busyBefore, busyAfter)
-        attach(busyBefore, name: "01-busy-before")
-        attach(busyAfter, name: "02-busy-after")
+        attach(busyBefore, "01-busy-before")
+        attach(busyAfter, "02-busy-after")
         XCTAssertGreaterThan(flowing, 0.005,
                              "premise: the terminal did not redraw in 2s (diff=\(flowing)), so output is NOT streaming and this is not a busy pane. A pass here would certify the busy-pane guard against a pane with nothing arriving — vacuous. Check the busyscroll mock's frame type: StreamFrame accepts only reset/data/resize/ping/exited and decoding is strict.")
 
         // THE ASSERTION. A single tap on a pane that is following output must take the responder.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)).tap()
-        let deadline = Date().addingTimeInterval(6)
-        while Date() < deadline {
-            if probe.exists, probe.label.contains("fr=1") { break }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
+        _ = poll(6, every: 0.25) { probe.exists && probe.label.contains("fr=1") }
         let after = probe.exists ? probe.label : "PROBE ABSENT"
         XCTAssertTrue(after.contains("fr=1"),
                       "a tap on a pane that is merely FOLLOWING OUTPUT did not take the responder, so the terminal is unfocusable while an agent works — the regression the scroll-tap guard introduced. If pub=scrollTapIgnored the guard is treating auto-follow as user scrolling. probe[\(after)]")
@@ -668,13 +651,6 @@ final class TerminalSelectionTests: XCTestCase {
         return Int(digits)
     }
     // MARK: - helpers (duplicated from ScrollTests, which keeps them private)
-
-    private func attach(_ shot: XCUIScreenshot, name: String) {
-        let a = XCTAttachment(screenshot: shot)
-        a.name = name
-        a.lifetime = .keepAlways
-        add(a)
-    }
 
     /// Fraction of pixels differing beyond a small per-pixel threshold, compared at a fixed
     /// small resolution so PNG jitter and antialiasing do not register as change.

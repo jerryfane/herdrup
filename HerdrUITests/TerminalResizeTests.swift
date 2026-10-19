@@ -70,18 +70,20 @@ class TerminalInteractionTestCase: XCTestCase {
         // Identifier OR label: production keycaps carry only an accessibility label.
         let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
                                                        identifier, identifier))
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
+        var found: XCUIElement?
+        _ = poll(timeout, every: 0) {
             let visible = app.frame.insetBy(dx: -1, dy: -1)
             for index in 0..<matches.count {
                 let candidate = matches.element(boundBy: index)
                 let frame = candidate.frame
                 guard frame.width > 0, frame.height > 0, visible.contains(frame) else { continue }
                 if requiringHittable && (!candidate.isEnabled || !candidate.isHittable) { continue }
-                return candidate
+                found = candidate
+                return true
             }
-        } while Date() < deadline
-        return nil
+            return false
+        }
+        return found
     }
 
     /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
@@ -244,10 +246,7 @@ class TerminalInteractionTestCase: XCTestCase {
     }
 
     func attach(_ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(app, name)
     }
 
     func anchor(file: StaticString = #filePath, line: UInt = #line) {
@@ -497,11 +496,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         // TIGHT POLLING, NOT A PREDICATE EXPECTATION. XCTNSPredicateExpectation
         // re-evaluates about once a second, and this cover is deliberately short-lived,
         // so the wait could miss it entirely and report a cover that never appeared.
-        var sawCover = false
-        let coverDeadline = Date().addingTimeInterval(4)
-        while Date() < coverDeadline {
-            if (probe()["covered"] as? Bool) == true { sawCover = true; break }
-        }
+        let sawCover = poll(4, every: 0) { (probe()["covered"] as? Bool) == true }
         XCTAssertTrue(sawCover, "no retained frame appeared for this resize: \(probe())")
         keycap.tap()
         // And it must go NOW, not by the deadline. The deadline is 140 ms of settle

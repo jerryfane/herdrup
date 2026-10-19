@@ -15,11 +15,10 @@ final class StatusMotionTests: XCTestCase {
     }
 
     private func launchList() -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
-        app.launchEnvironment["HERDR_STEADY_CARET"] = "1"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list", environment: [
+            // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
+            "HERDR_STEADY_CARET": "1",
+        ])
         XCTAssertTrue(app.staticTexts["herdr-app"].firstMatch.waitForExistence(timeout: 15),
                       "the roster should list the working agent")
         return app
@@ -42,10 +41,7 @@ final class StatusMotionTests: XCTestCase {
         }
         if changed >= 2 { return true }
         // Keep the photo of the stuck shape in the result bundle.
-        let photo = XCTAttachment(screenshot: first)
-        photo.name = "\(shape.identifier) held still (\(changed)/4 photos changed)"
-        photo.lifetime = .keepAlways
-        add(photo)
+        attach(first, "\(shape.identifier) held still (\(changed)/4 photos changed)")
         return false
     }
 
@@ -104,12 +100,11 @@ final class StatusMotionTests: XCTestCase {
     /// same shapes move again.
     func testHiddenStatusShapesHoldStill() {
         let pad = UIDevice.current.userInterfaceIdiom == .pad
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
-        // The status shapes' SwiftUI animations do not hold it up.
-        app.launchEnvironment["HERDR_STEADY_CARET"] = "1"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list", environment: [
+            // The open pane's blinking caret never lets XCUITest's idle wait finish (60 s a tap).
+            // The status shapes' SwiftUI animations do not hold it up.
+            "HERDR_STEADY_CARET": "1",
+        ])
         let row = app.staticTexts["herdr-app"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15), "the roster should list the working agent")
         sleep(1)

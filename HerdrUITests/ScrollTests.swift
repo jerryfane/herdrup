@@ -15,9 +15,7 @@ final class ScrollTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testTerminalScrollsWhenSwiped() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "scroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "scroll")
         let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
 
@@ -32,7 +30,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
-        attach(before, name: "01-before")
+        attach(before, "01-before")
         XCTAssertLessThan(idleDiff, 0.02,
             "Terminal is not static when untouched (diff=\(idleDiff)); a moving element would invalidate the scroll check.")
 
@@ -47,7 +45,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)   // let scroll settle + repaint
 
         let after = viewport.screenshot()
-        attach(after, name: "02-after-swipe")
+        attach(after, "02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
 
         // A real scroll shifts ~a screen of distinct numbered lines → a large fraction
@@ -63,9 +61,7 @@ final class ScrollTests: XCTestCase {
     /// event for the mouse-mode agent (the fix). Dead path (the bug: SwiftTerm's mouse-pan
     /// eats the drag, no wheel emitted) = unchanged pixels = this fails.
     func testClaudeCodeScrollsViaWheel() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "ccscroll"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "ccscroll")
         let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + enter alt-screen/mouse + render
@@ -75,7 +71,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
-        attach(before, name: "cc-01-before")
+        attach(before, "cc-01-before")
         XCTAssertLessThan(idleDiff, 0.02,
             "Claude-Code mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
 
@@ -90,7 +86,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
 
         let after = viewport.screenshot()
-        attach(after, name: "cc-02-after-swipe")
+        attach(after, "cc-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
         XCTAssertGreaterThan(movedDiff, 0.10,
             "Claude Code pane did NOT scroll: content unchanged after swipe (diff=\(movedDiff)). The drag was not translated into an SGR wheel event for the mouse-mode agent.")
@@ -104,9 +100,7 @@ final class ScrollTests: XCTestCase {
     /// the feature (nothing above the seed to scroll into); GREEN once the backfill fills
     /// SwiftTerm's scrollback.
     func testBackfillMakesHistoryScrollable() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "backfill"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "backfill")
         let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 3.0)   // launch + backfill read + reset seed feed
@@ -116,7 +110,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
-        attach(before, name: "bf-01-before")
+        attach(before, "bf-01-before")
         XCTAssertLessThan(idleDiff, 0.02,
             "Backfill mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
 
@@ -133,7 +127,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
 
         let after = viewport.screenshot()
-        attach(after, name: "bf-02-after-swipe")
+        attach(after, "bf-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
         XCTAssertGreaterThan(movedDiff, 0.10,
             "No backfilled history to scroll into: content unchanged after swiping (diff=\(movedDiff)). The connect-time scrollback backfill did not populate SwiftTerm's scrollback.")
@@ -145,9 +139,7 @@ final class ScrollTests: XCTestCase {
     /// output only if the app seeds scrollback from a reconnect's keyframe. RED before that
     /// (the history prepend ran on the first keyframe only, from the backfill); GREEN after.
     func testReconnectKeyframeRestoresHistory() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "keyframehistory"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "keyframehistory")
         let viewport = app.terminalSurface
         XCTAssertTrue(viewport.waitForExistence(timeout: 10))
         // Launch + the dropped stream + the reconnect's 0.3–0.5 s backoff + its keyframe.
@@ -157,7 +149,7 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         let beforeAgain = viewport.screenshot()
         let idleDiff = pixelDiffFraction(before, beforeAgain)
-        attach(before, name: "kh-01-before")
+        attach(before, "kh-01-before")
         XCTAssertLessThan(idleDiff, 0.02,
             "Mock not static when untouched (diff=\(idleDiff)); would invalidate the scroll check.")
 
@@ -170,20 +162,13 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
 
         let after = viewport.screenshot()
-        attach(after, name: "kh-02-after-swipe")
+        attach(after, "kh-02-after-swipe")
         let movedDiff = pixelDiffFraction(before, after)
         XCTAssertGreaterThan(movedDiff, 0.10,
             "No history after an in-place reconnect: content unchanged after swiping (diff=\(movedDiff)). The reconnect's keyframe history did not reach SwiftTerm's scrollback.")
     }
 
     // MARK: - helpers
-
-    private func attach(_ shot: XCUIScreenshot, name: String) {
-        let a = XCTAttachment(screenshot: shot)
-        a.name = name
-        a.lifetime = .keepAlways
-        add(a)
-    }
 
     /// Fraction of pixels that differ (beyond a small per-pixel threshold) between two
     /// screenshots, compared at a fixed small resolution so PNG-encoding jitter and

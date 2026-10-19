@@ -27,12 +27,7 @@ final class TerminalSearchTests: TerminalInteractionTestCase {
     }
 
     private func waitForLabelChange(_ element: XCUIElement, from: String, timeout: TimeInterval = 5) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if element.label != from { return true }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        return false
+        poll(timeout, every: 0.1) { element.label != from }
     }
 
     private func openFind() {
