@@ -746,6 +746,45 @@ final class GramTests: XCTestCase {
         _ = waitForPostCall(app, containing: "to=queue text=Please review the docs")
     }
 
+    /// herdrup#455: a file whose post failed keeps its upload, so the one-tap retry posts the
+    /// same bytes again instead of uploading them again (the terminal and guest composers
+    /// already resumed; the Gram composer re-uploaded everything unsent).
+    func testARetriedAttachmentPostsTheUploadItAlreadyHas() {
+        let app = launchGram(environment: ["HERDR_MOCK_PICKED_FILE": "1", "HERDR_MOCK_GRAM_POST_FAIL": "1"])
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+        let paperclip = app.buttons["gram-attach-button"]
+        XCTAssertTrue(paperclip.waitForExistence(timeout: 5))
+        paperclip.tap()
+        let file = app.buttons["composer-attach-file"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "the paperclip should open the attach sheet")
+        file.tap()
+        let chip = app.staticTexts["picked-notes.txt"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "the picked file should stage a chip")
+        let field = app.textViews["gram-composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Notes attached")
+        let send = app.buttons["gram-send-button"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3))
+        send.tap()
+
+        _ = waitForPostCall(app, containing: "text=Notes attached file=picked-notes.txt@")
+        XCTAssertTrue(app.staticTexts["The gram store is busy."].waitForExistence(timeout: 5),
+                      "the refused post should say why")
+        XCTAssertTrue(chip.exists, "the unsent file stays staged for the retry")
+
+        send.tap()
+        let probe = app.descendants(matching: .any)["gram-post-calls"].firstMatch
+        let retried = NSPredicate(format: "label MATCHES %@", "(?s).*file=.*file=.*")
+        XCTAssertTrue(waitForPredicate(retried, object: probe, timeout: 10),
+                      "the retry should post again; probe says \(probe.label)")
+        let uploads = probe.label.components(separatedBy: "\n")
+            .compactMap { $0.components(separatedBy: " file=").dropFirst().first }
+        XCTAssertEqual(uploads.count, 2, "\(probe.label)")
+        XCTAssertEqual(uploads.first, uploads.last, "the retry posts the upload it already has: \(uploads)")
+        XCTAssertTrue(poll(10, every: 0.25) { !chip.exists }, "a posted file leaves the strip")
+    }
+
     /// The header floats over the feed with no band, but the feed's top stops below it: scrolled
     /// to the top, the oldest loaded message is clear of the header's controls and hittable.
     func testOldestMessageClearsTheFloatingHeaderAtTheTop() {

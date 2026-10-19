@@ -9575,8 +9575,7 @@ struct MockTransport: HerdrTransport {
             return answer
         }
         if requestLine.contains("gram.post") {
-            Self.recordGramPost(requestLine)
-            return Self.gramPosted
+            return Self.recordGramPost(requestLine) ? Self.gramPosted : Self.gramPostRefused
         }
         if requestLine.contains("gram.get_file") {
             let id = Self.recordGramGetFile(requestLine)
@@ -9812,15 +9811,22 @@ struct MockTransport: HerdrTransport {
     /// moved (its line is being edited on another branch).
     static let gramPosted = MockWireFixtures.gramPosted
 
-    /// Every `gram.post` the app sent, in order: its `to` (nil for the shared queue) and
-    /// its `text`. Read by the Gram UI tests via GramView's DEBUG `gram-post-calls` probe.
-    static var gramPostLog: [(to: String?, text: String)] { gramPostRecorder.posts }
+    /// Every `gram.post` the app sent, in order: its `to` (nil for the shared queue), its
+    /// `text`, and its attachment as `name@upload_id`. Read by the Gram UI tests via
+    /// GramView's DEBUG `gram-post-calls` probe.
+    static var gramPostLog: [(to: String?, text: String, file: String?)] { gramPostRecorder.posts }
 
     /// `gramPostLog` as the probe's accessibility value: one `to=<name|queue> text=<text>`
-    /// per post, separated by newlines.
+    /// per post, plus ` file=<name>@<upload_id>` for an attachment, separated by newlines.
     static var gramPostLogSummary: String {
-        gramPostLog.map { "to=\($0.to ?? "queue") text=\($0.text)" }.joined(separator: "\n")
+        gramPostLog.map { post in
+            "to=\(post.to ?? "queue") text=\(post.text)" + (post.file.map { " file=\($0)" } ?? "")
+        }.joined(separator: "\n")
     }
+
+    /// The refusal `HERDR_MOCK_GRAM_POST_FAIL` answers an attachment post with.
+    static let gramPostRefused =
+        #"{"id":"mock","error":{"code":"internal","message":"The gram store is busy."}}"#
 
     private static let gramPostRecorder = GramPostRecorder()
 
@@ -9966,10 +9972,15 @@ struct MockTransport: HerdrTransport {
         return #"{"id":"gn\#(n)",\#(from),"text":"Status \#(n).\nLine two.\nLine three.\nLine four.\nLine five.","created_unix_ms":\#(1723041360000 + n * 60000),"read_by_owner":true}"#
     }.joined(separator: ",")
 
-    private static func recordGramPost(_ requestLine: String) {
+    /// Records a `gram.post`; false when the post is to be refused.
+    private static func recordGramPost(_ requestLine: String) -> Bool {
         let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
         let params = object?["params"] as? [String: Any] ?? [:]
-        gramPostRecorder.append(to: params["to"] as? String, text: params["text"] as? String ?? "")
+        let file = (params["file"] as? [String: Any]).map {
+            "\($0["name"] as? String ?? "")@\($0["upload_id"] as? String ?? "")"
+        }
+        return gramPostRecorder.append(
+            to: params["to"] as? String, text: params["text"] as? String ?? "", file: file)
     }
 
     /// The `gram.get_file` reply for the list fixture's image (g3): a 32 x 18 gradient PNG,
@@ -10026,16 +10037,25 @@ struct MockTransport: HerdrTransport {
     }
 }
 
-/// The `gram.post` calls MockTransport answered (`to`, `text`), in order, shared across
-/// the transport values the app builds. Read through `MockTransport.gramPostLog`.
+/// The `gram.post` calls MockTransport answered (`to`, `text`, and `name@upload_id` for an
+/// attachment), in order, shared across the transport values the app builds. Read through
+/// `MockTransport.gramPostLog`.
 final class GramPostRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var stored: [(to: String?, text: String)] = []
+    private var stored: [(to: String?, text: String, file: String?)] = []
+    /// `HERDR_MOCK_GRAM_POST_FAIL=N`: the first N attachment posts are refused.
+    private var failures = Int(ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_POST_FAIL"] ?? "") ?? 0
 
-    var posts: [(to: String?, text: String)] { lock.withLock { stored } }
+    var posts: [(to: String?, text: String, file: String?)] { lock.withLock { stored } }
 
-    func append(to: String?, text: String) {
-        lock.withLock { stored.append((to: to, text: text)) }
+    /// Records the post; false when `HERDR_MOCK_GRAM_POST_FAIL` refuses it.
+    func append(to: String?, text: String, file: String?) -> Bool {
+        lock.withLock {
+            stored.append((to: to, text: text, file: file))
+            guard file != nil, failures > 0 else { return true }
+            failures -= 1
+            return false
+        }
     }
 }
 
