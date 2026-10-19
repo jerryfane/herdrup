@@ -23,7 +23,8 @@ public enum GuestTerminalSize {
     }
 
     /// The lease each guest resize asks for. The host clamps a guest's `ttl_ms` to 1–60 s,
-    /// so the owner's 5-minute lease would silently become 60 s.
+    /// so the owner's 90 s lease (`TerminalSizeClaim.leaseTTLMillis`) would silently
+    /// become 60 s.
     public static let leaseTTLMillis: UInt64 = 30_000
     /// How often a guest re-asserts its committed size: a third of the lease, so one
     /// missed renewal cannot let it lapse.

@@ -277,9 +277,10 @@ struct GramView: View {
     @State private var debugTouchRedraws = 0
     #endif
     /// Bytes of the reply received so far for the in-flight download, against the
-    /// bytes expected. The daemon returns a file in ONE base64 reply, so this counts
-    /// SSH channel bytes — about 4/3 of the file — which is the only progress signal
-    /// the protocol offers.
+    /// bytes expected. The owner's open fetches a file with `gram.get_file`, ONE base64
+    /// reply, so this counts SSH channel bytes — about 4/3 of the file — the only
+    /// progress that request gives. (`gram.get_file_chunk` exists; the guest page uses
+    /// it, this page does not.)
     ///
     /// STAYS NIL UNTIL A CALLBACK ACTUALLY ARRIVES. Only the Citadel transport reports
     /// bytes; a mock or a local socket reports none, and seeding this from the file
@@ -2855,16 +2856,17 @@ struct GramView: View {
         /// just the pre-send size gate.
         static let maxFileBytes = 100 * 1024 * 1024
 
-        /// How many files can be staged at once, in EITHER composer. Each sends as its
-        /// own gram message.
+        /// How many files can be staged at once, in any composer (Gram, the terminal
+        /// reply, the guest). Each sends as its own gram message.
         ///
         /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
         /// staged file was held in memory as `Data`: ten 100 MB picks would have been
         /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads
         /// them one frame at a time, so the resident ceiling is a single frame no
-        /// matter how many files are staged or how large they are. Both send loops are
-        /// SERIAL and `gram.post` consumes each staging file, so the daemon's 1 GiB
-        /// aggregate staging budget never sees more than one upload in flight.
+        /// matter how many files are staged or how large they are. Every send loop (Gram,
+        /// the terminal reply, the guest) is SERIAL and `gram.post` consumes each staging
+        /// file, so the daemon's 1 GiB aggregate staging budget never sees more than one
+        /// upload in flight.
         static let maxAttachments = 10
 
         static let root = FileManager.default.temporaryDirectory
@@ -3215,9 +3217,10 @@ struct GramView: View {
 
     /// Marks EVERY unread message read, ignoring any active search — the button says "Read all"
     /// and the badge must reach zero, so marking only the filtered matches would leave a
-    /// non-zero badge with no visible cause. Serial, not a TaskGroup: the daemon has no bulk
-    /// mark-read (`gram.mark_read` takes one id), so a serial loop is both the existing idiom
-    /// and the one that cannot flood a forwarded SSH connection.
+    /// non-zero badge with no visible cause. Serial, not a TaskGroup: this sends one id per
+    /// `gram.mark_read` (current herdr also takes an `ids` list, but an older daemon takes
+    /// only `id`), so a serial loop is both the existing idiom and the one that cannot
+    /// flood a forwarded SSH connection.
     private func markAllRead() async {
         guard !markingAllRead else { return }
         markingAllRead = true

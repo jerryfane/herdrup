@@ -165,7 +165,8 @@ struct SavedGramRow: View {
     var onSaveFile: () -> Void
     var onUnsave: () -> Void
 
-    /// #354: the same bubble as the inbox (`GramRow`), never joined (Saved is a list of
+    /// #354: drawn in the inbox bubble's style (`GramRow`) but by its own code — its own
+    /// tail, avatar and file chips, no cards — and never joined (Saved is a list of
     /// separate keepsakes). Your saved posts sit on the right with the sent-arrow avatar:
     /// a saved copy does not record the recipient.
     private var mine: Bool { !saved.fromAgent }

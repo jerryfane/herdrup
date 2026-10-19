@@ -5699,8 +5699,9 @@ struct TerminalPaneContent: View {
         }
         .onDisappear { ctrlArmed = false }
         // When the app returns to the foreground, reseed the FRONT pane the same way the
-        // header refresh button does (bump streamGen → remount → startBackfill() reads the
-        // durable current screen + scrollback) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
+        // header refresh button does (bump streamGen → remount → a fresh keyframe, which
+        // carries the scrollback on current servers; startBackfill()'s read is the fallback
+        // for servers without keyframe history) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
         //
         // #62's fix keyed the reseed on scene phase alone, which is a PROXY, and the proxy
         // is only true on iOS. There the app is suspended, the stream really did stall, and

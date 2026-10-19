@@ -868,12 +868,14 @@ struct LiveTerminalView: UIViewRepresentable {
         /// A software-keyboard transition is animating this pane's height. UIKit reports
         /// the duration up front, so the whole sweep is ONE event with a known end.
         ///
-        /// The end is that reported duration and nothing else. An earlier version also
-        /// closed the sweep after 60ms of proposal quiet, which is wrong for any slow
-        /// transition: a dragged dismissal proposes a new row count every ~85ms, so the
-        /// quiet window closed the sweep mid-animation and the remaining frames
-        /// committed one by one — the defect, back again, for exactly the gesture a
-        /// reader controls. Review caught it (f3).
+        /// The reported duration plus `keyboardSweepGrace` is only the backstop: past it,
+        /// the sweep ends once the surface keeps one size for `keyboardSweepStillFrames`
+        /// rendered frames, bounded by `presentationDeadlineDuration` (see
+        /// `keyboardSweepDeadlineTask`). An earlier version also closed the sweep after
+        /// 60ms of proposal quiet, which is wrong for any slow transition: a dragged
+        /// dismissal proposes a new row count every ~85ms, so the quiet window closed the
+        /// sweep mid-animation and the remaining frames committed one by one — the defect,
+        /// back again, for exactly the gesture a reader controls. Review caught it (f3).
         private var keyboardSweepActive = false
         private var keyboardSweepDeadlineTask: Task<Void, Never>?
         /// The newest fit proposed during the sweep. Only this one is ever sent.
@@ -976,7 +978,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// produced BEFORE the live stream connected, resolved to ANSI bytes (nil on empty /
         /// error / timeout). The FIRST reset awaits it once, to prepend history above the seed.
         private var backfillTask: Task<[UInt8]?, Never>?
-        /// Guards the one-time scrollback-cap raise + history prepend to the FIRST reset only.
+        /// Set by the first reset. Gates the one-time scrollback-cap raise and the backfill
+        /// prepend (a reset's own keyframe history is fed on every reset), and tells a later
+        /// reset that it is a reconnect, which re-claims the pane's size.
         private var didSeedOnce = false
 
         /// Strips terminal graphics escape strings (kitty APC, high-volume DCS) from the raw PTY
@@ -1294,10 +1298,11 @@ struct LiveTerminalView: UIViewRepresentable {
             view.applyTerminalSize(cols: terminal.cols, rows: terminal.rows)
         }
 
-        /// Scrollback backfill — so scrolling up shows output produced BEFORE this connection
-        /// (open/refresh only seeds the current screen otherwise). On each connect we fetch the
-        /// last `backfillLines` rendered rows (server `recent`, incl. scrollback, as ANSI) and
-        /// feed them into SwiftTerm's scrollback ABOVE the live seed. `0` disables the feature.
+        /// Scrollback backfill — so scrolling up shows output produced BEFORE this connection,
+        /// for a server whose keyframes carry no history. Each mount reads the last
+        /// `backfillLines` rendered rows (server `recent`, incl. scrollback, as ANSI), and the
+        /// first reset without `history_b64` feeds them into SwiftTerm's scrollback ABOVE the
+        /// live seed. Also the `scrollbackLines` the stream asks the server to send as history.
         static let backfillLines: UInt32 = 1000            // server clamps `recent` to 1000 rows
         /// SwiftTerm scrollback ring, raised once per connect from its ~500 default. MUST stay
         /// >= backfillLines + live tail so a full backfill is retained (not truncated).
@@ -2343,7 +2348,6 @@ struct LiveTerminalView: UIViewRepresentable {
             // View-only (a guest) backfills too: the host lets a guest `agent.read` the granted
             // agent. An older host refuses with `guest_forbidden`; the read then yields nil
             // like any failure, and the stream's reset alone is the seed.
-            guard Self.backfillLines > 0 else { backfillTask = nil; return }
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
                 // Race the read against the timeout and take whichever finishes FIRST, ABANDONING
@@ -2351,7 +2355,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 // path, so we must never `await` a hung read — that would leave the first .reset (and
                 // every frame queued behind it) suspended forever, a blank terminal. Instead a
                 // one-shot gate resumes the continuation exactly once: whichever of the read / the
-                // 1.2s sleep fires first wins; a hung read just leaks its background task and we paint
+                // timeout (`backfillTimeoutNanos`) fires first wins; a hung read just leaks its background task and we paint
                 // the seed with no history, exactly as before the feature.
                 let gate = ResumeGate()
                 return await withCheckedContinuation { (cont: CheckedContinuation<[UInt8]?, Never>) in

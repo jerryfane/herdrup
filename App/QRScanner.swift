@@ -168,12 +168,4 @@ final class QRScannerController: UIViewController, AVCaptureMetadataOutputObject
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         onFound?(value)
     }
-
-    /// Allow another scan after a failure, without rebuilding the capture graph.
-    func resumeScanning() {
-        hasReported = false
-        sessionQueue.async { [session] in
-            if !session.isRunning { session.startRunning() }
-        }
-    }
 }

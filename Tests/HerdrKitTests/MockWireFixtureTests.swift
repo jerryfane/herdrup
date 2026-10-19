@@ -537,8 +537,12 @@ final class MockWireFixtureTests: XCTestCase {
     /// The upload + delete round-trips decode their `type: ok` replies without
     /// throwing, and the upload mints a safe `app-` id.
     func testMockGramUploadAndDeleteSucceed() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-hello-\(UUID().uuidString).txt")
+        try Data("hello".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
         let client = HerdrClient(transport: FixtureTransport())
-        let uploadID = try await client.gramUploadFile(Data("hello".utf8))
+        let uploadID = try await client.gramUploadFile(fileURL: url)
         XCTAssertTrue(uploadID.hasPrefix("app-"), "upload id should be a safe app- token")
         try await client.gramDelete(id: "g5")
     }
@@ -557,10 +561,14 @@ final class MockWireFixtureTests: XCTestCase {
                 AsyncThrowingStream { $0.finish() }
             }
         }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gram-upload-chunk-slashes-\(UUID().uuidString).bin")
+        try Data(repeating: 0xFF, count: HerdrClient.gramUploadChunkBytes).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
         let capture = Capture()
         let client = HerdrClient(transport: capture)
-        let data = Data(repeating: 0xFF, count: HerdrClient.gramUploadChunkBytes)
-        _ = try await client.gramUploadFile(data)
+        _ = try await client.gramUploadFile(fileURL: url)
         // ~49 KiB raw → ~65.5 KB unescaped base64 + envelope. Escaping every "/"
         // would nearly double it; assert it stays well under the point where the
         // outer argv base64 (~1.33x) would breach the 120 KB command cap.
@@ -586,10 +594,10 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
-    /// The SAME slash-escaping property for the FROM-DISK path. `Capture` is not a
+    /// The SAME slash-escaping property at the stream frame size. `Capture` is not a
     /// `CitadelTransport`, so `gramOpenUploadChannel` returns nil and this exercises
-    /// the per-chunk fallback — the CI-visible proof that reading from a file did not
-    /// regress the request-line size the in-memory path guards above.
+    /// the per-chunk fallback — the CI-visible proof that reading a stream-sized file
+    /// from disk does not inflate the request line either.
     func testGramUploadFromDiskRequestStaysCompactForSlashHeavyData() async throws {
         final class Capture: HerdrTransport, @unchecked Sendable {
             var maxLen = 0
