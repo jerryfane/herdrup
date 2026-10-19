@@ -2243,14 +2243,11 @@ struct TerminalHomeView: View {
             await deleteTerminal(terminal)
             return
         case .stop(let row):
-            do {
+            await perform(verb: "stop", title: row.title) {
                 try await client.closePane(paneID: row.info.paneID)
-            } catch let e {
-                error = "couldn't stop \(row.title): \(e)"
-                return
             }
         case .archive(let row):
-            do {
+            await perform(verb: "archive", title: row.title) {
                 // Attributed on purpose. Without `by`/`reason` the daemon records
                 // `by: "api"` and no reason — the same shape it writes for a pane that
                 // merely died, so a deliberate archive would be indistinguishable from
@@ -2258,19 +2255,25 @@ struct TerminalHomeView: View {
                 try await client.archiveAgent(target: row.info.paneID,
                                               reason: HerdrKit.appArchiveReason,
                                               by: HerdrKit.appArchiveActor)
-            } catch let e {
-                error = "couldn't archive \(row.title): \(e)"
-                return
             }
         case .unarchive(let row):
             // Resume the preserved session into a fresh pane, restoring the agent's
             // identity. Target by name (or terminal id): the pane id no longer resolves.
-            do {
-                try await client.unarchiveAgent(target: unarchiveTarget(row.info))
-            } catch let e {
-                error = "couldn't unarchive \(row.title): \(e)"
-                return
+            let target = unarchiveTarget(row.info)
+            await perform(verb: "unarchive", title: row.title) {
+                try await client.unarchiveAgent(target: target)
             }
+        }
+    }
+
+    /// One daemon action on a roster row: run `op`, then reload the roster. A failure is
+    /// disclosed as "couldn't <verb> <title>: <error>" and skips the reload.
+    private func perform(verb: String, title: String, _ op: () async throws -> Void) async {
+        do {
+            try await op()
+        } catch let e {
+            error = "couldn't \(verb) \(title): \(e)"
+            return
         }
         await load()
     }
@@ -3387,21 +3390,15 @@ struct TerminalHomeView: View {
         content
             .confirmationDialog(
                 "Restart agent?",
-                isPresented: Binding(
-                    get: { restartCandidate != nil },
-                    set: { if !$0 { restartCandidate = nil } }
-                ),
+                isPresented: $restartCandidate.isPresent(),
                 presenting: restartCandidate
             ) { row in
                 Button("Restart", role: .destructive) {
                     let target = row.info.paneID
                     let title = row.title
                     Task {
-                        do {
+                        await perform(verb: "restart", title: title) {
                             try await client.restartAgent(target: target)
-                            await load()
-                        } catch let e {
-                            error = "couldn't restart \(title): \(e)"
                         }
                     }
                 }
@@ -3413,10 +3410,7 @@ struct TerminalHomeView: View {
             }
             .confirmationDialog(
                 "Swap subscription?",
-                isPresented: Binding(
-                    get: { swapCandidate != nil },
-                    set: { if !$0 { swapCandidate = nil } }
-                ),
+                isPresented: $swapCandidate.isPresent(),
                 presenting: swapCandidate
             ) { cand in
                 Button("Swap", role: .destructive) {
@@ -3424,11 +3418,8 @@ struct TerminalHomeView: View {
                     let title = cand.row.title
                     let accountID = cand.account.id
                     Task {
-                        do {
+                        await perform(verb: "swap", title: title) {
                             try await client.restartAgent(target: target, account: accountID)
-                            await load()
-                        } catch let e {
-                            error = "couldn't swap \(title): \(e)"
                         }
                     }
                 }
@@ -3503,11 +3494,8 @@ struct TerminalHomeView: View {
                 let paneID = row.info.paneID
                 let title = row.title
                 Task {
-                    do {
+                    await perform(verb: "rename", title: title) {
                         try await client.renameAgent(target: paneID, name: newName)
-                        await load()
-                    } catch let e {
-                        error = "couldn't rename \(title): \(e)"
                     }
                 }
             }
@@ -3973,10 +3961,7 @@ struct TerminalHomeView: View {
         }
         .confirmationDialog(
             forgetCandidate.map { "Close \($0.title)?" } ?? "Close?",
-            isPresented: Binding(
-                get: { forgetCandidate != nil },
-                set: { if !$0 { forgetCandidate = nil } }
-            ),
+            isPresented: $forgetCandidate.isPresent(),
             titleVisibility: .visible,
             presenting: forgetCandidate
         ) { row in
@@ -3984,11 +3969,8 @@ struct TerminalHomeView: View {
                 let archived = row.info
                 let title = row.title
                 Task {
-                    do {
+                    await perform(verb: "close", title: title) {
                         try await client.forgetAgent(archived)
-                        await load()
-                    } catch let e {
-                        error = "couldn't close \(title): \(e)"
                     }
                 }
             }
@@ -7358,10 +7340,7 @@ struct SettingsView: View {
         }
         .confirmationDialog(
             pendingFederate.map { "Federate \($0.displayLabel)?" } ?? "",
-            isPresented: Binding(
-                get: { pendingFederate != nil },
-                set: { if !$0 { pendingFederate = nil } }
-            ),
+            isPresented: $pendingFederate.isPresent(),
             presenting: pendingFederate
         ) { machine in
             Button("Allow federation") { Task { await changeFederation(machine, enabled: true) } }
@@ -7371,10 +7350,7 @@ struct SettingsView: View {
         }
         .alert(
             "Federation status",
-            isPresented: Binding(
-                get: { federationError != nil },
-                set: { if !$0 { federationError = nil } }
-            )
+            isPresented: $federationError.isPresent()
         ) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -7410,10 +7386,7 @@ struct SettingsView: View {
         // out sequentially and reports the outcome in an alert.
         .confirmationDialog(
             bulkSwapTarget.map { "Use \($0.label) for all \($0.kind.capitalized) agents?" } ?? "",
-            isPresented: Binding(
-                get: { bulkSwapTarget != nil },
-                set: { if !$0 { bulkSwapTarget = nil } }
-            ),
+            isPresented: $bulkSwapTarget.isPresent(),
             presenting: bulkSwapTarget
         ) { account in
             let targets = agents.filter { $0.agent == account.kind }
@@ -7457,10 +7430,7 @@ struct SettingsView: View {
         }
         .alert(
             "Swap subscription",
-            isPresented: Binding(
-                get: { bulkResult != nil },
-                set: { if !$0 { bulkResult = nil } }
-            ),
+            isPresented: $bulkResult.isPresent(),
             presenting: bulkResult
         ) { _ in
             Button("OK", role: .cancel) {}
@@ -7483,10 +7453,7 @@ struct SettingsView: View {
         }
         .alert(
             "Daemon update",
-            isPresented: Binding(
-                get: { updateResult != nil },
-                set: { if !$0 { updateResult = nil } }
-            ),
+            isPresented: $updateResult.isPresent(),
             presenting: updateResult
         ) { _ in
             Button("OK", role: .cancel) {}
@@ -7626,10 +7593,7 @@ struct SettingsView: View {
                 }
                 .confirmationDialog(
                     logoutAccount.map { "Log out \($0.label)?" } ?? "",
-                    isPresented: Binding(
-                        get: { logoutAccount != nil },
-                        set: { if !$0 { logoutAccount = nil } }
-                    ),
+                    isPresented: $logoutAccount.isPresent(),
                     titleVisibility: .visible,
                     presenting: logoutAccount
                 ) { account in
@@ -7642,10 +7606,7 @@ struct SettingsView: View {
                 }
                 .confirmationDialog(
                     removeAccount.map { "Remove \($0.label)?" } ?? "",
-                    isPresented: Binding(
-                        get: { removeAccount != nil },
-                        set: { if !$0 { removeAccount = nil } }
-                    ),
+                    isPresented: $removeAccount.isPresent(),
                     titleVisibility: .visible,
                     presenting: removeAccount
                 ) { account in
