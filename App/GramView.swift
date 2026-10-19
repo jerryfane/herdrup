@@ -1,5 +1,4 @@
 import HerdrKit
-import QuickLook
 import SwiftUI
 import UIKit
 
@@ -249,18 +248,11 @@ struct GramView: View {
     /// does not re-run this separate child struct — without this, Gram would show
     /// old-size text after a size change until it re-rendered for another reason.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
-    /// Whether a received html/svg preview may run script (Settings → HTML previews).
-    /// Off unless the reader turned it on; read here so the viewer is built with it.
-    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
     /// Momentary "Copied ✓" on the setup card's copy button.
     @State private var setupCommandCopied = false
-    /// A downloaded file written to a temp URL, presented via QuickLook when set.
-    @State private var previewURL: URL?
-    /// A received web document (HTML/SVG) staged for the in-app viewer. Rendered by
-    /// `HtmlWebView` (no remote loads, navigation frozen, script only if the reader
-    /// turned it on) instead of QuickLook, whose srcdoc-sandbox path showed a blank
-    /// white screen for these files (issue #92).
-    @State private var webDoc: WebDoc?
+    /// The opened file in its viewer (`gramFileViewer`): QuickLook, or the in-app viewer
+    /// for a received web document.
+    @State private var preview: GramPreview?
     /// The in-flight file-open download (see `openFile`), cancelled when the page goes
     /// away so a late completion can't strand a temp file after cleanup already ran.
     @State private var openFileTask: Task<Void, Never>?
@@ -569,7 +561,7 @@ struct GramView: View {
         }
         // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
         // it and offers the system share action (save to Files, etc.).
-        .quickLookPreview($previewURL)
+        .gramFileViewer($preview)
         // Explicit "Save to Files…" (from a file chip's context menu): export through
         // the system document picker so the file lands where the owner picks — the real
         // Finder ~/Documents / ~/Downloads on Mac, the Files picker on iPhone/iPad.
@@ -583,70 +575,14 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
-        // Received HTML/SVG opens in a dedicated in-app viewer (no remote loads,
-        // navigation frozen, and script off unless the reader turned it on in Settings)
-        // rather than QuickLook, which rendered these blank (#92).
-        // Done dismisses; Share still lets the owner save the raw file.
-        .fullScreenCover(item: $webDoc) { doc in
-            NavigationStack {
-                HtmlWebView(html: doc.html, allowsJavaScript: previewJavaScript)
-                    .ignoresSafeArea(edges: .bottom)
-                    .navigationTitle(doc.title)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { webDoc = nil }
-                        }
-                        ToolbarItem(placement: .primaryAction) {
-                            ShareLink(item: doc.fileURL)
-                        }
-                    }
-            }
-            // Remove the raw temp file when the viewer closes so a viewed document
-            // does not linger in tmp. A cached file is handed to the viewer as the
-            // cache entry itself (`present`'s `cachedAt`): that is not a temp file,
-            // and deleting it would make the next open download it again.
-            .onDisappear {
-                if !Downloads.isCached(doc.fileURL) {
-                    try? FileManager.default.removeItem(at: doc.fileURL)
-                }
-            }
-        }
-        // Delete the previewed temp file when QuickLook dismisses (it nils the
-        // binding) or when it is replaced — so a previewed secret does not linger.
-        .onChange(of: previewURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
-                try? FileManager.default.removeItem(at: oldValue)
-            }
-        }
-        // Same for the web-doc viewer's raw file: remove the previous one whenever
-        // webDoc changes (including → nil on dismiss), so a viewed HTML/SVG never lingers.
-        // Cached downloads are exempt for the same reason as in `onDisappear`.
-        .onChange(of: webDoc?.fileURL) { oldValue, newValue in
-            if let oldValue, oldValue != newValue, !Downloads.isCached(oldValue) {
-                try? FileManager.default.removeItem(at: oldValue)
-            }
-        }
-        // Backstop: on the way out, cancel an in-flight file open (so a late completion
-        // can't strand a temp file after cleanup) and remove any lingering TEMP files —
-        // both the QuickLook preview and the web-doc viewer's raw file.
-        //
-        // CACHED FILES ARE NOT TEMP FILES. A downloaded gram file now lives under
-        // `Downloads.root` so reopening it costs nothing; deleting it here would
-        // re-download on the next open and quietly undo the cache. Only paths outside
-        // that root are unlinked.
+        // Backstop: on the way out, cancel an in-flight file open, so a late completion
+        // can't strand a temp file after `gramFileViewer`'s cleanup already ran.
         .onDisappear {
             // Gram went off screen: the next time it shows, the "N unread" rule is captured
             // afresh instead of staying on a message read during this visit.
             unreadRuleCaptured = false
             openFileTask?.cancel()
             saveFileTask?.cancel()
-            if let previewURL, !Downloads.isCached(previewURL) {
-                try? FileManager.default.removeItem(at: previewURL)
-            }
-            if let url = webDoc?.fileURL, !Downloads.isCached(url) {
-                try? FileManager.default.removeItem(at: url)
-            }
             // Staged attachment bytes are deliberately NOT removed here. Gram is a
             // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
             // plain tab switch while this view's `@State` — including the chips in
@@ -2537,9 +2473,7 @@ struct GramView: View {
         // fast. Markdown and web documents do need the bytes, and the routing decision
         // needs only the name and the stored mime.
         if let hit = Downloads.cached(id: id) {
-            if Self.isMarkdown(name: hit.name, mime: hit.mime)
-                || Self.isWebDocument(name: hit.name, mime: hit.mime)
-            {
+            if GramPreviewRouter.needsBytes(name: hit.name, mime: hit.mime) {
                 guard let data = try? Data(contentsOf: hit.url, options: .mappedIfSafe) else {
                     sendError = "Couldn't open the file."
                     return
@@ -2572,71 +2506,16 @@ struct GramView: View {
         }
     }
 
-    /// Route already-held bytes to the right viewer. Shared by the cache-hit and
-    /// post-download paths so both render a markdown or web document identically —
-    /// when this logic lived only inside the download closure, a cached open could not
-    /// reach it at all.
-    ///
-    /// `cachedAt` is the cache entry for the ORIGINAL bytes when one exists. QuickLook
-    /// and the web viewer are handed that file directly, so nothing is re-written per
-    /// open; derived artifacts (markdown rendered to HTML) still go to a temp file,
-    /// because what the cache holds is the source, not the rendering.
+    /// Show already-held bytes in the right viewer (`GramPreviewRouter`). Shared by the
+    /// cache-hit and post-download paths so both render a markdown or web document
+    /// identically. `cachedAt` is the cache entry for the ORIGINAL bytes when one exists.
     @MainActor
     private func present(data: Data?, name: String, mime: String = "", cachedAt: URL? = nil) {
         #if DEBUG
         openedFileProbe = "opened:\(name)"
         #endif
-        // Remove any previously-previewed TEMP file so a viewed secret does not
-        // accumulate; cache entries are left alone.
-        if let previous = previewURL, !Downloads.isCached(previous) {
-            try? FileManager.default.removeItem(at: previous)
-        }
-        let tmp = FileManager.default.temporaryDirectory
         do {
-            if Self.isMarkdown(name: name, mime: mime),
-                let data, let text = String(data: data, encoding: .utf8)
-            {
-                // Render markdown to styled HTML so it previews FORMATTED —
-                // QuickLook shows a raw .md file as plain source otherwise. This is a
-                // DERIVED artifact, so it goes to tmp even on a cache hit; the cache
-                // holds the markdown source.
-                let html = Markdown.toStyledHTML(text, title: Self.displayTitle(name))
-                let url = tmp.appendingPathComponent(Self.previewHTMLName(for: name))
-                try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-                previewURL = url
-            } else if Self.isWebDocument(name: name, mime: mime), let data {
-                // Received HTML/SVG renders in a dedicated in-app WKWebView viewer
-                // (no remote loads, script off by default), NOT QuickLook — the old
-                // srcdoc-sandbox path painted a blank white screen (#92). Decode
-                // LOSSILY (invalid UTF-8 -> U+FFFD) so a non-UTF-8 file still renders
-                // as text rather than being treated as a plain download. Keep the raw
-                // bytes on disk so the viewer's Share button can save the original.
-                let raw: URL
-                if let cachedAt {
-                    raw = cachedAt   // already on disk; do not rewrite it per open
-                } else {
-                    raw = tmp.appendingPathComponent(GramStaging.safeFileName(name))
-                    try data.write(to: raw, options: [.atomic, .completeFileProtection])
-                }
-                // We present webDoc, not a QuickLook preview — clear any stale
-                // previewURL (its file was removed above) so nothing tries to present
-                // a now-deleted path, and the previewURL onChange doesn't fire on it.
-                previewURL = nil
-                webDoc = WebDoc(
-                    title: Self.webBaseName(name),
-                    html: String(decoding: data, as: UTF8.self),
-                    fileURL: raw)
-            } else if let cachedAt {
-                // The cache entry IS the file, under its real name: hand it straight to
-                // QuickLook rather than copying it into tmp on every open.
-                previewURL = cachedAt
-            } else {
-                // Never trust the server name to be a safe path component; reduce
-                // it to a bare basename. Write encrypted-at-rest.
-                let url = tmp.appendingPathComponent(GramStaging.safeFileName(name))
-                try (data ?? Data()).write(to: url, options: [.atomic, .completeFileProtection])
-                previewURL = url
-            }
+            preview = try GramPreviewRouter.preview(data: data, name: name, mime: mime, cachedAt: cachedAt)
         } catch {
             sendError = "Couldn't open the file."
         }
@@ -2992,52 +2871,6 @@ struct GramView: View {
             guard urlParts.count > rootParts.count else { return false }
             return Array(urlParts.prefix(rootParts.count)) == rootParts
         }
-    }
-
-    /// A file we should render as formatted HTML (a markdown source), by extension
-    /// or advisory mime.
-    static func isMarkdown(name: String, mime: String) -> Bool {
-        let lower = name.lowercased()
-        return lower.hasSuffix(".md") || lower.hasSuffix(".markdown")
-            || mime.lowercased() == "text/markdown"
-    }
-
-    /// The markdown file's name without its `.md`/`.markdown` extension, for the
-    /// preview title.
-    static func displayTitle(_ name: String) -> String {
-        let base = GramStaging.safeFileName(name)
-        for ext in [".markdown", ".md"] where base.lowercased().hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
-        return base
-    }
-
-    /// The temp file name for a rendered markdown preview — a `.html` extension so
-    /// QuickLook renders it as a web page, not source.
-    static func previewHTMLName(for name: String) -> String {
-        displayTitle(name) + ".html"
-    }
-
-    /// A received web document that QuickLook would otherwise render as live,
-    /// scriptable content — routed to the in-app `HtmlWebView` viewer instead.
-    static func isWebDocument(name: String, mime: String) -> Bool {
-        let lower = name.lowercased()
-        if lower.hasSuffix(".html") || lower.hasSuffix(".htm") || lower.hasSuffix(".xhtml")
-            || lower.hasSuffix(".svg")
-        {
-            return true
-        }
-        let m = mime.lowercased()
-        return m == "text/html" || m == "application/xhtml+xml" || m == "image/svg+xml"
-    }
-
-    /// The web file's name without its extension, for the preview title.
-    static func webBaseName(_ name: String) -> String {
-        let base = GramStaging.safeFileName(name)
-        for ext in [".xhtml", ".html", ".htm", ".svg"] where base.lowercased().hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
-        return base
     }
 
     /// Delete a message (and its file bytes) after the server confirms — so a

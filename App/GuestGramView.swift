@@ -1,5 +1,4 @@
 import HerdrKit
-import QuickLook
 import SwiftUI
 import UIKit
 
@@ -65,20 +64,11 @@ struct GuestGramList: View {
     let access: GuestAccess
     @ObservedObject var model: GuestGramModel
 
-    @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
     @State private var downloadingID: String?
     @State private var progress: (received: Int, total: Int)?
     @State private var openTask: Task<Void, Never>?
-    @State private var previewURL: URL?
-    @State private var webDoc: WebDoc?
+    @State private var preview: GramPreview?
     @State private var fileError: String?
-
-    private struct WebDoc: Identifiable {
-        let id = UUID()
-        let title: String
-        let html: String
-        let fileURL: URL
-    }
 
     var body: some View {
         ScrollView {
@@ -112,32 +102,8 @@ struct GuestGramList: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .refreshable { await model.refresh(client: client, access: access) }
-        .quickLookPreview($previewURL)
-        .fullScreenCover(item: $webDoc) { doc in
-            NavigationStack {
-                HtmlWebView(html: doc.html, allowsJavaScript: previewJavaScript)
-                    .ignoresSafeArea(edges: .bottom)
-                    .navigationTitle(doc.title)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { webDoc = nil }
-                        }
-                        ToolbarItem(placement: .primaryAction) {
-                            ShareLink(item: doc.fileURL)
-                        }
-                    }
-            }
-            .onDisappear { try? FileManager.default.removeItem(at: doc.fileURL.deletingLastPathComponent()) }
-        }
-        // A viewed file doesn't linger in tmp once its viewer closes or is replaced.
-        .onChange(of: previewURL) { old, new in
-            if let old, old != new { try? FileManager.default.removeItem(at: old.deletingLastPathComponent()) }
-        }
-        .onDisappear {
-            openTask?.cancel()
-            if let previewURL { try? FileManager.default.removeItem(at: previewURL.deletingLastPathComponent()) }
-        }
+        .gramFileViewer($preview)
+        .onDisappear { openTask?.cancel() }
         .accessibilityIdentifier("guest-gram-list")
     }
 
@@ -202,24 +168,7 @@ struct GuestGramList: View {
     }
 
     private func present(data: Data, name: String, mime: String) throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("guest-gram-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if GramView.isMarkdown(name: name, mime: mime), let text = String(data: data, encoding: .utf8) {
-            let html = Markdown.toStyledHTML(text, title: GramView.displayTitle(name))
-            let url = dir.appendingPathComponent(GramView.previewHTMLName(for: name))
-            try Data(html.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-            previewURL = url
-        } else if GramView.isWebDocument(name: name, mime: mime) {
-            let url = dir.appendingPathComponent(GramStaging.safeFileName(name))
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
-            webDoc = WebDoc(title: GramView.webBaseName(name), html: String(decoding: data, as: UTF8.self),
-                            fileURL: url)
-        } else {
-            let url = dir.appendingPathComponent(GramStaging.safeFileName(name))
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
-            previewURL = url
-        }
+        preview = try GramPreviewRouter.preview(data: data, name: name, mime: mime, cachedAt: nil)
         #if DEBUG
         GuestMockTransport.noteOpened(name)
         #endif
