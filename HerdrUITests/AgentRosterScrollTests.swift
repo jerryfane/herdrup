@@ -34,9 +34,7 @@ final class AgentRosterScrollTests: XCTestCase {
     private let initialRosterLayoutTimeout: TimeInterval = 10.0
 
     func testRosterStaysResponsiveWhileRefreshesReorderRows() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "rosterstress"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "rosterstress")
 
         let scroll = app.scrollViews["agent-roster-scroll"]
         XCTAssertTrue(scroll.waitForExistence(timeout: 5), "agent roster scroll view did not appear")
@@ -60,10 +58,7 @@ final class AgentRosterScrollTests: XCTestCase {
             // gestures instead of assuming the initial position. The stress driver is
             // not armed yet, so these gestures cannot change the roster. A frozen list
             // still fails because they cannot make its already-present row hittable.
-            let attachment = XCTAttachment(screenshot: app.screenshot())
-            attachment.name = "roster-cold-launch-before-top-normalization"
-            attachment.lifetime = .keepAlways
-            add(attachment)
+            attach(app, "roster-cold-launch-before-top-normalization")
             let bottomWasHittable = bottomMarker.isHittable
             for _ in 0..<6 { scroll.swipeDown() }
             XCTAssertTrue(
@@ -177,10 +172,7 @@ final class AgentRosterScrollTests: XCTestCase {
             "a refresh changed the displayed roster while scrolling instead of being coalesced"
         )
 
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "roster-responsive-after-refresh-stress"
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(app, "roster-responsive-after-refresh-stress")
     }
 
     private func agentCount(_ element: XCUIElement) -> Int? {
@@ -195,19 +187,10 @@ final class AgentRosterScrollTests: XCTestCase {
         timeout: TimeInterval
     ) -> Int? {
         var observed: Int?
-        _ = waitForReceipt(timeout: timeout) {
+        _ = poll(timeout, every: 0.1) {
             observed = agentCount(element)
             return observed.map(allowed.contains) ?? false
         }
         return observed.flatMap { allowed.contains($0) ? $0 : nil }
-    }
-
-    private func waitForReceipt(timeout: TimeInterval, _ receipt: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if receipt() { return true }
-            _ = XCTWaiter.wait(for: [XCTestExpectation(description: "receipt")], timeout: 0.1)
-        } while Date() < deadline
-        return receipt()
     }
 }

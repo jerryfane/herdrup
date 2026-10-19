@@ -25,9 +25,7 @@ final class StaleFleetRowTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testDegradedFederatedRowRendersAStalenessMarker() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
 
         // Premise first: the roster actually rendered and the federated row is present.
         // Without this a missing marker could not be told apart from a missing screen.
