@@ -169,9 +169,12 @@ final class PairingTests: XCTestCase {
     }
 
     func testAnUnreachableMachineFailsQuicklyAndSaysSo() throws {
-        // Bind and immediately close, so the port is almost certainly refusing.
+        // A stopped stub must refuse connections. The pause lets the stub's worker reach
+        // accept() first: the schedule under which a close() alone left the port
+        // listening on Linux (CI 39225257578), so this case always covers it.
         let server = try StubDaemon(reply: nil)
         let payload = server.payload()
+        Thread.sleep(forTimeInterval: 0.2)
         server.stop()
 
         XCTAssertThrowsError(try Pairing.redeem(
@@ -319,6 +322,10 @@ private final class StubDaemon {
     func stop() {
         guard !stopped else { return }
         stopped = true
+        // shutdown() first: on Linux, close() alone does not wake the worker blocked in
+        // accept(), and the socket keeps listening, so a "refused" connect is accepted
+        // and then dropped.
+        _ = shutdown(listenFD, Int32(SHUT_RDWR))
         platformClose(listenFD)
     }
 
