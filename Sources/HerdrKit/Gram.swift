@@ -220,6 +220,12 @@ public struct GramListAnswer: Sendable, Equatable {
     }
 
     public var isUnchanged: Bool { messages == nil }
+
+    /// The tab badge's count from an `unread_only` answer: the daemon's whole-store
+    /// `unreadCount` when it sends one, since a paging daemon's answer holds only a page;
+    /// otherwise the messages it returned, which on a daemon without paging are all of
+    /// them. Nil when the answer carries neither (unchanged).
+    public var unreadBadgeCount: Int? { unreadCount ?? messages?.count }
 }
 
 /// `gram.post` / `gram.send` / `gram.grab` result (`type` varies). Only the echoed
