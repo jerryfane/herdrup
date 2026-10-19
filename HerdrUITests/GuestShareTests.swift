@@ -23,13 +23,10 @@ final class GuestShareTests: XCTestCase {
     /// going idle, which costs a minute per XCUITest action. Only the screenshot keeps it.
     private func launch(_ mode: String, ownerName: String = "Jerry", pendingInvite: Bool = false,
                         still: Bool = true, environment: [String: String] = [:]) {
-        app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
-        app.launchEnvironment["HERDR_MOCK_OWNER_NAME"] = ownerName
-        app.launchEnvironment.merge(environment) { _, new in new }
-        if still { app.launchEnvironment["HERDR_MOCK_STILL"] = "1" }
-        if pendingInvite { app.launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
-        app.launch()
+        var launchEnvironment = ["HERDR_MOCK_OWNER_NAME": ownerName].merging(environment) { _, new in new }
+        if still { launchEnvironment["HERDR_MOCK_STILL"] = "1" }
+        if pendingInvite { launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
+        app = XCUIApplication.launched(mock: mode, environment: launchEnvironment)
     }
 
     private func element(_ id: String) -> XCUIElement {
@@ -43,10 +40,7 @@ final class GuestShareTests: XCTestCase {
 
     private func shoot(_ name: String) {
         Thread.sleep(forTimeInterval: 0.8)   // let sheet and row animations settle
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(XCUIScreen.main.screenshot(), name)
     }
 
     private func openShareSheet() {

@@ -6,22 +6,8 @@ final class GuestShellTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
-    private func launch(_ mock: String) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mock
-        app.launch()
-        return app
-    }
-
-    private func attach(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     func testAcceptLandsOnGuestHome() {
-        let app = launch("guestaccept")
+        let app = XCUIApplication.launched(mock: "guestaccept")
 
         XCTAssertTrue(app.staticTexts["Jerry shared llm-opt with you"].waitForExistence(timeout: 10),
                       "the accept screen should say who shared which agent")
@@ -38,7 +24,7 @@ final class GuestShellTests: XCTestCase {
     }
 
     func testHomeShowsOnlyTheSharedAgentAndNoGram() {
-        let app = launch("guest")
+        let app = XCUIApplication.launched(mock: "guest")
 
         let row = app.buttons["guest-agent-row"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the shared agent's row should render")
@@ -58,7 +44,7 @@ final class GuestShellTests: XCTestCase {
     }
 
     func testLeaveRemovesTheShare() {
-        let app = launch("guest")
+        let app = XCUIApplication.launched(mock: "guest")
         XCTAssertTrue(app.buttons["guest-agent-row"].waitForExistence(timeout: 10))
 
         // A tap on the tab bar right after launch can be swallowed while it settles, so

@@ -14,35 +14,13 @@ final class GuestPushTests: XCTestCase {
     /// The guest home over the mock host, which shares Gram and takes guest push.
     /// `HERDR_MOCK_STILL` keeps the agent idle so XCUITest actions don't wait on a pulse.
     private func launch(authorization: String?) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "guest"
-        app.launchEnvironment["HERDR_MOCK_STILL"] = "1"
-        app.launchEnvironment["HERDR_MOCK_GUEST_FEATURES"] = "gram,push"
-        if let authorization { app.launchEnvironment["HERDR_MOCK_PUSH_AUTH"] = authorization }
-        app.launch()
-        return app
+        var environment = ["HERDR_MOCK_STILL": "1", "HERDR_MOCK_GUEST_FEATURES": "gram,push"]
+        if let authorization { environment["HERDR_MOCK_PUSH_AUTH"] = authorization }
+        return .launched(mock: "guest", environment: environment)
     }
 
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
-    }
-
-    /// Waits until `id`'s label satisfies `condition`; fails with its last label otherwise.
-    @discardableResult
-    private func waitForLabel(_ app: XCUIApplication, _ id: String, _ what: String, timeout: TimeInterval = 10,
-                              _ condition: (String) -> Bool) -> String {
-        let deadline = Date().addingTimeInterval(timeout)
-        var last = ""
-        while Date() < deadline {
-            let element = element(app, id)
-            if element.exists {
-                last = element.label
-                if condition(last) { return last }
-            }
-            Thread.sleep(forTimeInterval: 0.3)
-        }
-        XCTFail("\(what): \(id) = \(last)")
-        return last
     }
 
     private func openTab(_ app: XCUIApplication, _ name: String) {
@@ -59,25 +37,18 @@ final class GuestPushTests: XCTestCase {
         XCTAssertTrue(element(app, "guest-terminal").waitForExistence(timeout: 10))
     }
 
-    private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     /// A phone iOS already lets notify registers as soon as it connects, without a question,
     /// and the guest's Settings say On. The home and the agent screen share one connection,
     /// which registers once.
     func testGrantedPermissionRegistersWithoutAskingAndShowsOn() {
         let app = launch(authorization: "granted")
         openTab(app, "Settings")
-        waitForLabel(app, "guest-push-status", "a granted phone's notifications should be on") { $0 == "On" }
+        pollLabel(app, "guest-push-status", "a granted phone's notifications should be on") { $0 == "On" }
         XCTAssertEqual(app.buttons["guest-push-action"].label, "Turn off")
-        attachScreenshot(app, "guest-push-settings-on")
+        attach(app, "guest-push-settings-on")
 
         openAgent(app)
-        let calls = waitForLabel(app, "guest-host-calls", "the host should hold this phone's registration") {
+        let calls = pollLabel(app, "guest-host-calls", "the host should hold this phone's registration") {
             $0.contains(self.registration)
         }
         XCTAssertFalse(element(app, "guest-push-prompt").exists, "nothing to ask when iOS already allows")
@@ -97,14 +68,14 @@ final class GuestPushTests: XCTestCase {
         app.buttons["guest-back"].tap()
 
         openTab(app, "Settings")
-        waitForLabel(app, "guest-push-status", "Not now leaves notifications off") { $0 == "Off" }
+        pollLabel(app, "guest-push-status", "Not now leaves notifications off") { $0 == "Off" }
         let action = app.buttons["guest-push-action"]
         XCTAssertEqual(action.label, "Turn on")
         action.tap()
-        waitForLabel(app, "guest-push-status", "Turn on should turn them on") { $0 == "On" }
+        pollLabel(app, "guest-push-status", "Turn on should turn them on") { $0 == "On" }
 
         openAgent(app)
-        waitForLabel(app, "guest-host-calls", "Turn on should register this phone") { $0.contains(self.registration) }
+        pollLabel(app, "guest-host-calls", "Turn on should register this phone") { $0.contains(self.registration) }
         XCTAssertFalse(element(app, "guest-push-prompt").exists, "no second explanation once on")
     }
 
@@ -112,7 +83,7 @@ final class GuestPushTests: XCTestCase {
     func testDeniedPermissionPointsToSettingsAndNeverRegisters() {
         let app = launch(authorization: "denied")
         openTab(app, "Settings")
-        waitForLabel(app, "guest-push-status", "a refused phone says so") { $0 == "Off in iOS Settings" }
+        pollLabel(app, "guest-push-status", "a refused phone says so") { $0 == "Off in iOS Settings" }
         XCTAssertEqual(app.buttons["guest-push-action"].label, "Open Settings")
 
         openAgent(app)

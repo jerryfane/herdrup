@@ -12,13 +12,9 @@ final class GuestGramPaneTests: XCTestCase {
     /// app that never idles costs every XCUITest action its full idle timeout.
     private func launch(_ mock: String = "guestpane", features: String?,
                         environment: [String: String] = [:]) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mock
-        app.launchEnvironment["HERDR_MOCK_STILL"] = "1"
-        if let features { app.launchEnvironment["HERDR_MOCK_GUEST_FEATURES"] = features }
-        app.launchEnvironment.merge(environment) { _, new in new }
-        app.launch()
-        return app
+        var still = ["HERDR_MOCK_STILL": "1"]
+        if let features { still["HERDR_MOCK_GUEST_FEATURES"] = features }
+        return .launched(mock: mock, environment: still.merging(environment) { _, new in new })
     }
 
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
@@ -29,31 +25,6 @@ final class GuestGramPaneTests: XCTestCase {
         let probe = element(app, id)
         XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG probe \(id) should exist")
         return probe.label
-    }
-
-    /// Polls a probe until `condition` holds; fails with its last label otherwise.
-    @discardableResult
-    private func waitForProbe(_ app: XCUIApplication, _ id: String, _ what: String, timeout: TimeInterval = 10,
-                              _ condition: (String) -> Bool) -> String {
-        let deadline = Date().addingTimeInterval(timeout)
-        var last = ""
-        while Date() < deadline {
-            let probe = element(app, id)
-            if probe.exists {
-                last = probe.label
-                if condition(last) { return last }
-            }
-            Thread.sleep(forTimeInterval: 0.3)
-        }
-        XCTFail("\(what): \(id) = \(last)")
-        return last
-    }
-
-    private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     private func openGramTab(_ app: XCUIApplication) {
@@ -88,12 +59,12 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["You → llm-opt"].exists, "the guest's own post is labelled as theirs")
         XCTAssertTrue(app.buttons["guest-gram-file-gm-4"].exists, "the agent's file is offered")
 
-        waitForProbe(app, "guest-host-calls", "viewing the list should mark its unread Grams read") {
+        pollLabel(app, "guest-host-calls", "viewing the list should mark its unread Grams read") {
             $0.contains("gram.mark_read:gm-2,gm-4")
         }
         XCTAssertTrue(badge.waitForNonExistence(timeout: 5), "nothing is unread once seen")
         Thread.sleep(forTimeInterval: 0.8)
-        attachScreenshot(app, "guest-gram-tab")
+        attach(app, "guest-gram-tab")
         XCTAssertEqual(probe(app, "guest-forbidden-calls"), "", "the Gram tab calls only what a guest may")
     }
 
@@ -135,7 +106,7 @@ final class GuestGramPaneTests: XCTestCase {
             let probe = element(app, "guest-host-calls")
             if probe.exists { calls = probe.label; if opened(calls) { break } }
             for label in ["Done", "Close"] where app.buttons[label].exists {
-                attachScreenshot(app, "guest-gram-file-open")
+                attach(app, "guest-gram-file-open")
                 app.buttons[label].tap()
             }
             Thread.sleep(forTimeInterval: 0.5)
@@ -173,10 +144,10 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(prompt.waitForExistence(timeout: 10), "the first open should explain notifications")
         XCTAssertEqual(probe(app, "guest-host-calls").contains("notifications.register_device"), false,
                        "nothing registers before the guest says yes")
-        attachScreenshot(app, "guest-push-prompt")
+        attach(app, "guest-push-prompt")
         app.buttons["guest-push-enable"].tap()
 
-        waitForProbe(app, "guest-host-calls", "Turn on should register the device") {
+        pollLabel(app, "guest-host-calls", "Turn on should register the device") {
             $0.contains("notifications.register_device:device_token=mock-apns-token-guest,platform=apns,"
                 + "notify_needs_input=true,notify_dies=true,notify_finishes=true,notify_gram=true")
         }
@@ -190,7 +161,7 @@ final class GuestGramPaneTests: XCTestCase {
         let enable = app.buttons["guest-push-enable"]
         XCTAssertTrue(enable.waitForExistence(timeout: 10))
         enable.tap()
-        waitForProbe(app, "guest-host-calls", "Turn on should register the device") {
+        pollLabel(app, "guest-host-calls", "Turn on should register the device") {
             $0.contains("notify_needs_input=true,notify_dies=true,notify_finishes=true,notify_gram=false")
         }
         XCTAssertFalse(app.buttons["guest-tab-gram"].exists)
@@ -276,15 +247,15 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(send.waitForExistence(timeout: 5), "a staged file should be sendable")
         send.tap()
 
-        let calls = waitForProbe(app, "guest-host-calls", "the agent should be prompted with the file",
-                                 timeout: 15) { $0.contains("agent.prompt:") }
+        let calls = pollLabel(app, "guest-host-calls", "the agent should be prompted with the file",
+                              timeout: 15) { $0.contains("agent.prompt:") }
         let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
         XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, "the chip should clear once delivered")
         XCTAssertTrue(app.staticTexts["Message llm-opt as plotarmordev"].waitForExistence(timeout: 5),
                       "a delivered message clears the composer")
         let note = element(app, "guest-note")
         XCTAssertFalse(note.exists, "the send should not fail: \(note.exists ? note.label : "")")
-        attachScreenshot(app, "guest-attachment-sent")
+        attach(app, "guest-attachment-sent")
         return calls.components(separatedBy: ";")
     }
 }
