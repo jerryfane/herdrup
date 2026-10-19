@@ -574,8 +574,17 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         launch("resize", environment: ["HERDR_CLAIM_GRACE_MS": "600000"])
         let before = wait { self.claimCount("claims", pane: "ix:a", in: $0) > 0 }
         let claimsBefore = claimCount("claims", pane: "ix:a", in: before)
+        let releasesBefore = claimCount("inactiveReleases", pane: "ix:a", in: before)
         XCUIDevice.shared.press(.home)
-        Thread.sleep(forTimeInterval: 3)
+        // Wait for THIS background's release, read from the receipt while the app is still
+        // in the background (reading the probe does not bring the app forward), instead of a
+        // fixed dwell counted from the press. Counting from `releasesBefore` means an earlier
+        // release cannot satisfy it. A synchronization improvement, not a reproduced fix: in
+        // CI 39251022452 the app entered the background 2.5 s after Home and was back 1.31 s
+        // later with no release, and that red was not reproduced. The 30 s bound is new.
+        XCTAssertTrue(holds(within: 30) {
+            self.claimCount("inactiveReleases", pane: "ix:a", in: $0) > releasesBefore
+        }, "no release went out before the app was brought back: \(probe())")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
                       "the app did not return to the foreground")
