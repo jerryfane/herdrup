@@ -19,10 +19,7 @@ final class GramTests: XCTestCase {
     private var hasSidebar: Bool { UIDevice.current.userInterfaceIdiom != .phone }
 
     private func launchGram(environment: [String: String] = [:]) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launchEnvironment.merge(environment) { _, new in new }
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list", environment: environment)
         let tab = app.buttons["Gram"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 10))
         tab.tap()
@@ -74,11 +71,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(newest.waitForExistence(timeout: 5), "the newest message should be laid out")
         XCTAssertTrue(newest.isHittable, "the feed should open showing the newest message")
 
-        let shot = app.screenshot()
-        let attachment = XCTAttachment(screenshot: shot)
-        attachment.name = "gram-page"
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(app, "gram-page")
     }
 
     /// The search field filters the loaded inbox, and a filter that matches nothing says so
@@ -264,21 +257,17 @@ final class GramTests: XCTestCase {
         // The loaded-message count rides on the feed's message stack (`gram-feed-messages`).
         let messages = app.otherElements["gram-feed-messages"]
         XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
-        func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
-            let loaded = NSPredicate(format: "value == %@", "\(count) messages")
-            return waitForPredicate(loaded, object: messages, timeout: timeout)
-        }
         if !hasSidebar {
             // The phone's first page overfills the screen: opening fetches nothing.
-            XCTAssertTrue(waitForCount(12, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
+            XCTAssertTrue(waitForCount(messages, 12, timeout: 2), "opening should not load an older page; feed says \(messages.value ?? "nil")")
         }
 
         // Scroll up only until the page lands, so the swipes themselves cannot reach the top
         // of the NEW page and ask for the next one.
-        var paged = waitForCount(36, timeout: 2)
+        var paged = waitForCount(messages, 36, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(36, timeout: 3)
+            paged = waitForCount(messages, 36, timeout: 3)
         }
         XCTAssertTrue(paged, "reaching the top should load the older page (12 + 24 messages); feed says \(messages.value ?? "nil")")
 
@@ -337,11 +326,7 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
         let messages = app.otherElements["gram-feed-messages"]
         XCTAssertTrue(messages.waitForExistence(timeout: 5), "the feed should report its message count")
-        func waitForCount(_ count: Int, timeout: TimeInterval) -> Bool {
-            let loaded = NSPredicate(format: "value == %@", "\(count) messages")
-            return waitForPredicate(loaded, object: messages, timeout: timeout)
-        }
-        XCTAssertTrue(waitForCount(12, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(messages, 12, timeout: 5), "the first page only; feed says \(messages.value ?? "nil")")
         let newest = app.staticTexts["Great, ship it."]
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "the feed opens at the newest message")
@@ -357,12 +342,12 @@ final class GramTests: XCTestCase {
         gramTab.tap()
         XCTAssertTrue(newest.waitForExistence(timeout: 5) && newest.isHittable,
                       "back on Gram, the feed is still at the newest message")
-        XCTAssertTrue(waitForCount(12, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
+        XCTAssertTrue(waitForCount(messages, 12, timeout: 2), "coming back loads nothing; feed says \(messages.value ?? "nil")")
 
-        var paged = waitForCount(36, timeout: 2)
+        var paged = waitForCount(messages, 36, timeout: 2)
         for _ in 0..<8 where !paged {
             feed.swipeDown(velocity: .slow)
-            paged = waitForCount(36, timeout: 3)
+            paged = waitForCount(messages, 36, timeout: 3)
         }
         XCTAssertTrue(paged, "after a tab round trip, reaching the top should still load the older page; feed says \(messages.value ?? "nil")")
         let previousTop = app.staticTexts.matching(
@@ -586,10 +571,7 @@ final class GramTests: XCTestCase {
         // Like Messages, the bubble hugs its widest line, so it may widen; never narrower.
         XCTAssertGreaterThanOrEqual(bubble.frame.width, folded.width - 1, "expanding never narrows the bubble")
 
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = "gram-read-more-expanded"
-        shot.lifetime = .keepAlways
-        add(shot)
+        attach(app, "gram-read-more-expanded")
 
         for _ in 0..<3 where !showLess.isHittable { app.swipeDown() }
         showLess.tap()
@@ -960,15 +942,16 @@ final class GramTests: XCTestCase {
         waitForPredicate(NSPredicate(format: "label MATCHES %@", pattern), object: element, timeout: timeout)
     }
 
-    /// Judge each completed lookup before the deadline: XCTest's asynchronous waiter can
-    /// time out during a slow accessibility query even when the observed state already matches.
+    /// Waits until the feed's message stack (`gram-feed-messages`) reports `count` loaded messages.
+    private func waitForCount(_ messages: XCUIElement, _ count: Int, timeout: TimeInterval) -> Bool {
+        let loaded = NSPredicate(format: "value == %@", "\(count) messages")
+        return waitForPredicate(loaded, object: messages, timeout: timeout)
+    }
+
+    /// Polls rather than using XCTest's asynchronous waiter, which can time out during a slow
+    /// accessibility query even when the observed state already matches.
     private func waitForPredicate(_ matches: NSPredicate, object: Any?, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if matches.evaluate(with: object) { return true }
-            Thread.sleep(forTimeInterval: 0.2)
-        } while Date() < deadline
-        return matches.evaluate(with: object)
+        poll(timeout, every: 0.2) { matches.evaluate(with: object) }
     }
 
     /// Waits until `gram-get-file-calls` reports `count` `gram.get_file` calls for `id` (the
@@ -977,12 +960,7 @@ final class GramTests: XCTestCase {
     private func waitForGetFileCalls(_ probe: XCUIElement, _ id: String, _ count: Int,
                                      timeout: TimeInterval) -> Bool {
         let wanted = "\(id)=\(count)"
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if probe.label.split(separator: " ").contains(Substring(wanted)) { return true }
-            Thread.sleep(forTimeInterval: 0.2)
-        } while Date() < deadline
-        return probe.label.split(separator: " ").contains(Substring(wanted))
+        return poll(timeout, every: 0.2) { probe.label.split(separator: " ").contains(Substring(wanted)) }
     }
 
     /// Scrolls the feed until `element` is on screen below the floating header (the header is
@@ -1014,10 +992,7 @@ final class GramTests: XCTestCase {
         let preview = probe(app, "gram-image-preview-g3")
         XCTAssertTrue(waitForLabel(preview, matching: "preview", timeout: 8),
                       "the image card should decode its preview on its own; probe says \(preview.label)")
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = "gram-image-preview"
-        shot.lifetime = .keepAlways
-        add(shot)
+        attach(app, "gram-image-preview")
     }
 
     /// Opening an image whose preview already landed opens the cached file: the daemon is
@@ -1223,10 +1198,7 @@ final class GramTests: XCTestCase {
         XCTAssertLessThanOrEqual(threeLines.maxY, send.frame.minY + 1,
                                  "wrapped text moves above a toolbar holding the buttons")
         XCTAssertTrue(send.isHittable)
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "gram-composer-three-lines"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
+        attach(app, "gram-composer-three-lines")
 
         // The pull-to-expand editor: the handle appears at three lines, a tap opens a
         // taller editor above a fixed send button, and a second tap closes it.
@@ -1236,10 +1208,7 @@ final class GramTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.8)
         XCTAssertGreaterThan(field.frame.height, threeLines.height + 20, "tapping the handle opens the editor")
         XCTAssertEqual(send.frame.maxY, sendBottom, accuracy: 2, "opening the editor does not move send")
-        let editor = XCTAttachment(screenshot: app.screenshot())
-        editor.name = "gram-composer-editor"
-        editor.lifetime = .keepAlways
-        add(editor)
+        attach(app, "gram-composer-editor")
         handle.tap()
         Thread.sleep(forTimeInterval: 0.8)
         XCTAssertEqual(field.frame.height, threeLines.height, accuracy: 2, "a second tap closes it")
