@@ -31,16 +31,6 @@ struct GuestPaneView: View {
         case lost
     }
 
-    private struct Attachment: Identifiable {
-        let id = UUID()
-        let name: String
-        let mime: String
-        let staged: StagedAttachment
-        var uploadID: String?
-        var messageID: String?
-        var isImage: Bool { mime.hasPrefix("image/") }
-    }
-
     /// The host caps a prompt at 32 KiB (`invalid_params` beyond it).
     static let maxPromptBytes = 32 * 1024
     private static let pollNanoseconds: UInt64 = 5_000_000_000
@@ -55,8 +45,9 @@ struct GuestPaneView: View {
     @State private var note: String?
     /// Why the last status poll failed, when it wasn't a change of availability.
     @State private var connectionNote: String?
-    @State private var attachments: [Attachment] = []
+    @State private var attachments: [ComposerAttachment] = []
     @State private var sendingAttachmentID: UUID?
+    @State private var failedAttachmentID: UUID?
     @State private var uploadBytes: (sent: Int, total: Int)?
     @State private var loadingAttachment = false
     @State private var showAttachSheet = false
@@ -147,7 +138,8 @@ struct GuestPaneView: View {
             room: { GramView.Staging.maxAttachments - attachments.count }
         ) { outcome in
             attachments += outcome.files.map {
-                Attachment(name: $0.name, mime: $0.mime, staged: $0.staged)
+                ComposerAttachment(name: $0.name, mime: $0.mime,
+                                   isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
             }
             note = outcome.note
         }
@@ -496,17 +488,10 @@ struct GuestPaneView: View {
         .disabled(!canCompose)
     }
 
-    private func attachmentChip(_ file: Attachment) -> some View {
-        let state: ComposerAttachmentState
-        if sendingAttachmentID == file.id, let bytes = uploadBytes {
-            state = .uploading(sent: bytes.sent, total: bytes.total)
-        } else if sendingAttachmentID == file.id {
-            state = .sending
-        } else if file.messageID != nil {
-            state = .sent
-        } else {
-            state = sending ? .waiting : .ready
-        }
+    private func attachmentChip(_ file: ComposerAttachment) -> some View {
+        let state = ComposerAttachmentState.for(
+            file, sending: sending, sendingID: sendingAttachmentID,
+            failedID: failedAttachmentID, uploadBytes: uploadBytes)
         return ComposerAttachmentChip(
             name: file.name, size: file.staged.size, isImage: file.isImage, state: state,
             canRemove: !sending
@@ -610,6 +595,7 @@ struct GuestPaneView: View {
         let batch = attachments
         Task {
             defer { sending = false; uploadBytes = nil; sendingAttachmentID = nil }
+            failedAttachmentID = nil
             do {
                 var prompt = text
                 if !batch.isEmpty {
@@ -618,7 +604,7 @@ struct GuestPaneView: View {
                 }
                 try await client.prompt(pane: access.agentTarget, text: prompt,
                                         waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
-                for file in batch { try? FileManager.default.removeItem(at: file.staged.dir) }
+                // Each file's staged bytes went when its gram posted (the sender).
                 let sentIDs = Set(batch.map(\.id))
                 attachments.removeAll { sentIDs.contains($0.id) }
                 if reply.trimmingCharacters(in: .whitespacesAndNewlines) == text { reply = "" }
@@ -630,60 +616,36 @@ struct GuestPaneView: View {
         }
     }
 
-    /// Uploads and posts each staged file as a gram to the shared agent, remembering each
-    /// step so a retry after a failure resumes rather than re-sends.
-    private func deliver(_ batch: [Attachment]) async throws -> [GramAttachmentPrompt.Delivered] {
-        var delivered: [GramAttachmentPrompt.Delivered] = []
-        for original in batch {
-            var file = attachments.first { $0.id == original.id } ?? original
-            sendingAttachmentID = file.id
-            if file.messageID == nil {
-                if file.uploadID == nil {
-                    file.uploadID = try await upload(file)
-                    remember(file)
+    /// Uploads and posts each staged file as a gram to the shared agent
+    /// (`GramAttachmentSender`), remembering each step so a retry after a failure resumes
+    /// rather than re-sends.
+    private func deliver(_ batch: [ComposerAttachment]) async throws -> [GramAttachmentPrompt.Delivered] {
+        let sender = GramAttachmentSender(
+            upload: { file in
+                uploadBytes = (sent: 0, total: file.size)
+                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
+                    uploadBytes = (sent: sent, total: total)
                 }
-                let posted: GuestGramPostReceipt
-                do {
-                    posted = try await post(file)
-                } catch let error where GramAttachmentSender.isStaleUpload(error) {
-                    // The host holds nothing under that upload id (an earlier post used it
-                    // up): upload the file again and post once more.
-                    file.uploadID = nil
-                    remember(file)
-                    file.uploadID = try await upload(file)
-                    remember(file)
-                    posted = try await post(file)
-                }
-                file.messageID = posted.id
-                remember(file)
-            }
-            delivered.append(GramAttachmentPrompt.Delivered(
-                name: file.name, isImage: file.isImage, messageID: file.messageID ?? ""))
+                uploadBytes = nil
+                return uploadID
+            },
+            post: { _, attachment in
+                try await client.guestGramPost(
+                    text: "Attachment from \(access.guestName).", to: access.agentName,
+                    attachment: attachment
+                ).id
+            })
+        let result = await sender.send(batch, sending: { sendingAttachmentID = $0.id }) { file in
+            guard let index = attachments.firstIndex(where: { $0.id == file.id }) else { return }
+            attachments[index] = file
         }
-        return delivered
-    }
-
-    /// Uploads a staged file's bytes and returns the host's `upload_id` for it.
-    private func upload(_ file: Attachment) async throws -> String {
-        uploadBytes = (sent: 0, total: file.staged.size)
-        let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
-            uploadBytes = (sent: sent, total: total)
+        switch result {
+        case .success(let delivered):
+            return delivered
+        case .failure(let failure):
+            failedAttachmentID = failure.attachment.id
+            throw failure.error
         }
-        uploadBytes = nil
-        return uploadID
-    }
-
-    /// Posts an uploaded file to the shared agent as the guest's Gram.
-    private func post(_ file: Attachment) async throws -> GuestGramPostReceipt {
-        try await client.guestGramPost(
-            text: "Attachment from \(access.guestName).", to: access.agentName,
-            attachment: HerdrClient.GramFileAttachment(
-                uploadID: file.uploadID ?? "", name: file.name, mime: file.mime))
-    }
-
-    private func remember(_ file: Attachment) {
-        guard let index = attachments.firstIndex(where: { $0.id == file.id }) else { return }
-        attachments[index] = file
     }
 
     private func failureNote(_ error: Error) -> String {
