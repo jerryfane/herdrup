@@ -513,10 +513,6 @@ struct RootView: View {
             HtmlPreviewHarness()
         case .widgets:
             WidgetGallery()
-        case .newAgent:
-            NewAgentView(client: mockClient,
-                         initialFolder: "/root/herdr-ios", initialKind: "codex",
-                         initialTask: "Fix the failing schema artifact test and push")
         case .scroll:
             // A REAL SwiftTerm pane (not a stub) fed 200 lines of scrollback, so the
             // HerdrUITests swipe exercises the actual library scroll path — the only
@@ -527,8 +523,8 @@ struct RootView: View {
                                  agent: MockTransport.demoPaneAgent)
             }
         case .ccscroll:
-            // A REAL SwiftTerm pane in alt-screen + mouse-mode (Claude Code fullscreen
-            // shape). CCScrollDriver stands in for Claude Code: it redraws shifted
+            // A REAL SwiftTerm pane in mouse-mode on the normal buffer (Claude Code's shape).
+            // CCScrollDriver stands in for Claude Code: it redraws shifted
             // content when the app SENDS it an SGR wheel event, so the HerdrUITests
             // swipe proves the mouse-mode scroll path end to end.
             NavigationStack {
@@ -580,7 +576,7 @@ struct RootView: View {
             // Accept is injected: it returns the mock share without touching the network,
             // then lands on guest home exactly like a live accept.
             if let openGuest {
-                mockGuestHome(openGuest, initialTab: .agents)
+                mockGuestHome(openGuest)
             } else {
                 GuestAcceptView(
                     invite: GuestMockTransport.invite,
@@ -592,10 +588,10 @@ struct RootView: View {
                     },
                     onCancel: {})
             }
-        case .guest, .guestSettings:
+        case .guest:
             // After Leave the in-memory store is empty and the phone is back on onboarding.
             if let access = sharedMachines.machines.first {
-                mockGuestHome(access, initialTab: mode == .guestSettings ? .settings : .agents)
+                mockGuestHome(access)
             } else {
                 ConnectView { _ in }
             }
@@ -608,7 +604,7 @@ struct RootView: View {
 
     /// Guest home over the mock relay: the running scenario, whose agent.list also
     /// carries an agent that was not shared, which the home must not show.
-    private func mockGuestHome(_ access: GuestAccess, initialTab: GuestHomeView.Tab) -> some View {
+    private func mockGuestHome(_ access: GuestAccess) -> some View {
         GuestHomeView(
             access: access,
             connect: {
@@ -617,7 +613,6 @@ struct RootView: View {
                     client: HerdrClient(transport: GuestMockTransport(scenario: .running, onFeatures: features.sink())),
                     fingerprint: try GuestDevice.identity().fingerprint, features: features)
             },
-            initialTab: initialTab,
             onBack: nil,
             onLeave: { openGuest = nil })
     }
@@ -788,9 +783,6 @@ struct RootView: View {
     }
 }
 
-/// The connect screen: a manager of saved machines. Tap a host to connect (one tap);
-/// "Add host" and hold-to-Edit open the HostEditor sheet. Constructing the transport
-/// does not connect — the first request does — so this never blocks on the network.
 /// Setup facts shown on more than one screen.
 ///
 /// One definition, because the first-run screen and the post-failure guidance must not
@@ -835,6 +827,9 @@ private struct ConnectRowButtonStyle: ButtonStyle {
     }
 }
 
+/// The connect screen: a manager of saved machines. Tap a host to connect (one tap);
+/// "Add host" and hold-to-Edit open the HostEditor sheet. Constructing the transport
+/// does not connect — the first request does — so this never blocks on the network.
 struct ConnectView: View {
     var onConnect: (SSHCredentials) -> Void
     /// Opens the home of a machine someone shared with this phone.
@@ -1246,9 +1241,9 @@ struct NewAgentView: View {
     let onStarted: (_ paneID: String, _ name: String, _ task: String) -> Void
     let onCancel: () -> Void
 
-    @State private var folder: String
-    @State private var kind: String
-    @State private var task: String
+    @State private var folder = ""
+    @State private var kind = "claude"
+    @State private var task = ""
     @State private var starting = false
     @State private var errorMessage: String?
     /// The harnesses actually installed on the connected machine (`agent.kinds`), fetched on appear.
@@ -1265,14 +1260,10 @@ struct NewAgentView: View {
 
     init(client: HerdrClient,
          onStarted: @escaping (_ paneID: String, _ name: String, _ task: String) -> Void = { _, _, _ in },
-         onCancel: @escaping () -> Void = {},
-         initialFolder: String = "", initialKind: String = "claude", initialTask: String = "") {
+         onCancel: @escaping () -> Void = {}) {
         self.client = client
         self.onStarted = onStarted
         self.onCancel = onCancel
-        _folder = State(initialValue: initialFolder)
-        _kind = State(initialValue: initialKind)
-        _task = State(initialValue: initialTask)
     }
 
     private var trimmedFolder: String { folder.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -5708,8 +5699,9 @@ struct TerminalPaneContent: View {
         }
         .onDisappear { ctrlArmed = false }
         // When the app returns to the foreground, reseed the FRONT pane the same way the
-        // header refresh button does (bump streamGen → remount → startBackfill() reads the
-        // durable current screen + scrollback) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
+        // header refresh button does (bump streamGen → remount → a fresh keyframe, which
+        // carries the scrollback on current servers; startBackfill()'s read is the fallback
+        // for servers without keyframe history) — BUT ONLY IF THE STREAM ACTUALLY STOPPED.
         //
         // #62's fix keyed the reseed on scene phase alone, which is a PROXY, and the proxy
         // is only true on iOS. There the app is suspended, the stream really did stall, and
@@ -9410,12 +9402,6 @@ extension View {
 }
 
 #if DEBUG
-/// DEBUG-only screenshot mode: renders the list/pane views from MockTransport —
-/// no connection, no key, so the buildbox can screenshot them SAFELY (the app
-/// otherwise launches to the empty ConnectView). Enable by launching with env
-/// `HERDR_SCREENSHOT_MOCK=list` (default) or `=pane`, or the `-herdrScreenshotMock`
-/// launch argument.
-#if DEBUG
 /// Gram screenshot/UI-test harness (`HERDR_SCREENSHOT_MOCK=gram`). `GramView`'s Inbox/Saved
 /// selection is a binding owned by the host (on regular width the selector lives in the app's
 /// split-view sidebar), and `mockView` is a function that cannot hold `@State` — so this holds
@@ -9425,10 +9411,9 @@ struct GramScreenshotHarness: View {
     @State private var showingSaved = false
 
     var body: some View {
-        // `onClose` nil hides the close X (there is nothing to dismiss to in a standalone
-        // render). The machine label is the one the design's sample conversation names for
-        // local senders ("vetrina · mac-studio"); a live session gets it from its connection.
-        GramView(client: client, onClose: nil, showingSaved: $showingSaved)
+        // The machine label is the one the design's sample conversation names for local
+        // senders ("vetrina · mac-studio"); a live session gets it from its connection.
+        GramView(client: client, showingSaved: $showingSaved)
             .environment(\.guestMachineLabel, "mac-studio")
     }
 }
@@ -9479,13 +9464,11 @@ struct PagingTestHarness: View {
                       initialReply: "", siblings: slot.siblings))
     }
 }
-#endif
 
 /// Renders the received-document viewer over a file that tries to REWRITE ITSELF with
 /// script, so a UI receipt can read the rendered text and see whether the Settings
 /// switch let it run. Reads the same `@AppStorage` key `GramView` reads and passes it
 /// to the same view, so the receipt covers the shipping wiring rather than a stand-in.
-#if DEBUG
 struct HtmlPreviewHarness: View {
     @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
 
@@ -9505,11 +9488,15 @@ struct HtmlPreviewHarness: View {
             .ignoresSafeArea(edges: .bottom)
     }
 }
-#endif
 
+/// DEBUG-only screenshot and UI-test mode: renders the app's views from MockTransport and
+/// the other mocks below — no connection, no key, so the buildbox can screenshot them
+/// SAFELY (the app otherwise launches to the empty ConnectView). Enable by launching with
+/// env `HERDR_SCREENSHOT_MOCK=<mode>` (one of the names `mode` parses; anything else is
+/// `list`), or the `-herdrScreenshotMock` launch argument, which also gives `list`.
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, newAgent, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, gram, resize, control, htmlPreview, widgets
-    case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost, guestSettings
+    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, gram, resize, control, htmlPreview, widgets
+    case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
     // The home list's live status stream: an events_v2 daemon, and an older one.
@@ -9547,12 +9534,11 @@ enum ScreenshotMock {
         // widget extension compiles — over a bright and a dark backdrop, so the layout
         // and its contrast can be LOOKED at. XCUITest cannot see a real Live Activity.
         case "widgets": return .widgets
-        case "newagent": return .newAgent
         // `scroll` drives the omp scroll receipt: a real SwiftTerm pane seeded with 200
         // distinct lines of scrollback so a swipe visibly moves the content.
         case "scroll": return .scroll
         // `ccscroll` drives the Claude-Code scroll receipt: a real SwiftTerm pane put
-        // into alt-screen + mouse-mode (like Claude Code fullscreen) whose stand-in
+        // into mouse-mode on the normal buffer (like Claude Code) whose stand-in
         // agent redraws shifted content when it RECEIVES an SGR wheel event — so a swipe
         // proves drag → app emits wheel → content moves.
         case "ccscroll": return .ccscroll
@@ -9576,8 +9562,8 @@ enum ScreenshotMock {
         // `gram` renders the Gram page from a canned owner-view gram.list — the
         // messages, unread badge, claim states, and composer, for a layout FYI.
         case "gram": return .gram
-        // Guest access (#312): the invite accept screen, the guest home, the view-only
-        // pane in each state, and the guest Settings tab, all over GuestMockTransport.
+        // Guest access (#312): the invite accept screen, the guest home and the view-only
+        // pane in each state, all over GuestMockTransport.
         case "guestaccept": return .guestAccept
         case "guest": return .guest
         case "guestpane": return .guestPane
@@ -9585,15 +9571,11 @@ enum ScreenshotMock {
         case "guestblocked": return .guestBlocked
         // A host older than guest resizing: it refuses the guest's `pane.set_pty_size`.
         case "guestoldhost": return .guestOldHost
-        case "guestsettings": return .guestSettings
         default: return .list
         }
     }
 }
 
-/// Canned-response transport for the screenshot mock. The JSON is machine-checked
-/// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
-/// compiled on Linux) — keep the two fixtures in sync.
 /// `MockTransport` behind a daemon whose `ping` advertises `agent_forget` (#380), so the
 /// archived rows offer Close. The plain mock's ping does not decode, which is the
 /// older-daemon path where Close stays hidden.
@@ -9608,8 +9590,6 @@ struct ForgetCapableMockTransport: HerdrTransport {
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> { base.stream(requestLine) }
 }
 
-/// `MockTransport` on a machine with three running herdr sessions (work, personal and
-/// default) for the session pills receipt (#347). Every session answers with the demo list.
 /// The `sessions` mock's stand-in for RootView's session switch (#386): a tap on a pill
 /// remounts the home on a client for that session, sharing one `SessionSwitchCache`,
 /// exactly as RootView does on a real machine.
@@ -9633,6 +9613,8 @@ struct SessionsMockHome: View {
     }
 }
 
+/// `MockTransport` on a machine with three running herdr sessions (work, personal and
+/// default) for the session pills receipt (#347). Every session answers with the demo list.
 struct SessionsMockTransport: SessionListingTransport {
     private let base = MockTransport()
     /// The session this client addresses, and whether it was reached by a switch.
@@ -9665,21 +9647,24 @@ struct SessionsMockTransport: SessionListingTransport {
     }
 }
 
+/// Canned-response transport for the screenshot mock. The JSON is machine-checked
+/// in Tests/HerdrKitTests/MockWireFixtureTests.swift (the app target can't be
+/// compiled on Linux) — keep the two fixtures in sync.
 struct MockTransport: HerdrTransport {
     /// When true, `pane.stream` seeds MANY lines of scrollback (for the omp UI scroll
     /// receipt) instead of the short screenshot seed. Default false keeps the
     /// buildbox screenshot fixtures unchanged.
     var scrollback = false
-    /// When set, this pane is a Claude-Code stand-in (alt-screen + mouse-mode) that
+    /// When set, this pane is a Claude-Code stand-in (mouse-mode on the normal buffer) that
     /// scrolls in RESPONSE to SGR wheel events the app sends — for the ccscroll receipt.
     var ccDriver: CCScrollDriver?
-    /// When true, `agent.read` (source=recent, ansi) returns MANY numbered lines of history
-    /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
-    /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
     /// When true, `pane.stream` keeps APPENDING output after the seed, so SwiftTerm's
     /// auto-follow writes `contentOffset` on every frame. The busy-pane state: the scroll-tap
     /// guard must still let a tap take focus here, and two earlier versions of it did not.
     var busyOutput = false
+    /// When true, `agent.read` (source=recent, ansi) returns MANY numbered lines of history
+    /// while `pane.stream` seeds only the SHORT one-screen reset — so the scrollback a swipe
+    /// reveals can ONLY come from the connect-time backfill path. For the backfill receipt.
     var backfill = false
     /// When set, `pane.stream` carries history only inside its keyframes and drops the first
     /// stream after its keyframe; `agent.read` returns no history. For the reconnect receipt.
@@ -9722,6 +9707,7 @@ struct MockTransport: HerdrTransport {
             if Self.gramPaged { list = Self.gramPagedList(requestLine) }
             else if Self.gramImageCount > 0 { list = Self.gramListWithImages }
             else if Self.gramExpiresSaved { list = await Self.gramListExpiringSaved() }
+            else if Self.gramHtml { list = Self.gramListWithHtml }
             else { list = Self.gramNewer ? Self.gramListWithNewer : Self.gramList }
             let answer = Self.applyingOwnerReads(reads, to: list)
             if Self.gramHoldsPollAcrossRead, Self.isGramHeadPoll(requestLine) {
@@ -9739,7 +9725,8 @@ struct MockTransport: HerdrTransport {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
             // g3 is the list fixture's image, and `gi<n>` the image mock's: a real PNG, so
-            // the card decodes a preview.
+            // the card decodes a preview. gh1 is the HTML mock's report.
+            if id == "gh1" { return Self.gramHtmlContent }
             return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : Self.gramFileContent
         }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
@@ -10216,6 +10203,20 @@ struct MockTransport: HerdrTransport {
         gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
     }
 
+    /// `HERDR_MOCK_GRAM_HTML=1`: `gram.list` answers `gramList` with `gramHtmlRow` above its
+    /// newest message: an HTML file, which opens in the web viewer rather than QuickLook.
+    static var gramHtml: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_HTML"] == "1"
+    }
+
+    static var gramListWithHtml: String {
+        gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramHtmlRow + ",")
+    }
+
+    /// vetrina's HTML run report (gh1), read. Byte-identical to MockWireFixtures.gramHtmlRow.
+    static let gramHtmlRow =
+        #"{"id":"gh1","direction":"agent_to_owner","from":"vetrina","text":"Run report attached.","created_unix_ms":1723041420000,"read_by_owner":true,"file":{"name":"run-report.html","size":90,"mime":"text/html","sha256":"d78f7bf51215300da41164a777bd546b14995a93350f629717cfe83458e3f8b3"}}"#
+
     /// `HERDR_MOCK_GRAM_IMAGES=N`: `gram.list` answers `gramList` with N image messages (each
     /// `gram.get_file` answers the g3 PNG) above its newest message, each followed by a
     /// three-line text, so a scroll through the feed keeps carrying pictures on and off screen.
@@ -10257,6 +10258,11 @@ struct MockTransport: HerdrTransport {
     /// small enough to inline, real enough for the card's ImageIO decode.
     static let gramImageContent =
         #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":413,"data_base64":"iVBORw0KGgoAAAANSUhEUgAAACAAAAASCAIAAAC1qksFAAABZElEQVR42o2SPUsDQRCGZ+b+lkUKkQgKKQIKYhpLO4lIAgqmsrK0UBC0sLVXRMTCwsLCwsb/st5tbvfma3NCCHOz7zvPzOzixtovYaiaH1RkAgxEbVDlgAmIKSurJMDNwU+ytU7Kn8TyyeZ0I5UkWgm4vf5N6BQSBlWuhBTsBBgNv7QNA2m1h0QP2axUZHC89akrGltPRc/SAXZGH05FsIZegUFCBOyN38UEYGxghgCNjDxJShmc7L7abOwR3HyM2cWKIzZBBhzsP7dZtyLwHjuADUgtIE2J08On9kOe6YoKCektmbxoFwLeXLwlABttBVIIugx5lgZwd/li1U0G4sXqIzZBgdS1u3xF57PHfExKLQNibDFlCbkETI8e/IqQ3pKty5GOl01Qr+jk+J6LiPMNkjhAKXM30oLz2a1sTU1Qrgh5LUwgATUSz06vxcWqir1IGaSVsgkWiysqqP+DXO2t//8AaXuKJu4OmmAAAAAASUVORK5CYII="}}"#
+
+    /// The `gram.get_file` reply for the HTML mock's report (gh1): a 90-byte HTML page.
+    /// Byte-identical to MockWireFixtures.gramHtmlContent.
+    static let gramHtmlContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"run-report.html","mime":"text/html","size":90,"data_base64":"PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT5SdW4gcmVwb3J0PC90aXRsZT48cD5BbGwgMTQ2IHRlc3RzIHBhc3NlZC48L3A+"}}"#
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
@@ -10631,7 +10637,7 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
 }
 
 /// Stateful stand-in for a Claude-Code pane in the `ccscroll` UI test. It puts the REAL
-/// SwiftTerm view into ALT-SCREEN + MOUSE-MODE (like Claude Code "fullscreen"), then —
+/// SwiftTerm view into MOUSE-MODE on the normal buffer (see `attach`), then —
 /// each time the app SENDS it an SGR wheel event (`ESC[<64`/`<65`, proof the finger-drag
 /// was translated to wheel for a mouse-mode agent) — redraws the screen shifted by a few
 /// lines, standing in for Claude Code scrolling its own viewport. So the XCUITest proves
@@ -10676,7 +10682,7 @@ final class CCScrollDriver: @unchecked Sendable {
     }
 
     /// A 24-row window into a 200-line virtual transcript at the current `offset`,
-    /// cleared + home-positioned so each redraw fully repaints the visible alt screen.
+    /// cleared + home-positioned so each redraw fully repaints the visible screen.
     /// Each row is a FULL-WIDTH band of a character keyed to its line number, so a
     /// scroll (window shift) changes most pixels on screen — a subtle number-only tweak
     /// would fall under the test's pixel-diff threshold even when the scroll DID happen.

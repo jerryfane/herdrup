@@ -299,11 +299,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
 
-  # UI-test bundle — the automated SCROLL RECEIPT. Launches the app in the
-  # HERDR_SCREENSHOT_MOCK=scroll pane (a real SwiftTerm view fed 200 lines), swipes it,
-  # and asserts the rendered content MOVED (proving the SwiftTerm 1.15.0 scroll fix on a
-  # simulator — the on-device gesture proof JARVIS rule 47874 requires). Simulator only,
-  # never signed, never archived. GENERATE_INFOPLIST_FILE builds the test bundle plist.
+  # UI-test bundle: every XCUITest class in HerdrUITests, run against the app's
+  # HERDR_SCREENSHOT_MOCK modes. Simulator only, never signed, never archived.
+  # GENERATE_INFOPLIST_FILE builds the test bundle plist.
   HerdrUITests:
     type: bundle.ui-testing
     platform: iOS

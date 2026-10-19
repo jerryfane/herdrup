@@ -163,7 +163,6 @@ Sources/HerdrKit/        pure-Swift transport + typed API — Linux-testable, no
   AgentStatusStream.swift  all-pane status stream lines (events v2) and row patching
   AgentList.swift          agent-list model with fail-open-visible unknown statuses
   HostKeyPinning.swift     TOFU host-key policy + the nio-ssh validator bridge
-  SessionRecovery.swift    reconnect/resync policy: attempt identity, the subscription ledger
 Tests/HerdrKitTests/     protocol/transport unit tests (run on Linux)
 ```
 

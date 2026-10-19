@@ -54,7 +54,7 @@ public struct HostEndpoint: Equatable, Sendable {
     /// This exists to CLASSIFY A FAILURE, not to gate a connection: a phone off the
     /// tailnet cannot route here at all, so retrying is futile in a way that an
     /// ordinary unreachable host is not (a LAN box may simply be rebooting). See
-    /// `SessionRecovery.giveUpAfterFailures`.
+    /// `TransportError.connectTimedOut(host:onTailnet:)`.
     ///
     /// Address-range matching on purpose — no interface probing, so it needs no
     /// permissions and cannot be wrong about what the app is actually dialing.

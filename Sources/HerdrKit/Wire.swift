@@ -1045,7 +1045,6 @@ public struct PanePtySize: Decodable, Sendable, Equatable {
 /// talking to an older daemon simply hides unsupported controls.
 public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let liveHandoff: Bool
-    public let detachedServerDaemon: Bool
     public let paneInputStream: Bool
     public let gramUploadStream: Bool
     public let agentSessionTransfer: Bool
@@ -1065,7 +1064,6 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
-        case detachedServerDaemon = "detached_server_daemon"
         case paneInputStream = "pane_input_stream"
         case gramUploadStream = "gram_upload_stream"
         case agentSessionTransfer = "agent_session_transfer"
@@ -1078,7 +1076,6 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         liveHandoff = try c.decodeIfPresent(Bool.self, forKey: .liveHandoff) ?? false
-        detachedServerDaemon = try c.decodeIfPresent(Bool.self, forKey: .detachedServerDaemon) ?? false
         paneInputStream = try c.decodeIfPresent(Bool.self, forKey: .paneInputStream) ?? false
         gramUploadStream = try c.decodeIfPresent(Bool.self, forKey: .gramUploadStream) ?? false
         agentSessionTransfer = try c.decodeIfPresent(Bool.self, forKey: .agentSessionTransfer) ?? false

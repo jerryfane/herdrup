@@ -53,7 +53,7 @@ struct GuestHomeView: View {
     @State private var connection: GuestConnection?
     @State private var connectError: String?
     @State private var status: Status = .loading
-    @State private var tab: Tab
+    @State private var tab: Tab = .agents
     @State private var showingPane = false
     /// The agent screen's tab; a tapped push picks it.
     @State private var paneTab: GuestPaneTab = .terminal
@@ -62,14 +62,13 @@ struct GuestHomeView: View {
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
     init(access: GuestAccess, connect: @escaping () throws -> GuestConnection,
-         initialTab: Tab = .agents, pollInterval: Duration = .seconds(5),
+         pollInterval: Duration = .seconds(5),
          onBack: (() -> Void)?, onLeave: @escaping () -> Void) {
         self.access = access
         self.connect = connect
         self.pollInterval = pollInterval
         self.onBack = onBack
         self.onLeave = onLeave
-        _tab = State(initialValue: initialTab)
     }
 
     var body: some View {

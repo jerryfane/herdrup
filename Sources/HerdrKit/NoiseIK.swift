@@ -53,8 +53,6 @@ public enum NoiseIK {
             self.key = key
         }
 
-        var hasKey: Bool { key != nil }
-
         /// Noise nonces are 32 zero bits followed by the counter little-endian.
         static func nonce(_ n: UInt64) -> ChaChaPoly.Nonce {
             var bytes = Data(count: 4)

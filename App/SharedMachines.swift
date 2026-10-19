@@ -9,9 +9,9 @@ final class SharedMachinesStore: ObservableObject {
     static let shared: SharedMachinesStore = {
         #if DEBUG
         // Screenshot mocks and UI tests never read or write the real list; the guest
-        // home mocks start with the mock share, which Leave then removes.
+        // home mock starts with the mock share, which Leave then removes.
         if let mode = ScreenshotMock.mode {
-            let seeded = mode == .guest || mode == .guestSettings ? [GuestMockTransport.access] : []
+            let seeded = mode == .guest ? [GuestMockTransport.access] : []
             return SharedMachinesStore(defaults: nil, machines: seeded)
         }
         #endif

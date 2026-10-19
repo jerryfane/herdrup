@@ -16,18 +16,17 @@ final class GramUnreadTracker: ObservableObject {
 ///
 /// The app is the OWNER. This shows the inbox (agent->owner messages the fleet
 /// sent, plus the owner's own posts and their claim state) newest-first, and a
-/// composer to post to the shared grab-queue or, with an "@name", one agent directly, with an
-/// optional file attachment. A received file shows a chip that downloads and
-/// previews it (QuickLook); long-pressing a message deletes it — and its file
-/// bytes — for good, which is what makes gram safe for a short-lived secret like
-/// a temporary API key.
+/// composer to post to the shared grab-queue or, with an "@name", one agent directly.
+/// Up to `Staging.maxAttachments` files can be staged, and each sends as its own
+/// message. A received file draws as a card (`GramFileCard`, `GramImageCard`) that
+/// downloads and previews it; long-pressing a message opens its menu, whose Delete
+/// removes it — and its file bytes — for good, which is what makes gram safe for a
+/// short-lived secret like a temporary API key.
 ///
-/// Nav-agnostic: it renders its own content and takes an optional `onClose` — a
-/// modal cover passes one (a close button appears); a persistent tab passes nil.
-/// It owns its polling and never blocks the caller.
+/// Nav-agnostic: it renders its own content, has no close control of its own (it is a
+/// persistent tab), owns its polling and never blocks the caller.
 struct GramView: View {
     let client: HerdrClient
-    var onClose: (() -> Void)?
     /// Shared unread count for the tab-bar badge. Optional (defaulted) so existing
     /// call sites (and the DEBUG harness) compile unchanged; written on load and
     /// mark-read so reading a message clears the badge without leaving the tab.
@@ -278,9 +277,10 @@ struct GramView: View {
     @State private var debugTouchRedraws = 0
     #endif
     /// Bytes of the reply received so far for the in-flight download, against the
-    /// bytes expected. The daemon returns a file in ONE base64 reply, so this counts
-    /// SSH channel bytes — about 4/3 of the file — which is the only progress signal
-    /// the protocol offers.
+    /// bytes expected. The owner's open fetches a file with `gram.get_file`, ONE base64
+    /// reply, so this counts SSH channel bytes — about 4/3 of the file — the only
+    /// progress that request gives. (`gram.get_file_chunk` exists; the guest page uses
+    /// it, this page does not.)
     ///
     /// STAYS NIL UNTIL A CALLBACK ACTUALLY ARRIVES. Only the Citadel transport reports
     /// bytes; a mock or a local socket reports none, and seeding this from the file
@@ -604,8 +604,14 @@ struct GramView: View {
                     }
             }
             // Remove the raw temp file when the viewer closes so a viewed document
-            // does not linger in tmp.
-            .onDisappear { try? FileManager.default.removeItem(at: doc.fileURL) }
+            // does not linger in tmp. A cached file is handed to the viewer as the
+            // cache entry itself (`present`'s `cachedAt`): that is not a temp file,
+            // and deleting it would make the next open download it again.
+            .onDisappear {
+                if !Downloads.isCached(doc.fileURL) {
+                    try? FileManager.default.removeItem(at: doc.fileURL)
+                }
+            }
         }
         // Delete the previewed temp file when QuickLook dismisses (it nils the
         // binding) or when it is replaced — so a previewed secret does not linger.
@@ -852,27 +858,10 @@ struct GramView: View {
         .padding(.bottom, 8)
     }
 
-    /// Back (with the unread count) when the page is a cover, else just the count.
+    /// The unread count, when there is one.
     @ViewBuilder
     private var headerLeading: some View {
-        if let onClose {
-            Button(action: onClose) {
-                HStack(spacing: 3) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Palette.text)
-                    if unreadCount > 0 { unreadCountText }
-                }
-                .padding(.leading, 11)
-                .padding(.trailing, unreadCount > 0 ? 13 : 11)
-                .frame(minWidth: 44, minHeight: 44)
-                .gramGlass(Capsule())
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-            .accessibilityValue(unreadCount > 0 ? "\(unreadCount) unread" : "")
-        } else if unreadCount > 0 {
+        if unreadCount > 0 {
             unreadCountText
                 .padding(.horizontal, 13)
                 .frame(minWidth: 44, minHeight: 44)
@@ -2867,16 +2856,17 @@ struct GramView: View {
         /// just the pre-send size gate.
         static let maxFileBytes = 100 * 1024 * 1024
 
-        /// How many files can be staged at once, in EITHER composer. Each sends as its
-        /// own gram message.
+        /// How many files can be staged at once, in any composer (Gram, the terminal
+        /// reply, the guest). Each sends as its own gram message.
         ///
         /// 10, matching the photo picker's `maxSelectionCount`. It was cut to 3 when a
         /// staged file was held in memory as `Data`: ten 100 MB picks would have been
         /// ~1 GB resident. Staged bytes now live in a temp file and the upload reads
         /// them one frame at a time, so the resident ceiling is a single frame no
-        /// matter how many files are staged or how large they are. Both send loops are
-        /// SERIAL and `gram.post` consumes each staging file, so the daemon's 1 GiB
-        /// aggregate staging budget never sees more than one upload in flight.
+        /// matter how many files are staged or how large they are. Every send loop (Gram,
+        /// the terminal reply, the guest) is SERIAL and `gram.post` consumes each staging
+        /// file, so the daemon's 1 GiB aggregate staging budget never sees more than one
+        /// upload in flight.
         static let maxAttachments = 10
 
         static let root = FileManager.default.temporaryDirectory
@@ -3227,9 +3217,10 @@ struct GramView: View {
 
     /// Marks EVERY unread message read, ignoring any active search — the button says "Read all"
     /// and the badge must reach zero, so marking only the filtered matches would leave a
-    /// non-zero badge with no visible cause. Serial, not a TaskGroup: the daemon has no bulk
-    /// mark-read (`gram.mark_read` takes one id), so a serial loop is both the existing idiom
-    /// and the one that cannot flood a forwarded SSH connection.
+    /// non-zero badge with no visible cause. Serial, not a TaskGroup: this sends one id per
+    /// `gram.mark_read` (current herdr also takes an `ids` list, but an older daemon takes
+    /// only `id`), so a serial loop is both the existing idiom and the one that cannot
+    /// flood a forwarded SSH connection.
     private func markAllRead() async {
         guard !markingAllRead else { return }
         markingAllRead = true

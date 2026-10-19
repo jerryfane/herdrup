@@ -19,11 +19,9 @@ enum Palette {
     // near-black and every surface was one step off; this restores the spec.)
     static let ground = Color(hex: 0x13162A)        // app ground — deep desaturated indigo, NEVER black
     static let groundMachine = Color(hex: 0x0B0D1C) // terminal ONLY — its own ground, one shade under
-    static let groundDeep = Color(hex: 0x0A0C18)    // behind everything (device edges / safe-area fill)
     static let surface = Color(hex: 0x1D2038)       // cards, fields, rows
     static let card = surface                       // a card IS a surface (alias, kept for call sites)
     static let surfaceRaised = Color(hex: 0x262A45) // active tab, pressed state, key panel
-    static let cardRaised = surfaceRaised           // alias, kept for call sites
     static let hairline = Color(hex: 0x2E3358)      // rule — hairline around a surface
     static let hairlineQuiet = Color(hex: 0x232742) // rule-quiet — section rules and dividers
 

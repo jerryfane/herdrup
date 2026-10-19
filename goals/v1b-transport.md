@@ -185,8 +185,8 @@ only logical selection and last-confirmed revisions.
 **Full resync on foreground.** herdr's EventHub is a **512-entry ring with no
 gap signal**, so a backgrounded client falls off the back and *cannot detect
 that it did*. Never trust sequence continuity across a background period.
-`RefreshCoordinator.invalidateAll()` exists for this; the policy that calls it
-does not.
+`RefreshCoordinator.invalidateAll()` was written for this but never called, and
+was removed unused (#452).
 
 Also: subscriptions are **pane-scoped with no wildcard**, so `pane.created`
 must trigger a re-subscribe or new panes are silently unwatched.

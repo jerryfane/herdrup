@@ -2,8 +2,11 @@ import Foundation
 
 /// Typed client for the herdr JSON API.
 ///
-/// Every command opens its own connection, because the control socket is
-/// single-shot (see `HerdrTransport`). Only `subscribe` holds a connection open.
+/// A one-off command is one request and one reply: its own channel, because the
+/// control socket is single-shot (see `HerdrTransport`), or a held `api-bridge
+/// --multi` channel where the daemon has one (see `CitadelTransport`). The streams
+/// (`subscribe`, `subscribeAgentStatus`, `streamTerminal`) and the gram upload and
+/// pane input channels each hold a connection open while they run.
 public actor HerdrClient {
     private let transport: HerdrTransport
     private let encoder: JSONEncoder = {
@@ -228,17 +231,6 @@ public actor HerdrClient {
     /// lacking the method, so callers `try?`-degrade to a static kind list.
     public func agentKinds() async throws -> [AgentKind] {
         try await call("agent.kinds", EmptyParams(), as: AgentKindsResult.self).kinds
-    }
-
-    /// The complete pane set, as a value that carries its own provenance.
-    ///
-    /// `SessionRecovery.observe` takes this rather than `[AgentInfo]` because an
-    /// array can be filtered and a `PaneSnapshot` cannot be constructed outside
-    /// the module. A partial listing silently unsubscribes every omitted pane,
-    /// and their silence afterwards is indistinguishable from having no output —
-    /// so "this is the whole set" is enforced by where the value came from.
-    public func paneSnapshot() async throws -> PaneSnapshot {
-        PaneSnapshot(agents: try await agentList())
     }
 
     struct ReadParams: Encodable {
@@ -702,44 +694,6 @@ public actor HerdrClient {
         return citadel.openUploadChannel(String(decoding: data, as: UTF8.self))
     }
 
-    /// Uploads a file's bytes in chunks and returns the `upload_id` to attach to a
-    /// `gramPost`. Chunks are sent in order; the server validates each against the
-    /// running offset. A single request per chunk keeps every one under the SSH
-    /// command-size cap.
-    ///
-    /// `onProgress` (if given) is called on the main actor with `(bytesSent, totalBytes)`
-    /// — once at 0, then throttled to ~1% steps as chunks land, and once at completion —
-    /// so a caller can drive a determinate progress bar without flooding the UI on a
-    /// large (≈2100-chunk) 100 MB upload.
-    public func gramUploadFile(
-        _ data: Data,
-        onProgress: (@MainActor @Sendable (_ bytesSent: Int, _ totalBytes: Int) -> Void)? = nil
-    ) async throws -> String {
-        let uploadID = "app-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        var offset = 0
-        // Report at most ~once per 1% (or per chunk, whichever is coarser) so a big
-        // file's thousands of round-trips don't schedule thousands of UI updates.
-        let reportStep = max(Self.gramUploadChunkBytes, data.count / 100)
-        var lastReported = -reportStep
-        await onProgress?(0, data.count)
-        while offset < data.count {
-            let end = min(offset + Self.gramUploadChunkBytes, data.count)
-            let chunk = data.subdata(in: offset..<end)
-            _ = try await call(
-                "gram.upload_chunk",
-                GramUploadChunkParams(
-                    uploadID: uploadID, offset: UInt64(offset),
-                    dataBase64: chunk.base64EncodedString()),
-                as: JSONNull.self)
-            offset = end
-            if offset == data.count || offset - lastReported >= reportStep {
-                lastReported = offset
-                await onProgress?(offset, data.count)
-            }
-        }
-        return uploadID
-    }
-
     /// A fresh `upload_id`. The daemon keys its staging file and its single-writer
     /// claim on this, and validates it as one safe path component.
     static func mintUploadID() -> String {
@@ -1081,10 +1035,6 @@ public actor HerdrClient {
         }
     }
 
-    struct AgentStartedResult: Decodable {
-        let agent: AgentInfo
-    }
-
     /// Starts an agent of `kind` (claude/codex/gemini/…) named `name` in an
     /// existing pane. Returns the started agent. One `agent.start` attempt: a pane
     /// `splitPane` just created goes through `startAgentWhenShellReady` instead.
@@ -1099,7 +1049,7 @@ public actor HerdrClient {
     /// pane reports a composer (`InputMode.intent`). See `NewAgentView.start`.
     public func startAgent(name: String, kind: String, paneID: String) async throws -> AgentInfo {
         let params = AgentStartParams(name: name, kind: kind, paneID: paneID)
-        return try await call("agent.start", params, as: AgentStartedResult.self).agent
+        return try await call("agent.start", params, as: AgentInfoResult.self).agent
     }
 
     struct PaneProcessInfoResult: Decodable {
@@ -1205,10 +1155,6 @@ public actor HerdrClient {
     /// retry does not accumulate orphan panes.
     public func closePane(paneID: String) async throws {
         _ = try await call("pane.close", PaneTarget(paneID: paneID), as: JSONNull.self)
-    }
-
-    struct AgentTargetParams: Encodable {
-        let target: String
     }
 
     /// `agent.restart` params. `account` is the credential-account id to swap the
