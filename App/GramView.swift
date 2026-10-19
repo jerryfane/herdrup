@@ -3698,11 +3698,6 @@ enum GramBubble {
     static let avatarSize: CGFloat = 28
     /// How far an agent group sits in from the feed's edge: the avatar plus an 8 pt gap.
     static let groupIndent: CGFloat = 36
-    /// The saved-message list's avatar gap and slot (avatar 30 + gap).
-    static let avatarGap: CGFloat = 12
-    static let avatarSlot: CGFloat = 42
-    /// The minimum empty space on the side opposite the sender.
-    static let oppositeInset: CGFloat = 48
     /// iPad / Mac: the feed's width cap (#354 follow-up). About the width of a Messages
     /// conversation on iPad, so a long message wraps at a readable measure and your bubbles
     /// on the right stay near the agents' on the left.
@@ -3724,21 +3719,6 @@ struct BubbleTail: Shape {
         path.addLine(to: p(24, 0))
         path.closeSubpath()
         return path
-    }
-}
-
-/// Picks an SF Symbol for a file from its MIME type, for the guest Gram page's file chip.
-enum FileGlyph {
-    static func name(for mime: String, fileName: String) -> String {
-        let mime = mime.lowercased()
-        if mime.hasPrefix("image/") { return "photo" }
-        if mime.hasPrefix("video/") { return "film" }
-        if mime.hasPrefix("audio/") { return "waveform" }
-        if mime == "application/pdf" { return "doc.richtext" }
-        if mime == "application/zip" || mime.contains("compressed") { return "doc.zipper" }
-        if mime == "application/json" { return "curlybraces" }
-        if mime.hasPrefix("text/") { return "doc.text" }
-        return "doc"
     }
 }
 
