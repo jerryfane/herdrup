@@ -9784,15 +9784,7 @@ struct MockTransport: HerdrTransport {
                 return AsyncThrowingStream { continuation in
                     continuation.yield(MockWireFixtures.paneStreamAck)
                     driver.attach(continuation)
-                    let pings = Task {
-                        var seq: UInt64 = 1
-                        while !Task.isCancelled {
-                            try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
-                            guard !Task.isCancelled else { break }
-                            continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
-                            seq += 1
-                        }
-                    }
+                    let pings = Self.keepAlive(continuation)
                     continuation.onTermination = { _ in pings.cancel() }
                 }
             }
@@ -9819,15 +9811,7 @@ struct MockTransport: HerdrTransport {
                 // the rendered frame. That last property matters: several UI tests assert the
                 // terminal is byte-identical when untouched, so a keepalive that DREW anything
                 // would trade one false failure for another.
-                let pings = Task {
-                    var seq: UInt64 = 1
-                    while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
-                        guard !Task.isCancelled else { break }
-                        continuation.yield(Self.paneStreamPing(seq: seq, epoch: 7))
-                        seq += 1
-                    }
-                }
+                let pings = Self.keepAlive(continuation)
                 // BUSY-PANE OUTPUT: emit a line about eight times a second so SwiftTerm's
                 // auto-follow writes `contentOffset` on every frame, growing scrollback exactly
                 // as a working agent's does.
@@ -9888,12 +9872,7 @@ struct MockTransport: HerdrTransport {
     /// scroll from a dead one instead of separating nothing.
     static func scrollbackResetFrame() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
-        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        for i in 1...200 {
-            let letter = letters[i % letters.count]
-            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
-            body += String(format: "SCROLLTEST line %03d %@ %@\r\n", i, String(letter), bar)
-        }
+        for i in 1...200 { body += Self.variedLine("SCROLLTEST", i, digits: 3) }
         body += "SCROLLTEST end, swipe down to reveal earlier lines"
         let b64 = Data(body.utf8).base64EncodedString()
         return "{\"stream\":\"pane.bytes\",\"frame\":\"reset\",\"seq\":0,\"epoch\":7,\"cols\":80,\"rows\":24,\"data_b64\":\"\(b64)\"}"
@@ -9910,18 +9889,24 @@ struct MockTransport: HerdrTransport {
     /// which is not a signal the receipt's 10% floor can read.
     static func backfillRead() -> String {
         var body = "\u{1b}[?25l"   // hide cursor: static frames stay byte-identical
-        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        for i in 1...1000 {
-            let letter = letters[i % letters.count]
-            let bar = String(repeating: letter, count: 8 + (i * 7) % 44)
-            body += String(format: "BACKFILL line %04d %@ %@\r\n", i, String(letter), bar)
-        }
+        for i in 1...1000 { body += Self.variedLine("BACKFILL", i, digits: 4) }
         body += "BACKFILL end, swipe down to reveal earlier lines"
         let payload: [String: Any] = ["id": "mock", "result": ["read": [
             "pane_id": "w1:p1", "text": body, "truncated": false,
             "source": "recent", "format": "ansi"]]]
         let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
         return String(data: data, encoding: .utf8) ?? MockWireFixtures.agentRead
+    }
+
+    /// Row `n` of the scroll and backfill fixtures: "<prefix> line <n> <letter> <bar>", the
+    /// letter and the bar length (8 + (n*7) % 44) varying with `n` so a one-screen scroll
+    /// changes most of the pixels (see `scrollbackResetFrame`). `digits` zero-pads `n`.
+    /// The busy-output lines use a different bar on purpose and do not come from here.
+    static func variedLine(_ prefix: String, _ n: Int, digits: Int) -> String {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        let letter = letters[n % letters.count]
+        let bar = String(repeating: letter, count: 8 + (n * 7) % 44)
+        return String(format: "\(prefix) line %0\(digits)d %@ %@\r\n", n, String(letter), bar)
     }
 
     /// `notifications.status` for the Settings mock. `HERDR_MOCK_PUSH_STATE` picks the daemon's
@@ -10148,6 +10133,22 @@ struct MockTransport: HerdrTransport {
     /// on, since they assert the terminal is byte-identical while untouched.
     static func paneStreamPing(seq: UInt64, epoch: UInt64) -> String {
         #"{"stream":"pane.bytes","frame":"ping","seq":\#(seq),"epoch":\#(epoch)}"#
+    }
+
+    /// Sends `paneStreamPing` on `continuation` every 20 s, as the server does, until the
+    /// returned task is cancelled; every open mock stream needs it, because the app's stall
+    /// watchdog treats a silent stream as a stuck one (see `stream(_:)`). The caller cancels
+    /// the task in `onTermination`.
+    static func keepAlive(_ continuation: AsyncThrowingStream<String, Error>.Continuation) -> Task<Void, Never> {
+        Task {
+            var seq: UInt64 = 1
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)   // 20s, like the server
+                guard !Task.isCancelled else { break }
+                continuation.yield(paneStreamPing(seq: seq, epoch: 7))
+                seq += 1
+            }
+        }
     }
 
     /// A decoded blocked agent for the pane screenshot: status "blocked" groups
@@ -10460,15 +10461,7 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
                 continuation.finish()
                 return
             }
-            let pings = Task {
-                var seq: UInt64 = 1
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 20_000_000_000)
-                    guard !Task.isCancelled else { break }
-                    continuation.yield(MockTransport.paneStreamPing(seq: seq, epoch: 7))
-                    seq += 1
-                }
-            }
+            let pings = MockTransport.keepAlive(continuation)
             continuation.onTermination = { _ in pings.cancel() }
         }
     }
