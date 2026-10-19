@@ -3917,17 +3917,18 @@ struct GramRow: View, Equatable {
     }
 
     /// This row's open or save as its card draws and speaks it: the share of the reply
-    /// received, or a spinning ring while there is no measurement. The reply is base64, so
-    /// received channel bytes are scaled by 3/4 to approximate file bytes.
+    /// received, or a spinning ring while there is no measurement. The spoken figure is in
+    /// file bytes (`GramFile.downloadedLabel` scales the base64 reply back).
     private var download: GramCardDownload? {
         guard isDownloadingFile, let file = message.file else { return nil }
-        guard let p = downloadProgress, p.total > 0 else {
+        guard let p = downloadProgress,
+              let label = GramFile.downloadedLabel(received: p.received, total: p.total, fileSize: file.size)
+        else {
             return GramCardDownload(fraction: nil, spoken: "Downloading")
         }
-        let done = min(UInt64(Double(p.received) * 3.0 / 4.0), file.size)
         return GramCardDownload(
             fraction: min(1, Double(p.received) / Double(p.total)),
-            spoken: "Downloading, \(GramFile.displaySize(of: done)) of \(file.displaySize)")
+            spoken: "Downloading, \(label)")
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same
