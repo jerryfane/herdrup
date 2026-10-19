@@ -22,22 +22,19 @@ public actor HerdrClient {
     }()
     private let decoder = JSONDecoder()
     private var sequence: UInt64 = 0
-    /// Whether this daemon serves `gram.upload.stream`, cached per client so a
-    /// multi-file send pays ONE `ping`.
+    /// The daemon's `ping` capabilities, cached per client so the pane-input and
+    /// gram-upload openers pay ONE `ping` between them (and a ten-file send one in all).
     ///
-    /// Three states on purpose: a successful probe is cached either way (so an old
-    /// daemon is not re-probed per file), while a FAILED probe stays `unknown` (so a
-    /// transient error cannot pin this client to the per-chunk path for its whole
-    /// lifetime, and a daemon upgraded under a long-lived app is picked up).
-    private enum StreamCapability {
+    /// Two states on purpose: a successful probe is cached either way (so an old
+    /// daemon, which reports no capabilities, is not re-probed per open), while a
+    /// FAILED probe leaves it `unknown` (so a transient error cannot pin this client to
+    /// the fallback path for its whole lifetime, and a daemon upgraded under a
+    /// long-lived app is picked up).
+    private enum CapabilityCache {
         case unknown
-        case supported
-        case unsupported
+        case probed(ServerCapabilities?)
     }
-    private var streamCapability: StreamCapability = .unknown
-    /// Whether this daemon serves `pane.input.stream` (`pane_input_stream`), with the
-    /// same three states and caching rules as `streamCapability`.
-    private var inputStreamCapability: StreamCapability = .unknown
+    private var capabilityCache: CapabilityCache = .unknown
 
     public init(transport: HerdrTransport) {
         self.transport = transport
@@ -139,6 +136,26 @@ public actor HerdrClient {
     /// older daemon; callers treat every new feature as unsupported in that case.
     public func serverCapabilities() async throws -> ServerCapabilities? {
         try await call("ping", EmptyParams(), as: PingResult.self).capabilities
+    }
+
+    /// Whether the daemon advertises `flag`, from the per-client `capabilityCache`.
+    /// False when the probe fails, which leaves the cache `unknown` for the next call.
+    ///
+    /// The probe is NOT written with `try?`: `serverCapabilities()` both throws AND
+    /// returns an Optional, so `try?` flattens "the ping failed" into the same nil as
+    /// "the daemon sent no capabilities", and would cache a transient error as the
+    /// unsupported answer — the outcome the `unknown` state exists to prevent.
+    private func supports(_ flag: KeyPath<ServerCapabilities, Bool>) async -> Bool {
+        if case .probed(let capabilities) = capabilityCache {
+            return capabilities?[keyPath: flag] == true
+        }
+        do {
+            let probed = try await serverCapabilities()
+            capabilityCache = .probed(probed)
+            return probed?[keyPath: flag] == true
+        } catch {
+            return false
+        }
     }
 
     struct AccountsCreateParams: Encodable {
@@ -341,17 +358,8 @@ public actor HerdrClient {
     public func openPaneInput(pane: String) async -> PaneInputChannel? {
         guard PaneInputChannel.canStream(pane: pane),
               let citadel = transport as? CitadelTransport else { return nil }
-        // Probed once per client like `gramOpenUploadChannel`: a failed ping stays
-        // `unknown` and is retried on the next open.
-        if case .unknown = inputStreamCapability {
-            do {
-                let probed = try await serverCapabilities()
-                inputStreamCapability = probed?.paneInputStream == true ? .supported : .unsupported
-            } catch {
-                return nil
-            }
-        }
-        guard case .supported = inputStreamCapability else { return nil }
+        // Probed once per client (`supports(_:)`): a failed ping is retried on the next open.
+        guard await supports(\.paneInputStream) else { return nil }
         let openLine: String
         do {
             openLine = try encodeRequest("pane.input.stream", PaneInputStreamParams(paneID: pane))
@@ -669,23 +677,7 @@ public actor HerdrClient {
     /// the connection closed, so the reply cannot be correlated to the attempt.
     public func gramOpenUploadChannel(uploadID: String) async -> GramUploadChannel? {
         guard let citadel = transport as? CitadelTransport else { return nil }
-        // Three cache states, not two, and the probe is NOT written with `try?`:
-        // `serverCapabilities()` both throws AND returns an Optional, so `try?`
-        // flattens "the ping failed" into the same nil as "the daemon sent no
-        // capabilities" — which would cache a transient error as `unsupported` and pin
-        // this client to the per-chunk path for its whole lifetime, the exact outcome
-        // the `unknown` state exists to prevent. A ping that SUCCEEDS is cached either
-        // way, so a ten-file send pays one probe even against an old daemon; a ping
-        // that THROWS leaves the cache `unknown` and is re-probed on the next upload.
-        if case .unknown = streamCapability {
-            do {
-                let probed = try await serverCapabilities()
-                streamCapability = probed?.gramUploadStream == true ? .supported : .unsupported
-            } catch {
-                return nil
-            }
-        }
-        guard case .supported = streamCapability else { return nil }
+        guard await supports(\.gramUploadStream) else { return nil }
         let env = RequestEnvelope(
             id: "herdrkit:gram.upload.stream:\(uploadID)",
             method: "gram.upload.stream",
