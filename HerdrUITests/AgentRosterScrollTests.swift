@@ -211,33 +211,3 @@ final class AgentRosterScrollTests: XCTestCase {
         return receipt()
     }
 }
-
-/// Hittability under a continuously re-sorting roster is a state to WAIT for, not to
-/// sample. XCTest has `waitForExistence` but no hittable equivalent, so these poll it
-/// the same way — bounded, and failing by returning false so the caller's message,
-/// which names the bound, is the one that shows up.
-///
-/// THEY POLL HITTABILITY, NOT EXISTENCE, and the distinction is the whole point.
-/// Existence is satisfied by an element that is in the hierarchy but scrolled
-/// off-screen or occluded — precisely the state the original assertion was written to
-/// rule out. A bounded wait on existence would be green against a roster that never
-/// becomes reachable at all.
-extension XCUIElement {
-
-    func waitForHittable(timeout: TimeInterval) -> Bool {
-        waitForHittability(timeout: timeout, expected: true)
-    }
-
-    func waitForNotHittable(timeout: TimeInterval) -> Bool {
-        waitForHittability(timeout: timeout, expected: false)
-    }
-
-    private func waitForHittability(timeout: TimeInterval, expected: Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if isHittable == expected { return true }
-            _ = XCTWaiter.wait(for: [XCTestExpectation(description: "settle")], timeout: 0.1)
-        } while Date() < deadline
-        return isHittable == expected
-    }
-}

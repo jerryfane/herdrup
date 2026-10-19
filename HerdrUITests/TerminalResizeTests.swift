@@ -1,16 +1,6 @@
 import XCTest
 import UIKit
 
-extension XCUIApplication {
-    var terminalSurface: XCUIElement {
-        // String subscripts also compare labels/values. A first-match walk can
-        // time out fetching those unrelated attributes after app reactivation.
-        descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == %@", "terminal-surface"))
-            .firstMatch
-    }
-}
-
 /// Shared-surface receipts. The probe is populated only by actual CoreText draws;
 /// screenshots retain the independent visual evidence in each result bundle.
 class TerminalInteractionTestCase: XCTestCase {
