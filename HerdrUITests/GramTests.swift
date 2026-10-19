@@ -1043,6 +1043,34 @@ final class GramTests: XCTestCase {
                       "the open must reuse the cached file, not fetch it again; probe says \(calls.label)")
     }
 
+    /// #451: closing the HTML/SVG viewer must leave the download cache alone. A cached open
+    /// hands the viewer the cache entry itself, and the viewer used to delete its file on
+    /// close, so every reopen fetched the report again (`HERDR_MOCK_GRAM_HTML`: gh1 is an
+    /// HTML file). Opened, closed, opened again: the daemon is asked for gh1 once.
+    func testClosingTheHtmlViewerKeepsTheCachedFile() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_HTML": "1"])
+        let card = attachmentCard(app, message: "gh1")
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the HTML file should draw as a file card")
+        for _ in 0..<3 where !card.isHittable { app.swipeUp() }
+        let done = app.buttons["Done"].firstMatch
+        let gone = NSPredicate(format: "exists == false")
+        for open in 1...2 {
+            card.tap()
+            XCTAssertTrue(done.waitForExistence(timeout: 10),
+                          "open \(open): the report should show in the web viewer")
+            done.tap()
+            XCTAssertTrue(waitForPredicate(gone, object: done, timeout: 5),
+                          "open \(open): Done should close the viewer")
+        }
+        let opened = probe(app, "gram-opened-file")
+        XCTAssertEqual(opened.label, "opened:run-report.html")
+        // Past the probe's poll, so a second fetch would show.
+        Thread.sleep(forTimeInterval: 1)
+        let calls = probe(app, "gram-get-file-calls")
+        XCTAssertTrue(waitForGetFileCalls(calls, "gh1", 1, timeout: 1),
+                      "the reopen must use the cached file, not fetch it again; probe says \(calls.label)")
+    }
+
     /// The feed is an eager stack, so a drawn row exists whether it is seen or not: the
     /// image card must fetch only once it is really on screen. Fourteen newer messages
     /// (`HERDR_MOCK_GRAM_NEWER`) put g3 above the fold, inside a window that draws it.

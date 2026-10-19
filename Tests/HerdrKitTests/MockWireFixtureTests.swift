@@ -503,6 +503,37 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(String(decoding: data, as: UTF8.self), "hello world")
     }
 
+    /// The HTML mock (`HERDR_MOCK_GRAM_HTML`): its row decodes with an HTML file whose
+    /// listed size matches the bytes `gram.get_file` returns for it.
+    func testMockGramHtmlFileDecodes() async throws {
+        struct HtmlTransport: HerdrTransport {
+            func roundTrip(_ requestLine: String) async throws -> String {
+                if requestLine.contains("gram.list") {
+                    return MockWireFixtures.gramListAnswer(
+                        rows: [MockWireFixtures.gramHtmlRow, MockWireFixtures.gramListRows], hasMore: false)
+                }
+                if requestLine.contains("gram.get_file") { return MockWireFixtures.gramHtmlContent }
+                return #"{"id":"x","result":{}}"#
+            }
+            func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish() }
+            }
+        }
+        let client = HerdrClient(transport: HtmlTransport())
+        let answer = try await client.gramList()
+        let messages = try XCTUnwrap(answer.messages)
+        XCTAssertEqual(messages.first?.id, "gh1", "the report sits above the newest message")
+        let file = try XCTUnwrap(messages.first?.file, "gh1 should carry a file")
+        XCTAssertEqual(file.name, "run-report.html")
+        XCTAssertEqual(file.mime, "text/html")
+
+        let (name, mime, data) = try await client.gramGetFile(id: "gh1")
+        XCTAssertEqual(name, "run-report.html")
+        XCTAssertEqual(mime, "text/html")
+        XCTAssertEqual(UInt64(data.count), file.size)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).hasPrefix("<!doctype html>"))
+    }
+
     /// The upload + delete round-trips decode their `type: ok` replies without
     /// throwing, and the upload mints a safe `app-` id.
     func testMockGramUploadAndDeleteSucceed() async throws {
@@ -888,6 +919,16 @@ enum MockWireFixtures {
     /// to "hello world". Keep in sync with the App's MockTransport.gramFileContent.
     static let gramFileContent =
         #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":11,"data_base64":"aGVsbG8gd29ybGQ="}}"#
+
+    /// The HTML mock's row (`HERDR_MOCK_GRAM_HTML`): vetrina's run report, an HTML file.
+    /// Keep in sync with the App's MockTransport.gramHtmlRow.
+    static let gramHtmlRow =
+        #"{"id":"gh1","direction":"agent_to_owner","from":"vetrina","text":"Run report attached.","created_unix_ms":1723041420000,"read_by_owner":true,"file":{"name":"run-report.html","size":90,"mime":"text/html","sha256":"d78f7bf51215300da41164a777bd546b14995a93350f629717cfe83458e3f8b3"}}"#
+
+    /// The `gram.get_file` reply for gh1: the report's 90 bytes of HTML. Keep in sync with
+    /// the App's MockTransport.gramHtmlContent.
+    static let gramHtmlContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"run-report.html","mime":"text/html","size":90,"data_base64":"PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT5SdW4gcmVwb3J0PC90aXRsZT48cD5BbGwgMTQ2IHRlc3RzIHBhc3NlZC48L3A+"}}"#
 
     /// A canned `type: ok` reply, for `gram.upload_chunk` and `gram.delete`.
     static let okResult = #"{"id":"mock","result":{"type":"ok"}}"#

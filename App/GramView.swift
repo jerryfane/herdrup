@@ -604,8 +604,14 @@ struct GramView: View {
                     }
             }
             // Remove the raw temp file when the viewer closes so a viewed document
-            // does not linger in tmp.
-            .onDisappear { try? FileManager.default.removeItem(at: doc.fileURL) }
+            // does not linger in tmp. A cached file is handed to the viewer as the
+            // cache entry itself (`present`'s `cachedAt`): that is not a temp file,
+            // and deleting it would make the next open download it again.
+            .onDisappear {
+                if !Downloads.isCached(doc.fileURL) {
+                    try? FileManager.default.removeItem(at: doc.fileURL)
+                }
+            }
         }
         // Delete the previewed temp file when QuickLook dismisses (it nils the
         // binding) or when it is replaced — so a previewed secret does not linger.

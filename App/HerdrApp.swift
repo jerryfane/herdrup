@@ -9722,6 +9722,7 @@ struct MockTransport: HerdrTransport {
             if Self.gramPaged { list = Self.gramPagedList(requestLine) }
             else if Self.gramImageCount > 0 { list = Self.gramListWithImages }
             else if Self.gramExpiresSaved { list = await Self.gramListExpiringSaved() }
+            else if Self.gramHtml { list = Self.gramListWithHtml }
             else { list = Self.gramNewer ? Self.gramListWithNewer : Self.gramList }
             let answer = Self.applyingOwnerReads(reads, to: list)
             if Self.gramHoldsPollAcrossRead, Self.isGramHeadPoll(requestLine) {
@@ -9739,7 +9740,8 @@ struct MockTransport: HerdrTransport {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
             // g3 is the list fixture's image, and `gi<n>` the image mock's: a real PNG, so
-            // the card decodes a preview.
+            // the card decodes a preview. gh1 is the HTML mock's report.
+            if id == "gh1" { return Self.gramHtmlContent }
             return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : Self.gramFileContent
         }
         if requestLine.contains("gram.upload_chunk") { return Self.gramOk }
@@ -10216,6 +10218,20 @@ struct MockTransport: HerdrTransport {
         gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramNewerRows + ",")
     }
 
+    /// `HERDR_MOCK_GRAM_HTML=1`: `gram.list` answers `gramList` with `gramHtmlRow` above its
+    /// newest message: an HTML file, which opens in the web viewer rather than QuickLook.
+    static var gramHtml: Bool {
+        ProcessInfo.processInfo.environment["HERDR_MOCK_GRAM_HTML"] == "1"
+    }
+
+    static var gramListWithHtml: String {
+        gramList.replacingOccurrences(of: #""messages":["#, with: #""messages":["# + gramHtmlRow + ",")
+    }
+
+    /// vetrina's HTML run report (gh1), read. Byte-identical to MockWireFixtures.gramHtmlRow.
+    static let gramHtmlRow =
+        #"{"id":"gh1","direction":"agent_to_owner","from":"vetrina","text":"Run report attached.","created_unix_ms":1723041420000,"read_by_owner":true,"file":{"name":"run-report.html","size":90,"mime":"text/html","sha256":"d78f7bf51215300da41164a777bd546b14995a93350f629717cfe83458e3f8b3"}}"#
+
     /// `HERDR_MOCK_GRAM_IMAGES=N`: `gram.list` answers `gramList` with N image messages (each
     /// `gram.get_file` answers the g3 PNG) above its newest message, each followed by a
     /// three-line text, so a scroll through the feed keeps carrying pictures on and off screen.
@@ -10257,6 +10273,11 @@ struct MockTransport: HerdrTransport {
     /// small enough to inline, real enough for the card's ImageIO decode.
     static let gramImageContent =
         #"{"id":"mock","result":{"type":"gram_file_content","name":"vetrina-live.png","mime":"image/png","size":413,"data_base64":"iVBORw0KGgoAAAANSUhEUgAAACAAAAASCAIAAAC1qksFAAABZElEQVR42o2SPUsDQRCGZ+b+lkUKkQgKKQIKYhpLO4lIAgqmsrK0UBC0sLVXRMTCwsLCwsb/st5tbvfma3NCCHOz7zvPzOzixtovYaiaH1RkAgxEbVDlgAmIKSurJMDNwU+ytU7Kn8TyyeZ0I5UkWgm4vf5N6BQSBlWuhBTsBBgNv7QNA2m1h0QP2axUZHC89akrGltPRc/SAXZGH05FsIZegUFCBOyN38UEYGxghgCNjDxJShmc7L7abOwR3HyM2cWKIzZBBhzsP7dZtyLwHjuADUgtIE2J08On9kOe6YoKCektmbxoFwLeXLwlABttBVIIugx5lgZwd/li1U0G4sXqIzZBgdS1u3xF57PHfExKLQNibDFlCbkETI8e/IqQ3pKty5GOl01Qr+jk+J6LiPMNkjhAKXM30oLz2a1sTU1Qrgh5LUwgATUSz06vxcWqir1IGaSVsgkWiysqqP+DXO2t//8AaXuKJu4OmmAAAAAASUVORK5CYII="}}"#
+
+    /// The `gram.get_file` reply for the HTML mock's report (gh1): a 90-byte HTML page.
+    /// Byte-identical to MockWireFixtures.gramHtmlContent.
+    static let gramHtmlContent =
+        #"{"id":"mock","result":{"type":"gram_file_content","name":"run-report.html","mime":"text/html","size":90,"data_base64":"PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT5SdW4gcmVwb3J0PC90aXRsZT48cD5BbGwgMTQ2IHRlc3RzIHBhc3NlZC48L3A+"}}"#
 
     /// A canned `type: ok` reply for `gram.upload_chunk` and `gram.delete`.
     static let gramOk = #"{"id":"mock","result":{"type":"ok"}}"#
