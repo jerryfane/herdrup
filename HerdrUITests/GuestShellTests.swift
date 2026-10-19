@@ -50,10 +50,9 @@ final class GuestShellTests: XCTestCase {
         // A tap on the tab bar right after launch can be swallowed while it settles, so
         // tap until the tab reports selected.
         let settingsTab = app.tabBars.firstMatch.buttons["Settings"]
-        let selected = NSPredicate(format: "isSelected == true")
         for _ in 0..<3 where !settingsTab.isSelected {
             settingsTab.tap()
-            _ = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: selected, object: settingsTab)], timeout: 3)
+            _ = poll(3, every: 0.25) { settingsTab.isSelected }
         }
         let leave = app.buttons["guest-leave"]
         XCTAssertTrue(leave.waitForExistence(timeout: 10), "guest Settings should offer Leave share")

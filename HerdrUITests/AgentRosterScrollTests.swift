@@ -101,10 +101,8 @@ final class AgentRosterScrollTests: XCTestCase {
         // roster for the whole scroll, and the test only noticed 60 s later, as a
         // deferred row that was never promoted. Confirm the arm action ran here, where
         // the failure names its real cause.
-        let armed = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == %@", "armed"), object: armStress)], timeout: 3)
-        XCTAssertEqual(armed, .completed,
-                       "the roster stress arm tap did not reach its action (value: \(armStress.value ?? "nil"))")
+        XCTAssertTrue(poll(3, every: 0.25) { (armStress.value as? String) == "armed" },
+                      "the roster stress arm tap did not reach its action (value: \(armStress.value ?? "nil"))")
 
         for _ in 0..<18 {
             scroll.swipeUp()

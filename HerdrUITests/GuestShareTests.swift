@@ -251,8 +251,7 @@ final class GuestShareTests: XCTestCase {
         let want = on ? "1" : "0"
         for _ in 0..<3 where (row.value as? String) != want {
             row.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
-            _ = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "value == %@", want), object: row)], timeout: 3)
+            _ = poll(3, every: 0.25) { (row.value as? String) == want }
         }
         XCTAssertEqual(row.value as? String, want, "\(id) should be \(on ? "on" : "off")")
     }

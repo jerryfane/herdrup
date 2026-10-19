@@ -229,8 +229,7 @@ final class GuestGramPaneTests: XCTestCase {
     private func sendWithAttachment(_ app: XCUIApplication, text: String) -> [String] {
         let paperclip = app.buttons["guest-attach-button"]
         XCTAssertTrue(paperclip.waitForExistence(timeout: 10))
-        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: paperclip)
-        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed, "the composer should open")
+        XCTAssertTrue(poll(10, every: 0.25) { paperclip.isEnabled }, "the composer should open")
         paperclip.tap()
         let file = app.buttons["composer-attach-file"]
         XCTAssertTrue(file.waitForExistence(timeout: 5), "the paperclip should open the attach sheet")
@@ -249,8 +248,7 @@ final class GuestGramPaneTests: XCTestCase {
 
         let calls = pollLabel(app, "guest-host-calls", "the agent should be prompted with the file",
                               timeout: 15) { $0.contains("agent.prompt:") }
-        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
-        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, "the chip should clear once delivered")
+        XCTAssertTrue(poll(10, every: 0.25) { !chip.exists }, "the chip should clear once delivered")
         XCTAssertTrue(app.staticTexts["Message llm-opt as plotarmordev"].waitForExistence(timeout: 5),
                       "a delivered message clears the composer")
         let note = element(app, "guest-note")
