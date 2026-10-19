@@ -19,9 +19,7 @@ final class PagingTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testSwipeDoesNotPageAgents() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "paging"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "paging")
         Thread.sleep(forTimeInterval: 2.0)   // let the first pane mount + its stream seed
 
         // Opens on ALFA (heading collapses to "ALFA" — name==kind==folder) — front, hittable.
@@ -53,12 +51,7 @@ final class PagingTests: XCTestCase {
     /// from "merely still mounted", without relying on accessibility hiding.
     private func frontIs(_ app: XCUIApplication, _ name: String, timeout: TimeInterval = 6) -> Bool {
         let el = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", name)).firstMatch
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        repeat {
-            if el.exists && el.isHittable { return true }
-            Thread.sleep(forTimeInterval: 0.2)
-        } while Date() < deadline
-        return el.exists && el.isHittable
+        return poll(timeout, every: 0.2) { el.exists && el.isHittable }
     }
 
     private enum Dir { case left, right }
@@ -74,12 +67,5 @@ final class PagingTests: XCTestCase {
         let end   = app.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
         start.press(forDuration: 0.0, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0.0)
         Thread.sleep(forTimeInterval: 1.2)   // let any (now-absent) front swap + repaint settle
-    }
-
-    private func attach(_ app: XCUIApplication, _ name: String) {
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = name
-        shot.lifetime = .keepAlways
-        add(shot)
     }
 }

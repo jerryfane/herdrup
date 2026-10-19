@@ -11,24 +11,10 @@ final class GuestPaneTests: XCTestCase {
         super.tearDown()
     }
 
-    private func launch(_ mock: String) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mock
-        app.launch()
-        return app
-    }
-
     private func forbiddenCalls(_ app: XCUIApplication) -> String {
         let probe = app.descendants(matching: .any)["guest-forbidden-calls"]
         XCTAssertTrue(probe.waitForExistence(timeout: 5), "the DEBUG forbidden-calls probe should exist")
         return probe.label
-    }
-
-    private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     /// The terminal's `terminal-grid-probe`: "cols=C rows=R font=F fill=X".
@@ -51,13 +37,13 @@ final class GuestPaneTests: XCTestCase {
     private func waitForGrid(_ app: XCUIApplication, _ what: String, timeout: TimeInterval = 10,
                              _ condition: ((cols: Int, font: Double, fill: Double)) -> Bool)
         -> (cols: Int, font: Double, fill: Double) {
-        let deadline = Date().addingTimeInterval(timeout)
-        var last = grid(app)
-        while Date() < deadline {
-            if let reading = last, condition(reading) { return reading }
-            Thread.sleep(forTimeInterval: 0.25)
+        var last: (cols: Int, font: Double, fill: Double)?
+        let met = poll(timeout, every: 0.25) {
             last = grid(app)
+            guard let reading = last else { return false }
+            return condition(reading)
         }
+        if met, let reading = last { return reading }
         XCTFail("\(what): last grid \(String(describing: last))")
         return last ?? (0, 0, 0)
     }
@@ -67,7 +53,7 @@ final class GuestPaneTests: XCTestCase {
     /// size, and A+ makes that grid narrower; the agent's stream follows, still without the
     /// terminal taking any input.
     func testLargerTextResizesTheAgentsTerminal() {
-        let app = launch("guestpane")
+        let app = XCUIApplication.launched(mock: "guestpane")
         let terminal = app.descendants(matching: .any)["guest-terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
         // The mock host's pane starts 120 columns wide; the guest's first proposal replaces it
@@ -76,7 +62,7 @@ final class GuestPaneTests: XCTestCase {
             $0.cols != 120 && $0.font == 12.5 && $0.fill <= 1.0
         }
         Thread.sleep(forTimeInterval: 1)
-        attachScreenshot(app, "guest-resize-before")
+        attach(app, "guest-resize-before")
 
         let larger = app.buttons["guest-font-increase"]
         XCTAssertTrue(larger.waitForExistence(timeout: 5), "the guest pane should offer A+")
@@ -85,7 +71,7 @@ final class GuestPaneTests: XCTestCase {
             $0.cols < before.cols && $0.font > before.font
         }
         Thread.sleep(forTimeInterval: 1)
-        attachScreenshot(app, "guest-resize-after")
+        attach(app, "guest-resize-after")
 
         app.buttons["guest-font-decrease"].tap()
         waitForGrid(app, "A− should widen the agent's grid again") {
@@ -100,18 +86,18 @@ final class GuestPaneTests: XCTestCase {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("iPhone is portrait-only; rotation re-proposes on iPad")
         }
-        let app = launch("guestpane")
+        let app = XCUIApplication.launched(mock: "guestpane")
         let portrait = waitForGrid(app, "the guest's first fit") { $0.cols != 120 }
         XCUIDevice.shared.orientation = .landscapeLeft
         waitForGrid(app, "landscape should propose a wider grid") { $0.cols > portrait.cols }
-        attachScreenshot(app, "guest-resize-landscape")
+        attach(app, "guest-resize-landscape")
     }
 
     /// A host older than guest resizing refuses `pane.set_pty_size` with `guest_forbidden`. The
     /// pane keeps today's fit-to-width view, drops the size controls, and never asks again:
     /// not on a retry, not on a relayout.
     func testOldHostKeepsTheFitToWidthViewAndStopsProposing() {
-        let app = launch("guestoldhost")
+        let app = XCUIApplication.launched(mock: "guestoldhost")
         let terminal = app.descendants(matching: .any)["guest-terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["View-only · this host doesn't support guest resizing"]
@@ -134,7 +120,7 @@ final class GuestPaneTests: XCTestCase {
         if app.buttons["guest-keyboard-button"].exists { app.buttons["guest-keyboard-button"].tap() }
         Thread.sleep(forTimeInterval: 3)
         waitForGrid(app, "the fallback should still fit the width", fitsWidth)
-        attachScreenshot(app, "guest-resize-old-host")
+        attach(app, "guest-resize-old-host")
         XCTAssertEqual(forbiddenCalls(app), "pane.set_pty_size",
                        "one refusal, then no further set_pty_size calls")
     }
@@ -142,7 +128,7 @@ final class GuestPaneTests: XCTestCase {
     /// Watching never sends anything a guest may not send: no keyboard from the terminal, no
     /// quick keys, and a sent message goes out as a prompt.
     func testTerminalIsViewOnly() {
-        let app = launch("guestpane")
+        let app = XCUIApplication.launched(mock: "guestpane")
 
         XCTAssertTrue(app.staticTexts["WORKING"].waitForExistence(timeout: 10),
                       "the running agent's status pill should render")
@@ -156,7 +142,7 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         // Let the stream seed and the fit-to-width settle before the screenshot and taps.
         Thread.sleep(forTimeInterval: 2)
-        attachScreenshot(app, "guest-pane")
+        attach(app, "guest-pane")
 
         for _ in 0..<3 {
             terminal.tap()
@@ -187,7 +173,7 @@ final class GuestPaneTests: XCTestCase {
     /// send) had no way to put it away, and the view-only terminal takes no taps. It must
     /// offer the standard composer's collapse button, and tapping it hides the keyboard.
     func testKeyboardCanBeDismissedFromTheComposer() throws {
-        let app = launch("guestpane")
+        let app = XCUIApplication.launched(mock: "guestpane")
         let input = app.textViews["guest-composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         let collapse = app.buttons["guest-keyboard-button"]
@@ -201,7 +187,7 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(collapse.waitForExistence(timeout: 5), "a visible software keyboard must be dismissible")
         XCTAssertTrue(app.buttons["guest-attach-button"].exists, "the collapse button sits beside attach, not over it")
         Thread.sleep(forTimeInterval: 0.6)
-        attachScreenshot(app, "guest-pane-keyboard")
+        attach(app, "guest-pane-keyboard")
 
         collapse.tap()
         XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "the collapse button puts the keyboard away")
@@ -213,7 +199,7 @@ final class GuestPaneTests: XCTestCase {
     /// terminal brings those older rows into view. The mock's stream paints only the current
     /// screen, so an `earlier NNN` row at the top can only have come from the backfill.
     func testSwipeRevealsScrollbackFromBeforeTheGuestConnected() {
-        let app = launch("guestpane")
+        let app = XCUIApplication.launched(mock: "guestpane")
 
         let terminal = app.descendants(matching: .any)["guest-terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
@@ -232,7 +218,7 @@ final class GuestPaneTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.2)
         }
         Thread.sleep(forTimeInterval: 1)
-        attachScreenshot(app, "guest-scrollback")
+        attach(app, "guest-scrollback")
         XCTAssertTrue(topRow.label.contains("earlier"),
                       "a swipe down should reveal the backfilled scrollback: \(topRow.label)")
         XCTAssertEqual(forbiddenCalls(app), "", "the backfill is an allowed agent.read")
@@ -241,7 +227,7 @@ final class GuestPaneTests: XCTestCase {
     /// With the agent out of the foreground the host refuses the guest: the pane says so and
     /// the composer can't be used.
     func testPausedAgentDisablesTheComposer() {
-        let app = launch("guestpaused")
+        let app = XCUIApplication.launched(mock: "guestpaused")
 
         XCTAssertTrue(app.staticTexts["llm-opt isn't running"].waitForExistence(timeout: 10),
                       "the paused message should render")
@@ -253,18 +239,18 @@ final class GuestPaneTests: XCTestCase {
         app.textViews["guest-composer-input"].tap()
         Thread.sleep(forTimeInterval: 0.8)
         XCTAssertEqual(app.keyboards.count, 0, "the paused composer must not take input")
-        attachScreenshot(app, "guest-paused")
+        attach(app, "guest-paused")
     }
 
     /// A question only the owner can answer is called out above the composer.
     func testBlockedAgentShowsTheOwnerBanner() {
-        let app = launch("guestblocked")
+        let app = XCUIApplication.launched(mock: "guestblocked")
 
         XCTAssertTrue(app.staticTexts["llm-opt is asking a question only Jerry can answer"]
             .waitForExistence(timeout: 10), "the blocked banner should render")
         XCTAssertTrue(app.staticTexts["NEEDS JERRY"].exists)
         XCTAssertTrue(app.textViews["guest-composer-input"].exists, "the guest can still send a message")
         Thread.sleep(forTimeInterval: 2)
-        attachScreenshot(app, "guest-blocked")
+        attach(app, "guest-blocked")
     }
 }

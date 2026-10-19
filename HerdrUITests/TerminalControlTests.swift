@@ -224,10 +224,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         // the reply field while the mic is live. A simulator with no audio input never
         // starts it, and asserting the disarm there would fail on a state the app was
         // never in.
-        let started = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate { [weak self] _, _ in self?.reply.isEnabled == false },
-            object: nil)], timeout: 5)
-        guard started == .completed || !armed else {
+        let started = poll(5, every: 0.25) { !reply.isEnabled }
+        guard started || !armed else {
             throw XCTSkip("dictation never started in this environment (no audio input), so no disarm is owed. \(elementDump())")
         }
         // STARTING dictation is what must disarm, and the production cap's own label is
@@ -346,16 +344,11 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5),
                       "a photo should be sendable without caption text")
-        let ready = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
-            object: send)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
-                       "the staged photo's send action must accept a tap")
+        XCTAssertTrue(poll(5, every: 0.25) { send.exists && send.isEnabled && send.isHittable },
+                      "the staged photo's send action must accept a tap")
         send.tap()
-        let sent = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == false"), object: chip)
-        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
-                       "the photo should upload, post to the agent, and clear after prompt delivery")
+        XCTAssertTrue(poll(15, every: 0.25) { !chip.exists },
+                      "the photo should upload, post to the agent, and clear after prompt delivery")
     }
 
     /// The SAME path with a non-image file (a PDF), because the composer only accepted
@@ -378,10 +371,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.waitForExistence(timeout: 5),
                       "a file should be sendable without caption text")
         send.tap()
-        let sent = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == false"), object: chip)
-        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 15), .completed,
-                       "the file should upload, post to the agent, and clear after prompt delivery")
+        XCTAssertTrue(poll(15, every: 0.25) { !chip.exists },
+                      "the file should upload, post to the agent, and clear after prompt delivery")
     }
 
     /// TWO attachments in one reply. The composer used to hold a single one and a second
@@ -417,10 +408,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         send.tap()
         for chip in [photoChip, fileChip] {
-            let cleared = XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "exists == false"), object: chip)
-            XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 20), .completed,
-                           "both attachments should post and clear once the prompt is delivered")
+            XCTAssertTrue(poll(20, every: 0.25) { !chip.exists },
+                          "both attachments should post and clear once the prompt is delivered")
         }
     }
 
@@ -499,9 +488,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                        "the picked file's bytes should be uploaded")
         XCTAssertTrue((delivered["lastPrompt"] as? String ?? "").contains("File picked-notes.txt attached"),
                       "the prompt should name the picked file: \(delivered["lastPrompt"] ?? "")")
-        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
-        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 15), .completed,
-                       "the chip should clear once the prompt is delivered")
+        XCTAssertTrue(poll(15, every: 0.25) { !chip.exists },
+                      "the chip should clear once the prompt is delivered")
     }
 
     /// The staged-attachment chip. A container, so it is matched across element types
@@ -595,9 +583,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         command("reply-dictation")
-        let filled = NSPredicate { _, _ in (field.value as? String)?.hasSuffix("dictation-tail") == true }
-        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: filled, evaluatedWith: nil)], timeout: 8),
-                       .completed, "the dictated text should arrive in the reply field")
+        XCTAssertTrue(poll(8, every: 0.25) { (field.value as? String)?.hasSuffix("dictation-tail") == true },
+                      "the dictated text should arrive in the reply field")
         Thread.sleep(forTimeInterval: 0.6)
         attach("terminal-composer-dictation")
 

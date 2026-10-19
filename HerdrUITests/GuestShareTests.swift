@@ -23,13 +23,10 @@ final class GuestShareTests: XCTestCase {
     /// going idle, which costs a minute per XCUITest action. Only the screenshot keeps it.
     private func launch(_ mode: String, ownerName: String = "Jerry", pendingInvite: Bool = false,
                         still: Bool = true, environment: [String: String] = [:]) {
-        app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
-        app.launchEnvironment["HERDR_MOCK_OWNER_NAME"] = ownerName
-        app.launchEnvironment.merge(environment) { _, new in new }
-        if still { app.launchEnvironment["HERDR_MOCK_STILL"] = "1" }
-        if pendingInvite { app.launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
-        app.launch()
+        var launchEnvironment = ["HERDR_MOCK_OWNER_NAME": ownerName].merging(environment) { _, new in new }
+        if still { launchEnvironment["HERDR_MOCK_STILL"] = "1" }
+        if pendingInvite { launchEnvironment["HERDR_MOCK_GUEST_INVITE"] = "1" }
+        app = XCUIApplication.launched(mock: mode, environment: launchEnvironment)
     }
 
     private func element(_ id: String) -> XCUIElement {
@@ -43,10 +40,7 @@ final class GuestShareTests: XCTestCase {
 
     private func shoot(_ name: String) {
         Thread.sleep(forTimeInterval: 0.8)   // let sheet and row animations settle
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(XCUIScreen.main.screenshot(), name)
     }
 
     private func openShareSheet() {
@@ -257,8 +251,7 @@ final class GuestShareTests: XCTestCase {
         let want = on ? "1" : "0"
         for _ in 0..<3 where (row.value as? String) != want {
             row.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
-            _ = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "value == %@", want), object: row)], timeout: 3)
+            _ = poll(3, every: 0.25) { (row.value as? String) == want }
         }
         XCTAssertEqual(row.value as? String, want, "\(id) should be \(on ? "on" : "off")")
     }

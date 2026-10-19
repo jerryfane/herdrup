@@ -13,9 +13,7 @@ import XCTest
 /// receipt.
 final class WidgetGalleryTests: XCTestCase {
     func testCaptureLiveActivityLayouts() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "widgets"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "widgets")
 
         XCTAssertTrue(app.scrollViews.firstMatch.waitForExistence(timeout: 20),
                       "the gallery must render before anything is captured")
@@ -25,27 +23,20 @@ final class WidgetGalleryTests: XCTestCase {
 
         // Let the timers settle before the first capture.
         Thread.sleep(forTimeInterval: 1.5)
-        attach(named: "widget-gallery-top")
+        attach(XCUIScreen.main.screenshot(), "widget-gallery-top")
 
         app.swipeUp()
         Thread.sleep(forTimeInterval: 1.0)
-        attach(named: "widget-gallery-middle")
+        attach(XCUIScreen.main.screenshot(), "widget-gallery-middle")
 
         app.swipeUp()
         Thread.sleep(forTimeInterval: 1.0)
-        attach(named: "widget-gallery-bottom")
+        attach(XCUIScreen.main.screenshot(), "widget-gallery-bottom")
 
         for index in 0..<8 {
             app.swipeUp()
             Thread.sleep(forTimeInterval: 0.8)
-            attach(named: "widget-gallery-scroll-\(index)")
+            attach(XCUIScreen.main.screenshot(), "widget-gallery-scroll-\(index)")
         }
-    }
-
-    private func attach(named name: String) {
-        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        shot.name = name
-        shot.lifetime = .keepAlways
-        add(shot)
     }
 }

@@ -13,27 +13,15 @@ import XCTest
 /// the failure mode that would quietly ship a broken store image.
 final class StoreScreenshotTests: XCTestCase {
     private func capture(_ mode: String, named name: String, until: (XCUIApplication) -> Bool) {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mode
-        app.launch()
+        let app = XCUIApplication.launched(mock: mode)
 
-        let deadline = Date().addingTimeInterval(20)
-        var ready = false
-        while Date() < deadline {
-            if until(app) { ready = true; break }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
-        XCTAssertTrue(ready, "\(mode) never reached a capturable state")
+        XCTAssertTrue(poll(20, every: 0.25) { until(app) }, "\(mode) never reached a capturable state")
 
         // Let the first paint settle: animations and async rows land after the element
         // that proves the screen exists.
         Thread.sleep(forTimeInterval: 1.5)
 
-        let shot = XCUIScreen.main.screenshot()
-        let attachment = XCTAttachment(screenshot: shot)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(XCUIScreen.main.screenshot(), name)
         app.terminate()
     }
 

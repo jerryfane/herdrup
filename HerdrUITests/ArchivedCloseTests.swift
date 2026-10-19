@@ -8,12 +8,11 @@ final class ArchivedCloseTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     private func openArchivedMenu(mock: String) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = mock
-        // Every tap also redraws the home, as a roster poll landing mid-tap does on a slow
-        // runner: an open menu rebuilt by that redraw used to drop the tap on Close.
-        app.launchEnvironment["HERDR_REDRAW_ON_TOUCH"] = "1"
-        app.launch()
+        let app = XCUIApplication.launched(mock: mock, environment: [
+            // Every tap also redraws the home, as a roster poll landing mid-tap does on a slow
+            // runner: an open menu rebuilt by that redraw used to drop the tap on Close.
+            "HERDR_REDRAW_ON_TOUCH": "1",
+        ])
         let archived = app.buttons["Archived, 1"]
         XCTAssertTrue(archived.waitForExistence(timeout: 12), "the Archived row should be listed")
         archived.tap()

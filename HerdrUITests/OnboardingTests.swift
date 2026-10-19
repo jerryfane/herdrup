@@ -8,9 +8,7 @@ final class OnboardingTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testInstallAndPairCommandsAreCopyable() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "onboarding"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "onboarding")
 
         XCTAssertTrue(
             app.descendants(matching: .any)["pairing-prerequisite-tailscale"]
@@ -46,9 +44,7 @@ final class OnboardingTests: XCTestCase {
     /// Installing the fork doesn't restart a server that is already running, so the
     /// "missing features" notice must give the restart commands, not only "install it".
     func testForkNoticeGivesTheRestartCommands() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "fork-notice"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "fork-notice")
 
         let stop = app.buttons["Copy command: herdr server stop"]
         XCTAssertTrue(stop.waitForExistence(timeout: 8),
@@ -61,9 +57,7 @@ final class OnboardingTests: XCTestCase {
     }
 
     func testScannerExplainsBothCleanQRAlternatives() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "pairing-guidance"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "pairing-guidance")
 
         let fallback = app.descendants(matching: .any)["pairing-qr-fallback"]
         XCTAssertTrue(fallback.waitForExistence(timeout: 8),

@@ -11,9 +11,7 @@ final class SelectAgentFieldTests: XCTestCase {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("the empty detail column exists only in the iPad / Mac layout")
         }
-        let app = XCUIApplication()
-        app.launchEnvironment = ["HERDR_SCREENSHOT_MOCK": "list"]
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         let label = app.staticTexts["Select an agent"]
         XCTAssertTrue(label.waitForExistence(timeout: 30))
         // Let the field's pointer autopilot and typing wake a few hundred cells.

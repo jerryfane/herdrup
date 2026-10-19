@@ -1,16 +1,6 @@
 import XCTest
 import UIKit
 
-extension XCUIApplication {
-    var terminalSurface: XCUIElement {
-        // String subscripts also compare labels/values. A first-match walk can
-        // time out fetching those unrelated attributes after app reactivation.
-        descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == %@", "terminal-surface"))
-            .firstMatch
-    }
-}
-
 /// Shared-surface receipts. The probe is populated only by actual CoreText draws;
 /// screenshots retain the independent visual evidence in each result bundle.
 class TerminalInteractionTestCase: XCTestCase {
@@ -54,20 +44,10 @@ class TerminalInteractionTestCase: XCTestCase {
     }
 
     /// Whether the probe satisfies `condition` within `timeout`, without failing the test.
-    ///
-    /// POLLS, AND JUDGES EVERY READ THAT WAS STARTED BEFORE THE DEADLINE. An
-    /// `XCTNSPredicateExpectation` gives up at its timeout even while a read is still in
-    /// flight: on a slow hosted runner one probe query took 14.3 s (CI 39150458634,
-    /// testDeleteNonASCIICompositionAndPasteDisarm, t=60.20→74.48). The receipt it then
-    /// returned already met the condition and had been stable for 73 s, yet the waiter
-    /// failed the test. Same timeout; the GramTests `waitForPredicate` pattern (#440).
+    /// Uses the shared `poll` (#449), so a probe read started before the deadline is still
+    /// judged: on a slow hosted runner one probe query took 14.3 s (CI 39150458634).
     func holds(within timeout: TimeInterval, _ condition: @escaping ([String: Any]) -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if condition(probe()) { return true }
-            Thread.sleep(forTimeInterval: 0.2)
-        } while Date() < deadline
-        return condition(probe())
+        poll(timeout, every: 0.2) { condition(probe()) }
     }
 
     /// Check geometry before hit testing: clipped quick keys can raise
@@ -80,18 +60,20 @@ class TerminalInteractionTestCase: XCTestCase {
         // Identifier OR label: production keycaps carry only an accessibility label.
         let matches = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
                                                        identifier, identifier))
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
+        var found: XCUIElement?
+        _ = poll(timeout, every: 0) {
             let visible = app.frame.insetBy(dx: -1, dy: -1)
             for index in 0..<matches.count {
                 let candidate = matches.element(boundBy: index)
                 let frame = candidate.frame
                 guard frame.width > 0, frame.height > 0, visible.contains(frame) else { continue }
                 if requiringHittable && (!candidate.isEnabled || !candidate.isHittable) { continue }
-                return candidate
+                found = candidate
+                return true
             }
-        } while Date() < deadline
-        return nil
+            return false
+        }
+        return found
     }
 
     /// The production control bar is a HORIZONTAL SCROLL VIEW, and on a 402 pt phone
@@ -254,10 +236,7 @@ class TerminalInteractionTestCase: XCTestCase {
     }
 
     func attach(_ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        attach(app, name)
     }
 
     func anchor(file: StaticString = #filePath, line: UInt = #line) {
@@ -507,11 +486,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         // TIGHT POLLING, NOT A PREDICATE EXPECTATION. XCTNSPredicateExpectation
         // re-evaluates about once a second, and this cover is deliberately short-lived,
         // so the wait could miss it entirely and report a cover that never appeared.
-        var sawCover = false
-        let coverDeadline = Date().addingTimeInterval(4)
-        while Date() < coverDeadline {
-            if (probe()["covered"] as? Bool) == true { sawCover = true; break }
-        }
+        let sawCover = poll(4, every: 0) { (probe()["covered"] as? Bool) == true }
         XCTAssertTrue(sawCover, "no retained frame appeared for this resize: \(probe())")
         keycap.tap()
         // And it must go NOW, not by the deadline. The deadline is 140 ms of settle
@@ -599,8 +574,17 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         launch("resize", environment: ["HERDR_CLAIM_GRACE_MS": "600000"])
         let before = wait { self.claimCount("claims", pane: "ix:a", in: $0) > 0 }
         let claimsBefore = claimCount("claims", pane: "ix:a", in: before)
+        let releasesBefore = claimCount("inactiveReleases", pane: "ix:a", in: before)
         XCUIDevice.shared.press(.home)
-        Thread.sleep(forTimeInterval: 3)
+        // Wait for THIS background's release, read from the receipt while the app is still
+        // in the background (reading the probe does not bring the app forward), instead of a
+        // fixed dwell counted from the press. Counting from `releasesBefore` means an earlier
+        // release cannot satisfy it. A synchronization improvement, not a reproduced fix: in
+        // CI 39251022452 the app entered the background 2.5 s after Home and was back 1.31 s
+        // later with no release, and that red was not reproduced. The 30 s bound is new.
+        XCTAssertTrue(holds(within: 30) {
+            self.claimCount("inactiveReleases", pane: "ix:a", in: $0) > releasesBefore
+        }, "no release went out before the app was brought back: \(probe())")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
                       "the app did not return to the foreground")

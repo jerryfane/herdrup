@@ -3,9 +3,7 @@ import UIKit
 
 final class AgentListChromeTests: XCTestCase {
     func testBackReturnsFromAgentsToMachines() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         let back = app.buttons[UIDevice.current.userInterfaceIdiom == .pad ? "agents-back" : "Back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 10))
         if UIDevice.current.userInterfaceIdiom == .pad {
@@ -33,9 +31,7 @@ final class AgentListChromeTests: XCTestCase {
             throw XCTSkip("iPad window modes only")
         }
         continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         let window = app.windows.firstMatch
         let back = app.buttons["agents-back"].firstMatch
         let title = app.staticTexts["Agents"].firstMatch
@@ -44,7 +40,7 @@ final class AgentListChromeTests: XCTestCase {
 
         let startedFullScreen = window.frame.minX == 0 && window.frame.minY == 0
         if startedFullScreen {
-            attach("ipad-fullscreen-back-left", app)
+            attach(app, "ipad-fullscreen-back-left")
             XCTAssertLessThan(back.frame.maxX, title.frame.minX, "full screen: Back is left of the title")
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
                 .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.82)))
@@ -52,7 +48,7 @@ final class AgentListChromeTests: XCTestCase {
         XCTAssertTrue(window.frame.minX > 0 || window.frame.minY > 0, "must be in a window")
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         waitForSettledFrame(window)
-        attach("ipad-window-back-right", app)
+        attach(app, "ipad-window-back-right")
         XCTAssertGreaterThan(back.frame.minX, title.frame.maxX, "window: Back joins the right-hand capsule")
         // The window controls' pill is ~21.5 pt tall, centred ~31.5 pt below the window's
         // top; the sidebar panel starts 10 pt down. The capsules match the pill instead of
@@ -67,7 +63,7 @@ final class AgentListChromeTests: XCTestCase {
         }
         XCTAssertTrue(refresh.exists, "Gram should open with its header")
         waitForSettledFrame(refresh)   // the section switch may still be animating
-        attach("ipad-window-gram", app)
+        attach(app, "ipad-window-gram")
         assertLinesUpWithWindowControls(refresh, in: window, "Gram")
         if !startedFullScreen {
             // The window survived from an earlier run; the window case above still ran.
@@ -107,13 +103,6 @@ final class AgentListChromeTests: XCTestCase {
                           "\(section): the capsule must not reach up to the panel's top edge")
     }
 
-    private func attach(_ name: String, _ app: XCUIApplication) {
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = name
-        shot.lifetime = .keepAlways
-        add(shot)
-    }
-
     /// iPadOS animates a restored or resized window into place; frames read during that
     /// animation, and taps aimed with them, are wrong.
     private func waitForSettledFrame(_ element: XCUIElement) {
@@ -127,9 +116,7 @@ final class AgentListChromeTests: XCTestCase {
     }
 
     func testSearchFiltersAndClears() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         let search = app.textFields["agent-search"]
         XCTAssertTrue(search.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["Clear search"].exists, "nothing to clear yet")
@@ -144,9 +131,7 @@ final class AgentListChromeTests: XCTestCase {
 
     func testTabletSidebarCanHideAndRestoreInEverySection() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("Tablet split view") }
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "list"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "list")
         for section in ["Agents", "Gram", "Settings"] {
             if section != "Agents" { app.buttons[section].firstMatch.tap() }
             let hide = app.buttons["Minimise sidebar"].firstMatch

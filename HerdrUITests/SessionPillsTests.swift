@@ -8,9 +8,7 @@ final class SessionPillsTests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testRunningSessionsShowAsPillsWithTheCurrentOneSelected() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "sessions"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "sessions")
 
         XCTAssertTrue(app.staticTexts["mcb-air/mcb-air"].waitForExistence(timeout: 12),
                       "the roster should have loaded")
@@ -34,9 +32,7 @@ final class SessionPillsTests: XCTestCase {
     /// pills check every session), instead of an empty screen until its own list loads.
     /// In this mock the switched-to session takes 4 s to answer its own `agent.list`.
     func testSwitchingShowsTheNewSessionsAgentsWithoutWaitingForItsLoad() {
-        let app = XCUIApplication()
-        app.launchEnvironment["HERDR_SCREENSHOT_MOCK"] = "sessions"
-        app.launch()
+        let app = XCUIApplication.launched(mock: "sessions")
 
         XCTAssertTrue(app.staticTexts["mcb-air/mcb-air"].waitForExistence(timeout: 12),
                       "the roster should have loaded")
