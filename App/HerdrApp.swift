@@ -883,8 +883,8 @@ struct ConnectView: View {
                     // not have and cannot be expected to produce from this screen.
                     scanButton
                     addHostButton
-                    captions
-                    inviteEntry
+                    // Someone shared an agent: their invite, as a QR code or a link.
+                    inviteButtons
                 }
                 .padding(22)
                 // Cap + center the column on iPad/macOS so the host list doesn't
@@ -1004,35 +1004,33 @@ struct ConnectView: View {
         Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 54)
     }
 
-    /// Someone shared an agent: open their invite link. The system PasteButton reads
-    /// the clipboard only when tapped, so there is no "Allow Paste" prompt (see
-    /// HostEditor); scanning covers an invite shown as a QR code.
-    private var inviteEntry: some View {
+    /// Someone shared an agent: scan their invite QR, or paste the link. Scan is a
+    /// full-width button like Add host so it is easy to find; Paste is the smaller
+    /// fallback. The system PasteButton reads the clipboard only when tapped, so there
+    /// is no "Allow Paste" prompt (see HostEditor).
+    private var inviteButtons: some View {
         VStack(spacing: 10) {
-            Text("Got an invite link from someone?")
-                .font(connectFont(13)).foregroundStyle(Palette.textDim)
-            HStack(spacing: 10) {
-                PasteButton(payloadType: String.self) { items in
-                    Task { @MainActor in
-                        if let text = items.first { GuestInviteRouter.shared.open(text) }
-                    }
+            Button { showingInviteScan = true } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "qrcode.viewfinder").font(.system(size: 15, weight: .semibold))
+                    Text("Scan invite").font(connectFont(15, .semibold))
                 }
-                .labelStyle(.titleAndIcon)
-                .tint(Palette.surfaceRaised)
-                .buttonBorderShape(.capsule)
-                .controlSize(.large)
-                .accessibilityLabel("Paste invite link")
-                Button { showingInviteScan = true } label: {
-                    Label("Scan invite", systemImage: "qrcode.viewfinder")
-                        .font(connectFont(15, .semibold)).foregroundStyle(Palette.text)
-                        .padding(.horizontal, 16).frame(height: 44)
-                        .background(Palette.surface, in: Capsule())
-                }
-                .buttonStyle(.plain)
+                .foregroundStyle(Palette.text)
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .background(Palette.surface, in: Capsule())
             }
+            .buttonStyle(.plain)
+            PasteButton(payloadType: String.self) { items in
+                Task { @MainActor in
+                    if let text = items.first { GuestInviteRouter.shared.open(text) }
+                }
+            }
+            .labelStyle(.titleAndIcon)
+            .tint(Palette.surfaceRaised)
+            .buttonBorderShape(.capsule)
+            .controlSize(.regular)
+            .accessibilityLabel("Paste invite link")
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 12)
     }
 
     private var scanButton: some View {
@@ -1153,20 +1151,6 @@ struct ConnectView: View {
             .background(Palette.surface, in: Capsule())
         }
         .buttonStyle(.plain)
-    }
-
-    // Readable secondary copy, using the same native type as the host picker.
-    private var captions: some View {
-        VStack(spacing: 8) {
-            Text("Connects privately over your Tailscale network. Nothing is exposed to the public internet.")
-                .font(connectFont(13)).foregroundStyle(Palette.textDim)
-                .multilineTextAlignment(.center)
-            Text("Your key or password stays in this device's Keychain, never uploaded.")
-                .font(connectFont(13)).foregroundStyle(Palette.textDim)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 4)
     }
 
     private var savedHostsSection: some View {
