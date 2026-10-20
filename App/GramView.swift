@@ -354,45 +354,6 @@ struct GramView: View {
         var startsAfterMarker: Bool { separator != nil || unreadCount != nil }
     }
 
-    /// What of the feed is on screen, from the rows' and bottom marker's appear/disappear.
-    /// A class held in `@State` so the callbacks can update it without re-rendering the page.
-    private final class FeedVisibility {
-        /// Feed rows on screen (inside the scroll view's visible bounds, not merely built).
-        var rows: Set<String> = []
-        /// Feed rows whose top sits at the top of the visible bounds: where an anchor scroll
-        /// (`scrollTo(id, anchor: .top)`) puts a row once it has really landed.
-        var rowsAtTop: Set<String> = []
-        /// The bottom marker is on screen: the reader is at the newest message.
-        var atBottom = false
-        /// The older-messages sentinel at the top is on screen.
-        var sentinelOnScreen = false
-        /// An older page is being fetched for the sentinel (see `requestOlderPage`).
-        var pageRequested = false
-        /// The sentinel may fetch when it comes on screen. Spent by a fetch and given back only
-        /// when the reader scrolls the sentinel away (so its NEXT arrival is a new one), or when
-        /// the page has landed, the reader's place is restored, and the sentinel is still in
-        /// view (the loaded rows do not reach the top of the feed).
-        var pageArmed = true
-        /// Restoring the reader's place after an older page landed: the sentinel's visibility
-        /// flickers while the anchor scroll converges and must not arm or fetch meanwhile.
-        var anchoring = false
-        /// The initial scroll to the bottom has been asked for on this appearance.
-        var initialScrollIssued = false
-        /// The feed's visible height at the bottom marker's last report, so a shrink (keyboard
-        /// up, composer grown) can be told from the reader scrolling away. 0 = not known yet.
-        var viewportHeight: CGFloat = 0
-        /// The pending "stay at the bottom" scroll after a shrink. Re-scheduled on every frame
-        /// of the resize and run once it settles: a `scrollTo` on every animation frame of a
-        /// growing editor locked the lazy feed's layout (main thread busy, UI test hung).
-        var shrinkJump: Task<Void, Never>?
-        /// The search text the feed last showed, so a CHANGE of it (not the feed's first
-        /// appearance) scrolls to the newest match. nil until the feed has appeared.
-        var shownSearch: String?
-        /// The running older-messages fetch (the sentinel's, or the no-matches button's),
-        /// so a new or cleared search cancels it.
-        var olderFetch: Task<Void, Never>?
-    }
-
     /// The newest message in the whole loaded list (not the search-filtered one): what the
     /// feed follows in when it changes to a newer message.
     private struct FeedTip: Equatable {
@@ -1147,328 +1108,54 @@ struct GramView: View {
             noMatches(hasOlder: inboxStore.inbox.nextCursor != nil, loadedCount: messages.count)
         case .loaded:
             ScrollViewReader { feed in
-            ScrollView {
-                // EAGER, NOT LAZY, AND WINDOWED. A LazyVStack here never settled while the
-                // composer's pull-up editor shrank the feed: main thread at 100% in layout,
-                // the composer UI test hung on CI's iPhone (also with no other change) and 2/2
-                // locally; with this stack it passes on CI and 3/3 locally in 18 s. An eager
-                // stack draws every row it is given, and paging keeps adding to what is loaded,
-                // so it is given only the newest `renderLimit` messages (`feedEntries`); older
-                // loaded ones are revealed by the top sentinel without a fetch.
-                VStack(spacing: 0) {
-                    // The sentinel, at the TOP: the feed is oldest-first and opens at the
-                    // bottom, so it comes on screen only when the reader scrolls up past the
-                    // oldest loaded message, which is exactly when the next page is worth
-                    // fetching (see `requestOlderPage`). A failed page says so and becomes a tap
-                    // target, instead of spinning forever with nothing left to re-trigger it.
-                    // During a search the same arrival searches older pages for matches
-                    // (`loadOlderMatches`), and the sentinel says so; it is a tap target
-                    // then too, since a result list that fits on screen cannot be scrolled
-                    // to bring it in.
-                    if hasHiddenOlder || inboxStore.inbox.nextCursor != nil {
-                        Button {
-                            // A tap retries a failed page, or searches older pages: a fresh,
-                            // reader-asked fetch.
-                            pageError = nil
-                            feedVisibility.pageArmed = true
-                            requestOlderPage()
-                        } label: {
-                            HStack(spacing: 8) {
-                                if let pageError {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 12, weight: .semibold))
-                                    Text("\(pageError) Tap to retry.")
-                                } else if sentinelSearchesOlder && !searchingOlder {
-                                    Image(systemName: "arrow.up")
-                                        .font(.system(size: 12, weight: .semibold))
-                                    // Names both ways: a short result list cannot be scrolled.
-                                    // After a bounded search found nothing older: true even with
-                                    // matches from the newer messages shown below.
-                                    Text(searchedOlderWithoutMatch.map {
-                                        "No older matches in \($0) messages. Tap or scroll up to search further"
-                                    } ?? "Tap or scroll up to search older messages")
-                                } else {
-                                    ProgressView().controlSize(.small)
-                                    Text(sentinelSearchesOlder ? "Searching older messages…" : "Loading older messages…")
-                                }
-                            }
-                            .font(Typography.app(12))
-                            .foregroundStyle(Palette.textFaint)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(pageError == nil && !(sentinelSearchesOlder && !searchingOlder))
-                        .accessibilityIdentifier("gram-loading-older")
-                        // Fetches when the sentinel ARRIVES on screen after the initial scroll:
-                        // the first layout starts at the top and builds it although the reader
-                        // never saw it. One arrival, one page: the fetch disarms it, and only
-                        // scrolling it away again (or the anchor-restore check) re-arms it, so a
-                        // page landing while it is still in view cannot chain into the next.
-                        // The tracker is a background view re-identified on every appearance:
-                        // a NEW view reports its geometry at once, so coming back to the tab
-                        // re-reports the sentinel even though nothing moved.
-                        .background {
-                            Color.clear
-                                .onFeedVisibilityChange { onScreen in
-                                    feedVisibility.sentinelOnScreen = onScreen
-                                    if onScreen {
-                                        requestOlderPage()
-                                    } else if !feedVisibility.anchoring, !feedVisibility.pageRequested {
-                                        feedVisibility.pageArmed = true
-                                    }
-                                }
-                                .id(feedAppearance)
-                        }
-                        .onDisappear {
-                            feedVisibility.sentinelOnScreen = false
-                            if !feedVisibility.anchoring, !feedVisibility.pageRequested {
-                                feedVisibility.pageArmed = true
-                            }
-                        }
-                    }
-                    ForEach(Array(feedEntries.enumerated()), id: \.element.id) { index, entry in
-                        VStack(spacing: 0) {
-                            if let date = entry.separator {
-                                GramTimeSeparator(date: date)
-                                    .padding(.top, index == 0 ? 0 : 16)
-                            }
-                            if let count = entry.unreadCount {
-                                GramUnreadRule(count: count)
-                                    .padding(.top, index == 0 && entry.separator == nil ? 0 : 12)
-                            }
-                            GramRow(
-                                message: entry.message,
-                                isDownloadingFile: downloadingFileFor == entry.message.id,
-                                downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
-                                // Not before the feed has landed on the newest message: the
-                                // first layout passes through the top rows, never seen.
-                                feedLanded: didInitialScroll,
-                                visibleTop: headerBottom,
-                                appearance: feedAppearance,
-                                isSaved: savedGrams.isSaved(entry.message.id),
-                                expandedSegments: expandedTexts[entry.id] ?? [],
-                                fontScale: uiFontScale,
-                                onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
-                                onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
-                                onPrefetchImage: { await prefetchImage(entry.message) },
-                                onToggleSave: { savedGrams.toggle(entry.message) },
-                                onDelete: { delete(entry.message) },
-                                onSetExpanded: { segment, open in setExpanded(entry.id, segment: segment, open) },
-                                startsGroup: entry.startsGroup,
-                                endsGroup: entry.endsGroup,
-                                localMachine: localMachine
-                            )
-                            // A page render (a keystroke, a poll, another file's progress) skips
-                            // every row whose inputs are unchanged (`GramRow.==`).
-                            .equatable()
-                            // 2 pt inside a group, 10 pt between groups.
-                            .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
-                        }
-                        // Read when it is ON SCREEN: every drawn row exists, on screen or not,
-                        // and before the initial scroll the first layout sits at the
-                        // top, which the reader never sees (`finishInitialScroll` reads what is
-                        // on screen once the feed has landed on the newest message).
-                        // `feedAppearance` is part of the reported value, so a row still on
-                        // screen when the tab comes back reports again (rows are not
-                        // re-identified: that would rebuild every bubble).
-                        .onFeedPlacementChange(appearance: feedAppearance,
-                                               visibleTop: headerBottom > 0 ? headerBottom : nil) { placement in
-                            if placement.onScreen {
-                                feedVisibility.rows.insert(entry.id)
-                                if didInitialScroll { markReadIfNeeded(entry.message) }
-                            } else {
-                                feedVisibility.rows.remove(entry.id)
-                            }
-                            if placement.atTop {
-                                feedVisibility.rowsAtTop.insert(entry.id)
-                            } else {
-                                feedVisibility.rowsAtTop.remove(entry.id)
-                            }
-                        }
-                        .onDisappear {
-                            feedVisibility.rows.remove(entry.id)
-                            feedVisibility.rowsAtTop.remove(entry.id)
-                        }
-                    }
-                    if shouldShowSetupCard { setupCard.padding(.top, 14) }
-                    Color.clear.frame(height: 1).id(Self.feedBottomID)
-                        // The reader is at the bottom while this marker is on screen (within a
-                        // few points): new messages are followed in only then. Tracked by a
-                        // background view re-identified on every appearance, like the sentinel,
-                        // so returning to the tab says "at the bottom" again (and finishes the
-                        // initial scroll) without the reader having to scroll.
-                        .background {
-                            Color.clear
-                                .onFeedBottomChange(slack: 24) { bottom in
-                                    let wasAtBottom = feedVisibility.atBottom
-                                    let previousHeight = feedVisibility.viewportHeight
-                                    // A marker leaving the hierarchy reports no scroll view (height
-                                    // 0): that is not a resize, and must not count as one later.
-                                    if bottom.viewportHeight > 0 {
-                                        feedVisibility.viewportHeight = bottom.viewportHeight
-                                    }
-                                    // The feed's VISIBLE HEIGHT got smaller under a reader at the
-                                    // bottom because the keyboard came up: the scroll view keeps its
-                                    // top offset, so the newest rows slid under the composer. Keep
-                                    // the reader at the bottom, as Messages does. Only a real
-                                    // viewport decrease counts (an older page or a filter leaves the
-                                    // height alone), one jump after the resize settles.
-                                    // Not while the composer has grown (wrapped text, the pull-up
-                                    // editor): a scroll to the bottom while the editor opened locked
-                                    // the feed's layout on iPhone (main thread busy, UI test hung),
-                                    // and the tall editor is for writing, not for following.
-                                    let shrank = previousHeight > 0 && bottom.viewportHeight > 0
-                                        && bottom.viewportHeight < previousHeight - 0.5
-                                    if shrank, wasAtBottom, didInitialScroll, !feedVisibility.anchoring,
-                                       composerAtRest {
-                                        feedVisibility.atBottom = true
-                                        feedVisibility.shrinkJump?.cancel()
-                                        feedVisibility.shrinkJump = Task { @MainActor in
-                                            try? await Task.sleep(nanoseconds: Self.shrinkJumpSettleNanos)
-                                            guard !Task.isCancelled, composerAtRest else { return }
-                                            feed.scrollTo(Self.feedBottomID, anchor: .bottom)
-                                        }
-                                        return
-                                    }
-                                    feedVisibility.atBottom = bottom.onScreen
-                                    guard bottom.onScreen else { return }
-                                    showingNewMessages = false
-                                    finishInitialScroll()
-                                }
-                                .id(feedAppearance)
-                        }
-                        // Not the pending shrink jump: the feed's own onDisappear cancels it
-                        // (this marker leaves only with the feed, but a jump scheduled just
-                        // before must still run while the feed stays).
-                        .onDisappear { feedVisibility.atBottom = false }
-                }
-                .padding(16)
-                // How many messages the feed holds, so VoiceOver can say how long the list is
-                // and a UI test can count the pages loaded. On the stack as a containing
-                // element, not on the ScrollView: the ScrollView's own value read back as a
-                // number that matched no list the page held.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("gram-feed-messages")
-                .accessibilityValue("\(visibleMessages.count) messages")
-                .readableColumn(feedCap)
-            }
-            .accessibilityIdentifier("gram-feed")
-            // Before the `.task` below, so the scroll loop already sees fresh reports.
-            .onAppear { feedAppearance += 1 }
-            // Oldest at the top, newest at the bottom: open at the newest. NOT
-            // `.defaultScrollAnchor(.bottom)`: with it, growing the composer (which shrinks the
-            // feed) re-anchored the feed every frame, a redraw loop that pinned the CPU and
-            // hung the composer's UI test.
-            .task {
-                if !unreadRuleCaptured { captureUnreadRule() }
-                feedVisibility.initialScrollIssued = true
-                // The first jump can land short of the bottom while rows (images, folded
-                // text) still settle their heights (on iPhone it opened mid-history). Jump again after each
-                // layout pass until the bottom marker is really on screen; bounded so a feed
-                // that cannot reach it never spins.
-                for _ in 0..<8 {
-                    feed.scrollTo(Self.feedBottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if feedVisibility.atBottom { break }
-                }
-                if feedVisibility.atBottom { finishInitialScroll() }
-            }
-            // A change of the search text is a deliberate change of view: once the filtered rows
-            // are laid out, show the newest match at the bottom (clearing the search returns to
-            // the newest message). Keyed on the text, so each change scrolls once and a newer
-            // keystroke cancels the older one's scroll; the feed's first appearance only records
-            // the text (the `.task` above opens it at the bottom).
-            .task(id: search) {
-                guard let shown = feedVisibility.shownSearch else {
-                    feedVisibility.shownSearch = search
-                    return
-                }
-                guard shown != search else { return }
-                feedVisibility.shownSearch = search
-                // (The window itself is reset by the page's onChange(of: search), which also
-                // runs while the feed is swapped for "No matches".)
-                // Same bounded settle loop as the initial scroll: estimated row heights can make
-                // one jump land short.
-                for _ in 0..<8 {
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    guard !Task.isCancelled else { return }
-                    feed.scrollTo(Self.feedBottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if feedVisibility.atBottom { break }
-                }
-                // The results are on screen at the newest match. A sentinel off screen now
-                // arrives only when the reader scrolls up to it, so it may search older pages
-                // then; one already in view (the results fit) waits for a tap. Arming on its
-                // own reports alone missed a sentinel that stayed off screen across the change.
-                try? await Task.sleep(nanoseconds: 60_000_000)
-                guard !Task.isCancelled else { return }
-                if !feedVisibility.sentinelOnScreen, !feedVisibility.pageRequested, !feedVisibility.anchoring {
-                    feedVisibility.pageArmed = true
-                }
-            }
-            .onDisappear {
-                didInitialScroll = false
-                feedVisibility.initialScrollIssued = false
+            // Given only the newest `renderLimit` messages (`feedEntries`, see
+            // `WindowedBottomFeed` on why the stack is eager and windowed); older loaded ones are
+            // revealed by the top sentinel without a fetch.
+            WindowedBottomFeed(
+                feed: feed,
+                items: feedEntries,
+                spacing: 0,
+                showsSentinel: hasHiddenOlder || inboxStore.inbox.nextCursor != nil,
+                bottomID: Self.feedBottomID,
+                feedID: "gram-feed",
+                messagesID: "gram-feed-messages",
+                messagesValue: "\(visibleMessages.count) messages",
+                columnCap: feedCap,
+                visibleTop: headerBottom,
+                search: search,
+                visibility: feedVisibility,
+                appearance: $feedAppearance,
+                landed: $didInitialScroll,
+                anchorID: $pageAnchorID,
+                onOpen: { if !unreadRuleCaptured { captureUnreadRule() } },
+                onLanded: feedLanded,
+                // Read when it is ON SCREEN, once the feed has landed on the newest message.
+                onRowSeen: { entry in markReadIfNeeded(entry.message) },
+                onSentinelArrival: requestOlderPage,
+                onBottomReached: { showingNewMessages = false },
+                onLeave: { showingNewMessages = false },
+                // Only while the composer is one row (see `composerAtRest`).
+                followsShrink: { composerAtRest },
                 // During a search the next feed waits for the reader to bring the sentinel in
                 // (see the page's `onChange(of: search)`).
-                feedVisibility.pageArmed = search.isEmpty
-                feedVisibility.anchoring = false
-                feedVisibility.shownSearch = nil
-                showingNewMessages = false
-                feedVisibility.shrinkJump?.cancel()
-            }
+                armedOnReturn: { search.isEmpty },
+                // Not into another search of older pages: that is bounded per arrival, and a
+                // result list that fits on screen would otherwise walk the whole store.
+                chainsAfterAnchor: { search.isEmpty || hasHiddenOlder },
+                sentinel: { inboxSentinel },
+                row: { index, entry in inboxRow(index: index, entry: entry) },
+                footer: { if shouldShowSetupCard { setupCard.padding(.top, 14) } }
+            )
             // Follow a NEW message in only when the reader is at the bottom or just sent it;
             // otherwise offer the "New messages" button. Keyed on the unfiltered newest
             // message, and only when it is newer than the last one, so a delete or an older
-            // page never moves the reader (a search change scrolls on its own, above).
+            // page never moves the reader (a search change scrolls on its own, in the feed).
             .onChange(of: feedTip) { old, new in
                 guard didInitialScroll, let new, new.createdUnixMs > (old?.createdUnixMs ?? 0) else { return }
                 if feedVisibility.atBottom || pendingPosts.contains(where: { $0.id == new.id }) {
                     feed.scrollTo(Self.feedBottomID, anchor: .bottom)
                 } else {
                     showingNewMessages = true
-                }
-            }
-            // An older page landed above: put the previously-top message back at the top, so
-            // the insert does not move what the reader is looking at. If the sentinel is still
-            // on screen once that settles (the loaded rows do not fill the feed), the reader
-            // can see the top, so the next page is fetched.
-            .onChange(of: pageAnchorID) { _, id in
-                guard let id else { return }
-                pageAnchorID = nil
-                feedVisibility.anchoring = true
-                Task { @MainActor in
-                    // The inserted rows may still be settling their heights, so one
-                    // jump can land short (on iPhone the feed stayed at the top of the new page,
-                    // sentinel in view). Jump FIRST, then check after the layout pass, and
-                    // jump again until the row has really landed at the top: checking before
-                    // the first jump read the row's placement from BEFORE the insert, which
-                    // could end the restore without moving the feed. Bounded so a feed that
-                    // cannot get there (it fits on screen) never spins.
-                    for _ in 0..<10 {
-                        feed.scrollTo(id, anchor: .top)
-                        try? await Task.sleep(nanoseconds: 60_000_000)
-                        if feedVisibility.rowsAtTop.contains(id) { break }
-                    }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                    feedVisibility.anchoring = false
-                    // Landed: at the top, or on screen with the bottom marker too (the whole
-                    // feed fits, so the row cannot be scrolled up to the top).
-                    let settled = feedVisibility.rowsAtTop.contains(id)
-                        || (feedVisibility.rows.contains(id) && feedVisibility.atBottom)
-                    if !feedVisibility.sentinelOnScreen {
-                        feedVisibility.pageArmed = true
-                    } else if settled, search.isEmpty || hasHiddenOlder {
-                        // The reader's place is back and the top is STILL in view: the reader
-                        // can see it, so this is an arrival at the top too. Not into another
-                        // search of older pages: that is bounded per arrival, and a result
-                        // list that fits on screen would otherwise walk the whole store.
-                        feedVisibility.pageArmed = true
-                        requestOlderPage()
-                    }
-                    // Otherwise the anchor did not hold; nothing chains until the reader
-                    // scrolls the sentinel away and back.
                 }
             }
             .overlay(alignment: .bottom) {
@@ -1504,10 +1191,92 @@ struct GramView: View {
         }
     }
 
+    /// The inbox feed's top sentinel: the feed is oldest-first and opens at the bottom, so it
+    /// comes on screen only when the reader scrolls up past the oldest loaded message, which is
+    /// exactly when the next page is worth fetching (see `requestOlderPage`). A failed page says
+    /// so and becomes a tap target, instead of spinning forever with nothing left to re-trigger
+    /// it. During a search the same arrival searches older pages for matches
+    /// (`loadOlderMatches`), and the sentinel says so; it is a tap target then too, since a
+    /// result list that fits on screen cannot be scrolled to bring it in.
+    private var inboxSentinel: some View {
+        Button {
+            // A tap retries a failed page, or searches older pages: a fresh,
+            // reader-asked fetch.
+            pageError = nil
+            feedVisibility.pageArmed = true
+            requestOlderPage()
+        } label: {
+            HStack(spacing: 8) {
+                if let pageError {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("\(pageError) Tap to retry.")
+                } else if sentinelSearchesOlder && !searchingOlder {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                    // Names both ways: a short result list cannot be scrolled.
+                    // After a bounded search found nothing older: true even with
+                    // matches from the newer messages shown below.
+                    Text(searchedOlderWithoutMatch.map {
+                        "No older matches in \($0) messages. Tap or scroll up to search further"
+                    } ?? "Tap or scroll up to search older messages")
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text(sentinelSearchesOlder ? "Searching older messages…" : "Loading older messages…")
+                }
+            }
+            .font(Typography.app(12))
+            .foregroundStyle(Palette.textFaint)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .disabled(pageError == nil && !(sentinelSearchesOlder && !searchingOlder))
+        .accessibilityIdentifier("gram-loading-older")
+    }
+
+    /// One inbox feed row with what draws above it: its time separator and the unread rule.
+    private func inboxRow(index: Int, entry: FeedEntry) -> some View {
+        VStack(spacing: 0) {
+            if let date = entry.separator {
+                GramTimeSeparator(date: date)
+                    .padding(.top, index == 0 ? 0 : 16)
+            }
+            if let count = entry.unreadCount {
+                GramUnreadRule(count: count)
+                    .padding(.top, index == 0 && entry.separator == nil ? 0 : 12)
+            }
+            GramRow(
+                message: entry.message,
+                isDownloadingFile: downloadingFileFor == entry.message.id,
+                downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
+                // Not before the feed has landed on the newest message: the
+                // first layout passes through the top rows, never seen.
+                feedLanded: didInitialScroll,
+                visibleTop: headerBottom,
+                appearance: feedAppearance,
+                isSaved: savedGrams.isSaved(entry.message.id),
+                expandedSegments: expandedTexts[entry.id] ?? [],
+                fontScale: uiFontScale,
+                onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
+                onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
+                onPrefetchImage: { await prefetchImage(entry.message) },
+                onToggleSave: { savedGrams.toggle(entry.message) },
+                onDelete: { delete(entry.message) },
+                onSetExpanded: { segment, open in setExpanded(entry.id, segment: segment, open) },
+                startsGroup: entry.startsGroup,
+                endsGroup: entry.endsGroup,
+                localMachine: localMachine
+            )
+            // A page render (a keystroke, a poll, another file's progress) skips
+            // every row whose inputs are unchanged (`GramRow.==`).
+            .equatable()
+            // 2 pt inside a group, 10 pt between groups.
+            .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
+        }
+    }
+
     private static let feedBottomID = "gram-feed-bottom"
-    /// How long a shrinking feed must stay still before the reader is kept at the bottom:
-    /// longer than one frame, short enough to read as part of the keyboard/editor motion.
-    private static let shrinkJumpSettleNanos: UInt64 = 150_000_000
 
     private func centered<V: View>(@ViewBuilder _ inner: () -> V) -> some View {
         VStack { Spacer(); inner(); Spacer() }
@@ -2761,13 +2530,11 @@ struct GramView: View {
         unreadRule = unread.last.map { UnreadRule(messageID: $0.id, count: unread.count) }
     }
 
-    /// The feed has landed on the newest message (its bottom marker came on screen after the
-    /// scroll was issued): from now on rows that appear are being read. The rows already on
-    /// screen are read one turn later, once this layout pass's appear/disappear callbacks have
-    /// dropped the top rows the first layout built.
-    private func finishInitialScroll() {
-        guard feedVisibility.initialScrollIssued, !didInitialScroll else { return }
-        didInitialScroll = true
+    /// The feed has landed on the newest message (`WindowedBottomFeed` saw its bottom marker
+    /// come on screen after the scroll was issued): from now on rows that appear are being
+    /// read. The rows already on screen are read one turn later, once this layout pass's
+    /// appear/disappear callbacks have dropped the top rows the first layout built.
+    private func feedLanded() {
         Task { @MainActor in
             for message in messages where feedVisibility.rows.contains(message.id) {
                 markReadIfNeeded(message)
@@ -2961,11 +2728,11 @@ private struct FileExportPicker: UIViewControllerRepresentable {
 }
 
 /// The Saved section's feed, read like the inbox: oldest at the top and the newest at the
-/// bottom, opening at the newest with the inbox's bounded scroll to the bottom marker. It
-/// draws only the newest `GramView.renderWindow` saved messages (an eager, windowed stack,
-/// like the inbox's), and reaching the top reveals the next older window, putting the
-/// previously-top message back at the top so the reader keeps their place. Saved is local
-/// and complete, so a reveal never fetches. A search filters `saved` before it gets here and
+/// bottom, on the inbox's `WindowedBottomFeed`. It draws only the newest
+/// `GramView.renderWindow` saved messages, and reaching the top reveals the next older
+/// window, putting the previously-top message back at the top so the reader keeps their
+/// place. Saved is local and complete, so a reveal never fetches, and there is no read
+/// tracking or composer resize to follow. A search filters `saved` before it gets here and
 /// starts over from the newest window.
 private struct GramSavedFeed: View {
     /// The saved messages to show, newest first (the store's order), after the search filter.
@@ -2987,30 +2754,16 @@ private struct GramSavedFeed: View {
     /// The previously-top message after a reveal; the feed scrolls back to it.
     @State private var anchorID: String?
     /// Bumped each time the feed comes on screen, so its trackers report again (see
-    /// `GramView.feedAppearance`).
+    /// `WindowedBottomFeed.appearance`).
     @State private var appearance = 0
-    @State private var visibility = Visibility()
-
-    /// What of the feed is on screen, read only from callbacks (a reference box, so updating
-    /// it on every scroll does not re-render the feed). The inbox's `FeedVisibility` for
-    /// Saved: there is no fetch, read tracking or composer resize to follow here.
-    private final class Visibility {
-        var rows: Set<String> = []
-        var rowsAtTop: Set<String> = []
-        var atBottom = false
-        var sentinelOnScreen = false
-        /// The sentinel may reveal when it comes on screen: spent by a reveal, given back when
-        /// the sentinel leaves the screen or the reveal's anchor has settled with it in view.
-        var armed = true
-        var anchoring = false
-        var initialScrollIssued = false
-        /// The feed has landed on the newest saved message: the first layout starts at the top,
-        /// and the sentinel it builds there was never seen.
-        var landed = false
-        var shownSearch: String?
+    @State private var visibility = FeedVisibility()
+    /// The feed has landed on the newest saved message (the first layout starts at the top, and
+    /// the sentinel it builds there was never seen). In `visibility`, not `@State`: nothing
+    /// drawn depends on it, and re-rendering this feed when it lands left the reveal's anchor
+    /// short of the top on iPad (the previously-top row stayed low, the oldest in view).
+    private var landed: Binding<Bool> {
+        Binding(get: { visibility.landed }, set: { visibility.landed = $0 })
     }
-
-    private static let bottomID = "gram-saved-bottom"
 
     private var hasHiddenOlder: Bool { saved.count > renderLimit }
     /// The drawn window, oldest at the top.
@@ -3019,154 +2772,60 @@ private struct GramSavedFeed: View {
     var body: some View {
         let rows = drawn
         ScrollViewReader { feed in
-            ScrollView {
-                VStack(spacing: 14) {
-                    if hasHiddenOlder {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Loading older saved messages…")
-                        }
-                        .font(Typography.app(12))
-                        .foregroundStyle(Palette.textFaint)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .accessibilityIdentifier("gram-saved-older")
-                        .background {
-                            Color.clear
-                                .onFeedVisibilityChange { onScreen in
-                                    visibility.sentinelOnScreen = onScreen
-                                    if onScreen {
-                                        revealOlder()
-                                    } else if !visibility.anchoring {
-                                        visibility.armed = true
-                                    }
-                                }
-                                .id(appearance)
-                        }
-                        .onDisappear {
-                            visibility.sentinelOnScreen = false
-                            if !visibility.anchoring { visibility.armed = true }
-                        }
-                    }
-                    ForEach(rows) { s in
-                        SavedGramRow(
-                            saved: s,
-                            isDownloadingFile: downloadingFileFor == s.id,
-                            downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
-                            onOpenFile: { onOpenFile(s) },
-                            onSaveFile: { onSaveFile(s) },
-                            onUnsave: { onUnsave(s) }
-                        )
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("gram-saved-\(s.id)")
-                        .onFeedPlacementChange(appearance: appearance,
-                                               visibleTop: headerBottom > 0 ? headerBottom : nil) { placement in
-                            if placement.onScreen { visibility.rows.insert(s.id) } else { visibility.rows.remove(s.id) }
-                            if placement.atTop { visibility.rowsAtTop.insert(s.id) } else { visibility.rowsAtTop.remove(s.id) }
-                        }
-                        .onDisappear {
-                            visibility.rows.remove(s.id)
-                            visibility.rowsAtTop.remove(s.id)
-                        }
-                    }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
-                        .background {
-                            Color.clear
-                                .onFeedBottomChange(slack: 24) { bottom in
-                                    visibility.atBottom = bottom.onScreen
-                                    if bottom.onScreen { finishInitialScroll() }
-                                }
-                                .id(appearance)
-                        }
-                        .onDisappear { visibility.atBottom = false }
-                }
-                .padding(16)
+            WindowedBottomFeed(
+                feed: feed,
+                items: rows,
+                spacing: 14,
+                showsSentinel: hasHiddenOlder,
+                bottomID: "gram-saved-bottom",
+                feedID: "gram-saved-feed",
                 // How many saved messages are drawn, so a UI test can tell the window from all.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("gram-saved-messages")
-                .accessibilityValue("\(rows.count) of \(saved.count) saved")
-                // iPad / Mac: a readable conversation column, centred, so a bubble never
-                // stretches across the whole detail pane.
-                .readableColumn(columnCap)
-            }
-            .accessibilityIdentifier("gram-saved-feed")
-            .onAppear { appearance += 1 }
-            // Open at the newest, as the inbox does (and for its reasons, not
-            // `.defaultScrollAnchor(.bottom)`): jump again after each layout pass until the
-            // bottom marker is really on screen, bounded.
-            .task {
-                visibility.initialScrollIssued = true
-                for _ in 0..<8 {
-                    feed.scrollTo(Self.bottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if visibility.atBottom { break }
-                }
-                if visibility.atBottom { finishInitialScroll() }
-            }
-            // A changed search shows its newest match at the bottom, from the newest window.
-            .task(id: search) {
-                guard let shown = visibility.shownSearch else {
-                    visibility.shownSearch = search
-                    return
-                }
-                guard shown != search else { return }
-                visibility.shownSearch = search
-                for _ in 0..<8 {
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    guard !Task.isCancelled else { return }
-                    feed.scrollTo(Self.bottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if visibility.atBottom { break }
-                }
-            }
+                messagesID: "gram-saved-messages",
+                messagesValue: "\(rows.count) of \(saved.count) saved",
+                columnCap: columnCap,
+                visibleTop: headerBottom,
+                search: search,
+                visibility: visibility,
+                appearance: $appearance,
+                landed: landed,
+                anchorID: $anchorID,
+                // A feed that fits shows the top too.
+                onLanded: { if visibility.sentinelOnScreen { revealOlder() } },
+                onSentinelArrival: revealOlder,
+                sentinel: {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading older saved messages…")
+                    }
+                    .font(Typography.app(12))
+                    .foregroundStyle(Palette.textFaint)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .accessibilityIdentifier("gram-saved-older")
+                },
+                row: { _, s in
+                    SavedGramRow(
+                        saved: s,
+                        isDownloadingFile: downloadingFileFor == s.id,
+                        downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
+                        onOpenFile: { onOpenFile(s) },
+                        onSaveFile: { onSaveFile(s) },
+                        onUnsave: { onUnsave(s) }
+                    )
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("gram-saved-\(s.id)")
+                },
+                footer: { EmptyView() }
+            )
             .onChange(of: search) { _, _ in renderLimit = GramView.renderWindow }
-            .onDisappear {
-                visibility.landed = false
-                visibility.initialScrollIssued = false
-                visibility.armed = true
-                visibility.anchoring = false
-                visibility.shownSearch = nil
-            }
-            // A reveal landed above: put the previously-top message back at the top (the
-            // inbox's anchor restore). If the sentinel is still in view once that settles, the
-            // reader can see the top, so the next window is revealed.
-            .onChange(of: anchorID) { _, id in
-                guard let id else { return }
-                anchorID = nil
-                visibility.anchoring = true
-                Task { @MainActor in
-                    for _ in 0..<10 {
-                        feed.scrollTo(id, anchor: .top)
-                        try? await Task.sleep(nanoseconds: 60_000_000)
-                        if visibility.rowsAtTop.contains(id) { break }
-                    }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                    visibility.anchoring = false
-                    let settled = visibility.rowsAtTop.contains(id)
-                        || (visibility.rows.contains(id) && visibility.atBottom)
-                    if !visibility.sentinelOnScreen {
-                        visibility.armed = true
-                    } else if settled {
-                        visibility.armed = true
-                        revealOlder()
-                    }
-                }
-            }
         }
-    }
-
-    /// The feed has landed on the newest saved message; a feed that fits shows the top too.
-    private func finishInitialScroll() {
-        guard visibility.initialScrollIssued, !visibility.landed else { return }
-        visibility.landed = true
-        if visibility.sentinelOnScreen { revealOlder() }
     }
 
     /// One older window per arrival of the sentinel, after the feed has landed. The message on
     /// top now is put back at the top once the window is drawn above it.
     private func revealOlder() {
-        guard visibility.landed, visibility.armed, !visibility.anchoring, hasHiddenOlder else { return }
-        visibility.armed = false
+        guard visibility.landed, visibility.pageArmed, !visibility.anchoring, hasHiddenOlder else { return }
+        visibility.pageArmed = false
         let top = drawn.first?.id
         renderLimit += GramView.renderWindow
         if let top { anchorID = top }
@@ -3645,77 +3304,4 @@ private extension View {
     func gramFloatingHeader<Bar: View>(@ViewBuilder _ bar: () -> Bar) -> some View {
         modifier(GramFloatingHeader(bar: bar()))
     }
-
-    /// Calls `action` with whether this view is inside the nearest scroll view's visible
-    /// bounds (grown by `slack` points above and below), whenever that changes. Geometry,
-    /// not `onAppear`: a drawn row is not necessarily on screen, so
-    /// "built" is not "on screen".
-    func onFeedVisibilityChange(slack: CGFloat = 0, _ action: @escaping (Bool) -> Void) -> some View {
-        onFeedPlacementChange(slack: slack) { action($0.onScreen) }
-    }
-
-    /// As `onFeedVisibilityChange`, also reporting whether the view's top sits at the top of
-    /// the visible bounds (within a few points), where `scrollTo(_, anchor: .top)` puts it.
-    /// Reports transitions only, not every scrolled point. `appearance` rides in the value so
-    /// a new appearance reports again although the geometry is unchanged.
-    ///
-    /// `visibleTop` is the floating header's bottom edge in `GramView.feedPageSpace`. The feed
-    /// scrolls on under the header, and its content has a top margin of the header's height,
-    /// so a row anchored at the top may land at the header's bottom edge rather than at the scroll
-    /// view's own top: either counts as the top, or the paging anchor would never land. Only
-    /// the part of the viewport below the header counts as on screen: a row under the header's
-    /// controls and fade is not being read.
-    func onFeedPlacementChange(slack: CGFloat = 0, appearance: Int = 0, visibleTop: CGFloat? = nil,
-                               _ action: @escaping (FeedPlacement) -> Void) -> some View {
-        onGeometryChange(for: FeedPlacement.self) { proxy in
-            guard let scrollBounds = proxy.bounds(of: .scrollView) else {
-                return FeedPlacement(onScreen: false, atTop: false, appearance: appearance)
-            }
-            let page = proxy.frame(in: .named(GramView.feedPageSpace))
-            var visible = scrollBounds
-            if let visibleTop {
-                // The header's bottom edge in this view's own coordinates.
-                let headerEdge = visibleTop - page.minY
-                if headerEdge > visible.minY {
-                    visible = CGRect(x: visible.minX, y: headerEdge, width: visible.width,
-                                     height: max(0, visible.maxY - headerEdge))
-                }
-            }
-            let onScreen = visible.height > 0 && visible.insetBy(dx: 0, dy: -slack)
-                .intersects(CGRect(origin: .zero, size: proxy.size))
-            // `scrollBounds` is in this view's own coordinates, so its minY is how far the
-            // scroll view's top lies below this view's top.
-            var atTop = abs(scrollBounds.minY) <= 8
-            if !atTop, let visibleTop {
-                atTop = abs(page.minY - visibleTop) <= 8
-            }
-            return FeedPlacement(onScreen: onScreen, atTop: atTop, appearance: appearance)
-        } action: { action($0) }
-    }
-
-    /// The bottom marker's tracker: on screen (within `slack`) and the feed's visible height,
-    /// so a resize under the reader is reported apart from a scroll.
-    func onFeedBottomChange(slack: CGFloat, _ action: @escaping (FeedBottom) -> Void) -> some View {
-        onGeometryChange(for: FeedBottom.self) { proxy in
-            guard let viewport = proxy.bounds(of: .scrollView) else {
-                return FeedBottom(onScreen: false, viewportHeight: 0)
-            }
-            let onScreen = viewport.insetBy(dx: 0, dy: -slack)
-                .intersects(CGRect(origin: .zero, size: proxy.size))
-            return FeedBottom(onScreen: onScreen, viewportHeight: viewport.height)
-        } action: { action($0) }
-    }
-}
-
-/// Where a feed view sits in the scroll view's visible bounds (`onFeedPlacementChange`).
-private struct FeedPlacement: Equatable {
-    let onScreen: Bool
-    let atTop: Bool
-    let appearance: Int
-}
-
-/// The bottom marker's report (`onFeedBottomChange`).
-private struct FeedBottom: Equatable {
-    let onScreen: Bool
-    let viewportHeight: CGFloat
 }
