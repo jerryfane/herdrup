@@ -173,6 +173,11 @@ struct GuestMockTransport: HerdrTransport {
                      mime: $0["mime"] as? String ?? "")
                 }
                 let call = "gram.post:" + (file.map { "\($0.name)@\($0.uploadID)" } ?? "")
+                if Self.gram.refusesAsInProgress() {
+                    Self.hostRecorder.append(call + "=upload_in_progress")
+                    return Self.errorLine(id: id, code: "upload_in_progress",
+                                          message: "read the upload connection to EOF")
+                }
                 guard let message = Self.gram.post(text: params["text"] as? String ?? "",
                                                    to: params["to"] as? String ?? "", file: file) else {
                     Self.hostRecorder.append(call + "=no_staged_upload")
@@ -373,6 +378,20 @@ struct GuestMockTransport: HerdrTransport {
         /// `HERDR_MOCK_GUEST_STALE_UPLOAD`: the host has lost the first upload a post names, so
         /// that post is refused as one is after an earlier post already used its upload.
         private var loseNextUpload = ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_STALE_UPLOAD"] != nil
+        /// `HERDR_MOCK_GUEST_POST_IN_PROGRESS=N`: the first N posts are refused with
+        /// `upload_in_progress`, as the host does while it has not yet reaped the upload
+        /// connection. The upload stays staged, so asking again succeeds.
+        private var inProgressPosts =
+            Int(ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_POST_IN_PROGRESS"] ?? "") ?? 0
+
+        /// Whether this post is one `HERDR_MOCK_GUEST_POST_IN_PROGRESS` refuses.
+        func refusesAsInProgress() -> Bool {
+            lock.withLock {
+                guard inProgressPosts > 0 else { return false }
+                inProgressPosts -= 1
+                return true
+            }
+        }
 
         init() {
             let now = UInt64(Date().timeIntervalSince1970 * 1000)

@@ -224,6 +224,25 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(prompt.contains("File picked-notes.txt attached via Herdr Gram message gp-1"), prompt)
     }
 
+    /// herdrup#455: a post the host refuses while it still holds the upload connection
+    /// (`upload_in_progress`) is asked again, without uploading again, as the owner's
+    /// composers do. The guest used to fail the send outright.
+    func testAPostRefusedWhileTheUploadFinishesIsAskedAgain() {
+        let app = launch(features: nil, environment: ["HERDR_MOCK_PICKED_FILE": "1",
+                                                      "HERDR_MOCK_GUEST_POST_IN_PROGRESS": "2"])
+        let calls = sendWithAttachment(app, text: "")
+
+        XCTAssertEqual(calls.filter { $0.hasPrefix("gram.upload_chunk:") }.count, 1,
+                       "the bytes are uploaded once: \(calls)")
+        let posts = calls.filter { $0.hasPrefix("gram.post:") }
+        XCTAssertEqual(posts.count, 3, "two refusals, then the post lands: \(calls)")
+        XCTAssertEqual(Set(posts.map { $0.components(separatedBy: "=").first ?? "" }).count, 1,
+                       "every try posts the same upload: \(posts)")
+        XCTAssertTrue(posts.last?.hasSuffix("=gp-1") == true, "\(posts)")
+        let prompt = calls.first { $0.hasPrefix("agent.prompt:") } ?? ""
+        XCTAssertTrue(prompt.contains("File picked-notes.txt attached via Herdr Gram message gp-1"), prompt)
+    }
+
     /// Picks the harness's file through the paperclip, types `text` and sends. Waits for the
     /// agent's prompt, checks the composer cleared without a note, and returns the host's calls.
     private func sendWithAttachment(_ app: XCUIApplication, text: String) -> [String] {
