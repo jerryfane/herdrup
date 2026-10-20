@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 /// A guest's Gram tab and push for the shared agent (herdrup#338), over GuestMockTransport.
@@ -83,7 +84,16 @@ final class GuestGramPaneTests: XCTestCase {
         let input = app.textViews["guest-composer-input"]
         XCTAssertTrue(input.exists)
         XCTAssertLessThan(newest.frame.maxY, input.frame.minY + 1, "the newest Gram sits above the composer")
-        XCTAssertGreaterThan(newest.frame.maxY, input.frame.minY - 200, "pinned to the bottom, not the top")
+        // Pinned to the bottom: the feed opened scrolled to its end, so the oldest row (gm-0,
+        // above gm-1) is off screen on a phone, and nothing is drawn below the newest.
+        let oldest = element(app, "guest-gram-row-gm-0")
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertFalse(oldest.isHittable, "the feed opens at the newest, not the oldest")
+        }
+        for id in ["gm-0", "gm-1", "gm-2", "gm-3"] {
+            XCTAssertLessThan(element(app, "guest-gram-row-\(id)").frame.maxY, newest.frame.maxY,
+                              "the newest Gram is the last row")
+        }
         XCTAssertLessThan(older.frame.minY, mine.frame.minY, "oldest first")
         XCTAssertLessThan(mine.frame.minY, newest.frame.minY, "oldest first")
         XCTAssertGreaterThan(mine.frame.midX, older.frame.midX, "the guest's own post sits on the right")
