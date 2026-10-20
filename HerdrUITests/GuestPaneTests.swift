@@ -128,7 +128,8 @@ final class GuestPaneTests: XCTestCase {
         // Fitted: the widest whole-pixel cell that keeps all 120 columns inside the width.
         let fitsWidth = { (reading: (cols: Int, font: Double, fill: Double)) -> Bool in
             let slack = Double(reading.cols) / Double(UIScreen.main.scale * terminal.frame.width)
-            return reading.cols == 120 && reading.fill <= 1.0 && reading.fill > 1.0 - slack
+            // The probe prints `fill` to two decimals: allow its half-step of rounding.
+            return reading.cols == 120 && reading.fill <= 1.0 && reading.fill > 1.0 - slack - 0.005
         }
         waitForGrid(app, "the host's 120 columns should fill the width", fitsWidth)
         // Anything that would re-propose: a rotation on iPad, a keyboard raising and dropping.

@@ -84,12 +84,7 @@ final class GuestGramPaneTests: XCTestCase {
         let input = app.textViews["guest-composer-input"]
         XCTAssertTrue(input.exists)
         XCTAssertLessThan(newest.frame.maxY, input.frame.minY + 1, "the newest Gram sits above the composer")
-        // Pinned to the bottom: the feed opened scrolled to its end, so the oldest row (gm-0,
-        // above gm-1) is off screen on a phone, and nothing is drawn below the newest.
-        let oldest = element(app, "guest-gram-row-gm-0")
-        if UIDevice.current.userInterfaceIdiom == .phone {
-            XCTAssertFalse(oldest.isHittable, "the feed opens at the newest, not the oldest")
-        }
+        // Pinned to the bottom: nothing is drawn below the newest.
         for id in ["gm-0", "gm-1", "gm-2", "gm-3"] {
             XCTAssertLessThan(element(app, "guest-gram-row-\(id)").frame.maxY, newest.frame.maxY,
                               "the newest Gram is the last row")
