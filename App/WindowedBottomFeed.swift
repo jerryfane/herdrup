@@ -346,6 +346,10 @@ final class FeedVisibility {
     var anchoring = false
     /// The initial scroll to the bottom has been asked for on this appearance.
     var initialScrollIssued = false
+    /// The feed has landed on the newest message, for an owner whose drawing does not depend on
+    /// it (Saved): its `landed` binding points here instead of at `@State`. The inbox keeps its
+    /// own `didInitialScroll`, which its rows read.
+    var landed = false
     /// The feed's visible height at the bottom marker's last report, so a shrink (keyboard
     /// up, composer grown) can be told from the reader scrolling away. 0 = not known yet.
     var viewportHeight: CGFloat = 0
