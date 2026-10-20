@@ -1755,7 +1755,10 @@ struct LiveTerminalView: UIViewRepresentable {
             // screen, are not user intent. The actual state is published on reveal.
             guard !tailPublishHeld else { return }
             var atTail = atTail
-            if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
+            // The alt-screen rule is the owner's: their jump is Ctrl+End to the agent. A
+            // view-only jump is a local scroll (jumpToTail), and a guest fitted to the
+            // agent's width can have more rows than fit on screen, so report the real place.
+            if !viewOnly, view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
             guard atTail != lastReportedAtTail else { return }
             lastReportedAtTail = atTail
             let publish = onTailStateChange

@@ -80,6 +80,9 @@ struct GuestGramList: View {
     @State private var anchorID: String?
     /// The text segments each message's reader opened with "Read more", by message id.
     @State private var expanded: [String: Set<Int>] = [:]
+    /// Settings → Text size, as the owner's feed reads it: an `.equatable()` row only
+    /// redraws when an input changes, so the scale has to be one of them.
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
     private static let bottomID = "guest-gram-bottom"
 
@@ -166,6 +169,7 @@ struct GuestGramList: View {
             feedLanded: landed,
             isSaved: false,
             expandedSegments: expanded[message.id] ?? [],
+            fontScale: uiFontScale,
             onOpenFile: { open(message.id) },
             onSaveFile: {},
             onPrefetchImage: {},
@@ -178,6 +182,9 @@ struct GuestGramList: View {
             endsGroup: entry.endsGroup,
             viewer: .guest
         )
+        // A page render (a keystroke, a poll, a file's progress) skips every row whose
+        // inputs are unchanged (`GramRow.==`), as in the owner's feed.
+        .equatable()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("guest-gram-row-\(message.id)")
     }
