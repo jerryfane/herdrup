@@ -292,16 +292,6 @@ struct GramView: View {
     /// seconds. Cleared once the server's own snapshot also omits the id.
     @State private var deletedIDs: Set<String> = []
 
-    /// A received web document (HTML/SVG) staged for the in-app `HtmlWebView` viewer.
-    /// Holds the parsed markup to render plus the raw file on disk so the owner can
-    /// still Share/save it (the affordance QuickLook used to offer).
-    private struct WebDoc: Identifiable {
-        let id = UUID()
-        let title: String
-        let html: String
-        let fileURL: URL
-    }
-
     // The pre-send size gate and the count cap both live on `ComposerStaging`
     // (nonisolated, so the photo importer and the terminal composer can read them):
     // `ComposerStaging.maxFileBytes` and `ComposerStaging.maxAttachments`.
@@ -545,8 +535,8 @@ struct GramView: View {
             }
             sendError = outcome.note
         }
-        // A tapped file chip downloads the bytes to a temp URL; QuickLook previews
-        // it and offers the system share action (save to Files, etc.).
+        // A tapped file chip opens through the shared viewer (GramFileViewer.swift):
+        // HTML/SVG in the in-app web viewer, everything else in QuickLook.
         .gramFileViewer($preview)
         // Explicit "Save to Files…" (from a file chip's context menu): export through
         // the system document picker so the file lands where the owner picks — the real

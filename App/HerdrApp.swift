@@ -9572,7 +9572,7 @@ struct MockTransport: HerdrTransport {
         }
         if requestLine.contains("agent.read") {
             if let keyframeHistory { return try await keyframeHistory.read(requestLine) }
-            return backfill ? Self.backfillRead() : Self.agentRead
+            return backfill ? Self.backfillRead() : MockWireFixtures.agentRead
         }
         if requestLine.contains("gram.mark_read") {
             Self.gramOwnerReads.markRead(Self.requestParamID(requestLine))
@@ -9594,7 +9594,7 @@ struct MockTransport: HerdrTransport {
             return answer
         }
         if requestLine.contains("gram.post") {
-            return Self.recordGramPost(requestLine) ? Self.gramPosted : Self.gramPostRefused
+            return Self.recordGramPost(requestLine) ? MockWireFixtures.gramPosted : Self.gramPostRefused
         }
         if requestLine.contains("gram.get_file") {
             let id = Self.recordGramGetFile(requestLine)
@@ -9798,7 +9798,6 @@ struct MockTransport: HerdrTransport {
 
     /// `MockWireFixtures.agentRead` under its old name, for the agent.read callers not yet
     /// moved (their lines are being edited on another branch).
-    static let agentRead = MockWireFixtures.agentRead
 
     /// `HERDR_MOCK_GRAM_PAGED=1`: `gram.list` answers as a store two pages deeper than
     /// `gramList`, so the Gram paging UI test can scroll to the top. The first page is
@@ -9828,7 +9827,6 @@ struct MockTransport: HerdrTransport {
 
     /// `MockWireFixtures.gramPosted` under its old name, for the gram.post caller not yet
     /// moved (its line is being edited on another branch).
-    static let gramPosted = MockWireFixtures.gramPosted
 
     /// Every `gram.post` the app sent, in order: its `to` (nil for the shared queue), its
     /// `text`, and its attachment as `name@upload_id`. Read by the Gram UI tests via
@@ -10013,7 +10011,6 @@ struct MockTransport: HerdrTransport {
 
     /// `MockWireFixtures.paneStreamAck` under its old name, for the stream caller not yet
     /// moved (its neighbours are being edited on another branch).
-    static let paneStreamAck = MockWireFixtures.paneStreamAck
     /// A keepalive `pane.stream` ping, the frame a real daemon sends about every 20s and the one
     /// the 50s stall watchdog is sized against. Carries only `seq` and `epoch`
     /// (HerdrKit/Wire.swift:705 decodes exactly those), so it proves the stream is alive without
@@ -10379,7 +10376,7 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
 
     /// Answers an `agent.read`. Only source=recent is the backfill's history read.
     func read(_ requestLine: String) async throws -> String {
-        guard requestLine.contains(#""source":"recent""#) else { return MockTransport.agentRead }
+        guard requestLine.contains(#""source":"recent""#) else { return MockWireFixtures.agentRead }
         Self.reads.requestedOne()
         if historyFromFirstKeyframe {
             do {
@@ -10390,7 +10387,7 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
             }
         }
         Self.reads.answeredOne()
-        return MockTransport.agentRead
+        return MockWireFixtures.agentRead
     }
 
     func stream() -> AsyncThrowingStream<String, Error> {
@@ -10400,7 +10397,7 @@ final class KeyframeHistoryDriver: @unchecked Sendable {
         }
         let history = historyFromFirstKeyframe || attempt > 1
         return AsyncThrowingStream { continuation in
-            continuation.yield(MockTransport.paneStreamAck)
+            continuation.yield(MockWireFixtures.paneStreamAck)
             continuation.yield(Self.resetFrame(history: history))
             if !history {
                 // Dropped: the app's in-place reconnect must recover the history.
