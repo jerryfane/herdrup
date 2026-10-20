@@ -167,4 +167,45 @@ final class ScrollTests: XCTestCase {
         XCTAssertGreaterThan(movedDiff, 0.10,
             "No history after an in-place reconnect: content unchanged after swiping (diff=\(movedDiff)). The reconnect's keyframe history did not reach SwiftTerm's scrollback.")
     }
+
+    /// The REDUNDANT-HISTORY-READ receipt (#459). On a current server (herdr#301) every keyframe
+    /// carries history, so the mount-time history read (agent.read, source=recent) is never used.
+    /// That read starts at mount, concurrently with the stream and before any keyframe can
+    /// arrive, so "no read is issued" is not something the app can promise; what it can do is
+    /// cancel the read once a keyframe with history lands. The `keyframehistoryread` mock holds
+    /// each history read for 3 s (shorter than the app's 6 s backfill timeout, which also cancels
+    /// it) and counts how it ends. RED without the cancel: the held read runs to its answer
+    /// (answered=1). GREEN: the first keyframe cancels it while it is held (answered=0).
+    func testKeyframeHistoryCancelsHistoryRead() {
+        let app = XCUIApplication.launched(mock: "keyframehistoryread")
+        XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10))
+        let probe = app.descendants(matching: .any)["keyframe-history-reads"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 10), "keyframe-history-reads probe missing")
+
+        // Past the 3 s hold, then until every requested read has ended one way or the other.
+        Thread.sleep(forTimeInterval: 4)
+        var counts = readCounts(probe.label)
+        _ = poll(6, every: 0.25) {
+            counts = readCounts(probe.label)
+            return counts.requested > 0 && counts.answered + counts.cancelled >= counts.requested
+        }
+        XCTAssertGreaterThanOrEqual(counts.requested, 1,
+            "The mount-time history read never reached the mock (\(probe.label)).")
+        XCTAssertEqual(counts.answered, 0,
+            "The history read ran to its answer although the keyframe already carried history (\(probe.label)).")
+        XCTAssertEqual(counts.cancelled, counts.requested,
+            "Every history read should be cancelled once a keyframe with history arrives (\(probe.label)).")
+    }
+
+    // MARK: - helpers
+
+    /// Parses the `keyframe-history-reads` probe: "requested=N answered=N cancelled=N".
+    private func readCounts(_ label: String) -> (requested: Int, answered: Int, cancelled: Int) {
+        var values: [String: Int] = [:]
+        for field in label.split(separator: " ") {
+            let pair = field.split(separator: "=")
+            if pair.count == 2, let n = Int(pair[1]) { values[String(pair[0])] = n }
+        }
+        return (values["requested"] ?? 0, values["answered"] ?? 0, values["cancelled"] ?? 0)
+    }
 }

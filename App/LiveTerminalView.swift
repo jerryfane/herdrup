@@ -8,7 +8,7 @@ import HerdrKit
 
 /// One-shot claim gate: `claim()` returns true to EXACTLY ONE caller, so a
 /// `CheckedContinuation` raced between two tasks (a read vs a timeout) is resumed at
-/// most once. Used by the scrollback backfill to bound a read that the transport won't
+/// most once. Used by the scrollback backfill to bound a read that the transport may not
 /// cancel — the loser is abandoned rather than awaited.
 private final class ResumeGate: @unchecked Sendable {
     private let lock = NSLock()
@@ -976,7 +976,8 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// Scrollback backfill: the in-flight `read` (source=.recent, ANSI) fetching history
         /// produced BEFORE the live stream connected, resolved to ANSI bytes (nil on empty /
-        /// error / timeout). The FIRST reset awaits it once, to prepend history above the seed.
+        /// error / timeout). The first reset WITHOUT keyframe history awaits it once, to prepend
+        /// history above the seed; a reset that carries keyframe history cancels it.
         private var backfillTask: Task<[UInt8]?, Never>?
         /// Set by the first reset. Gates the one-time scrollback-cap raise and the backfill
         /// prepend (a reset's own keyframe history is fed on every reset), and tells a later
@@ -1581,7 +1582,7 @@ struct LiveTerminalView: UIViewRepresentable {
             // Tests that inspect the untouched terminal need a baseline before a gesture
             // publishes its first selection reading. Inert outside the mock DEBUG app.
             publishSelectionProbe("mounted")
-            startBackfill()   // fetch history CONCURRENTLY with the stream; the first reset awaits it
+            startBackfill()   // fetch history CONCURRENTLY with the stream; see startBackfill
             start()
         }
 
@@ -2343,8 +2344,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // MARK: streaming
 
         /// Fetch recent rendered history (incl. scrollback) as ANSI, bounded by a timeout so it
-        /// can never stall the live seed. Runs concurrently with the stream; the FIRST reset
-        /// awaits this at the single point where the bytes must land above the seed.
+        /// can never stall the live seed. Runs concurrently with the stream; the first reset
+        /// WITHOUT keyframe history awaits this at the single point where the bytes must land
+        /// above the seed, and a reset that carries keyframe history cancels it.
         private func startBackfill() {
             // View-only (a guest) backfills too: the host lets a guest `agent.read` the granted
             // agent. An older host refuses with `guest_forbidden`; the read then yields nil
@@ -2352,24 +2354,36 @@ struct LiveTerminalView: UIViewRepresentable {
             let client = self.client, pane = self.paneID
             backfillTask = Task { () -> [UInt8]? in
                 // Race the read against the timeout and take whichever finishes FIRST, ABANDONING
-                // the loser. The shipped HerdrTransports do NOT honour Task cancellation on the read
-                // path, so we must never `await` a hung read — that would leave the first .reset (and
-                // every frame queued behind it) suspended forever, a blank terminal. Instead a
-                // one-shot gate resumes the continuation exactly once: whichever of the read / the
-                // timeout (`backfillTimeoutNanos`) fires first wins; a hung read just leaks its background task and we paint
-                // the seed with no history, exactly as before the feature.
+                // the loser. A transport need not honour Task cancellation on the read path (the
+                // held request channel stops waiting; a per-request exec may not), so we must never
+                // `await` a hung read — that would leave the first .reset (and every frame queued
+                // behind it) suspended forever, a blank terminal. Instead a one-shot gate resumes
+                // the continuation exactly once: whichever of the read / the timeout
+                // (`backfillTimeoutNanos`) fires first wins; a hung read just leaks its background
+                // task and we paint the seed with no history, exactly as before the feature.
+                //
+                // The read is an unstructured task, so cancelling THIS task (a keyframe that
+                // carries history, or stop()) does not reach it by itself: the handler forwards
+                // it. A transport that ignores cancellation still leaks the read until it ends.
                 let gate = ResumeGate()
-                return await withCheckedContinuation { (cont: CheckedContinuation<[UInt8]?, Never>) in
-                    let read = Task {
-                        let r = try? await client.read(pane: pane, source: .recent,
-                                                       format: .ansi, lines: Self.backfillLines)
-                        let bytes = (r?.text).flatMap { $0.isEmpty ? nil : [UInt8]($0.utf8) }
-                        if gate.claim() { cont.resume(returning: bytes) }
+                let read = Task { () -> [UInt8]? in
+                    let r = try? await client.read(pane: pane, source: .recent,
+                                                   format: .ansi, lines: Self.backfillLines)
+                    return (r?.text).flatMap { $0.isEmpty ? nil : [UInt8]($0.utf8) }
+                }
+                return await withTaskCancellationHandler {
+                    await withCheckedContinuation { (cont: CheckedContinuation<[UInt8]?, Never>) in
+                        Task {
+                            let bytes = await read.value
+                            if gate.claim() { cont.resume(returning: bytes) }
+                        }
+                        Task {
+                            try? await Task.sleep(nanoseconds: Self.backfillTimeoutNanos)
+                            if gate.claim() { read.cancel(); cont.resume(returning: nil) }
+                        }
                     }
-                    Task {
-                        try? await Task.sleep(nanoseconds: Self.backfillTimeoutNanos)
-                        if gate.claim() { read.cancel(); cont.resume(returning: nil) }
-                    }
+                } onCancel: {
+                    read.cancel()
                 }
             }
         }
@@ -2576,6 +2590,9 @@ struct LiveTerminalView: UIViewRepresentable {
                         // on the server. It REPLACES this emulator's history on every reset — the
                         // first one, a reconnect, a lagged re-seed — so output that scrolled off
                         // while the stream was down is never missing and nothing is doubled.
+                        // The mount-time backfill read is then redundant: stop it.
+                        backfillTask?.cancel()
+                        backfillTask = nil
                         if !stopped { seedKeyframeHistory(history, rows: rows, into: view) }
                     } else if firstReset {
                         // An older server sends no history: fall back to the separate backfill.
