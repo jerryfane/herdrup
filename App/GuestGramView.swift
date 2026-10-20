@@ -78,6 +78,8 @@ struct GuestGramList: View {
     @State private var appearance = 0
     @State private var landed = false
     @State private var anchorID: String?
+    /// The text segments each message's reader opened with "Read more", by message id.
+    @State private var expanded: [String: Set<Int>] = [:]
 
     private static let bottomID = "guest-gram-bottom"
 
@@ -136,7 +138,7 @@ struct GuestGramList: View {
                 },
                 row: { index, entry in
                     GramFeedRow(index: index, entry: entry) {
-                        row(entry.message)
+                        row(entry)
                     }
                 },
                 footer: { EmptyView() }
@@ -155,19 +157,25 @@ struct GuestGramList: View {
         }
     }
 
-    private func row(_ message: GramMessage) -> some View {
-        GramRow(
+    private func row(_ entry: GramFeedEntry) -> some View {
+        let message = entry.message
+        return GramRow(
             message: message,
             isDownloadingFile: downloadingID == message.id,
             downloadProgress: downloadingID == message.id ? progress : nil,
             feedLanded: landed,
             isSaved: false,
+            expandedSegments: expanded[message.id] ?? [],
             onOpenFile: { open(message.id) },
             onSaveFile: {},
             onPrefetchImage: {},
             onToggleSave: {},
             onDelete: {},
-            onSetExpanded: { _, _ in },
+            onSetExpanded: { segment, open in
+                if open { expanded[message.id, default: []].insert(segment) } else { expanded[message.id]?.remove(segment) }
+            },
+            startsGroup: entry.startsGroup,
+            endsGroup: entry.endsGroup,
             viewer: .guest
         )
         .accessibilityElement(children: .contain)
