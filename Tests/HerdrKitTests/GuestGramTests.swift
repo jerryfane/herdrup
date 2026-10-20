@@ -106,6 +106,35 @@ final class GuestGramTests: XCTestCase {
         XCTAssertNil(page.messages[2].expiredFile, "absent from the wire stays nil")
     }
 
+    /// The guest's Gram tab draws the owner's feed rows: the agent's Grams come from the agent
+    /// (unread until the guest's mark), and the guest's own posts go to the shared agent, so
+    /// the row says "Delivered to <agent>".
+    func testAGuestGramDrawsAsTheOwnersGramMessage() {
+        let agents = GuestGramMessage(
+            id: "gm-4", direction: .agentToOwner, from: "llm-opt", text: "Q5 table",
+            createdUnixMs: 1_790_000_000_000,
+            file: GuestGramFile(name: "q5.md", size: 512, mime: "text/markdown", sha256: nil), read: false)
+        let owned = agents.gramMessage(agent: "llm-opt")
+        XCTAssertEqual(owned.id, "gm-4")
+        XCTAssertTrue(owned.isFromAgent)
+        XCTAssertNil(owned.to, "the agent's Gram is addressed to no agent")
+        XCTAssertTrue(owned.isUnread, "the guest's read mark carries over")
+        XCTAssertEqual(owned.createdUnixMs, 1_790_000_000_000)
+        XCTAssertEqual(owned.file, GramFile(name: "q5.md", size: 512, mime: "text/markdown", sha256: ""))
+        XCTAssertNil(owned.expiredFile)
+
+        let mine = GuestGramMessage(
+            id: "gp-1", direction: .ownerToAgent, from: "plotarmordev (via HerdrUp)", text: "",
+            createdUnixMs: 1_790_000_060_000,
+            expiredFile: GuestGramFile(name: "old.png", size: 9, mime: "image/png", sha256: "9c0d"), read: true)
+        let posted = mine.gramMessage(agent: "llm-opt")
+        XCTAssertFalse(posted.isFromAgent)
+        XCTAssertEqual(posted.to, "llm-opt", "the guest's post is delivered to the shared agent")
+        XCTAssertFalse(posted.isOpenQueueItem)
+        XCTAssertNil(posted.file)
+        XCTAssertEqual(posted.expiredFile, GramFile(name: "old.png", size: 9, mime: "image/png", sha256: "9c0d"))
+    }
+
     func testGuestGramListOmitsUnsetParamsAndClampsTheLimit() async throws {
         let transport = RecordingTransport { _, _ in #"{"id":"x","result":{"type":"guest_gram_list","messages":[]}}"# }
         let client = HerdrClient(transport: transport)

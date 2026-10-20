@@ -91,4 +91,39 @@ final class GuestPushTests: XCTestCase {
         XCTAssertFalse(element(app, "guest-push-prompt").exists, "iOS won't ask again, so neither does the app")
         XCTAssertFalse(element(app, "guest-host-calls").label.contains("notifications.register_device"))
     }
+
+    /// The agent page's ⋯ turns this share's push off and on (GuestPushCenter, as Guest
+    /// Settings does): off unregisters the phone and the ⋯ shows the owner's struck bell, on
+    /// registers it again and the ⋯ is back. Only push calls a guest may make.
+    func testActionsMenuTurnsThisSharesNotificationsOffAndOn() {
+        let app = launch(authorization: "granted")
+        openAgent(app)
+        pollLabel(app, "guest-host-calls", "a granted phone registers on connect") { $0.contains(self.registration) }
+        let actions = app.buttons["guest-actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        XCTAssertEqual(actions.value as? String, "Notifications on", "push on: the ⋯ shows no struck bell")
+
+        actions.tap()
+        let toggle = app.buttons["guest-notifications"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "the ⋯ should offer this share's notifications")
+        XCTAssertEqual(toggle.label, "Turn off notifications")
+        toggle.tap()
+        pollLabel(app, "guest-host-calls", "Turn off should unregister this phone") {
+            $0.contains("notifications.unregister_device:mock-apns-token-guest")
+        }
+        XCTAssertTrue(poll(5, every: 0.25) { actions.value as? String == "Notifications off" },
+                      "push off: the ⋯ shows the struck bell, not \(String(describing: actions.value))")
+        attach(app, "guest-notifications-off")
+
+        actions.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Turn on notifications")
+        toggle.tap()
+        pollLabel(app, "guest-host-calls", "Turn on should register this phone again") {
+            $0.components(separatedBy: self.registration).count - 1 == 2
+        }
+        XCTAssertTrue(poll(5, every: 0.25) { actions.value as? String == "Notifications on" },
+                      "push on again: the ⋯ is back, not \(String(describing: actions.value))")
+        XCTAssertEqual(element(app, "guest-forbidden-calls").label, "")
+    }
 }

@@ -701,7 +701,8 @@ struct GramFileCard: View {
     let onSave: (() -> Void)?
     var embedded = false
     /// The page's UI-test handle: the inbox and Saved share one, the guest's is per message.
-    var identifier = "gram-attachment-open"
+    var identifier = GramFileCard.ownerIdentifier
+    static let ownerIdentifier = "gram-attachment-open"
 
     /// The file's kind as Files names it ("ZIP archive"), from its extension, then its mime.
     static func kind(name: String, mime: String) -> String {
@@ -783,7 +784,8 @@ struct GramExpiredFileCard: View {
     let name: String
     let byteCount: Int?
     var embedded = false
-    var identifier = "gram-attachment-expired"
+    var identifier = GramExpiredFileCard.ownerIdentifier
+    static let ownerIdentifier = "gram-attachment-expired"
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 

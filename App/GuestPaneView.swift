@@ -63,20 +63,33 @@ struct GuestPaneView: View {
     /// The host refused guest resizing (an older host): for the rest of this session the
     /// terminal fits the agent's grid to the width and the size controls are gone.
     @State private var resizeRefused = false
+    /// False while the guest has scrolled the terminal away from its newest output: the
+    /// owner's "Latest" pill shows (`TerminalJumpToLatestPill`), and its tap bumps the token.
+    @State private var terminalAtTail = true
+    @State private var jumpToTailToken = 0
+    /// The note row's height over the composer, and the terminal's: the composer floats over
+    /// the terminal (as the owner's does), so only its resting row takes layout height.
+    @State private var bottomChromeHeight: CGFloat = 0
+    @State private var terminalHeight: CGFloat = 0
     @StateObject private var gram = GuestGramModel()
     @ObservedObject private var guestPush = GuestPushCenter.shared
     #if DEBUG
     @State private var forbiddenProbe = ""
     @State private var hostCallsProbe = ""
+    @State private var streamOpensProbe = ""
     #endif
 
     /// The owner shares this agent's Gram with the guest (the host's hello says so).
     private var showsGram: Bool { features.current?.gram == true }
     private var showingGram: Bool { showsGram && tab == .gram }
 
+    /// The page's ground: the terminal's on the Terminal tab, as the owner's terminal page,
+    /// and the app's on Gram, as the owner's Gram.
+    private var pageGround: Color { showingGram ? Palette.ground : Palette.groundMachine }
+
     var body: some View {
         VStack(spacing: 0) {
-            navBar
+            header
             statusRow
             if showsGram { tabStrip }
             ZStack(alignment: .bottom) {
@@ -101,10 +114,10 @@ struct GuestPaneView: View {
                     .transition(.opacity)
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { terminalHeight = $0 }
             bottomBlock
         }
-        .background(Palette.groundMachine.ignoresSafeArea())
-        .ignoresSafeArea(.container, edges: .bottom)
+        .background(pageGround.ignoresSafeArea())
         .overlay { EdgeSwipeBack { onClose() } }
         .task { await pollLoop() }
         // Once the host's features are known: register for push (or explain it, when iOS
@@ -161,7 +174,6 @@ struct GuestPaneView: View {
         .overlay(Capsule().stroke(Palette.hairlineQuiet, lineWidth: 1))
         .padding(.horizontal, 16).padding(.vertical, 8)
         .frame(maxWidth: .infinity)
-        .background(Palette.ground)
     }
 
     private func tabButton(_ title: String, systemImage: String, tab value: GuestPaneTab, id: String,
@@ -201,14 +213,12 @@ struct GuestPaneView: View {
         return parts.joined(separator: " · ")
     }
 
-    private var navBar: some View {
+    /// The owner's agent header (#358): the round back button, the title (or the find
+    /// field), and one capsule holding Find, Reconnect and ⋯ on the Terminal tab, ⋯ alone
+    /// on Gram. No Share or Close: only the owner can invite people or close the agent.
+    private var header: some View {
         HStack(spacing: 10) {
-            Button { onClose() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(Palette.text).frame(width: 28, height: 44)
-            }
-            .accessibilityLabel("Back")
-            .accessibilityIdentifier("guest-back")
+            PaneHeaderBackButton(identifier: "guest-back") { onClose() }
             if findOpen {
                 InlineSearchField(
                     placeholder: "Find", text: $findTerm, focus: $findFocused,
@@ -216,38 +226,88 @@ struct GuestPaneView: View {
                     onNext: { stepFind(.forward) }, onPrevious: { stepFind(.backward) },
                     identifierPrefix: "guest-find")
             } else {
-                Text(heading).font(Typography.app(18.5, .semibold)).tracking(-0.185)
+                Text(heading).font(Typography.app(16, .semibold))
                     .foregroundStyle(Palette.text).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !showingGram {
-                Button { toggleFind() } label: {
-                    Image(systemName: findOpen ? "xmark" : "magnifyingglass")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Palette.text).frame(width: 28, height: 44)
+            PaneHeaderCapsule {
+                if !showingGram {
+                    InlineSearchToggle(isOpen: findOpen, identifier: "guest-find",
+                                       target: CGSize(width: 40, height: 44)) { toggleFind() }
+                    // The owner's reconnect: a new stream (`pane.stream`) and a fresh read of
+                    // the agent (`agent.list`), both on the guest allowlist.
+                    PaneHeaderRefreshButton(identifier: "guest-refresh") {
+                        streamGen += 1
+                        Task { await refresh() }
+                    }
                 }
-                .accessibilityLabel(findOpen ? "Close search" : "Search")
-                .accessibilityIdentifier("guest-find")
+                actionsMenu
             }
         }
-        .padding(.leading, 14).padding(.trailing, 12)
-        .frame(height: 52)
-        .background(Palette.ground)
+        .frame(height: max(44, (44 * Typography.scale).rounded()))
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
     }
 
+    /// This share's push is off (or iOS refuses it): the ⋯ shows the owner's amber struck bell.
+    private var notificationsOff: Bool {
+        switch guestPush.status(for: access) {
+        case .off, .denied: return true
+        case .on, .unavailable, .failed: return false
+        }
+    }
+
+    /// The owner's ⋯, trimmed to what a guest may do: copy the screen or the recent output
+    /// (`agent.read`) and the guest's own text size on the Terminal tab, and this share's
+    /// notifications (GuestPushCenter, as in Guest Settings) on both tabs.
+    private var actionsMenu: some View {
+        Menu {
+            if !showingGram {
+                TerminalCopyMenuSection(client: client, paneID: access.agentTarget)
+                // Hidden where the host refuses guest resizing: the size could not change.
+                if !resizeRefused && (availability == .running || availability == .connecting) {
+                    TerminalTextSizeMenuSection(
+                        increaseID: "guest-font-increase", decreaseID: "guest-font-decrease",
+                        onIncrease: { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: 1) },
+                        onDecrease: { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: -1) },
+                        onReset: { terminalFontSize = GuestTerminalSize.defaultPoints })
+                }
+            }
+            if let action = guestPush.status(for: access).action {
+                Button { runPushAction(action) } label: {
+                    switch action {
+                    case .turnOff: Label("Turn off notifications", systemImage: "bell.slash")
+                    case .turnOn: Label("Turn on notifications", systemImage: "bell")
+                    case .openSettings: Label("Allow notifications in Settings", systemImage: "gear")
+                    case .retry: Label("Retry notifications", systemImage: "arrow.clockwise")
+                    }
+                }
+                .accessibilityIdentifier("guest-notifications")
+            }
+        } label: {
+            PaneActionsMenuLabel(notificationsOff: notificationsOff)
+        }
+        .accessibilityIdentifier("guest-actions")
+        .accessibilityValue(notificationsOff ? "Notifications off" : "Notifications on")
+    }
+
+    private func runPushAction(_ action: GuestPushAction) {
+        guard action != .openSettings else {
+            guestPush.openSettings()
+            return
+        }
+        Task { await guestPush.perform(action, access, client: client) }
+    }
+
+    /// The agent's status and "Shared by <owner>" under the header: the pill also carries
+    /// CONNECTING / NOT RUNNING / OFFLINE / NEEDS <OWNER>, which the owner's title line has
+    /// no room for beside the capsule.
     private var statusRow: some View {
         HStack(spacing: 8) {
             statusPill
             SharedByChip(owner: access.ownerName)
             Spacer(minLength: 0)
-            if !showingGram && !resizeRefused && (availability == .running || availability == .connecting) {
-                textSizeControls
-            }
         }
         .padding(.horizontal, 16)
-        .frame(height: 44)
-        .background(Palette.ground)
-        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairlineQuiet).frame(height: 1) }
     }
 
     @ViewBuilder
@@ -276,33 +336,6 @@ struct GuestPaneView: View {
         availability == .running && AgentStatus(wire: agent?.agentStatus).isBlocked
     }
 
-    /// A− / A+: the guest's text size. The terminal proposes the grid that fits at that size,
-    /// so the agent's terminal is resized to it (for the owner's screens too).
-    private var textSizeControls: some View {
-        HStack(spacing: 2) {
-            textSizeButton("textformat.size.smaller", label: "Smaller text", id: "guest-font-decrease",
-                           enabled: terminalFontSize > GuestTerminalSize.range.lowerBound, taps: -1)
-            textSizeButton("textformat.size.larger", label: "Larger text", id: "guest-font-increase",
-                           enabled: terminalFontSize < GuestTerminalSize.range.upperBound, taps: 1)
-        }
-    }
-
-    private func textSizeButton(_ symbol: String, label: String, id: String, enabled: Bool,
-                                taps: Int) -> some View {
-        Button {
-            terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: taps)
-        } label: {
-            Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(enabled ? Palette.text : Palette.textFaint)
-                .frame(width: 36, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(id)
-    }
-
     // MARK: - Terminal
 
     private var findRequest: FindRequest? {
@@ -320,13 +353,27 @@ struct GuestPaneView: View {
                     fitsStreamWidth: resizeRefused,
                     onResizeRefused: { resizeRefused = true },
                     onStreamEnded: streamEnded,
+                    jumpToTailToken: jumpToTailToken,
+                    onTailStateChange: { terminalAtTail = $0 },
+                    isAtTail: terminalAtTail,
                     fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
                     findRequest: findRequest,
                     onFindResult: { index, total in findMatches = (index, total) })
                     .id(streamGen)
                     .accessibilityIdentifier("guest-terminal")
-                    .padding(.horizontal, 12).padding(.top, 10)
+                    // The owner's terminal inset.
+                    .padding(.horizontal, 8)
+                    // The owner's "Latest" pill while the guest reads history; a local scroll
+                    // (view-only sends nothing).
+                    .overlay(alignment: .bottomTrailing) {
+                        ZStack {
+                            if !terminalAtTail {
+                                TerminalJumpToLatestPill(identifier: "guest-latest") { jumpToTailToken += 1 }
+                            }
+                        }
+                        .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
+                    }
             }
             if let message = centerMessage {
                 GuestCenterMessage(icon: message.icon, title: message.title, detail: message.detail)
@@ -362,15 +409,29 @@ struct GuestPaneView: View {
         !attachments.isEmpty || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// The composer floats over the terminal, as the owner's does: only the note row and the
+    /// composer's resting row take layout height, so a growing composer never resizes the
+    /// agent's terminal.
     private var bottomBlock: some View {
-        VStack(spacing: 0) {
-            noteRow
-                .padding(.top, 2)
-            composer
-                .padding(.top, 10)
-                .padding(.bottom, composerKeyboard.isVisible ? 8 : 26)
-        }
-        .background(Palette.groundMachine)
+        Color.clear
+            .frame(height: bottomChromeHeight + ComposerStyle.restingHeight + 8)
+            .overlay(alignment: .bottom) {
+                VStack(spacing: 0) {
+                    Group {
+                        if showingGram && note == nil && connectionNote == nil && uploadBytes == nil && !isBlocked {
+                            Color.clear.frame(height: 4)
+                        } else {
+                            noteRow.padding(.top, 2).padding(.bottom, 10)
+                        }
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomChromeHeight = $0 }
+                    composer
+                        .environment(\.composerEditorRoom, terminalHeight)
+                        .padding(.bottom, 8)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .background(pageGround)
+            }
     }
 
     /// The single line above the composer: an error or progress note when there is one,
@@ -440,7 +501,7 @@ struct GuestPaneView: View {
                 if reply.isEmpty && !dictating {
                     placeholder
                         .font(Typography.app(16))
-                        .foregroundStyle(Palette.textFaint)
+                        .foregroundStyle(Palette.textDim)
                         .lineLimit(1)
                         .allowsHitTesting(false)
                 }
@@ -479,6 +540,15 @@ struct GuestPaneView: View {
                     .fixedSize()
                     .accessibilityLabel("Send message")
                     .accessibilityIdentifier("guest-send-button")
+                } else {
+                    // The owner's saved prompts: a pick fills the composer and sends it as a
+                    // message (`agent.prompt`), like a typed one.
+                    SavedPromptsMenu { prompt in
+                        reply = prompt.text
+                        send()
+                    }
+                    .disabled(!canCompose || sending || dictating)
+                    .accessibilityIdentifier("guest-saved-prompts")
                 }
             }
             .buttonStyle(.plain)
@@ -680,12 +750,17 @@ struct GuestPaneView: View {
                 .accessibilityElement()
                 .accessibilityIdentifier("guest-host-calls")
                 .accessibilityLabel(hostCallsProbe)
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("guest-stream-opens")
+                .accessibilityLabel(streamOpensProbe)
         }
         .frame(width: 1, height: 1)
         .task {
             while !Task.isCancelled {
                 forbiddenProbe = GuestMockTransport.forbiddenCalls.joined(separator: ",")
                 hostCallsProbe = GuestMockTransport.hostCalls.joined(separator: ";")
+                streamOpensProbe = "\(GuestMockTransport.streamOpens)"
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }

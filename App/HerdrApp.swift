@@ -5586,7 +5586,7 @@ struct TerminalPaneContent: View {
                     // only the pill itself hit-tests, taps elsewhere reach the terminal.
                     .overlay(alignment: .bottomTrailing) {
                         ZStack {
-                            if !terminalAtTail { jumpToLatestPill }
+                            if !terminalAtTail { TerminalJumpToLatestPill { jumpToTailToken += 1 } }
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                     }
@@ -5731,15 +5731,7 @@ struct TerminalPaneContent: View {
     /// underneath (a height change resizes the PTY and reflows the buffer).
     private var header: some View {
         HStack(spacing: 10) {
-            Button { onClose() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(Palette.surfaceRaised))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
+            PaneHeaderBackButton { onClose() }
             if findOpen {
                 findField
             } else {
@@ -5749,27 +5741,17 @@ struct TerminalPaneContent: View {
                 // second line.
                 if let chip = guestShare.chipText { GuestShareChip(text: chip) }
             }
-            HStack(spacing: 0) {
+            PaneHeaderCapsule {
                 InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find",
                                    target: CGSize(width: 40, height: 44)) { toggleFind() }
-                Button {
+                PaneHeaderRefreshButton(identifier: "terminal-refresh") {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
-                } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Palette.text)
-                        .frame(width: 40, height: 44)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("terminal-refresh")
-                .accessibilityLabel("Reconnect and refresh")
                 // Per-agent actions (⋯), only for an agent pane — as before, where they lived
                 // on the status row that exists only when the pane has a status group.
                 if group != nil { agentActionsMenu }
             }
-            .padding(.horizontal, 2)
-            .background(Capsule().fill(Palette.surfaceRaised))
         }
         // Fixed across find / status / no-status states, but scaled with the app's text
         // size: at 140 % the title (16 pt) over the status line (11 pt) needs ~47 pt and
@@ -5849,35 +5831,12 @@ struct TerminalPaneContent: View {
     /// at a glance without opening the menu.
     private var agentActionsMenu: some View {
         Menu {
-            Section {
-                Button {
-                    Task {
-                        if let out = try? await client.read(pane: paneID, source: .visible, format: .text) {
-                            UIPasteboard.general.string = out.text
-                        }
-                    }
-                } label: { Label("Copy screen", systemImage: "doc.on.doc") }
-                Button {
-                    Task {
-                        if let out = try? await client.read(pane: paneID, source: .recentUnwrapped, format: .text) {
-                            UIPasteboard.general.string = out.text
-                        }
-                    }
-                } label: { Label("Copy recent output", systemImage: "doc.on.clipboard") }
-            }
-            Section("Text size") {
-                Button {
-                    terminalFontSize = min(terminalFontSize + 1, 24)
-                } label: { Label("Increase", systemImage: "textformat.size.larger") }
-                .accessibilityIdentifier("terminal-font-increase")
-                Button {
-                    terminalFontSize = max(terminalFontSize - 1, 9)
-                } label: { Label("Decrease", systemImage: "textformat.size.smaller") }
-                .accessibilityIdentifier("terminal-font-decrease")
-                Button {
-                    terminalFontSize = 12.5
-                } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
-            }
+            TerminalCopyMenuSection(client: client, paneID: paneID)
+            TerminalTextSizeMenuSection(
+                increaseID: "terminal-font-increase", decreaseID: "terminal-font-decrease",
+                onIncrease: { terminalFontSize = min(terminalFontSize + 1, 24) },
+                onDecrease: { terminalFontSize = max(terminalFontSize - 1, 9) },
+                onReset: { terminalFontSize = 12.5 })
             if agent != nil {
                 Button {
                     guestShare.isSharing = true
@@ -5899,18 +5858,11 @@ struct TerminalPaneContent: View {
                 Label("Close agent", systemImage: "xmark.circle")
             }
         } label: {
-            Image(systemName: mute.isMuted(paneID) ? "bell.slash" : "ellipsis")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(mute.isMuted(paneID) ? Palette.waiting : Palette.text)
-                .frame(width: 40, height: 44)
-                .contentShape(Rectangle())
+            PaneActionsMenuLabel(notificationsOff: mute.isMuted(paneID))
         }
         .accessibilityIdentifier("terminal-actions")
     }
 
-    /// Shown only while the pane is scrolled away from its newest output, so it is out
-    /// of the way the rest of the time. Uses the app's primary ink-fill treatment, the
-    /// same one the send arrow and the banner's Switch button use.
     /// Hardware-keyboard shortcuts for this pane, carried by hidden zero-size buttons —
     /// the same pattern the split view uses for Command-K and Command-slash
     /// (`keyboardShortcuts`, :1931-1947).
@@ -5988,20 +5940,6 @@ struct TerminalPaneContent: View {
         guard !findTerm.isEmpty else { return }
         findDirection = direction
         findGeneration += 1
-    }
-
-    private var jumpToLatestPill: some View {
-        Button { jumpToTailToken += 1 } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
-                Text("Latest").font(Typography.app(12, .semibold))
-            }
-            .foregroundStyle(Palette.ground)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(Palette.text).clipShape(Capsule())
-        }
-        .padding(.trailing, 16).padding(.bottom, 12)
-        .accessibilityLabel(Text("Jump to latest output"))
     }
 
     // MARK: classic-renderer banner
