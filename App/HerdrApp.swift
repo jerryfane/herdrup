@@ -4264,20 +4264,10 @@ struct TerminalHomeView: View {
         return HStack(alignment: .center, spacing: 0) {
             // The row's leading inset (where the needs-you dot used to sit).
             Color.clear.frame(width: 20, height: 1)
-            ZStack(alignment: .bottomTrailing) {
-                Circle().fill(AgentIdentity.gradient(forName: row.title))
-                    .frame(width: avatar, height: avatar)
-                    .overlay(Text(AgentIdentity.glyph(forName: row.title))
-                        .font(Typography.app(sidebar ? 19 : 22, .bold)).foregroundStyle(.white))
-                Group {
-                    if row.info.isUnreachable {
-                        avatarBadge(.offline).accessibilityLabel(Text("offline"))
-                    } else {
-                        statusBadge(row.group)
-                    }
-                }
-                .offset(x: 4, y: 4)
-            }
+            AgentAvatar(name: row.title,
+                        badge: row.info.isUnreachable ? .offline : AgentAvatarBadge(row.group),
+                        badgeLabel: row.info.isUnreachable ? "offline" : row.group.label,
+                        diameter: avatar, glyphSize: sidebar ? 19 : 22)
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -4394,55 +4384,6 @@ struct TerminalHomeView: View {
         case let (nil, a?): return a
         case (nil, nil): return info.paneID
         }
-    }
-
-    /// The status as a 22 pt badge on the avatar (#352), ringed with the ground colour.
-    /// Named for VoiceOver too: the status is colour + shape.
-    private func statusBadge(_ group: AgentGroup) -> some View {
-        avatarBadge(AvatarBadge(group)).accessibilityLabel(Text(group.label))
-    }
-
-    private enum AvatarBadge {
-        case waiting, stopped, unrecognised, working, offline, none
-        init(_ group: AgentGroup) {
-            switch group {
-            case .needsYou: self = .waiting
-            case .stopped: self = .stopped
-            case .unrecognised: self = .unrecognised
-            case .working: self = .working
-            case .idle: self = .none
-            }
-        }
-    }
-
-    /// Status is SHAPE + colour, never colour alone — desaturate the screen and it still
-    /// sorts: ! in a circle waits, × in a rounded SQUARE stopped, a turning ring works. An
-    /// unreachable remote agent's status is a stale last-known value, so it shows a muted
-    /// offline square (gone, not live), never a live badge. Idle has no badge.
-    @ViewBuilder
-    private func avatarBadge(_ badge: AvatarBadge) -> some View {
-        switch badge {
-        case .waiting: badgeGlyph("exclamationmark", Palette.waiting, square: false)
-        case .unrecognised: badgeGlyph("questionmark", Palette.waiting, square: false)
-        case .stopped: badgeGlyph("xmark", Palette.died, square: true)
-        case .offline: badgeGlyph("wifi.slash", Palette.surfaceRaised, square: true, ink: Palette.textDim)
-        case .working:
-            TurningRing(color: Palette.working, diameter: 12, lineWidth: 2)
-                .frame(width: 22, height: 22)
-                .background(Circle().fill(Palette.ground))
-                .overlay(Circle().stroke(Palette.ground, lineWidth: 2.5))
-        case .none:
-            EmptyView()
-        }
-    }
-
-    private func badgeGlyph(_ system: String, _ fill: Color, square: Bool, ink: Color = Palette.ground) -> some View {
-        let shape = RoundedRectangle(cornerRadius: square ? 6 : 11)
-        return Image(systemName: system)
-            .font(.system(size: 10, weight: .heavy)).foregroundStyle(ink)
-            .frame(width: 22, height: 22)
-            .background(shape.fill(fill))
-            .overlay(shape.stroke(Palette.ground, lineWidth: 2.5))
     }
 
     // MARK: error / host-key recovery (functional, restyled to the tokens)

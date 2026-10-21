@@ -241,6 +241,75 @@ private struct Spinning: ViewModifier {
     }
 }
 
+/// The status badge on a Messages-style agent row's avatar (#352). Status is SHAPE +
+/// colour, never colour alone — desaturate the screen and it still sorts: ! in a circle
+/// waits, × in a rounded SQUARE stopped, a turning ring works. An unreachable remote
+/// agent's status is a stale last-known value, so it shows a muted offline square (gone,
+/// not live), never a live badge. Idle has no badge.
+enum AgentAvatarBadge: Equatable {
+    case waiting, stopped, unrecognised, working, offline, none
+
+    init(_ group: AgentGroup) {
+        switch group {
+        case .needsYou: self = .waiting
+        case .stopped: self = .stopped
+        case .unrecognised: self = .unrecognised
+        case .working: self = .working
+        case .idle: self = .none
+        }
+    }
+}
+
+/// The round avatar of a Messages-style agent row: the name's colour and initial, with the
+/// status as a 22 pt badge on its lower-right edge, ringed with the ground colour. The
+/// owner's roster and a guest's shared-agent list draw the same avatar.
+struct AgentAvatar: View {
+    let name: String
+    let badge: AgentAvatarBadge
+    /// What VoiceOver reads for the badge: the status is colour + shape, so it is named.
+    let badgeLabel: String
+    var diameter: CGFloat = 52
+    var glyphSize: CGFloat = 22
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Circle().fill(AgentIdentity.gradient(forName: name))
+                .frame(width: diameter, height: diameter)
+                .overlay(Text(AgentIdentity.glyph(forName: name))
+                    .font(Typography.app(glyphSize, .bold)).foregroundStyle(.white))
+            badgeView
+                .accessibilityLabel(Text(badgeLabel))
+                .offset(x: 4, y: 4)
+        }
+    }
+
+    @ViewBuilder
+    private var badgeView: some View {
+        switch badge {
+        case .waiting: glyph("exclamationmark", Palette.waiting, square: false)
+        case .unrecognised: glyph("questionmark", Palette.waiting, square: false)
+        case .stopped: glyph("xmark", Palette.died, square: true)
+        case .offline: glyph("wifi.slash", Palette.surfaceRaised, square: true, ink: Palette.textDim)
+        case .working:
+            TurningRing(color: Palette.working, diameter: 12, lineWidth: 2)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Palette.ground))
+                .overlay(Circle().stroke(Palette.ground, lineWidth: 2.5))
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private func glyph(_ system: String, _ fill: Color, square: Bool, ink: Color = Palette.ground) -> some View {
+        let shape = RoundedRectangle(cornerRadius: square ? 6 : 11)
+        return Image(systemName: system)
+            .font(.system(size: 10, weight: .heavy)).foregroundStyle(ink)
+            .frame(width: 22, height: 22)
+            .background(shape.fill(fill))
+            .overlay(shape.stroke(Palette.ground, lineWidth: 2.5))
+    }
+}
+
 /// A filled status dot that softly pulses while `active` (i.e. working) and
 /// holds perfectly still otherwise. Reuses TurningRing's onAppear +
 /// repeatForever idiom; a fading scale reads "alive" without implying a
