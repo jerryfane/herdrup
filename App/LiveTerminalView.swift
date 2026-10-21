@@ -1755,10 +1755,11 @@ struct LiveTerminalView: UIViewRepresentable {
             // screen, are not user intent. The actual state is published on reveal.
             guard !tailPublishHeld else { return }
             var atTail = atTail
-            // The alt-screen rule is the owner's: their jump is Ctrl+End to the agent. A
-            // view-only jump is a local scroll (jumpToTail), and a guest fitted to the
-            // agent's width can have more rows than fit on screen, so report the real place.
-            if !viewOnly, view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
+            // For guests too, deliberately (#472 review f3): on the alt screen SwiftTerm pins
+            // contentOffset to yDisp*cell on every frame and its scroll delegate reports
+            // position 0, so a view-only "bottom" there is neither stable nor reachable by
+            // scrollTo(row:). Until SwiftTerm exposes one, alt panes show no Latest pill.
+            if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
             guard atTail != lastReportedAtTail else { return }
             lastReportedAtTail = atTail
             let publish = onTailStateChange
