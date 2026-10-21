@@ -58,6 +58,7 @@ struct GuestHomeView: View {
     /// The agent screen's tab; a tapped push picks it.
     @State private var paneTab: GuestPaneTab = .terminal
     @State private var confirmingRemove = false
+    @Environment(\.displayScale) private var displayScale
     /// Observed so a Text size change re-renders at the new `Typography.scale`.
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
@@ -118,6 +119,7 @@ struct GuestHomeView: View {
                 header
                 ScrollView {
                     VStack(spacing: 0) {
+                        sharedBy
                         content
                         GuestShellStyle.note {
                             Text("You can see only the agents \(access.ownerName) shares with you.")
@@ -138,33 +140,36 @@ struct GuestHomeView: View {
         }
     }
 
+    /// The owner's Agents bar: a small centred title, Back in its capsule. In an iPad window
+    /// Back joins the right-hand capsule, clear of the window controls (`SectionBackSlot`).
     private var header: some View {
-        ZStack(alignment: .topLeading) {
-            VStack(spacing: 3) {
-                Text(access.machineLabel)
-                    .font(Typography.app(21, .bold)).tracking(-0.21)
-                    .foregroundStyle(Palette.text).lineLimit(1)
-                    .accessibilityIdentifier("guest-home-title")
-                Text("Shared by \(access.ownerName) · 1 agent")
-                    .font(Typography.machine(13, .medium)).foregroundStyle(Palette.textFaint)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 60)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if let onBack {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.text)
-                        .frame(width: 36, height: 36)
-                        .background(Palette.surface, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Machines")
-                .accessibilityIdentifier("guest-home-back")
-                .padding(.leading, 16).padding(.top, 18)
-            }
+        SectionTopBar(title: "Agents", leading: {
+            if onBack != nil { SectionBackSlot(.leading) { backButton } }
+        }) {
+            if onBack != nil { SectionBackSlot(.trailing) { backButton } }
         }
-        .frame(height: 74)
+    }
+
+    private var backButton: some View {
+        SectionBarButton(icon: "chevron.left", label: "Machines", identifier: "guest-home-back") {
+            onBack?()
+        }
+    }
+
+    /// Whose machine this is, where the owner's roster has its search field; it scrolls
+    /// away with the list.
+    private var sharedBy: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(access.machineLabel)
+                .font(Typography.app(20, .bold)).tracking(-0.2)
+                .foregroundStyle(Palette.text).lineLimit(1)
+                .accessibilityIdentifier("guest-home-title")
+            Text("Shared by \(access.ownerName) · 1 agent")
+                .font(Typography.app(14)).foregroundStyle(Palette.textDim)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20).padding(.top, 4).padding(.bottom, 10)
     }
 
     @ViewBuilder
@@ -176,8 +181,6 @@ struct GuestHomeView: View {
             case .loading:
                 ProgressView().tint(Palette.textDim).frame(height: 64).padding(.top, 26)
             case .live(let row):
-                sectionHeader(row.flatMap { $0.info.guestRunning == false ? nil : $0.group.sectionTitle } ?? "Paused")
-                    .padding(.top, 8).padding(.bottom, 8)
                 Button {
                     withAnimation(.easeOut(duration: 0.26)) { showingPane = true }
                 } label: {
@@ -205,103 +208,61 @@ struct GuestHomeView: View {
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Text(title.uppercased()).tracking(1.56)
-                Text("⌄").font(Typography.machine(10, .semibold))
-            }
-            .font(Typography.machine(12, .semibold))
-            .foregroundStyle(Palette.textFaint)
-            Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
-        }
-        .padding(.horizontal, 16)
-    }
-
-    /// The shared agent's row. With no listed agent, or one the host reports as not
-    /// the pane's foreground program, it reads "isn't running" with a paused chip.
+    /// The shared agent as a Messages-style row, like the owner's roster (#352): full width
+    /// on the ground, the round avatar with its status badge, the name over the preview, and
+    /// an inset divider. With no listed agent, or one the host reports as not the pane's
+    /// foreground program, it reads "isn't running" with a paused pill and a dimmed avatar.
     private func agentRow(_ row: AgentRow?) -> some View {
         let running = row.map { $0.info.guestRunning != false } ?? false
-        return HStack(spacing: 13) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(for: row?.info.agent))
-                Text(AgentIdentity.glyph(for: row?.info.agent ?? access.agentName))
-                    .font(Typography.app(19, .bold)).foregroundStyle(.white)
-            }
-            .frame(width: 40, height: 40)
-            .opacity(running ? 1 : 0.55)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(access.agentName)
-                    .font(Typography.app(17, .semibold)).foregroundStyle(Palette.text).lineLimit(1)
+        let group = running ? row?.group : nil
+        return HStack(alignment: .center, spacing: 0) {
+            Color.clear.frame(width: 20, height: 1)
+            AgentAvatar(name: access.agentName,
+                        badge: group.map(AgentAvatarBadge.init) ?? .none,
+                        badgeLabel: group?.label ?? "paused")
+                .opacity(running ? 1 : 0.55)
+                .padding(.trailing, 12)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(access.agentName)
+                        .font(.system(size: 17 * Typography.scale, weight: .semibold))
+                        .foregroundStyle(Palette.text).lineLimit(1)
+                    if !running {
+                        Text("paused")
+                            .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(Palette.textDim.opacity(0.12)))
+                    }
+                    Spacer(minLength: 6)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textFaint)
+                        .accessibilityHidden(true)
+                }
+                // A waiting agent's preview reads in the primary colour, like an unread message.
                 Text(running ? row.map(meta) ?? "" : "\(access.agentName) isn't running")
-                    .font(Typography.machine(13.5)).foregroundStyle(Palette.textDim).lineLimit(1)
+                    .font(.system(size: 15 * Typography.scale))
+                    .foregroundStyle(group == .needsYou ? Palette.text : Palette.textDim)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if let row, running {
-                badge(row)
-            } else {
-                Text("paused")
-                    .font(Typography.machine(12, .medium)).foregroundStyle(Palette.textDim)
-                    .padding(.horizontal, 9).padding(.vertical, 3)
-                    .background(Palette.surfaceRaised, in: Capsule())
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: 86 * max(1, Typography.scale), alignment: .center)
+            // The divider starts where the text starts, not under the avatar.
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Palette.hairline).frame(height: 1 / displayScale)
+                    .padding(.trailing, 16)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .frame(minHeight: 64)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(running ? edge(row?.group ?? .idle) : Palette.hairline, lineWidth: 1))
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 16)
+        .contentShape(Rectangle())
     }
 
-    /// The guest projection carries no cwd or title, so the meta is the agent kind and
+    /// The guest projection carries no cwd or title, so the preview is the agent kind and
     /// its state ("omp · working"), or the state alone when the kind is unknown.
     private func meta(_ row: AgentRow) -> String {
         [row.info.agent, row.group.label].compactMap { $0 }.joined(separator: " · ")
-    }
-
-    private func edge(_ group: AgentGroup) -> Color {
-        switch group {
-        case .needsYou, .unrecognised: return Palette.waiting.opacity(0.5)
-        case .stopped: return Palette.died.opacity(0.5)
-        case .working, .idle: return Palette.hairline
-        }
-    }
-
-    /// The same status vocabulary as the owner's rows.
-    @ViewBuilder
-    private func badge(_ row: AgentRow) -> some View {
-        switch row.group {
-        case .working:
-            HStack(spacing: 6) {
-                Text("now").font(Typography.machine(13, .medium)).foregroundStyle(Palette.working)
-                GuestSpinner()
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(row.group.label))
-        case .needsYou:
-            symbolBadge("exclamationmark", Palette.waiting, circle: true).accessibilityLabel(Text(row.group.label))
-        case .unrecognised:
-            symbolBadge("questionmark", Palette.waiting, circle: true).accessibilityLabel(Text(row.group.label))
-        case .stopped:
-            symbolBadge("xmark", Palette.died, circle: false).accessibilityLabel(Text(row.group.label))
-        case .idle:
-            Circle().stroke(Palette.textFaint, lineWidth: 1.5).frame(width: 8, height: 8)
-                .accessibilityLabel(Text(row.group.label))
-        }
-    }
-
-    private func symbolBadge(_ system: String, _ color: Color, circle: Bool) -> some View {
-        Image(systemName: system)
-            .font(.system(size: 11, weight: .bold)).foregroundStyle(color)
-            .frame(width: 26, height: 26)
-            .overlay {
-                if circle {
-                    Circle().stroke(color.opacity(0.55), lineWidth: 1.5)
-                } else {
-                    RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.55), lineWidth: 1.5)
-                }
-            }
     }
 
     private func message<Extra: View>(
@@ -375,23 +336,5 @@ struct GuestHomeView: View {
     private func leave() {
         SharedMachinesStore.shared.remove(access)
         onLeave()
-    }
-}
-
-/// The mock's working spinner: a faint blue track with one bright quarter, turning.
-private struct GuestSpinner: View {
-    @State private var spin = false
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Palette.working.opacity(0.25), lineWidth: 2)
-            Circle().trim(from: 0, to: 0.25)
-                .stroke(Palette.working, style: StrokeStyle(lineWidth: 2, lineCap: .butt))
-                .rotationEffect(.degrees(spin ? 315 : -45))
-        }
-        .frame(width: 16, height: 16)
-        .onAppear {
-            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) { spin = true }
-        }
     }
 }
