@@ -339,21 +339,6 @@ struct GramView: View {
         let count: Int
     }
 
-    /// One feed row with what draws around it: a time separator, the unread rule, and
-    /// whether it opens or closes a sender group.
-    private struct FeedEntry: Identifiable {
-        let message: GramMessage
-        /// The time separator above the row, when the gap from the previous one is over an
-        /// hour or the day changed (and above the first row).
-        let separator: Date?
-        /// The unread rule above the row.
-        let unreadCount: Int?
-        let startsGroup: Bool
-        let endsGroup: Bool
-        var id: String { message.id }
-        var startsAfterMarker: Bool { separator != nil || unreadCount != nil }
-    }
-
     /// The newest message in the whole loaded list (not the search-filtered one): what the
     /// feed follows in when it changes to a newer message.
     private struct FeedTip: Equatable {
@@ -386,28 +371,9 @@ struct GramView: View {
 
     /// The newest `renderLimit` of the visible messages, oldest first, with their separators,
     /// unread rule and groups. Everything the feed draws comes from here.
-    private var feedEntries: [FeedEntry] {
-        let rows = Array(visibleMessages.prefix(renderLimit).reversed())
-        let calendar = Calendar.current
-        let markers: [(separator: Date?, unread: Int?)] = rows.indices.map { index in
-            let date = rows[index].createdAt
-            let separates = index == 0
-                || date.timeIntervalSince(rows[index - 1].createdAt) > 3600
-                || !calendar.isDate(date, inSameDayAs: rows[index - 1].createdAt)
-            let unread = unreadRule?.messageID == rows[index].id ? unreadRule?.count : nil
-            return (separates ? date : nil, unread)
-        }
-        func breaks(_ index: Int) -> Bool { markers[index].separator != nil || markers[index].unread != nil }
-        return rows.indices.map { index in
-            let next = index + 1
-            return FeedEntry(
-                message: rows[index],
-                separator: markers[index].separator,
-                unreadCount: markers[index].unread,
-                startsGroup: index == 0 || breaks(index) || !GramRow.sameRun(rows[index - 1], rows[index]),
-                endsGroup: next == rows.count || breaks(next) || !GramRow.sameRun(rows[index], rows[next])
-            )
-        }
+    private var feedEntries: [GramFeedEntry] {
+        GramFeedEntry.entries(oldestFirst: Array(visibleMessages.prefix(renderLimit).reversed()),
+                              unreadRule: unreadRule.map { ($0.messageID, $0.count) })
     }
 
     private enum LoadPhase: Equatable {
@@ -1236,16 +1202,8 @@ struct GramView: View {
     }
 
     /// One inbox feed row with what draws above it: its time separator and the unread rule.
-    private func inboxRow(index: Int, entry: FeedEntry) -> some View {
-        VStack(spacing: 0) {
-            if let date = entry.separator {
-                GramTimeSeparator(date: date)
-                    .padding(.top, index == 0 ? 0 : 16)
-            }
-            if let count = entry.unreadCount {
-                GramUnreadRule(count: count)
-                    .padding(.top, index == 0 && entry.separator == nil ? 0 : 12)
-            }
+    private func inboxRow(index: Int, entry: GramFeedEntry) -> some View {
+        GramFeedRow(index: index, entry: entry) {
             GramRow(
                 message: entry.message,
                 isDownloadingFile: downloadingFileFor == entry.message.id,
@@ -1271,8 +1229,6 @@ struct GramView: View {
             // A page render (a keystroke, a poll, another file's progress) skips
             // every row whose inputs are unchanged (`GramRow.==`).
             .equatable()
-            // 2 pt inside a group, 10 pt between groups.
-            .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
         }
     }
 
@@ -2862,6 +2818,70 @@ private struct GramRowRenderProbe: View {
 }
 #endif
 
+/// One feed row with what draws around it: a time separator, the unread rule, and whether it
+/// opens or closes a sender group. Shared by the owner's inbox and a guest's Gram tab.
+struct GramFeedEntry: Identifiable {
+    let message: GramMessage
+    /// The time separator above the row, when the gap from the previous one is over an
+    /// hour or the day changed (and above the first row).
+    let separator: Date?
+    /// The unread rule above the row.
+    let unreadCount: Int?
+    let startsGroup: Bool
+    let endsGroup: Bool
+    var id: String { message.id }
+    var startsAfterMarker: Bool { separator != nil || unreadCount != nil }
+
+    /// `rows` (oldest first) with their separators, the unread rule above `unreadRule`'s
+    /// message, and their sender groups. A separator or the rule breaks a group.
+    static func entries(oldestFirst rows: [GramMessage],
+                        unreadRule: (messageID: String, count: Int)? = nil) -> [GramFeedEntry] {
+        let calendar = Calendar.current
+        let markers: [(separator: Date?, unread: Int?)] = rows.indices.map { index in
+            let date = rows[index].createdAt
+            let separates = index == 0
+                || date.timeIntervalSince(rows[index - 1].createdAt) > 3600
+                || !calendar.isDate(date, inSameDayAs: rows[index - 1].createdAt)
+            let unread = unreadRule?.messageID == rows[index].id ? unreadRule?.count : nil
+            return (separates ? date : nil, unread)
+        }
+        func breaks(_ index: Int) -> Bool { markers[index].separator != nil || markers[index].unread != nil }
+        return rows.indices.map { index in
+            let next = index + 1
+            return GramFeedEntry(
+                message: rows[index],
+                separator: markers[index].separator,
+                unreadCount: markers[index].unread,
+                startsGroup: index == 0 || breaks(index) || !GramRow.sameRun(rows[index - 1], rows[index]),
+                endsGroup: next == rows.count || breaks(next) || !GramRow.sameRun(rows[index], rows[next])
+            )
+        }
+    }
+}
+
+/// One feed row with what draws above it (its time separator and the unread rule) and the
+/// feed's gaps: 2 pt inside a sender group, 10 pt between groups.
+struct GramFeedRow<Row: View>: View {
+    let index: Int
+    let entry: GramFeedEntry
+    @ViewBuilder let row: () -> Row
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let date = entry.separator {
+                GramTimeSeparator(date: date)
+                    .padding(.top, index == 0 ? 0 : 16)
+            }
+            if let count = entry.unreadCount {
+                GramUnreadRule(count: count)
+                    .padding(.top, index == 0 && entry.separator == nil ? 0 : 12)
+            }
+            row()
+                .padding(.top, index == 0 && !entry.startsAfterMarker ? 0 : (entry.startsGroup ? 10 : 2))
+        }
+    }
+}
+
 /// One message in the feed: option D's iMessage layout in herdr's colours (round 3).
 ///
 /// An agent's group opens with a "name · machine" line and carries the sender's avatar
@@ -2870,7 +2890,20 @@ private struct GramRowRenderProbe: View {
 /// monospaced inset with Copy, an image attachment shows as a picture card and any other
 /// file as a file card, sharing one card with the text when the message has both. A file
 /// the store expired draws as a file card with nothing to open (`GramExpiredFileCard`).
+///
+/// `viewer` says whose feed it is: the owner's inbox, or a guest's copy of the one agent
+/// shared with them (`GuestGramList`), which draws the same rows with less to do.
 struct GramRow: View, Equatable {
+    /// Who reads the feed, and so what a row offers.
+    enum Viewer: Equatable {
+        /// The owner's inbox: every action, image previews, the owner's file downloads.
+        case owner
+        /// A guest: Copy only (no Save, Delete or Save to Files); every file draws as a card,
+        /// opened by the guest's bounded piece-by-piece download (`gram.get_file_chunk`),
+        /// never from the owner's download cache; the cards carry the guest identifiers.
+        case guest
+    }
+
     let message: GramMessage
     var isDownloadingFile: Bool
     /// Reply bytes received against bytes expected for THIS row's download, when the
@@ -2909,6 +2942,7 @@ struct GramRow: View, Equatable {
     /// This device's own machine label, for a local sender's "name · machine" line (a
     /// federated sender carries its own). Empty when unknown: the line shows the name only.
     var localMachine = ""
+    var viewer: Viewer = .owner
 
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.displayScale) private var displayScale
@@ -2938,6 +2972,7 @@ struct GramRow: View, Equatable {
             && lhs.startsGroup == rhs.startsGroup
             && lhs.endsGroup == rhs.endsGroup
             && lhs.localMachine == rhs.localMachine
+            && lhs.viewer == rhs.viewer
             && (lhs.message.file?.isImage != true
                 || (lhs.feedLanded == rhs.feedLanded
                     && lhs.visibleTop == rhs.visibleTop
@@ -2947,11 +2982,11 @@ struct GramRow: View, Equatable {
     private var mine: Bool { !message.isFromAgent }
     private var maxWidth: CGFloat { GramCardMetrics.cardWidth(sizeClass) }
     private var imageFile: GramFile? {
-        guard let file = message.file, file.isImage else { return nil }
+        guard viewer == .owner, let file = message.file, file.isImage else { return nil }
         return file
     }
     private var documentFile: GramFile? {
-        guard let file = message.file, !file.isImage else { return nil }
+        guard let file = message.file, viewer == .guest || !file.isImage else { return nil }
         return file
     }
     /// The attachment drawn as a card in the text part, below any text: a document, or any
@@ -3046,7 +3081,7 @@ struct GramRow: View, Equatable {
     /// file's Save to Files, then the message actions.
     @StableMenuBuilder
     private var menu: [StableMenuItem] {
-        if message.file != nil {
+        if message.file != nil && viewer == .owner {
             StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
         }
         if !message.text.isEmpty {
@@ -3054,9 +3089,11 @@ struct GramRow: View, Equatable {
                 UIPasteboard.general.string = message.text
             }
         }
-        StableMenuItem(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark",
-                       action: onToggleSave)
-        StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+        if viewer == .owner {
+            StableMenuItem(isSaved ? "Unsave" : "Save", systemImage: isSaved ? "bookmark.slash" : "bookmark",
+                           action: onToggleSave)
+            StableMenuItem("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+        }
     }
 
     /// The text and any card file (a document, or a file the store expired), drawn by the
@@ -3081,7 +3118,9 @@ struct GramRow: View, Equatable {
         if let file = documentFile {
             fileCard(file, embedded: embedded)
         } else if let expired = message.expiredFile {
-            GramExpiredFileCard(name: expired.name, byteCount: Int(clamping: expired.size), embedded: embedded)
+            GramExpiredFileCard(name: expired.name, byteCount: Int(clamping: expired.size), embedded: embedded,
+                                identifier: viewer == .guest ? "guest-gram-expired-\(message.id)"
+                                                             : GramExpiredFileCard.ownerIdentifier)
         }
     }
 
@@ -3092,8 +3131,9 @@ struct GramRow: View, Equatable {
             byteCount: Int(clamping: file.size),
             download: download,
             onOpen: onOpenFile,
-            onSave: onSaveFile,
-            embedded: embedded
+            onSave: viewer == .owner ? onSaveFile : nil,
+            embedded: embedded,
+            identifier: viewer == .guest ? "guest-gram-file-\(message.id)" : GramFileCard.ownerIdentifier
         )
         // A second tap while its own download runs does nothing; the value says why.
         .disabled(isDownloadingFile)
@@ -3165,7 +3205,7 @@ struct GramRow: View, Equatable {
     /// This row's open or save as its card draws and speaks it (`GramCardDownload.reply`).
     private var download: GramCardDownload? {
         guard isDownloadingFile, let file = message.file else { return nil }
-        return .reply(downloadProgress, fileSize: file.size)
+        return viewer == .guest ? .chunked(downloadProgress) : .reply(downloadProgress, fileSize: file.size)
     }
 
     /// Whether two messages (oldest first) belong to one group: the same side, and the same
@@ -3255,6 +3295,18 @@ extension View {
     }
 }
 
+/// Gram's ground fading out downward where the feed meets the chrome above it: ground, ground
+/// at 85 % by 55 %, then clear. Behind the owner's floating header, and at the top of a
+/// guest's Gram tab.
+struct GramGroundFade: View {
+    var body: some View {
+        LinearGradient(stops: [.init(color: Palette.ground, location: 0),
+                               .init(color: Palette.ground.opacity(0.85), location: 0.55),
+                               .init(color: Palette.ground.opacity(0), location: 1)],
+                       startPoint: .top, endPoint: .bottom)
+    }
+}
+
 /// Gram's header floating over the feed: no band, the messages scroll on up under its glass
 /// controls, over a ground fade that covers the status bar and the controls only. An OVERLAY,
 /// not a safe-area bar or inset: the scroll view's safe area stays the page's own, so the
@@ -3281,10 +3333,7 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                         if abs(height - barHeight) > 0.5 { barHeight = height }
                     }
                     .background {
-                        LinearGradient(stops: [.init(color: Palette.ground, location: 0),
-                                               .init(color: Palette.ground.opacity(0.85), location: 0.55),
-                                               .init(color: Palette.ground.opacity(0), location: 1)],
-                                       startPoint: .top, endPoint: .bottom)
+                        GramGroundFade()
                             .ignoresSafeArea(edges: .top)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)

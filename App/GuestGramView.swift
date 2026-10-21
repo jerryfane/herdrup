@@ -58,7 +58,12 @@ final class GuestGramModel: ObservableObject {
     }
 }
 
-/// The Gram tab's list: rows, file downloads and the viewers they open.
+/// The Gram tab: the owner's Gram conversation for the one shared agent. Oldest at the top
+/// and pinned to the bottom on the inbox's `WindowedBottomFeed`, with its time separators,
+/// sender runs (the name once, the avatar and tail on the run's last message) and file
+/// cards, drawn by the inbox's own `GramRow` as a guest viewer. The guest's own posts sit on
+/// the right with "Delivered to <agent>" under them. Older pages load when the guest scrolls
+/// up to the top; files download in bounded pieces and open in the viewers.
 struct GuestGramList: View {
     let client: HerdrClient
     let access: GuestAccess
@@ -69,42 +74,133 @@ struct GuestGramList: View {
     @State private var openTask: Task<Void, Never>?
     @State private var preview: GramPreview?
     @State private var fileError: String?
+    @State private var visibility = FeedVisibility()
+    @State private var appearance = 0
+    @State private var landed = false
+    @State private var anchorID: String?
+    /// The text segments each message's reader opened with "Read more", by message id.
+    @State private var expanded: [String: Set<Int>] = [:]
+    /// Settings → Text size, as the owner's feed reads it: an `.equatable()` row only
+    /// redraws when an input changes, so the scale has to be one of them.
+    @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
+
+    private static let bottomID = "guest-gram-bottom"
+
+    /// The guest's Grams, oldest first, as the owner's feed draws them.
+    private var entries: [GramFeedEntry] {
+        GramFeedEntry.entries(oldestFirst: model.messages.reversed().map { $0.gramMessage(agent: access.agentName) })
+    }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 14) {
-                if let fileError {
-                    notice(fileError, id: "guest-gram-file-error")
-                }
-                if let failure = model.failure {
-                    notice(failure, id: "guest-gram-failure")
-                }
-                if model.messages.isEmpty {
-                    empty
-                }
-                ForEach(model.messages) { message in
-                    GuestGramRow(
-                        message: message, agentName: access.agentName,
-                        isDownloading: downloadingID == message.id,
-                        progress: downloadingID == message.id ? progress : nil,
-                        onOpenFile: { open(message) })
-                }
-                if model.hasMore {
-                    ProgressView().tint(Palette.textDim)
-                        .frame(height: 44)
-                        .task { await model.loadMore(client: client, access: access) }
-                }
+        VStack(spacing: 0) {
+            if let fileError { notice(fileError, id: "guest-gram-file-error") }
+            if let failure = model.failure { notice(failure, id: "guest-gram-failure") }
+            if model.messages.isEmpty {
+                ScrollView { empty.frame(maxWidth: .infinity) }
+                    .refreshable { await model.refresh(client: client, access: access) }
+            } else {
+                feed
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
-            // iPad / Mac: the inbox's readable conversation column, so the guest's own posts on
-            // the right stay near the agent's on the left.
-            .readableColumn(GramBubble.columnCap)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .refreshable { await model.refresh(client: client, access: access) }
         .gramFileViewer($preview)
         .onDisappear { openTask?.cancel() }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("guest-gram-list")
+    }
+
+    private var feed: some View {
+        let rows = entries
+        return ScrollViewReader { proxy in
+            WindowedBottomFeed(
+                feed: proxy,
+                items: rows,
+                spacing: 0,
+                showsSentinel: model.hasMore,
+                bottomID: Self.bottomID,
+                feedID: "guest-gram-feed",
+                messagesID: "guest-gram-messages",
+                messagesValue: "\(rows.count) messages",
+                columnCap: GramBubble.columnCap,
+                visibleTop: 0,
+                search: "",
+                visibility: visibility,
+                appearance: $appearance,
+                landed: $landed,
+                anchorID: $anchorID,
+                onLanded: { if visibility.sentinelOnScreen { loadOlder(top: rows.first?.id) } },
+                onSentinelArrival: { loadOlder(top: rows.first?.id) },
+                sentinel: {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading older messages…")
+                    }
+                    .font(Typography.app(12))
+                    .foregroundStyle(Palette.textFaint)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                },
+                row: { index, entry in
+                    GramFeedRow(index: index, entry: entry) {
+                        row(entry)
+                    }
+                },
+                footer: { EmptyView() }
+            )
+            // A new Gram follows in while the guest is at the bottom, as the inbox does.
+            .onChange(of: model.messages.first?.id) { _, _ in
+                guard landed, visibility.atBottom else { return }
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            }
+            .refreshable { await model.refresh(client: client, access: access) }
+        }
+        // The top of the feed fades into the tab strip, as the owner's feed does under its header.
+        .overlay(alignment: .top) {
+            GramGroundFade().frame(height: 16)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+    }
+
+    private func row(_ entry: GramFeedEntry) -> some View {
+        let message = entry.message
+        return GramRow(
+            message: message,
+            isDownloadingFile: downloadingID == message.id,
+            downloadProgress: downloadingID == message.id ? progress : nil,
+            feedLanded: landed,
+            isSaved: false,
+            expandedSegments: expanded[message.id] ?? [],
+            fontScale: uiFontScale,
+            onOpenFile: { open(message.id) },
+            onSaveFile: {},
+            onPrefetchImage: {},
+            onToggleSave: {},
+            onDelete: {},
+            onSetExpanded: { segment, open in
+                if open { expanded[message.id, default: []].insert(segment) } else { expanded[message.id]?.remove(segment) }
+            },
+            startsGroup: entry.startsGroup,
+            endsGroup: entry.endsGroup,
+            viewer: .guest
+        )
+        // A page render (a keystroke, a poll, a file's progress) skips every row whose
+        // inputs are unchanged (`GramRow.==`), as in the owner's feed.
+        .equatable()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("guest-gram-row-\(message.id)")
+    }
+
+    /// One older page per arrival at the top, after the feed landed; the message on top now
+    /// is put back at the top once the page is drawn above it.
+    private func loadOlder(top: String?) {
+        guard landed, visibility.pageArmed, !visibility.anchoring, !visibility.pageRequested,
+              model.hasMore else { return }
+        visibility.pageArmed = false
+        visibility.pageRequested = true
+        Task {
+            await model.loadMore(client: client, access: access)
+            visibility.pageRequested = false
+            if let top { anchorID = top }
+        }
     }
 
     @ViewBuilder private var empty: some View {
@@ -135,6 +231,7 @@ struct GuestGramList: View {
             .padding(.horizontal, 12).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 12).fill(Palette.surface))
             .accessibilityIdentifier(id)
+            .padding(.horizontal, 16).padding(.top, 8)
     }
 
     // MARK: Files
@@ -142,8 +239,9 @@ struct GuestGramList: View {
     /// Downloads the file in bounded pieces and opens it: markdown rendered, HTML and SVG in
     /// the in-app viewer (script off unless allowed), anything else in QuickLook, whose share
     /// button saves or sends it.
-    private func open(_ message: GuestGramMessage) {
-        guard downloadingID == nil, let file = message.file else { return }
+    private func open(_ id: String) {
+        guard downloadingID == nil, let message = model.messages.first(where: { $0.id == id }),
+              let file = message.file else { return }
         downloadingID = message.id
         progress = nil
         fileError = nil
@@ -172,77 +270,5 @@ struct GuestGramList: View {
         #if DEBUG
         GuestMockTransport.noteOpened(name)
         #endif
-    }
-}
-
-/// One Gram: the agent's, or the guest's own post, with its file, drawn with the inbox's
-/// parts (`GramLoneMessage`): its bubble and tail, the agent's avatar, and the file as the
-/// inbox's file or expired card. The guest's own posts sit on the right, as the owner's do.
-private struct GuestGramRow: View {
-    let message: GuestGramMessage
-    let agentName: String
-    let isDownloading: Bool
-    let progress: (received: Int, total: Int)?
-    let onOpenFile: () -> Void
-
-    private var mine: Bool { !message.isFromAgent }
-
-    var body: some View {
-        GramLoneMessage(
-            text: message.text, sender: message.from, mine: mine,
-            hasCard: message.file != nil || message.expiredFile != nil,
-            menu: { menu },
-            header: { header },
-            card: card(embedded:)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("guest-gram-row-\(message.id)")
-    }
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text(message.isFromAgent ? message.from : "You → \(agentName)")
-                .font(Typography.app(12, .semibold)).foregroundStyle(Palette.textDim)
-                .lineLimit(1)
-            if message.isUnread {
-                Circle().fill(Palette.waiting).frame(width: 7, height: 7)
-                    .accessibilityLabel("Unread")
-            }
-            Text(GramRow.age(from: message.createdAt))
-                .font(Typography.machine(11)).foregroundStyle(Palette.textFaint)
-        }
-    }
-
-    /// A guest can copy a message's text; the file opens from its card (the viewer's Share
-    /// saves it).
-    @StableMenuBuilder
-    private var menu: [StableMenuItem] {
-        if !message.text.isEmpty {
-            StableMenuItem("Copy", systemImage: "doc.on.doc") {
-                UIPasteboard.general.string = message.text
-            }
-        }
-    }
-
-    /// The file's card, which opens it; a file the host's store expired (herdr#298) draws the
-    /// inbox's expired card, with nothing to open.
-    @ViewBuilder
-    private func card(embedded: Bool) -> some View {
-        if let file = message.file {
-            GramFileCard(
-                name: file.name,
-                kind: GramFileCard.kind(name: file.name, mime: file.mime),
-                byteCount: Int(clamping: file.size),
-                download: isDownloading ? GramCardDownload.chunked(progress) : nil,
-                onOpen: onOpenFile,
-                onSave: nil,
-                embedded: embedded,
-                identifier: "guest-gram-file-\(message.id)"
-            )
-            .disabled(isDownloading)
-        } else if let expired = message.expiredFile {
-            GramExpiredFileCard(name: expired.name, byteCount: Int(clamping: expired.size),
-                                embedded: embedded, identifier: "guest-gram-expired-\(message.id)")
-        }
     }
 }

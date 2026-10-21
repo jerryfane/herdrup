@@ -40,6 +40,13 @@ public struct GramFile: Decodable, Sendable, Equatable {
     /// An `image/*` attachment: the feed draws it as a picture card.
     public var isImage: Bool { mime.lowercased().hasPrefix("image/") }
 
+    public init(name: String, size: UInt64, mime: String, sha256: String) {
+        self.name = name
+        self.size = size
+        self.mime = mime
+        self.sha256 = sha256
+    }
+
     /// Format a byte count for display. Static so a not-yet-uploaded local file
     /// (which has no `GramFile` yet) can use the same rendering.
     public static func displaySize(of size: UInt64) -> String {
@@ -93,6 +100,24 @@ public struct GramMessage: Decodable, Identifiable, Sendable, Equatable {
     /// `<alias>/<name>` and the daemon knows the alias's machine. Absent otherwise, and
     /// from daemons predating it.
     public let machineLabel: String?
+
+    public init(id: String, direction: GramDirection, from: String, to: String? = nil, text: String,
+                grabbedBy: String? = nil, grabbedUnixMs: UInt64? = nil, createdUnixMs: UInt64,
+                readByOwner: Bool, file: GramFile? = nil, expiredFile: GramFile? = nil,
+                machineLabel: String? = nil) {
+        self.id = id
+        self.direction = direction
+        self.from = from
+        self.to = to
+        self.text = text
+        self.grabbedBy = grabbedBy
+        self.grabbedUnixMs = grabbedUnixMs
+        self.createdUnixMs = createdUnixMs
+        self.readByOwner = readByOwner
+        self.file = file
+        self.expiredFile = file == nil ? expiredFile : nil
+        self.machineLabel = machineLabel
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, direction, from, to, text, file

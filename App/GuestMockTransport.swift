@@ -83,6 +83,10 @@ struct GuestMockTransport: HerdrTransport {
 
     private static let recorder = CallRecorder()
     private static let hostRecorder = CallRecorder()
+    private static let streamRecorder = CallRecorder()
+    /// How many `pane.stream`s the guest opened (a reconnect opens another). Read by UI tests
+    /// via GuestPaneView's `guest-stream-opens` probe.
+    static var streamOpens: Int { streamRecorder.calls.count }
     /// The shared agent's PTY: one per process, like the host's, whichever transport value
     /// a re-rendered view built.
     private static let pty = MockPTY()
@@ -225,6 +229,7 @@ struct GuestMockTransport: HerdrTransport {
             }
         }
         guard method == "pane.stream" else { return AsyncThrowingStream { $0.finish() } }
+        Self.streamRecorder.append(method)
         if scenario == .paused {
             // The host refuses a stream while the shared agent is not in the foreground.
             let refusal = Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")

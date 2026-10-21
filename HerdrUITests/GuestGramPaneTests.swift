@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 /// A guest's Gram tab and push for the shared agent (herdrup#338), over GuestMockTransport.
@@ -40,9 +41,9 @@ final class GuestGramPaneTests: XCTestCase {
 
     // MARK: Gram tab
 
-    /// The tab lists the agent's Grams and the guest's own post, newest first, and counts the
-    /// unread ones until the guest looks: then they are marked read on the host, for this
-    /// guest only.
+    /// The tab lists the agent's Grams and the guest's own post, oldest first as the owner's
+    /// Gram does, and counts the unread ones until the guest looks: then they are marked read
+    /// on the host, for this guest only.
     func testGramTabListsTheSharedAgentsGramsAndMarksThemReadWhenViewed() {
         let app = launch(features: "gram")
         let badge = element(app, "guest-gram-unread")
@@ -51,12 +52,13 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertTrue(app.buttons["guest-tab-terminal"].exists)
 
         openGramTab(app)
-        let rows = ["gm-4", "gm-3", "gm-2", "gm-1"].map { element(app, "guest-gram-row-\($0)") }
+        let rows = ["gm-1", "gm-2", "gm-3", "gm-4"].map { element(app, "guest-gram-row-\($0)") }
         for row in rows { XCTAssertTrue(row.waitForExistence(timeout: 5), "row \(row) should render") }
-        XCTAssertLessThan(rows[0].frame.minY, rows[1].frame.minY, "newest first")
-        XCTAssertLessThan(rows[2].frame.minY, rows[3].frame.minY, "newest first")
+        XCTAssertLessThan(rows[0].frame.minY, rows[1].frame.minY, "oldest first")
+        XCTAssertLessThan(rows[2].frame.minY, rows[3].frame.minY, "oldest first")
         XCTAssertTrue(app.staticTexts["Here's the Q5 table: decode is up 36% over Q4, prefill flat."].exists)
-        XCTAssertTrue(app.staticTexts["You → llm-opt"].exists, "the guest's own post is labelled as theirs")
+        XCTAssertTrue(app.staticTexts["Delivered to llm-opt"].exists,
+                      "the guest's own post carries the owner's status line to the agent")
         XCTAssertTrue(app.buttons["guest-gram-file-gm-4"].exists, "the agent's file is offered")
 
         pollLabel(app, "guest-host-calls", "viewing the list should mark its unread Grams read") {
@@ -68,6 +70,37 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertEqual(probe(app, "guest-forbidden-calls"), "", "the Gram tab calls only what a guest may")
     }
 
+    /// The owner's conversation: oldest at the top, opening pinned to the bottom with the
+    /// newest Gram in view above the composer; the guest's own post sits on the right, the
+    /// agent's on the left under one sender line per run.
+    func testGramTabIsOldestFirstWithTheNewestVisibleAtTheBottom() {
+        let app = launch(features: "gram")
+        openGramTab(app)
+        let newest = element(app, "guest-gram-row-gm-4")
+        let mine = element(app, "guest-gram-row-gm-3")
+        let older = element(app, "guest-gram-row-gm-2")
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        XCTAssertTrue(poll(5, every: 0.25) { newest.isHittable }, "the newest Gram is in view on open")
+        let input = app.textViews["guest-composer-input"]
+        XCTAssertTrue(input.exists)
+        XCTAssertLessThan(newest.frame.maxY, input.frame.minY + 1, "the newest Gram sits above the composer")
+        // Pinned to the bottom: nothing is drawn below the newest.
+        for id in ["gm-0", "gm-1", "gm-2", "gm-3"] {
+            XCTAssertLessThan(element(app, "guest-gram-row-\(id)").frame.maxY, newest.frame.maxY,
+                              "the newest Gram is the last row")
+        }
+        XCTAssertLessThan(older.frame.minY, mine.frame.minY, "oldest first")
+        XCTAssertLessThan(mine.frame.minY, newest.frame.minY, "oldest first")
+        XCTAssertGreaterThan(mine.frame.midX, older.frame.midX, "the guest's own post sits on the right")
+        XCTAssertFalse(element(app, "guest-view-only-note").exists, "the view-only note is the terminal's")
+        XCTAssertFalse(app.buttons["guest-find"].exists, "Find is the terminal's")
+        XCTAssertFalse(app.buttons["guest-refresh"].exists, "Reconnect is the terminal's")
+        XCTAssertTrue(app.buttons["guest-actions"].exists, "the ⋯ stays for notifications")
+        Thread.sleep(forTimeInterval: 0.8)
+        attach(app, "guest-gram-oldest-first")
+        XCTAssertEqual(probe(app, "guest-forbidden-calls"), "")
+    }
+
     /// herdr#298: a file the host's store expired (gm-0, a picture with no caption) draws as
     /// a chip naming it "no longer available", never an empty row body. It is not a button
     /// and tapping it fetches nothing from the host.
@@ -77,7 +110,8 @@ final class GuestGramPaneTests: XCTestCase {
         let row = element(app, "guest-gram-row-gm-0")
         XCTAssertTrue(row.waitForExistence(timeout: 5), "the expired message keeps its row")
         let list = element(app, "guest-gram-list")
-        for _ in 0..<4 where !row.isHittable { list.swipeUp() }
+        // The oldest message sits at the top of the bottom-pinned feed.
+        for _ in 0..<4 where !row.isHittable { list.swipeDown() }
         let chip = element(app, "guest-gram-expired-gm-0")
         XCTAssertTrue(chip.waitForExistence(timeout: 3), "the row should show the expired file")
         XCTAssertEqual(chip.label, "q4-baseline.png, no longer available")

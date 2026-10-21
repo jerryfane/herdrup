@@ -30,6 +30,9 @@ public struct GuestGramFile: Decodable, Sendable, Equatable {
     }
 
     public var displaySize: String { GramFile.displaySize(of: size) }
+
+    /// The owner's file metadata for the same file (no checksum when the host sent none).
+    public var gramFile: GramFile { GramFile(name: name, size: size, mime: mime, sha256: sha256 ?? "") }
 }
 
 /// One Gram in the guest's list.
@@ -84,6 +87,17 @@ public struct GuestGramMessage: Decodable, Identifiable, Sendable, Equatable {
     /// Only the agent's Grams can be unread; the guest wrote their own.
     public var isUnread: Bool { isFromAgent && !read }
     public var createdAt: Date { Date(timeIntervalSince1970: Double(createdUnixMs) / 1000.0) }
+
+    /// This Gram as the owner's feed draws it (the app's `GramRow`): the agent's Grams come
+    /// from the agent, and the guest's own posts are addressed to `agent`, so they read
+    /// "Delivered to <agent>" under the bubble. The guest's read mark stands in for the
+    /// owner's; there is no queue claim or federated machine on a guest's projection.
+    public func gramMessage(agent: String) -> GramMessage {
+        GramMessage(
+            id: id, direction: direction, from: from, to: isFromAgent ? nil : agent, text: text,
+            createdUnixMs: createdUnixMs, readByOwner: read,
+            file: file.map(\.gramFile), expiredFile: expiredFile.map(\.gramFile))
+    }
 }
 
 /// The host's answer to a guest's `gram.post`: its guest projection of the stored message

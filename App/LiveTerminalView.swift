@@ -1755,6 +1755,10 @@ struct LiveTerminalView: UIViewRepresentable {
             // screen, are not user intent. The actual state is published on reveal.
             guard !tailPublishHeld else { return }
             var atTail = atTail
+            // For guests too, deliberately (#472 review f3): on the alt screen SwiftTerm pins
+            // contentOffset to yDisp*cell on every frame and its scroll delegate reports
+            // position 0, so a view-only "bottom" there is neither stable nor reachable by
+            // scrollTo(row:). Until SwiftTerm exposes one, alt panes show no Latest pill.
             if view?.getTerminal().isCurrentBufferAlternate == true { atTail = true }
             guard atTail != lastReportedAtTail else { return }
             lastReportedAtTail = atTail

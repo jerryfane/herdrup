@@ -17,6 +17,22 @@ final class GuestPaneTests: XCTestCase {
         return probe.label
     }
 
+    /// Opens the header's ⋯ and taps `item`, waiting for the menu to present it.
+    private func tapMenuItem(_ app: XCUIApplication, _ item: String, _ what: String) {
+        let actions = app.buttons["guest-actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5), "the guest header should offer ⋯")
+        actions.tap()
+        let entry = app.buttons[item]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5), what)
+        entry.tap()
+    }
+
+    /// Closes an open menu by tapping outside it (the header's title area).
+    private func dismissMenu(_ app: XCUIApplication) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).tap()
+        Thread.sleep(forTimeInterval: 0.6)
+    }
+
     /// The terminal's `terminal-grid-probe`: "cols=C rows=R font=F fill=X".
     private func grid(_ app: XCUIApplication) -> (cols: Int, font: Double, fill: Double)? {
         let probe = app.descendants(matching: .any)["terminal-grid-probe"]
@@ -64,16 +80,15 @@ final class GuestPaneTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1)
         attach(app, "guest-resize-before")
 
-        let larger = app.buttons["guest-font-increase"]
-        XCTAssertTrue(larger.waitForExistence(timeout: 5), "the guest pane should offer A+")
-        larger.tap()
+        // The guest's own text size lives in ⋯ → Text size, where the owner's is.
+        tapMenuItem(app, "guest-font-increase", "the guest pane's ⋯ should offer Increase")
         let after = waitForGrid(app, "A+ should make the agent's grid narrower") {
             $0.cols < before.cols && $0.font > before.font
         }
         Thread.sleep(forTimeInterval: 1)
         attach(app, "guest-resize-after")
 
-        app.buttons["guest-font-decrease"].tap()
+        tapMenuItem(app, "guest-font-decrease", "the guest pane's ⋯ should offer Decrease")
         waitForGrid(app, "A− should widen the agent's grid again") {
             $0.cols > after.cols && $0.font < after.font
         }
@@ -102,12 +117,19 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["View-only · this host doesn't support guest resizing"]
             .waitForExistence(timeout: 10), "the pane should say why the size can't change")
+        // ⋯ still opens (Copy), but holds no Text size on an older host.
+        let actions = app.buttons["guest-actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        actions.tap()
+        XCTAssertTrue(app.buttons["Copy screen"].waitForExistence(timeout: 5), "the ⋯ menu should open")
         XCTAssertFalse(app.buttons["guest-font-increase"].exists, "no size controls on an older host")
         XCTAssertFalse(app.buttons["guest-font-decrease"].exists, "no size controls on an older host")
+        dismissMenu(app)
         // Fitted: the widest whole-pixel cell that keeps all 120 columns inside the width.
         let fitsWidth = { (reading: (cols: Int, font: Double, fill: Double)) -> Bool in
             let slack = Double(reading.cols) / Double(UIScreen.main.scale * terminal.frame.width)
-            return reading.cols == 120 && reading.fill <= 1.0 && reading.fill > 1.0 - slack
+            // The probe prints `fill` to two decimals: allow its half-step of rounding.
+            return reading.cols == 120 && reading.fill <= 1.0 && reading.fill > 1.0 - slack - 0.005
         }
         waitForGrid(app, "the host's 120 columns should fill the width", fitsWidth)
         // Anything that would re-propose: a rotation on iPad, a keyboard raising and dropping.
@@ -252,5 +274,81 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(app.textViews["guest-composer-input"].exists, "the guest can still send a message")
         Thread.sleep(forTimeInterval: 2)
         attach(app, "guest-blocked")
+    }
+
+    // MARK: Header
+
+    /// The owner's agent header for a guest: back, Find, Reconnect and ⋯ (Copy screen, Copy
+    /// recent output, Text size, notifications). The owner-only Share and Close are absent,
+    /// and so is the quick-key bar; the status pill and "Shared by" chip stay under it.
+    func testHeaderOffersTheGuestsButtonsAndNoOwnerOnlyActions() {
+        let app = XCUIApplication.launched(mock: "guestpane", environment: ["HERDR_MOCK_STILL": "1"])
+        XCTAssertTrue(app.descendants(matching: .any)["guest-terminal"].waitForExistence(timeout: 10))
+        for id in ["guest-back", "guest-find", "guest-refresh", "guest-actions"] {
+            XCTAssertTrue(app.buttons[id].waitForExistence(timeout: 5), "the header should offer \(id)")
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["guest-status-pill"].exists, "the status pill stays")
+        XCTAssertTrue(app.staticTexts["Shared by Jerry"].exists, "the Shared by chip stays")
+        XCTAssertFalse(app.buttons["esc"].exists, "a guest pane has no quick keys")
+        XCTAssertFalse(app.buttons["guest-font-increase"].exists, "A+ moved into the ⋯ menu")
+
+        app.buttons["guest-actions"].tap()
+        for label in ["Copy screen", "Copy recent output", "Increase", "Decrease", "Reset"] {
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 5), "⋯ should offer \(label)")
+        }
+        XCTAssertFalse(app.buttons["Share with someone"].exists, "only the owner can share")
+        XCTAssertFalse(app.buttons["terminal-share"].exists, "only the owner can share")
+        XCTAssertFalse(app.buttons["Close agent"].exists, "only the owner can close the agent")
+        attach(app, "guest-actions-menu")
+        app.buttons["Copy screen"].tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(forbiddenCalls(app), "", "Copy screen is an allowed agent.read")
+    }
+
+    /// Reconnect and refresh opens a new stream (`pane.stream`) and re-reads the agent, both
+    /// calls a guest may make.
+    func testRefreshReconnectsTheStream() {
+        let app = XCUIApplication.launched(mock: "guestpane", environment: ["HERDR_MOCK_STILL": "1"])
+        XCTAssertTrue(app.descendants(matching: .any)["guest-terminal"].waitForExistence(timeout: 10))
+        let opens = app.descendants(matching: .any)["guest-stream-opens"]
+        XCTAssertTrue(poll(10, every: 0.25) { (Int(opens.label) ?? 0) >= 1 }, "the pane should open a stream")
+        Thread.sleep(forTimeInterval: 2)
+        let before = Int(opens.label) ?? 0
+        app.buttons["guest-refresh"].tap()
+        XCTAssertTrue(poll(10, every: 0.25) { (Int(opens.label) ?? 0) > before },
+                      "Refresh should open a new stream (was \(before), now \(opens.label))")
+        XCTAssertTrue(app.descendants(matching: .any)["guest-terminal"].waitForExistence(timeout: 5))
+        XCTAssertEqual(forbiddenCalls(app), "", "a reconnect calls only what a guest may")
+    }
+
+    /// The owner's "Latest" pill: it appears once the guest scrolls up into history, and a
+    /// tap returns the terminal to its newest output (and the pill goes).
+    func testLatestPillAppearsInHistoryAndReturnsToTheTail() {
+        let app = XCUIApplication.launched(mock: "guestpane", environment: ["HERDR_MOCK_STILL": "1"])
+        let terminal = app.descendants(matching: .any)["guest-terminal"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        let topRow = app.descendants(matching: .any)["terminal-top-row-probe"]
+        XCTAssertTrue(topRow.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 2)
+        let latest = app.buttons["guest-latest"]
+        XCTAssertFalse(latest.exists, "no pill at the tail")
+        let live = topRow.label
+
+        let high = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let low = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        for _ in 0..<3 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        XCTAssertTrue(latest.waitForExistence(timeout: 5), "scrolled into history, the Latest pill should show")
+        XCTAssertNotEqual(topRow.label, live, "the swipe should have moved into history")
+        Thread.sleep(forTimeInterval: 0.5)
+        attach(app, "guest-latest-pill")
+
+        latest.tap()
+        XCTAssertTrue(latest.waitForNonExistence(timeout: 5), "back at the tail, the pill goes")
+        XCTAssertTrue(poll(5, every: 0.25) { topRow.label == live },
+                      "the tap should return to the live screen: \(topRow.label)")
+        XCTAssertEqual(forbiddenCalls(app), "", "jumping to the tail sends nothing")
     }
 }
