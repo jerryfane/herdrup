@@ -313,9 +313,11 @@ case "$shard" in
     fi
     # Then GramTests on the iPhone with the Debug build. The iPad is shut down first: the
     # hosted runner has 7 GB, and a second booted simulator adds to the memory pressure
-    # measured during launch stalls (herdrup#418).
+    # measured during launch stalls (herdrup#418). Budget: run 39608758941 (39 GramTests,
+    # ~17% slower runner) spent 21.7 min in 36 finished cases and hit the old 25m with
+    # two cases left; 35m leaves room for the suite to grow.
     xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
-    run_suite iPhoneGram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
+    run_suite iPhoneGram "$IPHONE_UDID" 35m -only-testing:HerdrUITests/GramTests || failed=1
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in
