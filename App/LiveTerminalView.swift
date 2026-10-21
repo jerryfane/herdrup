@@ -1772,6 +1772,10 @@ struct LiveTerminalView: UIViewRepresentable {
             // `allowsHitTesting(false)`, but this handler SENDS BYTES, so it should not
             // depend on a host layout decision staying the way it is.
             guard !stopped, foreground, gr.state == .ended else { return }
+            // A view-only pane on the alt screen has no reachable bottom: SwiftTerm pins the
+            // offset to the top row there, so `scrollTo(row: Int.max)` would jump the guest
+            // UP. Same reason the Latest pill is suppressed there (see reportTailState).
+            if viewOnly, view?.getTerminal().isCurrentBufferAlternate == true { return }
             jumpToTail()
         }
 
