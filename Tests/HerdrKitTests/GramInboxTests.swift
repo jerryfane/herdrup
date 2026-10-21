@@ -379,16 +379,38 @@ final class GramInboxTests: XCTestCase {
         XCTAssertEqual(inbox.conditionalDigest, "d")
     }
 
-    /// An id outside the window (Read all marks older unread ones too) is evidence of
-    /// nothing in an answer that does not carry it: the daemon's count stands.
-    func testStaleAnswerLeavesAnOutOfWindowReadToTheDaemonsCount() throws {
+    /// Read all also marks unread rows older than the loaded window, and a head poll never
+    /// carries those. A poll requested before the marks still counted them unread, so
+    /// its count must drop by them too, or the badge comes back for every one (#447).
+    func testStaleAnswerStillCountsReadsOutsideTheWindow() throws {
+        var inbox = GramInbox()
+        inbox.apply(counted([try message("a")], unread: 2))
+        let asked = inbox.readStamp
+        inbox.markRead(id: "a")
+        inbox.markRead(id: "old")
+        XCTAssertEqual(inbox.unreadCount, 0)
+
+        inbox.apply(counted([try message("a")], unread: 2), readStamp: asked)
+        XCTAssertEqual(inbox.unreadCount, 0, "a stale answer must not bring back an out-of-window read")
+        XCTAssertFalse(inbox.messages[0].isUnread)
+        XCTAssertNil(inbox.conditionalDigest, "the next poll is unconditional and brings the daemon's own count")
+
+        // The next answer, requested after the reads, is the daemon's word.
+        inbox.apply(counted([try message("a", unread: false)], unread: 0), readStamp: inbox.readStamp)
+        XCTAssertEqual(inbox.unreadCount, 0)
+        XCTAssertEqual(inbox.conditionalDigest, "d")
+    }
+
+    /// The same when no loaded row was marked at all: the out-of-window read alone holds.
+    func testStaleAnswerCountsAnOutOfWindowReadWithNoLoadedRowMarked() throws {
         var inbox = GramInbox()
         inbox.apply(counted([try message("a")], unread: 2))
         let asked = inbox.readStamp
         inbox.markRead(id: "old")
         XCTAssertEqual(inbox.unreadCount, 1)
-        inbox.apply(counted([try message("a")], unread: 1), readStamp: asked)
+        inbox.apply(counted([try message("a")], unread: 2), readStamp: asked)
         XCTAssertEqual(inbox.unreadCount, 1)
         XCTAssertTrue(inbox.messages[0].isUnread)
+        XCTAssertNil(inbox.conditionalDigest)
     }
 }

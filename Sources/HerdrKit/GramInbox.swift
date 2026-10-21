@@ -133,15 +133,20 @@ public struct GramInbox: Sendable, Equatable {
             // the pre-mutation list.
             return false
         }
-        // A row read after the request went out that the answer still reports unread was
-        // counted before the mark landed: it stays read, and the daemon's count drops by
-        // it. An id the answer does not carry, or carries as read, is evidence of nothing
-        // and left to the daemon's count. Reads the answer could see are settled by it.
+        // A read made after the request went out was counted by that answer as unread:
+        // the request reached the daemon before the confirmed mark did, and only unread
+        // rows are ever marked. So it stays read and the daemon's count drops by it,
+        // whether or not the answer carries the row. Read all marks rows older than the
+        // loaded window too, and a head poll never carries those. Only a row the answer
+        // itself reports read is already out of its count. Reads the answer could see are
+        // settled by it.
         var unreadCount = answer.unreadCount
         var heldRead = false
         for (id, stamp) in localReads where stamp > asked {
-            guard let index = fresh.firstIndex(where: { $0.id == id }), fresh[index].isUnread else { continue }
-            fresh[index].readByOwner = true
+            if let index = fresh.firstIndex(where: { $0.id == id }) {
+                guard fresh[index].isUnread else { continue }
+                fresh[index].readByOwner = true
+            }
             if let count = unreadCount { unreadCount = max(0, count - 1) }
             heldRead = true
         }
