@@ -219,7 +219,9 @@ struct GuestGramList: View {
         visibility.pageArmed = false
         visibility.pageRequested = true
         let before = model.messages.count
-        Task {
+        // On the main actor, as the owner's `olderFetch` is: the completion reads the model
+        // and writes view state, so it must not depend on the SDK isolating View members.
+        Task { @MainActor in
             do {
                 try await model.loadMore(client: client, access: access)
             } catch {
