@@ -30,9 +30,10 @@ final class GuestGramModel: ObservableObject {
         await feed.refresh(client: client)
     }
 
-    func loadMore(client: HerdrClient, access: GuestAccess) async {
+    /// The next older page. Throws when it failed, for the feed's sentinel to offer a retry.
+    func loadMore(client: HerdrClient, access: GuestAccess) async throws {
         self.access = access
-        await feed.loadMore(client: client)
+        try await feed.loadMore(client: client)
     }
 
     func markAllRead(client: HerdrClient) async {
@@ -74,6 +75,9 @@ struct GuestGramList: View {
     @State private var openTask: Task<Void, Never>?
     @State private var preview: GramPreview?
     @State private var fileError: String?
+    /// A failed older page, shown ON the sentinel with a retry (as the owner's inbox does):
+    /// until the reader taps it, the sentinel's arrivals do not fetch again.
+    @State private var pageError: String?
     @State private var visibility = FeedVisibility()
     @State private var appearance = 0
     @State private var landed = false
@@ -127,17 +131,34 @@ struct GuestGramList: View {
                 appearance: $appearance,
                 landed: $landed,
                 anchorID: $anchorID,
-                onLanded: { if visibility.sentinelOnScreen { loadOlder(top: rows.first?.id) } },
+                // A feed that fits shows the top too. After a hop, as the owner's
+                // `feedLanded`: at the landing itself the sentinel can still read as on screen
+                // from the first layout at the top, which fetched a page nobody asked for.
+                onLanded: { Task { @MainActor in if visibility.sentinelOnScreen { loadOlder(top: rows.first?.id) } } },
                 onSentinelArrival: { loadOlder(top: rows.first?.id) },
                 sentinel: {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Loading older messages…")
+                    Button {
+                        // A tap retries the failed page: a fresh, reader-asked fetch.
+                        pageError = nil
+                        visibility.pageArmed = true
+                        loadOlder(top: rows.first?.id)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if let pageError {
+                                GramPageFailureLabel(message: pageError)
+                            } else {
+                                ProgressView().controlSize(.small)
+                                Text("Loading older messages…")
+                            }
+                        }
+                        .font(Typography.app(12))
+                        .foregroundStyle(Palette.textFaint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                     }
-                    .font(Typography.app(12))
-                    .foregroundStyle(Palette.textFaint)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .buttonStyle(.plain)
+                    .disabled(pageError == nil)
+                    .accessibilityIdentifier("guest-gram-loading-older")
                 },
                 row: { index, entry in
                     GramFeedRow(index: index, entry: entry) {
@@ -190,16 +211,27 @@ struct GuestGramList: View {
     }
 
     /// One older page per arrival at the top, after the feed landed; the message on top now
-    /// is put back at the top once the page is drawn above it.
+    /// is put back at the top once the page is drawn above it. Not over a failure: that waits
+    /// for the reader's tap on the sentinel.
     private func loadOlder(top: String?) {
         guard landed, visibility.pageArmed, !visibility.anchoring, !visibility.pageRequested,
-              model.hasMore else { return }
+              pageError == nil, model.hasMore else { return }
         visibility.pageArmed = false
         visibility.pageRequested = true
+        let before = model.messages.count
         Task {
-            await model.loadMore(client: client, access: access)
+            do {
+                try await model.loadMore(client: client, access: access)
+            } catch {
+                pageError = "Couldn't load older messages."
+            }
             visibility.pageRequested = false
-            if let top { anchorID = top }
+            if model.messages.count > before {
+                if let top { anchorID = top }
+            } else {
+                // Nothing landed, so no anchor scroll will re-arm: the next arrival may fetch.
+                visibility.pageArmed = true
+            }
         }
     }
 

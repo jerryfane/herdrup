@@ -358,6 +358,40 @@ final class GramTests: XCTestCase {
         XCTAssertEqual(messages.value as? String, "36 messages", "exactly one older page should load")
     }
 
+    /// Tapping the selected Gram tab again goes to the NEWEST message, at the bottom of this
+    /// oldest-first feed, as the feed's own "follow newest" does; not to the OLDEST at the top
+    /// (the system's scroll-to-top on a tab re-tap did that on iPhone). Read up into the older
+    /// page first, so the newest is well off screen. iPad's section bar does the same.
+    func testTappingTheSelectedGramTabGoesToTheNewestMessage() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_PAGED": "1"])
+        let feed = app.scrollViews["gram-feed"]
+        XCTAssertTrue(feed.waitForExistence(timeout: 10), "the Gram feed should load")
+        func onScreen(_ element: XCUIElement) -> Bool {
+            element.exists && element.isHittable
+                && element.frame.minY >= feed.frame.minY && element.frame.maxY <= feed.frame.maxY
+        }
+        let newest = app.staticTexts["Great, ship it."]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5) && poll(5, every: 0.25) { onScreen(newest) },
+                      "the feed opens at the newest message")
+
+        // Up to the older page's oldest message (reaching the top fetched that page).
+        let olderOldest = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Older page: release planning starts here.")).firstMatch
+        for _ in 0..<16 where !onScreen(olderOldest) { feed.swipeDown(velocity: .slow) }
+        XCTAssertTrue(onScreen(olderOldest), "the older page's oldest message should be on screen")
+        // Let a fetch from reaching that top land, so it cannot move the feed after the tap.
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertFalse(onScreen(newest), "the newest message is off screen at the top")
+
+        app.buttons["Gram"].firstMatch.tap()
+        XCTAssertTrue(poll(5, every: 0.25) { onScreen(newest) },
+                      "tapping the selected Gram tab should go to the newest message")
+        // Past any late scroll (the system's to the top would land after ours).
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(onScreen(newest), "the feed should stay at the newest message")
+        XCTAssertFalse(olderOldest.isHittable, "the feed should not be at the oldest messages")
+    }
+
     // MARK: - Render budget
 
     /// The DEBUG `gram-row-renders` probe: how many `GramRow` bodies have run (its label;

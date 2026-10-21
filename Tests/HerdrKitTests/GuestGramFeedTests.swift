@@ -114,11 +114,11 @@ final class GuestGramFeedTests: XCTestCase {
         await feed.refresh(client: client)
         XCTAssertTrue(feed.hasMore)
 
-        let more = Task { await feed.loadMore(client: client) }
+        let more = Task { try? await feed.loadMore(client: client) }
         await waitUntil(host, started: 2)
         await feed.refresh(client: client)
         host.release(1)
-        await more.value
+        _ = await more.value
         XCTAssertEqual(feed.messages.map(\.id), ["m9", "m3"])
         XCTAssertFalse(feed.hasMore)
     }

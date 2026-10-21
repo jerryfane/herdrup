@@ -281,7 +281,8 @@ public final class GuestGramFeed {
     public private(set) var hasMore = false
     /// A list answer (or failure) has been applied at least once.
     public private(set) var loaded = false
-    /// Why the newest fetch failed; nil after one succeeds.
+    /// Why the newest refresh failed; nil after one succeeds. An older page's failure is
+    /// thrown by `loadMore` instead.
     public private(set) var lastError: Error?
     public var onChange: (() -> Void)?
 
@@ -332,22 +333,25 @@ public final class GuestGramFeed {
         return true
     }
 
-    /// The next older page. Dropped if a refresh replaced the list meanwhile.
-    public func loadMore(client: HerdrClient) async {
+    /// The next older page. Dropped if a refresh replaced the list meanwhile. A failure is
+    /// THROWN rather than kept in `lastError`, for the caller to show where the reader asked
+    /// for the page (the feed's top sentinel) with a retry, as the owner's inbox does.
+    public func loadMore(client: HerdrClient) async throws {
         guard hasMore, !loadingMore, let last = messages.last else { return }
         loadingMore = true
         defer { loadingMore = false }
         let version = listVersion
+        let page: GuestGramPage
         do {
-            let page = try await client.guestGramList(limit: Self.pageSize, beforeID: last.id)
-            guard listVersion == version else { return }
-            let known = Set(messages.map(\.id))
-            messages += page.messages.filter { !known.contains($0.id) }
-            hasMore = page.hasMore
+            page = try await client.guestGramList(limit: Self.pageSize, beforeID: last.id)
         } catch {
             guard listVersion == version, !(error is CancellationError) else { return }
-            lastError = error
+            throw error
         }
+        guard listVersion == version else { return }
+        let known = Set(messages.map(\.id))
+        messages += page.messages.filter { !known.contains($0.id) }
+        hasMore = page.hasMore
         onChange?()
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The Gram feed's scrolling, shared by the inbox and Saved: an EAGER, windowed stack read
 /// oldest at the top and newest at the bottom, that opens at the newest message, reveals or
@@ -51,6 +52,11 @@ where Item.ID == String {
     /// The previously-top message after older rows landed above it; the feed scrolls back
     /// to it so the reader keeps their place. Set by the owner, cleared here.
     @Binding var anchorID: String?
+    /// The owner's tab-bar re-tap (`HomeTab.gram` tapped while selected), bumped to go to the
+    /// newest message; nil for a feed that is not a tab's own. Non-nil also takes the feed out
+    /// of the SYSTEM's scroll-to-top (`ScrollsToTopOff`), which the re-tap runs too and which
+    /// in this oldest-first feed goes to the OLDEST message.
+    var newestRequest: Int? = nil
     /// Runs as the feed opens, before the initial scroll is issued.
     var onOpen: () -> Void = {}
     /// The feed has landed on the newest message (see `finishInitialScroll`).
@@ -204,8 +210,20 @@ where Item.ID == String {
             // iPad / Mac: a readable conversation column, centred, so a bubble never
             // stretches across the whole detail pane.
             .readableColumn(columnCap)
+            .background { if newestRequest != nil { ScrollsToTopOff() } }
         }
         .accessibilityIdentifier(feedID)
+        // A re-tap of the selected tab: to the newest message, as opening does (the same
+        // bounded jump, since rows above may still be settling their heights).
+        .onChange(of: newestRequest) { _, _ in
+            Task { @MainActor in
+                for _ in 0..<8 {
+                    feed.scrollTo(bottomID, anchor: .bottom)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if visibility.atBottom { break }
+                }
+            }
+        }
         // Before the `.task` below, so the scroll loop already sees fresh reports.
         .onAppear { appearance += 1 }
         // Oldest at the top, newest at the bottom: open at the newest. NOT
@@ -438,4 +456,33 @@ struct FeedPlacement: Equatable {
 struct FeedBottom: Equatable {
     let onScreen: Bool
     let viewportHeight: CGFloat
+}
+
+/// Turns off `scrollsToTop` on the UIScrollView a SwiftUI ScrollView is drawn with, from a
+/// probe in its content: the probe finds its nearest UIScrollView ancestor once it is in a
+/// window. Public UIKit only. `WindowedBottomFeed` uses it for a tab's own feed, whose top is
+/// the OLDEST message, so neither a re-tap of its tab nor a status-bar tap sends it there.
+private struct ScrollsToTopOff: UIViewRepresentable {
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {}
+
+    final class Probe: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            var ancestor = superview
+            while let view = ancestor {
+                if let scrollView = view as? UIScrollView {
+                    scrollView.scrollsToTop = false
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+    }
 }

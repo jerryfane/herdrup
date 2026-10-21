@@ -116,7 +116,11 @@ struct GuestMockTransport: HerdrTransport {
         switch method {
         case "gram.list":
             Self.hostRecorder.append("gram.list")
-            return Self.encode(id: id, result: ["type": "guest_gram_list", "messages": Self.gram.list(), "has_more": false])
+            guard let page = Self.gram.list(beforeID: params["before_id"] as? String) else {
+                return Self.errorLine(id: id, code: "internal", message: "gram store busy")
+            }
+            return Self.encode(id: id, result: ["type": "guest_gram_list", "messages": page.messages,
+                                                "has_more": page.hasMore])
         case "gram.mark_read":
             let ids = params["ids"] as? [String] ?? []
             Self.hostRecorder.append("gram.mark_read:\(ids.sorted().joined(separator: ","))")
@@ -398,6 +402,14 @@ struct GuestMockTransport: HerdrTransport {
             }
         }
 
+        /// `HERDR_MOCK_GUEST_OLDER_PAGE_FAILS_ONCE`: the Gram has an older page beyond the
+        /// newest one, and the first ask for it fails (as a dropped relay hop or a busy store
+        /// would); asking again answers it. The newest page then also carries 30 older
+        /// fillers (gm-f1 newest), so the feed is taller than any screen and the older page is
+        /// asked for only once the reader scrolls up to the top, as in a real Gram.
+        private let olderPage: [[String: Any]]
+        private var failOlderPage = ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_OLDER_PAGE_FAILS_ONCE"] != nil
+
         init() {
             let now = UInt64(Date().timeIntervalSince1970 * 1000)
             let minute: UInt64 = 60_000
@@ -422,9 +434,38 @@ struct GuestMockTransport: HerdrTransport {
                  "created_unix_ms": now - 20 * minute, "read": true,
                  "expired_file": ["name": "q4-baseline.png", "size": 873_472, "mime": "image/png", "sha256": "9c0d"]],
             ]
+            guard ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_OLDER_PAGE_FAILS_ONCE"] != nil else {
+                olderPage = []
+                return
+            }
+            messages += (1...30).map { index in
+                ["id": "gm-f\(index)", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Rerun checkpoint \(index) saved.",
+                 "created_unix_ms": now - (20 + UInt64(index)) * minute, "read": true]
+            }
+            olderPage = [
+                ["id": "gm-older-1", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Q4 baseline archived; starting on the Q5 build.",
+                 "created_unix_ms": now - 60 * minute, "read": true],
+                ["id": "gm-older-2", "direction": "agent_to_owner", "from": "llm-opt",
+                 "text": "Joined the TensorFold rerun queue.",
+                 "created_unix_ms": now - 70 * minute, "read": true],
+            ]
         }
 
-        func list() -> [[String: Any]] { lock.withLock { messages } }
+        /// The newest page (`beforeID` nil), or the older page below the newest one; nil
+        /// when this ask is the one `HERDR_MOCK_GUEST_OLDER_PAGE_FAILS_ONCE` fails.
+        func list(beforeID: String?) -> (messages: [[String: Any]], hasMore: Bool)? {
+            lock.withLock {
+                guard let beforeID else { return (messages, !olderPage.isEmpty) }
+                guard messages.contains(where: { $0["id"] as? String == beforeID }) else { return ([], false) }
+                if failOlderPage {
+                    failOlderPage = false
+                    return nil
+                }
+                return (olderPage, false)
+            }
+        }
 
         func markRead(_ ids: [String]) {
             lock.withLock {

@@ -47,6 +47,10 @@ struct GramView: View {
     /// and the page draws no search control of its own. Declared after `readAllToken` so the
     /// memberwise init keeps its order (see the sidebar call site).
     var searchText: Binding<String>? = nil
+    /// Bumped by the host when the owner taps Gram while it is already selected (the iPhone
+    /// tab bar, the iPad section bar): the shown feed, the inbox or Saved, goes to its newest
+    /// message at the bottom, not the system's scroll-to-top (see `WindowedBottomFeed`).
+    var newestToken: Int = 0
 
     /// The last server snapshot (newest first) and the owner's just-posted messages
     /// not yet reflected in a snapshot. `messages` composes them so a background poll
@@ -995,6 +999,7 @@ struct GramView: View {
                 search: search,
                 headerBottom: headerBottom,
                 columnCap: feedCap,
+                newestToken: newestToken,
                 downloadingFileFor: downloadingFileFor,
                 downloadBytes: downloadBytes,
                 onOpenFile: { s in openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
@@ -1093,6 +1098,7 @@ struct GramView: View {
                 appearance: $feedAppearance,
                 landed: $didInitialScroll,
                 anchorID: $pageAnchorID,
+                newestRequest: newestToken,
                 onOpen: { if !unreadRuleCaptured { captureUnreadRule() } },
                 onLanded: feedLanded,
                 // Read when it is ON SCREEN, once the feed has landed on the newest message.
@@ -1174,9 +1180,7 @@ struct GramView: View {
         } label: {
             HStack(spacing: 8) {
                 if let pageError {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("\(pageError) Tap to retry.")
+                    GramPageFailureLabel(message: pageError)
                 } else if sentinelSearchesOlder && !searchingOlder {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 12, weight: .semibold))
@@ -2698,6 +2702,8 @@ private struct GramSavedFeed: View {
     /// screen, and an anchored row may land at it.
     let headerBottom: CGFloat
     let columnCap: CGFloat
+    /// `GramView.newestToken`: a re-tap of the selected Gram tab goes to the newest saved.
+    let newestToken: Int
     let downloadingFileFor: String?
     let downloadBytes: (received: Int, total: Int)?
     let onOpenFile: (SavedGram) -> Void
@@ -2745,6 +2751,7 @@ private struct GramSavedFeed: View {
                 appearance: $appearance,
                 landed: landed,
                 anchorID: $anchorID,
+                newestRequest: newestToken,
                 // A feed that fits shows the top too.
                 onLanded: { if visibility.sentinelOnScreen { revealOlder() } },
                 onSentinelArrival: revealOlder,
@@ -3304,6 +3311,19 @@ struct GramGroundFade: View {
                                .init(color: Palette.ground.opacity(0.85), location: 0.55),
                                .init(color: Palette.ground.opacity(0), location: 1)],
                        startPoint: .top, endPoint: .bottom)
+    }
+}
+
+/// A feed's top sentinel once an older page failed: the failure and a retry, so the sentinel
+/// becomes a tap target instead of spinning with nothing left to re-trigger it. The owner's
+/// inbox and a guest's Gram tab; the caller's HStack lays out the icon and text.
+struct GramPageFailureLabel: View {
+    let message: String
+
+    var body: some View {
+        Image(systemName: "arrow.clockwise")
+            .font(.system(size: 12, weight: .semibold))
+        Text("\(message) Tap to retry.")
     }
 }
 

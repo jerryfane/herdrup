@@ -2046,6 +2046,9 @@ struct TerminalHomeView: View {
     /// One-shot signal for the sidebar's Read-all button, same reason as `gramRefreshToken`:
     /// a sidebar button cannot call `GramView`'s async mark-read pass directly.
     @State private var gramReadAllToken = 0
+    /// One-shot signal for a tap on Gram while it is already selected (the phone's tab bar, the
+    /// iPad's section bar and rail): the feed goes to its newest message (`GramView.newestToken`).
+    @State private var gramNewestToken = 0
     /// The Gram search on regular width. The field sits at the top of the sidebar (a sibling
     /// column of the page it filters), so the text lives here and reaches `GramView` as a
     /// binding; the phone keeps the page's own search toggle instead.
@@ -2585,7 +2588,8 @@ struct TerminalHomeView: View {
                              showingSaved: $gramShowingSaved,
                              refreshToken: gramRefreshToken,
                              readAllToken: gramReadAllToken,
-                             searchText: $gramSearch)
+                             searchText: $gramSearch,
+                             newestToken: gramNewestToken)
                 case .settings:
                     SettingsView(
                         client: client,
@@ -2872,9 +2876,24 @@ struct TerminalHomeView: View {
     /// About three iPhone tab items wide; the sidebar ranges 250-460 pt.
     private static let sidebarTabBarMaxWidth: CGFloat = 320
 
+    /// Selects a section. Gram tapped while it is already selected goes to its newest message
+    /// (`gramNewestToken`): the feed is oldest-first, so "back to the start" is its BOTTOM.
+    private func select(_ tab: HomeTab) {
+        if tab == .gram, selectedTab == .gram { gramNewestToken += 1 }
+        selectedTab = tab
+    }
+
+    /// The phone's tab bar selection, through `select`: the TabView sets it again with the
+    /// selected tab when that tab is tapped, which is how a re-tap of Gram is seen. Gram's
+    /// feed opts out of the tab bar's own scroll-to-top (see `WindowedBottomFeed`); Agents
+    /// and Settings keep it.
+    private var tabSelection: Binding<HomeTab> {
+        Binding(get: { selectedTab }, set: { select($0) })
+    }
+
     private func sidebarTabItem(_ tab: HomeTab, badge: Int) -> some View {
         let selected = selectedTab == tab
-        return Button { selectedTab = tab } label: {
+        return Button { select(tab) } label: {
             VStack(spacing: 1) {
                 Image(systemName: tab.icon)
                     .environment(\.symbolVariants, .fill)
@@ -3045,7 +3064,7 @@ struct TerminalHomeView: View {
     /// without changing section.
     private func railSectionButton(_ tab: HomeTab, badge: Int = 0) -> some View {
         Button {
-            selectedTab = tab
+            select(tab)
             // Both variables, for the same reason `toggleSidebar` writes both: the rail
             // is only on screen when the LAYOUT is collapsed, which the preference may
             // not reflect, and `onChange` does not fire when the flag is already false.
@@ -3116,7 +3135,7 @@ struct TerminalHomeView: View {
             // Apple's standard tab bar (Liquid Glass automatically on iOS 26, the clean
             // standard bar below that) replaces the old hand-built pill (#88). Terminal
             // is NOT a tab — it fronts a keep-mounted pane over everything (below).
-            TabView(selection: $selectedTab) {
+            TabView(selection: tabSelection) {
                 agentsTab
                     .tag(HomeTab.agents)
                     .tabItem { Label(HomeTab.agents.label, systemImage: HomeTab.agents.icon) }
@@ -3124,7 +3143,8 @@ struct TerminalHomeView: View {
                 // Gram and Settings were modal covers; they are persistent tabs now.
                 // Both are nav-agnostic and take no onClose as tabs (no close button).
                 GramView(client: client, unread: gramUnread,
-                         showingSaved: $gramShowingSaved)
+                         showingSaved: $gramShowingSaved,
+                         newestToken: gramNewestToken)
                     .tag(HomeTab.gram)
                     .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
                     .modifier(GramUnreadBadge(unread: gramUnread))
