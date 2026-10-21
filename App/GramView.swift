@@ -1174,9 +1174,7 @@ struct GramView: View {
         } label: {
             HStack(spacing: 8) {
                 if let pageError {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("\(pageError) Tap to retry.")
+                    GramPageFailureLabel(message: pageError)
                 } else if sentinelSearchesOlder && !searchingOlder {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 12, weight: .semibold))
@@ -3304,6 +3302,19 @@ struct GramGroundFade: View {
                                .init(color: Palette.ground.opacity(0.85), location: 0.55),
                                .init(color: Palette.ground.opacity(0), location: 1)],
                        startPoint: .top, endPoint: .bottom)
+    }
+}
+
+/// A feed's top sentinel once an older page failed: the failure and a retry, so the sentinel
+/// becomes a tap target instead of spinning with nothing left to re-trigger it. The owner's
+/// inbox and a guest's Gram tab; the caller's HStack lays out the icon and text.
+struct GramPageFailureLabel: View {
+    let message: String
+
+    var body: some View {
+        Image(systemName: "arrow.clockwise")
+            .font(.system(size: 12, weight: .semibold))
+        Text("\(message) Tap to retry.")
     }
 }
 

@@ -101,6 +101,36 @@ final class GuestGramPaneTests: XCTestCase {
         XCTAssertEqual(probe(app, "guest-forbidden-calls"), "")
     }
 
+    /// An older page that fails says so on the top sentinel with a retry, instead of spinning
+    /// on "Loading older messages…" with nothing left to re-trigger it (herdrup#473); a tap
+    /// asks again and the page lands above the first one. The first page is taller than the
+    /// screen (gm-f30 its oldest), so only the reader's scroll up asks for the older page.
+    func testAFailedOlderPageOffersARetryThatLoadsIt() {
+        let app = launch(features: "gram", environment: ["HERDR_MOCK_GUEST_OLDER_PAGE_FAILS_ONCE": "1"])
+        openGramTab(app)
+        XCTAssertTrue(element(app, "guest-gram-row-gm-4").waitForExistence(timeout: 5))
+        let list = element(app, "guest-gram-list")
+        let sentinel = element(app, "guest-gram-loading-older")
+        let retry = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Tap to retry")).firstMatch
+        // Up to the top, and no further (a pull there refreshes): the sentinel comes on screen
+        // and asks for the older page, which fails.
+        for _ in 0..<12 where !(sentinel.exists && sentinel.isHittable) && !retry.exists {
+            list.swipeDown()
+        }
+        XCTAssertTrue(retry.waitForExistence(timeout: 8),
+                      "the failed page should offer a retry, not spin; sentinel says \(sentinel.exists ? sentinel.label : "nothing")")
+        XCTAssertFalse(element(app, "guest-gram-row-gm-older-1").exists, "the failed page drew nothing")
+        attach(app, "guest-gram-older-page-failed")
+
+        retry.tap()
+        let older = element(app, "guest-gram-row-gm-older-1")
+        XCTAssertTrue(older.waitForExistence(timeout: 8), "the retry should load the older page")
+        XCTAssertLessThan(older.frame.minY, element(app, "guest-gram-row-gm-f30").frame.minY,
+                          "the older page sits above the first one")
+        XCTAssertFalse(retry.exists, "the failure clears once the page loads")
+        XCTAssertEqual(probe(app, "guest-forbidden-calls"), "")
+    }
+
     /// herdr#298: a file the host's store expired (gm-0, a picture with no caption) draws as
     /// a chip naming it "no longer available", never an empty row body. It is not a button
     /// and tapping it fetches nothing from the host.
