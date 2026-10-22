@@ -3594,7 +3594,11 @@ struct LiveTerminalView: UIViewRepresentable {
                     if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     self.publishTopRowProbe()
                     self.prediction.viewScrolled()   // guesses stand only on the live screen
-                    self.loadOlderHistoryIfNeeded(offsetY: offsetY, viewportHeight: viewportHeight)
+                    // Only a finger reaching the top pages. Seeding writes contentOffset 0
+                    // before it settles at the tail, and that must not fetch history nobody asked for.
+                    if userDriven {
+                        self.loadOlderHistoryIfNeeded(offsetY: offsetY, viewportHeight: viewportHeight)
+                    }
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
