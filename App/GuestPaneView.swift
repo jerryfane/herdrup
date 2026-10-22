@@ -67,6 +67,8 @@ struct GuestPaneView: View {
     /// owner's "Latest" pill shows (`TerminalJumpToLatestPill`), and its tap bumps the token.
     @State private var terminalAtTail = true
     @State private var jumpToTailToken = 0
+    /// True while the terminal loads an older page of its history (the top capsule).
+    @State private var terminalHistoryLoading = false
     /// The note row's height over the composer, and the terminal's: the composer floats over
     /// the terminal (as the owner's does), so only its resting row takes layout height.
     @State private var bottomChromeHeight: CGFloat = 0
@@ -355,6 +357,7 @@ struct GuestPaneView: View {
                     onStreamEnded: streamEnded,
                     jumpToTailToken: jumpToTailToken,
                     onTailStateChange: { terminalAtTail = $0 },
+                    onHistoryLoadingChange: { terminalHistoryLoading = $0 },
                     isAtTail: terminalAtTail,
                     fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
@@ -373,6 +376,14 @@ struct GuestPaneView: View {
                             }
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
+                    }
+                    .overlay(alignment: .top) {
+                        ZStack {
+                            if terminalHistoryLoading {
+                                TerminalHistoryLoadingCapsule(identifier: "guest-history-loading")
+                            }
+                        }
+                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryLoading)
                     }
             }
             if let message = centerMessage {

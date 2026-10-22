@@ -1634,6 +1634,28 @@ public actor HerdrClient {
         return try await call("pane.set_pty_size", params, as: PanePtySize.self)
     }
 
+    /// One page of the pane's scrollback ABOVE `cursor`'s row (`pane.history`): up to
+    /// `lines` rows (the server's 1...1000 range), oldest first, plus the cursor for the
+    /// next older page (nil at the start of the retained history).
+    ///
+    /// The two refusals that end paging for good are typed (`PaneHistoryError`) so the
+    /// caller can stop quietly on them while still treating a transport failure, or a
+    /// `pane_not_found`, as the `APIError` it is.
+    public func paneHistory(pane: String, cursor: String, lines: UInt32 = 500) async throws -> PaneHistoryPage {
+        let params = PaneHistoryParams(paneID: pane, cursor: cursor, lines: min(max(lines, 1), 1000))
+        do {
+            return try await call("pane.history", params, as: PaneHistoryPage.self)
+        } catch let error as APIError where error.code == "history_cursor_expired" {
+            throw PaneHistoryError.historyCursorExpired
+        } catch let error as APIError
+            where error.code == "invalid_request"
+                && error.message.lowercased().contains("unknown variant")
+                && error.message.contains("pane.history") {
+            // An older herdr cannot even deserialize the method (see `probeFork`).
+            throw PaneHistoryError.unsupported
+        }
+    }
+
     // MARK: - Guest access (owner)
 
     /// Create a one-use invite for a live agent (`guest.invite.create`). `target` is the

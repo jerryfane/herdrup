@@ -155,7 +155,7 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertTrue(started.resync)
 
         guard events.count >= 2, case .frame(let frame) = events[1],
-              case .reset(_, let epoch, let cols, let rows, let data, _, let lagged) = frame else {
+              case .reset(_, let epoch, let cols, let rows, let data, _, _, let lagged) = frame else {
             return XCTFail("second stream event was not a reset frame")
         }
         XCTAssertEqual(epoch, 7)
@@ -202,25 +202,30 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(cols, 100)
         XCTAssertEqual(rows, 30)
 
-        guard case .reset(_, _, _, _, _, let history, let lagged) =
+        guard case .reset(_, _, _, _, _, let history, let noCursor, let lagged) =
             try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"","lagged":true}"#) else {
             return XCTFail("lagged reset frame did not decode")
         }
         XCTAssertTrue(lagged)
         XCTAssertNil(history, "a server that sends no history_b64 must read as 'no history offered'")
+        XCTAssertNil(noCursor, "a server without pane_history sends no history_cursor")
 
         // A keyframe that carries history decodes it; an empty one means "asked, none".
-        guard case .reset(_, _, _, _, let screen, let carried, _) =
-            try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"aGk=","history_b64":"b2xk"}"#) else {
+        guard case .reset(_, _, _, _, let screen, let carried, let cursor, _) =
+            try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"aGk=","history_b64":"b2xk","history_cursor":"hc-1f3a"}"#) else {
             return XCTFail("reset with history did not decode")
         }
         XCTAssertEqual(String(decoding: screen, as: UTF8.self), "hi")
         XCTAssertEqual(carried.map { String(decoding: $0, as: UTF8.self) }, "old")
-        guard case .reset(_, _, _, _, _, let none, _) =
+        XCTAssertEqual(cursor, "hc-1f3a", "the cursor addressing the oldest history row must survive decode")
+        guard case .reset(_, _, _, _, _, let none, _, _) =
             try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"","history_b64":""}"#) else {
             return XCTFail("reset with empty history did not decode")
         }
         XCTAssertEqual(none, Data())
+        XCTAssertThrowsError(
+            try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"","history_cursor":7}"#),
+            "a history_cursor that is not a string is a foreign line, not 'no cursor'")
         XCTAssertThrowsError(
             try frame(#"{"stream":"pane.bytes","frame":"reset","seq":1,"epoch":7,"cols":80,"rows":24,"data_b64":"","history_b64":"%%"}"#),
             "corrupt history must fail the stream like corrupt screen bytes")

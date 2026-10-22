@@ -138,3 +138,27 @@ struct TerminalJumpToLatestPill: View {
         if let identifier { pill.accessibilityIdentifier(identifier) } else { pill }
     }
 }
+
+/// Shown at the top of the terminal while an older page of its history loads, in the words
+/// and ink of Gram's "Loading older messages…" sentinel, on a surface capsule so it reads
+/// over terminal output. Not a control: the page lands by itself, and touches pass through
+/// to the terminal, which keeps scrolling underneath.
+struct TerminalHistoryLoadingCapsule: View {
+    var identifier = "terminal-history-loading"
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small).tint(Palette.textFaint)
+            Text("Loading earlier output…")
+        }
+        .font(Typography.app(12))
+        .foregroundStyle(Palette.textFaint)
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(Palette.surface).clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
+        .padding(.top, 8)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
+    }
+}

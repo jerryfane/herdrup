@@ -572,6 +572,15 @@ struct RootView: View {
                                  agent: MockTransport.demoPaneAgent)
             }
             .overlay(alignment: .topLeading) { KeyframeHistoryReadProbe() }
+        case .historyPaging:
+            // A REAL SwiftTerm pane on a `pane_history` server: scrolling near the top of the
+            // keyframe's history pages older rows in; the probe logs each request's cursor.
+            NavigationStack {
+                TerminalPaneContent(client: HerdrClient(transport: MockTransport(historyPaging: HistoryPagingDriver())),
+                                 paneID: "w1:p1", title: "historypaging",
+                                 agent: MockTransport.demoPaneAgent)
+            }
+            .overlay(alignment: .topLeading) { HistoryPagingProbe() }
         case .paging:
             // Three distinctively-named agents in the real keep-mounted container. A swipe
             // fronts the neighbour and the header heading changes (ALFA→BRAVO→ALFA) — the
@@ -5373,6 +5382,8 @@ struct TerminalPaneContent: View {
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
+    /// True while the terminal loads an older page of its history (the top capsule).
+    @State private var terminalHistoryLoading = false
     /// The terminal's current height: the room the composer grows over.
     @State private var terminalHeight: CGFloat = 0
     /// The note and quick-key row above the composer. With the composer's resting row,
@@ -5517,6 +5528,7 @@ struct TerminalPaneContent: View {
                                  },
                                  jumpToTailToken: jumpToTailToken,
                                  onTailStateChange: { terminalAtTail = $0 },
+                                 onHistoryLoadingChange: { terminalHistoryLoading = $0 },
                                  // The host's current belief, so a `streamGen` remount seeds a
                                  // fresh Coordinator instead of replaying the last jump.
                                  isAtTail: terminalAtTail,
@@ -5550,6 +5562,13 @@ struct TerminalPaneContent: View {
                             if !terminalAtTail { TerminalJumpToLatestPill { jumpToTailToken += 1 } }
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
+                    }
+                    // An overlay for the same reason: touches pass through to the terminal.
+                    .overlay(alignment: .top) {
+                        ZStack {
+                            if terminalHistoryLoading { TerminalHistoryLoadingCapsule() }
+                        }
+                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryLoading)
                     }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
                 // note and the quick keys above it) takes layout height. Every extra line,
@@ -9247,7 +9266,7 @@ struct HtmlPreviewHarness: View {
 /// env `HERDR_SCREENSHOT_MOCK=<mode>` (one of the names `mode` parses; anything else is
 /// `list`), or the `-herdrScreenshotMock` launch argument, which also gives `list`.
 enum ScreenshotMock {
-    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, keyframeHistoryRead, gram, resize, control, htmlPreview, widgets
+    case onboarding, pairingGuidance, forkNotice, list, rosterStress, pane, settings, scroll, ccscroll, busyScroll, paging, backfill, keyframeHistory, keyframeHistoryRead, historyPaging, gram, resize, control, htmlPreview, widgets
     case guestAccept, guest, guestPane, guestPaused, guestBlocked, guestOldHost
     // Guest access, owner side: the pane with its share sheet, and Settings → Shared access.
     case share, sharedAccess
@@ -9316,6 +9335,8 @@ enum ScreenshotMock {
         // before it answers, so the `keyframe-history-reads` probe shows whether the app
         // cancelled the mount-time read once the first keyframe made it redundant.
         case "keyframehistoryread": return .keyframeHistoryRead
+        // `historypaging` drives the history-paging receipt: see `HistoryPagingDriver`.
+        case "historypaging": return .historyPaging
         // `gram` renders the Gram page from a canned owner-view gram.list — the
         // messages, unread badge, claim states, and composer, for a layout FYI.
         case "gram": return .gram
@@ -9427,6 +9448,8 @@ struct MockTransport: HerdrTransport {
     /// When set, `pane.stream` carries history only inside its keyframes and `agent.read`
     /// returns none; see `KeyframeHistoryDriver`. For the reconnect and redundant-read receipts.
     var keyframeHistory: KeyframeHistoryDriver?
+    /// When set, `pane.stream` and `pane.history` page older history; see `HistoryPagingDriver`.
+    var historyPaging: HistoryPagingDriver?
     /// Stateful agent-list source for the refresh-during-scroll regression receipt.
     var rosterDriver: RosterStressDriver?
     var interactionDriver: TerminalInteractionDriver?
@@ -9452,6 +9475,9 @@ struct MockTransport: HerdrTransport {
                 return try await rosterDriver.nextAgentList()
             }
             return MockWireFixtures.agentList
+        }
+        if requestLine.contains("pane.history"), let historyPaging {
+            return try await historyPaging.page(requestLine)
         }
         if requestLine.contains("agent.read") {
             if let keyframeHistory { return try await keyframeHistory.read(requestLine) }
@@ -9528,6 +9554,7 @@ struct MockTransport: HerdrTransport {
         // what a quiet live pane looks like. This is what the ccDriver branch below has always
         // done, for the same reason.
         if requestLine.contains("pane.stream") {
+            if let historyPaging { return historyPaging.stream() }
             if let keyframeHistory { return keyframeHistory.stream() }
             if let driver = ccDriver {
                 // Claude-Code stand-in: keep the stream OPEN so the driver can push
@@ -10331,6 +10358,106 @@ struct KeyframeHistoryReadProbe: View {
             .task {
                 while !Task.isCancelled {
                     let now = KeyframeHistoryDriver.reads.summary
+                    if now != summary { summary = now }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+    }
+}
+
+/// Stand-in for a `pane_history` daemon (terminal history paging). The pane's whole history
+/// is rows `older 1` ... `older 2300`; the keyframe carries the newest 300 of them with a
+/// `history_cursor` for row 2001, and `pane.history` serves the rows above any cursor, a page
+/// at a time, down to row 1 (null cursor). Every page is held for `heldPageNanos` so the
+/// loading capsule is on screen long enough for a UI test to see it. Each request's cursor is
+/// logged in order, so a test can tell whether the app chained the cursors it was given.
+final class HistoryPagingDriver: @unchecked Sendable {
+    final class RequestLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cursors: [String] = []
+
+        fileprivate func requested(_ cursor: String) { lock.withLock { cursors.append(cursor) } }
+
+        /// "requests=N cursors=a,b,…".
+        var summary: String {
+            lock.withLock { "requests=\(cursors.count) cursors=\(cursors.joined(separator: ","))" }
+        }
+    }
+
+    static let requests = RequestLog()
+    static let totalRows = 2300
+    static let keyframeRows = 300
+    static let heldPageNanos: UInt64 = 1_500_000_000
+
+    private static func row(_ n: Int) -> String {
+        let pad = String(repeating: "-", count: (n * 7) % 30)
+        return "\u{1b}[3\(1 + n % 6)molder \(n) \(pad)\u{1b}[0m"
+    }
+
+    /// Answers a `pane.history` request line.
+    func page(_ requestLine: String) async throws -> String {
+        let object = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+        let params = object?["params"] as? [String: Any]
+        let cursor = params?["cursor"] as? String ?? ""
+        let lines = params?["lines"] as? Int ?? 500
+        Self.requests.requested(cursor)
+        try await Task.sleep(nanoseconds: Self.heldPageNanos)
+        guard cursor.hasPrefix("hc-"), let above = Int(cursor.dropFirst(3)), above >= 1 else {
+            return #"{"id":"mock","error":{"code":"history_cursor_expired","message":"history cursor expired"}}"#
+        }
+        let first = max(1, above - lines)
+        let rows = (first..<above).map(Self.row).joined(separator: "\r\n")
+        let result: [String: Any] = [
+            "type": "pane_history", "pane_id": "w1:p1",
+            "history_b64": Data(rows.utf8).base64EncodedString(),
+            "rows": above - first,
+            "cursor": first > 1 ? "hc-\(first)" : NSNull(),
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: ["id": "mock", "result": result])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    func stream() -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(MockWireFixtures.paneStreamAck)
+            continuation.yield(Self.resetFrame())
+            let pings = MockTransport.keepAlive(continuation)
+            continuation.onTermination = { _ in pings.cancel() }
+        }
+    }
+
+    private static func resetFrame() -> String {
+        let oldestSent = totalRows - keyframeRows + 1
+        let past = (oldestSent...totalRows).map(row).joined(separator: "\r\n") + "\r\n"
+        var screen = "\u{1b}[?25l"
+        for n in 1...8 { screen += "live row \(n)\r\n" }
+        screen += "$ "
+        let object: [String: Any] = [
+            "stream": "pane.bytes", "frame": "reset", "seq": 0, "epoch": 7, "cols": 80, "rows": 24,
+            "data_b64": Data(screen.utf8).base64EncodedString(),
+            "history_b64": Data(past.utf8).base64EncodedString(),
+            "history_cursor": "hc-\(oldestSent)",
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// DEBUG receipt for the history-paging test: `HistoryPagingDriver.requests` as the label of
+/// `history-paging-requests`, refreshed while the mock pane is up.
+struct HistoryPagingProbe: View {
+    @State private var summary = HistoryPagingDriver.requests.summary
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityIdentifier("history-paging-requests")
+            .accessibilityLabel(summary)
+            .task {
+                while !Task.isCancelled {
+                    let now = HistoryPagingDriver.requests.summary
                     if now != summary { summary = now }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
