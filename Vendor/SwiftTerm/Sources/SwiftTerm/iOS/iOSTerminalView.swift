@@ -317,6 +317,28 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         set { caretView?.blinkPaused = newValue }
     }
 
+    /// herdr: `Terminal.prependHistory` for this view. The scroll view's offset moves
+    /// down by the inserted rows in the same step, so the reader keeps the rows they
+    /// were reading -- also mid-drag or mid-flick, when `updateScroller` leaves the
+    /// offset to the gesture and the next gesture frame would otherwise resolve the old
+    /// offset to the newly inserted rows.
+    @discardableResult
+    public func prependHistory (_ bytes: ArraySlice<UInt8>, maxScrollback: Int) -> Int {
+        let count = terminal.prependHistory (bytes, maxScrollback: maxScrollback)
+        guard count > 0 else { return 0 }
+        selection.shiftRows (by: count)
+        search.invalidate ()
+        linkHighlightRange = nil
+        let wasUpdatingFromTerminal = updatingContentOffsetFromTerminal
+        updatingContentOffsetFromTerminal = true
+        defer { updatingContentOffsetFromTerminal = wasUpdatingFromTerminal }
+        contentSize.height = CGFloat (terminal.displayBuffer.lines.count) * cellDimension.height
+        contentOffset.y += CGFloat (count) * cellDimension.height
+        updateScroller ()
+        queuePendingDisplay ()
+        return count
+    }
+
     /// Last proposed grid plus the cell metrics it was computed from, so an
     /// unchanged layout does not re-propose, but a font change does.
     var requestedTerminalGrid: (cols: Int, rows: Int)? = nil

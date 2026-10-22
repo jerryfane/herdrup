@@ -197,6 +197,34 @@ final class ScrollTests: XCTestCase {
             "Every history read should be cancelled once a keyframe with history arrives (\(probe.label)).")
     }
 
+    /// The HISTORY-PAGING receipt. The `historypaging` mock's keyframe carries 300 rows and a
+    /// `history_cursor`; `pane.history` serves 2000 older rows a held page at a time. Nothing
+    /// may be requested before the reader scrolls; flicking to the top must show the loading
+    /// capsule and request the page above the keyframe's cursor, and the next request must
+    /// carry the cursor that page returned (hc-2001 → hc-1501).
+    func testScrollingToTheTopPagesOlderHistory() {
+        let app = XCUIApplication.launched(mock: "historypaging")
+        let viewport = app.terminalSurface
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
+        let probe = app.descendants(matching: .any)["history-paging-requests"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 10), "history-paging-requests probe missing")
+        Thread.sleep(forTimeInterval: 2.0)
+        XCTAssertTrue(probe.label.hasPrefix("requests=0"), "paged before any scroll (\(probe.label))")
+
+        let capsule = app.descendants(matching: .any)["terminal-history-loading"]
+        var sawCapsule = false
+        let chained = poll(40, every: 0.1) {
+            if !sawCapsule && capsule.exists { sawCapsule = true }
+            if probe.label.contains("hc-1501") { return true }
+            viewport.swipeDown(velocity: .fast)
+            if !sawCapsule && capsule.exists { sawCapsule = true }
+            return probe.label.contains("hc-1501")
+        }
+        XCTAssertTrue(sawCapsule, "the loading capsule never showed while a page was held")
+        XCTAssertTrue(chained, "the second page did not use the first page's cursor (\(probe.label))")
+        XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
+    }
+
     // MARK: - helpers
 
     /// Parses the `keyframe-history-reads` probe: "requested=N answered=N cancelled=N".

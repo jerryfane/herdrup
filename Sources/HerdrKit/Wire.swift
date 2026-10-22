@@ -785,7 +785,10 @@ public enum StreamFrame: Sendable, Equatable {
     /// dropped the backlog and re-seeded, so the caller should clear before feeding.
     /// `history` = the scrollback rows above this screen, oldest first, captured with
     /// it (`scrollback_lines` requested); `nil` from a server that does not send it.
-    case reset(seq: UInt64, epoch: UInt64, cols: Int, rows: Int, data: Data, history: Data?, lagged: Bool)
+    /// `historyCursor` = the `pane.history` token for the OLDEST row of `history`; only a
+    /// `pane_history` server sends it, and only when older rows exist above that row.
+    case reset(seq: UInt64, epoch: UInt64, cols: Int, rows: Int, data: Data, history: Data?,
+               historyCursor: String?, lagged: Bool)
     /// Raw PTY delta bytes, to be fed to the emulator in `seq` order.
     case data(seq: UInt64, epoch: UInt64, data: Data)
     /// In-band SIGWINCH: the PTY winsize changed at this offset.
@@ -801,6 +804,7 @@ extension StreamFrame: Decodable {
         case stream, frame, seq, epoch, cols, rows
         case dataB64 = "data_b64"
         case historyB64 = "history_b64"
+        case historyCursor = "history_cursor"
         case lagged
     }
 
@@ -844,8 +848,9 @@ extension StreamFrame: Decodable {
             // Absent from servers that do not window history into keyframes; present
             // (possibly empty) once asked for, and then strict like `data_b64`.
             let history = c.contains(.historyB64) ? try payload(.historyB64) : nil
+            let historyCursor = try c.decodeIfPresent(String.self, forKey: .historyCursor)
             self = .reset(seq: seq, epoch: epoch, cols: cols, rows: rows, data: try payload(),
-                          history: history, lagged: lagged)
+                          history: history, historyCursor: historyCursor, lagged: lagged)
         case "data":
             self = .data(seq: seq, epoch: epoch, data: try payload())
         case "resize":
@@ -1039,6 +1044,77 @@ public struct PanePtySize: Decodable, Sendable, Equatable {
     }
 }
 
+// MARK: - pane.history (older scrollback, paged by cursor)
+
+/// Params of `pane.history`. `cursor` is a token the server issued (a reset's
+/// `history_cursor` or a previous page's `cursor`); it follows its row while the pane
+/// keeps writing, which a row number could not.
+public struct PaneHistoryParams: Encodable, Sendable {
+    public let paneID: String
+    public let cursor: String
+    public let lines: UInt32
+
+    public init(paneID: String, cursor: String, lines: UInt32) {
+        self.paneID = paneID
+        self.cursor = cursor
+        self.lines = lines
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case paneID = "pane_id"
+        case cursor, lines
+    }
+}
+
+/// Result of `pane.history` (`type: "pane_history"`): the rows directly ABOVE the
+/// requested cursor's row, oldest first, rendered like a keyframe's `history_b64`.
+/// `cursor` addresses the oldest row returned, i.e. the next older page; nil once the
+/// page reached the start of the history the server still keeps.
+public struct PaneHistoryPage: Decodable, Sendable, Equatable {
+    public let paneID: String
+    public let data: Data
+    public let rows: Int
+    public let cursor: String?
+
+    public init(paneID: String, data: Data, rows: Int, cursor: String?) {
+        self.paneID = paneID
+        self.data = data
+        self.rows = rows
+        self.cursor = cursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case paneID = "pane_id"
+        case historyB64 = "history_b64"
+        case rows, cursor
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        paneID = try c.decode(String.self, forKey: .paneID)
+        rows = try c.decode(Int.self, forKey: .rows)
+        cursor = try c.decodeIfPresent(String.self, forKey: .cursor)
+        // Strict like a keyframe's history: these bytes go into a stateful emulator, so a
+        // truncated payload must fail the page rather than be fed half-decoded.
+        let b64 = try c.decode(String.self, forKey: .historyB64)
+        guard let bytes = Data(base64Encoded: b64) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .historyB64, in: c, debugDescription: "history_b64 is not valid base64")
+        }
+        data = bytes
+    }
+}
+
+/// Why `pane.history` produced no page. Both mean "stop paging": neither becomes true
+/// by retrying the same cursor.
+public enum PaneHistoryError: Error, Equatable, Sendable {
+    /// `history_cursor_expired`: the token is unknown to this server process (restart,
+    /// handoff, evicted) or its row was trimmed off the top of the pane's scrollback.
+    case historyCursorExpired
+    /// The server cannot deserialize `pane.history` at all (it predates `pane_history`).
+    case unsupported
+}
+
 // MARK: - Server / staged self-update (server.staged_update / server.apply_staged_update)
 
 /// Feature flags returned by `ping`. Missing fields decode false so a newer app
@@ -1061,6 +1137,9 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// `herdr api-bridge --multi` exists: one exec channel serves many requests
     /// (herdr PR #296). `CitadelTransport` routes one-off requests over it (#390).
     public let apiBridgeMulti: Bool
+    /// `pane.history` pages older scrollback by cursor, and `pane.stream` resets carry
+    /// `history_cursor` (herdr terminal history paging).
+    public let paneHistory: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1071,6 +1150,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case eventsV2 = "events_v2"
         case agentForget = "agent_forget"
         case apiBridgeMulti = "api_bridge_multi"
+        case paneHistory = "pane_history"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1086,6 +1166,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         eventsV2 = try c.decodeIfPresent(Bool.self, forKey: .eventsV2) ?? false
         agentForget = try c.decodeIfPresent(Bool.self, forKey: .agentForget) ?? false
         apiBridgeMulti = try c.decodeIfPresent(Bool.self, forKey: .apiBridgeMulti) ?? false
+        paneHistory = try c.decodeIfPresent(Bool.self, forKey: .paneHistory) ?? false
     }
 }
 

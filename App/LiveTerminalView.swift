@@ -129,6 +129,9 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Reports whether the pane is parked at its newest output. Invoked ONLY when
     /// the value changes, so it cannot re-render SwiftUI on every scroll frame.
     var onTailStateChange: (Bool) -> Void = { _ in }
+    /// Reports whether an older page of history is loading (the host shows
+    /// `TerminalHistoryLoadingCapsule`). Invoked only when the value changes.
+    var onHistoryLoadingChange: (Bool) -> Void = { _ in }
     /// The host's CURRENT belief about tail state, used to seed a fresh Coordinator on
     /// a remount. Without it a `streamGen` remount resets the Coordinator's baseline to
     /// `true` while the host still holds `false`, and the next jump's `atTail: true`
@@ -225,6 +228,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // it every pass rather than only at mount.
         context.coordinator.liveness = liveness
         context.coordinator.onTailStateChange = onTailStateChange
+        context.coordinator.onHistoryLoadingChange = onHistoryLoadingChange
         // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
@@ -1016,6 +1020,111 @@ struct LiveTerminalView: UIViewRepresentable {
             view.feed(byteArray: push[...])
         }
 
+        // MARK: older history, paged in above the scrollback
+        //
+        // A keyframe carries at most `backfillLines` rows of history, while the server keeps
+        // far more. A `pane_history` server adds a cursor for the row above the oldest one
+        // sent; reaching the top of the scrollback asks for the page above it, which lands
+        // ABOVE everything held without moving what the reader is looking at, and brings the
+        // cursor for the next page. Any server or cursor that cannot page simply ends it:
+        // the terminal then holds what it held before paging existed.
+
+        /// Rows per `pane.history` page.
+        static let historyPageLines: UInt32 = 500
+        /// The scrollback a paging pane may grow to; reaching it ends paging.
+        static let historyScrollbackCap = 20_000
+        /// How long a page that failed in transit waits before the next scroll may retry it.
+        static let historyRetryDelay: Duration = .seconds(2)
+
+        /// The `pane.history` token for the rows above the oldest one this emulator holds:
+        /// from the latest keyframe, then from each page. nil = nothing (more) to load.
+        private var historyCursor: String?
+        private var historyPageTask: Task<Void, Never>?
+        /// Bumped whenever the history the cursor describes is replaced (a reset, teardown):
+        /// a page requested before that belongs to history that is no longer here.
+        private var historyGeneration = 0
+        private var historyRetryAt: ContinuousClock.Instant?
+        /// See `LiveTerminalView.onHistoryLoadingChange`. Refreshed by `updateUIView`.
+        var onHistoryLoadingChange: ((Bool) -> Void)?
+        private var historyLoading = false {
+            didSet {
+                guard historyLoading != oldValue else { return }
+                let publish = onHistoryLoadingChange, loading = historyLoading
+                DispatchQueue.main.async { publish?(loading) }
+            }
+        }
+
+        /// A keyframe replaced the history: whatever page was in flight is void, and paging
+        /// restarts from this keyframe's cursor (nil = it offers none).
+        private func adoptHistoryCursor(_ cursor: String?) {
+            historyPageTask?.cancel()
+            historyPageTask = nil
+            historyGeneration &+= 1
+            historyRetryAt = nil
+            historyLoading = false
+            historyCursor = cursor
+        }
+
+        /// Called on every scroll position change: within one screen of the top of the
+        /// scrollback, request the page above it (one at a time).
+        @MainActor
+        private func loadOlderHistoryIfNeeded(offsetY: CGFloat, viewportHeight: CGFloat) {
+            guard !stopped, foreground, historyPageTask == nil, let cursor = historyCursor,
+                  offsetY < viewportHeight, let view,
+                  !view.getTerminal().isCurrentBufferAlternate else { return }
+            if let retryAt = historyRetryAt, ContinuousClock.now < retryAt { return }
+            let client = self.client, pane = self.paneID, generation = historyGeneration
+            historyLoading = true
+            historyPageTask = Task { @MainActor [weak self] in
+                let result: Result<PaneHistoryPage, Error>
+                do {
+                    result = .success(try await client.paneHistory(pane: pane, cursor: cursor,
+                                                                   lines: Self.historyPageLines))
+                } catch {
+                    result = .failure(error)
+                }
+                guard let self, !Task.isCancelled, generation == self.historyGeneration else { return }
+                self.historyPageTask = nil
+                self.historyLoading = false
+                self.applyHistoryPage(result)
+            }
+        }
+
+        @MainActor
+        private func applyHistoryPage(_ result: Result<PaneHistoryPage, Error>) {
+            guard !stopped, let view else { return }
+            let page: PaneHistoryPage
+            switch result {
+            case .success(let answer):
+                page = answer
+            case .failure(is PaneHistoryError), .failure(is APIError):
+                // Expired, unsupported, or the pane is gone: the same cursor will not page.
+                historyCursor = nil
+                return
+            case .failure:
+                // In transit (a dropped connection): the cursor is still good.
+                historyRetryAt = ContinuousClock.now + Self.historyRetryDelay
+                return
+            }
+            // The pane switched to its alternate screen while the page was in flight. The
+            // normal screen's history is unchanged underneath, so this cursor pages it later.
+            guard !view.getTerminal().isCurrentBufferAlternate else { return }
+            // Its own filter: the stream's holds the state of the live bytes around this page.
+            var filter = TerminalGraphicsFilter()
+            let clean = filter.filter([UInt8](page.data)[...])
+            guard !clean.isEmpty else {
+                historyCursor = page.cursor
+                return
+            }
+            let inserted = view.prependHistory(clean[...], maxScrollback: Self.historyScrollbackCap)
+            // Nothing fit: the scrollback is at the cap, and paging ends. A page the cap cut
+            // short kept its NEWEST rows, so its cursor no longer adjoins the top; that cannot
+            // leave a gap, because the cut filled the scrollback and the next page inserts
+            // nothing.
+            historyCursor = inserted == 0 ? nil : page.cursor
+            publishTopRowProbe()
+        }
+
         /// Auto-reconnect. `reconnectBackoff` drives capped, jittered exponential backoff (reset once a
         /// fresh stream delivers a real `.reset`, i.e. it genuinely re-established). `lastStreamActivity`
         /// feeds the heartbeat watchdog: the server pings every 20s (`PING_INTERVAL`), so a long
@@ -1307,7 +1416,8 @@ struct LiveTerminalView: UIViewRepresentable {
         /// live seed. Also the `scrollbackLines` the stream asks the server to send as history.
         static let backfillLines: UInt32 = 1000            // server clamps `recent` to 1000 rows
         /// SwiftTerm scrollback ring, raised once per connect from its ~500 default. MUST stay
-        /// >= backfillLines + live tail so a full backfill is retained (not truncated).
+        /// >= backfillLines + live tail so a full backfill is retained (not truncated). A pane
+        /// whose keyframe offers older history grows to `historyScrollbackCap` instead.
         static let scrollbackCap = 4000
         /// Safety cap so a truly hung `read` can't stall the seed forever — NOT a tight budget.
         /// The read runs concurrently with the stream's fresh SSH connect (~1-2s), and the reset
@@ -2106,6 +2216,7 @@ struct LiveTerminalView: UIViewRepresentable {
             scrollPan?.isEnabled = false    // no drag can send bytes to an exited/replaced pane
             scrollSendTask?.cancel()
             scrollSendTask = nil
+            adoptHistoryCursor(nil)         // no page lands in a torn-down or exited pane
             // No forwarded keystroke can reach an exited/replaced pane: the send in flight is
             // cancelled and the input stream closed (frames it never acked count as lost).
             if let inputSender { MainActor.assumeIsolated { inputSender.stop() } }
@@ -2572,7 +2683,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 }
             case .frame(let frame):
                 switch frame {
-                case .reset(_, _, let cols, let rows, let data, let history, _):
+                case .reset(_, _, let cols, let rows, let data, let history, let resetCursor, _):
                     reconnectBackoff.reset()   // a full keyframe = the stream genuinely (re)established
                     graphicsFilter.reset()  // fresh screen: abandon any graphics string split before this keyframe
                     let firstReset = !didSeedOnce
@@ -2593,6 +2704,9 @@ struct LiveTerminalView: UIViewRepresentable {
                     // A keyframe replaces the screen: whatever a pending resize was waiting
                     // to reveal describes a screen that no longer exists.
                     discardPresentationReadiness()
+                    // Paging restarts from this keyframe: its cursor names the row above the
+                    // history it carries, and nothing else here can be paged.
+                    adoptHistoryCursor(history == nil ? nil : resetCursor)
                     if let history {
                         // The keyframe carries the scrollback above its screen, captured with it
                         // on the server. It REPLACES this emulator's history on every reset — the
@@ -2601,7 +2715,17 @@ struct LiveTerminalView: UIViewRepresentable {
                         // The mount-time backfill read is then redundant: stop it.
                         backfillTask?.cancel()
                         backfillTask = nil
-                        if !stopped { seedKeyframeHistory(history, rows: rows, into: view) }
+                        if !stopped {
+                            // A pane that can page holds up to the paging cap from now on. Raised
+                            // BEFORE any output can fill the smaller ring: a ring that trims its
+                            // top while the cursor still names the row above it would page the
+                            // next rows in above a gap. At the cap a trim means a full ring, and a
+                            // full ring takes no page.
+                            if historyCursor != nil {
+                                view.getTerminal().changeHistorySize(Self.historyScrollbackCap)
+                            }
+                            seedKeyframeHistory(history, rows: rows, into: view)
+                        }
                     } else if firstReset {
                         // An older server sends no history: fall back to the separate backfill.
                         // History ABOVE the seed: feed it now so its lines scroll into SwiftTerm's
@@ -3443,6 +3567,7 @@ struct LiveTerminalView: UIViewRepresentable {
                 // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
                 let offsetY = scroll.contentOffset.y
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                let viewportHeight = scroll.bounds.height
                 // USER-DRIVEN MOTION ONLY, and read HERE, synchronously, while the scroll is
                 // actually happening. This is the whole correction to the previous version.
                 //
@@ -3469,6 +3594,11 @@ struct LiveTerminalView: UIViewRepresentable {
                     if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     self.publishTopRowProbe()
                     self.prediction.viewScrolled()   // guesses stand only on the live screen
+                    // Only a finger reaching the top pages. Seeding writes contentOffset 0
+                    // before it settles at the tail, and that must not fetch history nobody asked for.
+                    if userDriven {
+                        self.loadOlderHistoryIfNeeded(offsetY: offsetY, viewportHeight: viewportHeight)
+                    }
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift

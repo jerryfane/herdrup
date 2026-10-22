@@ -819,6 +819,41 @@ public final class Buffer {
             }
         }
     }
+
+    // MARK: - herdr: older history inserted above the scrollback
+    //
+    // A remote pane keeps far more history than it sends with a keyframe, and the
+    // embedder pages the older rows in as the reader approaches the top. Those rows
+    // belong ABOVE every existing line, and inserting them must not change what the
+    // reader is looking at: every index into `lines` that describes a position moves
+    // down by the inserted count. `x`/`y`/`savedY`/the scroll region are
+    // screen-relative and stay; `linesTop` counts trimmed lines, not inserted ones.
+
+    /// Inserts `newLines` (oldest first) at the top of `lines`. The caller has grown the
+    /// ring so they fit without trimming anything.
+    func prependLines (_ newLines: [BufferLine])
+    {
+        let count = newLines.count
+        guard count > 0 else { return }
+        precondition (_lines.count + count <= _lines.maxLength, "prependLines: the ring has no room")
+        var withImages = 0
+        for line in newLines {
+            // Rows written at today's width are scrollback from the moment they land,
+            // exactly like rows `yBase` scrolled past.
+            if preservesScrollbackLayout {
+                line.preserveLayout (columns: cols)
+            }
+            if line.images != nil {
+                withImages += 1
+            }
+        }
+        _lines.splice (start: 0, deleteCount: 0, items: newLines, change: { _ in })
+        _linesWithImagesCount += withImages
+        // Direct writes: the `yBase` setter would re-archive layouts of rows that were
+        // already scrollback, and both indexes simply follow the rows they named.
+        _yBase += count
+        _yDisp += count
+    }
     
     func translateBufferLineToString (lineIndex: Int, trimRight: Bool, startCol: Int = 0, endCol: Int = -1, skipNullCellsFollowingWide: Bool = false, characterProvider: ((CharData) -> Character)? = nil) -> String
     {

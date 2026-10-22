@@ -5582,6 +5582,83 @@ open class Terminal {
     {
         changeScrollback(newScrollback)
     }
+
+    // MARK: - herdr: older history prepended above the scrollback
+
+    /**
+     * herdr: inserts `bytes` -- older output, oldest row first, rows separated by CR LF --
+     * ABOVE the normal buffer's existing scrollback without moving the viewport: the rows
+     * the reader sees, and the live screen, stay where they are on screen.
+     *
+     * The bytes are parsed by a scratch terminal of this width and these options, so
+     * colours, attributes and wide characters render exactly as if they had been fed;
+     * nothing in this terminal's parser, cursor or modes is touched. A trailing newline
+     * ends the last row; it does not add an empty one.
+     *
+     * The ring grows (to `maxScrollback` at once: slots cost a pointer, rows are only
+     * allocated as they fill) so nothing already here is trimmed. Rows that would take
+     * the scrollback past `maxScrollback` are dropped from the OLDEST end of `bytes`, so
+     * what is inserted always adjoins the current top row.
+     *
+     * - Returns: how many rows were inserted: 0 on the alternate screen (it has no
+     *   scrollback) or at the cap, fewer than `bytes` holds when the cap cut it short.
+     */
+    @discardableResult
+    public func prependHistory (_ bytes: ArraySlice<UInt8>, maxScrollback: Int) -> Int
+    {
+        let target = normalBuffer
+        guard !isCurrentBufferAlternate, target.hasScrollback, !bytes.isEmpty else { return 0 }
+        let room = maxScrollback + target.rows - target.lines.count
+        guard room > 0 else { return 0 }
+
+        var scratchOptions = options
+        scratchOptions.cols = cols
+        scratchOptions.rows = rows
+        // Room is all that can be kept, and a full scratch ring trims its oldest rows --
+        // the ones the cap drops anyway.
+        scratchOptions.scrollback = room
+        let scratch = Terminal (delegate: HistoryParseDelegate (), options: scratchOptions)
+        scratch.feed (buffer: bytes)
+        let parsed = scratch.buffer
+        var end = parsed.yBase + parsed.y + 1
+        if bytes.last == 0x0a {
+            end -= 1
+        }
+        let count = min (end, room)
+        guard count > 0 else { return 0 }
+
+        var newLines: [BufferLine] = []
+        newLines.reserveCapacity (count)
+        for index in (end - count)..<end {
+            let line = parsed.lines [index]
+            // Grapheme clusters are interned per terminal: re-intern the scratch codes here.
+            for col in 0..<line.count where line [col].code > Int32 (CharData.maxRune) {
+                var cell = line [col]
+                cell.code = code (for: scratch.getCharacter (for: cell))
+                line [col] = cell
+            }
+            newLines.append (line)
+        }
+
+        if (target.scrollback ?? 0) < target.lines.count + count - target.rows {
+            changeScrollback (maxScrollback)
+        }
+        target.prependLines (newLines)
+        // Image placements address absolute rows of `lines`.
+        for (key, record) in kittyGraphicsState.placementsByKey {
+            var moved = record
+            moved.row += count
+            kittyGraphicsState.placementsByKey [key] = moved
+        }
+        updateFullScreen ()
+        return count
+    }
+
+    /// The scratch parser of `prependHistory` answers nobody: its replies to queries in
+    /// the history bytes would be replies to output that ran long ago.
+    private final class HistoryParseDelegate: TerminalDelegate {
+        func send (source: Terminal, data: ArraySlice<UInt8>) {}
+    }
     
     func syncScrollArea ()
     {

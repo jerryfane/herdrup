@@ -566,6 +566,22 @@ class SelectionService: CustomDebugStringConvertible {
             wordSelectionAnchor = nil
         }
     }
+
+    /// herdr: `count` rows were inserted above every buffer line
+    /// (`Terminal.prependHistory`); the selection keeps covering the same text.
+    func shiftRows (by count: Int)
+    {
+        start.row += count
+        end.row += count
+        pivot?.row += count
+        if let anchor = wordSelectionAnchor {
+            wordSelectionAnchor = (Position (col: anchor.start.col, row: anchor.start.row + count),
+                                   Position (col: anchor.end.col, row: anchor.end.row + count))
+        }
+        if active {
+            terminal.tdel?.selectionChanged (source: terminal)
+        }
+    }
     
     public func getSelectedText () -> String {
         let (min, max) = if Position.compare(start, end) == .before {
