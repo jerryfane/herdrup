@@ -75,6 +75,38 @@ boot_simulator() {
   fi
 }
 
+# Installs the app under test after boot and before xcodebuild's first launch, and fails
+# the round if the install fails (herdrup#418). Run 39991292867: on a just cold-booted
+# iPhone the first three GramTests timed out acquiring XCTest's background assertion while
+# the home screen still showed the app as "Installing…". This only installs: nothing
+# launches the app, so each test's first launch is still the real XCTest launch.
+# xcodebuild installs the same build again; that install finds the system settled.
+APP_UNDER_TEST=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
+install_app_under_test() {
+  local udid="$1" log="$2" bundle_id start
+  if [ ! -d "$APP_UNDER_TEST" ]; then
+    echo "::error::app under test not found at $APP_UNDER_TEST"
+    return 1
+  fi
+  bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || {
+    echo "::error::cannot read CFBundleIdentifier from $APP_UNDER_TEST"
+    return 1
+  }
+  start=$(date +%s)
+  echo "$(date -u +%FT%TZ) install $bundle_id on $udid" >"$log"
+  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
+      xcrun simctl install "$udid" "$APP_UNDER_TEST" >>"$log" 2>&1; then
+    echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
+    return 1
+  fi
+  # simctl install returns when installd is done; the container proves the system has it.
+  if ! xcrun simctl get_app_container "$udid" "$bundle_id" app >>"$log" 2>&1; then
+    echo "::error::$bundle_id has no app container on $udid after install; see $log"
+    return 1
+  fi
+  echo "$(date -u +%FT%TZ) installed in $(( $(date +%s) - start )) s" | tee -a "$log"
+}
+
 # Prints one -only-testing argument per failed test case in an .xcresult.
 failed_tests() {
   xcrun xcresulttool get test-results tests --path "$1" 2>/dev/null | python3 -c '
@@ -101,6 +133,7 @@ run_suite() {
   local status=0
   # Boot outside the test deadline. Booting during the build was measured to slow both.
   boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
+  install_app_under_test "$udid" "TestReceipts/$label-install.log" || return 1
   # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the job budget
   # and take the receipt upload down with it. Per-case allowances make xcodebuild
   # fail a stuck test with diagnostics instead of blocking to the deadline.
@@ -112,6 +145,9 @@ run_suite() {
       -maximum-test-execution-time-allowance 600 \
       -resultBundlePath "TestReceipts/$label-first.xcresult" \
       "$@" 2>&1 | tee "TestReceipts/$label-first.log" | xcbeautify || status=$?
+  # The first case's result and time is the first real XCTest launch after install.
+  grep -m1 -E "^Test Case '.*' (passed|failed|skipped) \(" "TestReceipts/$label-first.log" \
+    | sed 's/^/first test after install: /' >>"TestReceipts/$label-install.log" || true
   [ "$status" -eq 0 ] && return 0
   stop_recording
   if [ "$status" -eq 124 ] || [ "$status" -eq 130 ]; then
