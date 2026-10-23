@@ -76,5 +76,12 @@ let package = Package(
         .testTarget(
             name: "AgentActivityStateTests",
             dependencies: ["AgentActivityState"]),
+        // Main-actor types whose plain constants must stay readable from any context
+        // (a default argument is evaluated in the caller's). Warnings are errors here, so a
+        // constant that slips back onto the main actor fails the build, not just warns.
+        .testTarget(
+            name: "HerdrKitIsolationTests",
+            dependencies: ["HerdrKit"],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]),
     ]
 )

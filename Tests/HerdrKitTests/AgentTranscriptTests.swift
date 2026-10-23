@@ -235,6 +235,19 @@ final class TranscriptGroupingTests: XCTestCase {
         ])
     }
 
+    /// `pending_ask` one refresh behind an answer given elsewhere: the answered entry is the
+    /// one card, with no live buttons.
+    func testStalePendingAskForAnAnsweredEntryAddsNoSecondCard() {
+        let question = [TranscriptQuestion(question: "Merge?", options: ["Yes", "Not yet"])]
+        let stale = TranscriptPendingAsk(id: "a1", questions: question, answerable: true)
+        let turns = TranscriptGrouping.turns([
+            e("u1", 0, .user(text: "Go", author: .owner)),
+            e("a1", 1, .ask(TranscriptAsk(questions: question, answer: ["Yes"]))),
+        ], pendingAsk: stale)
+        XCTAssertEqual(turns.count, 1)
+        XCTAssertEqual(turns[0].items, [.ask(id: "a1", TranscriptAsk(questions: question, answer: ["Yes"]), pending: nil)])
+    }
+
     func testPendingAskWithoutItsEntryIsAppendedToTheLastTurn() {
         let pending = TranscriptPendingAsk(
             id: "a9", questions: [TranscriptQuestion(question: "Q?", options: ["A"])], answerable: false)
@@ -379,10 +392,11 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertNil(after)
         XCTAssertEqual(answered.answer, ["Yes"])
 
-        store.clearLocalAnswer(askID: "a1")
+        // A refresh that still reports the question open keeps the answer sent from here.
         await store.refresh(client: client)
-        guard case .ask(_, _, let again)? = store.turns.last?.items.last else { return XCTFail() }
-        XCTAssertNotNil(again)
+        guard case .ask(_, let kept, let again)? = store.turns.last?.items.last else { return XCTFail() }
+        XCTAssertNil(again)
+        XCTAssertEqual(kept.answer, ["Yes"])
     }
 
     func testFailedRefreshKeepsTheConversationAndRecordsTheError() async {

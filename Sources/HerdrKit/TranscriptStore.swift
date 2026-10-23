@@ -129,8 +129,10 @@ public enum TranscriptGrouping {
                 current?.items.removeAll { if case .plan = $0 { return true }; return false }
                 append(.plan(id: entry.id, items), entry)
             case .ask(let ask):
+                // One card per question: its own entry, answered or open. An answer in the
+                // entry wins over a `pending_ask` that has not caught up with it yet.
+                if pendingAsk?.id == entry.id { pendingSeen = true }
                 let pending = ask.answer == nil && pendingAsk?.id == entry.id ? pendingAsk : nil
-                if pending != nil { pendingSeen = true }
                 append(.ask(id: entry.id, ask, pending: pending), entry)
             case .turnEnd(let status, let error):
                 if status == .done {
@@ -179,8 +181,9 @@ public enum TranscriptGrouping {
 /// it replaces the copy in place.
 @MainActor
 public final class TranscriptStore {
-    /// Turns per page (the server clamps to 1...50).
-    public static let pageTurns: UInt32 = 20
+    /// Turns per page (the server clamps to 1...50). Nonisolated: it is the init's default
+    /// argument, which the caller evaluates in its own context.
+    public nonisolated static let pageTurns: UInt32 = 20
 
     public let target: String
     public private(set) var entries: [TranscriptEntry] = []
@@ -312,12 +315,6 @@ public final class TranscriptStore {
     public func noteAnswered(askID: String, option: String) {
         localAnswers[askID] = [option]
         if pendingAsk?.id == askID { pendingAsk = nil }
-        regroup()
-    }
-
-    /// Forgets an optimistic answer the server refused.
-    public func clearLocalAnswer(askID: String) {
-        guard localAnswers.removeValue(forKey: askID) != nil else { return }
         regroup()
     }
 

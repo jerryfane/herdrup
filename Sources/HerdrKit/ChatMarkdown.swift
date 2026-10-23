@@ -84,15 +84,13 @@ public enum ChatMarkdown {
                 continue
             }
 
-            if trimmed.contains("|"), i + 1 < lines.count,
-               isTableSeparator(lines[i + 1].trimmingCharacters(in: .whitespaces)) {
+            if let header = tableHeader(trimmed, separator: i + 1 < lines.count ? lines[i + 1] : nil) {
                 flushParagraph()
-                let header = cells(trimmed)
                 var rows: [[String]] = []
                 i += 2
                 while i < lines.count {
                     let row = lines[i].trimmingCharacters(in: .whitespaces)
-                    guard !row.isEmpty, row.contains("|") else { break }
+                    guard !row.isEmpty, hasPipe(row) else { break }
                     var cells = cells(row)
                     // Pad or cut to the header's width so the grid stays rectangular.
                     if cells.count < header.count { cells += Array(repeating: "", count: header.count - cells.count) }
@@ -180,16 +178,65 @@ public enum ChatMarkdown {
         return (hashes, text.trimmingCharacters(in: .whitespaces))
     }
 
-    private static func isTableSeparator(_ trimmed: String) -> Bool {
-        guard trimmed.contains("-"), trimmed.contains("|") || trimmed.contains(":") else { return false }
-        return trimmed.allSatisfy { "|-: ".contains($0) }
+    /// The header cells when `trimmed` opens a GitHub table: a line with a pipe outside
+    /// inline code, then a delimiter row of as many cells, each dashes with optional
+    /// alignment colons, three characters at least (`---`, `:--:`, `--:`). Prose with a
+    /// stray pipe stays prose.
+    private static func tableHeader(_ trimmed: String, separator: String?) -> [String]? {
+        guard let separator, hasPipe(trimmed) else { return nil }
+        let header = cells(trimmed)
+        let delimiters = cells(separator.trimmingCharacters(in: .whitespaces))
+        guard delimiters.count == header.count, delimiters.allSatisfy(isDelimiterCell) else { return nil }
+        return header
+    }
+
+    /// `:?-+:?`, at least three characters.
+    private static func isDelimiterCell(_ cell: String) -> Bool {
+        var body = Substring(cell)
+        if body.first == ":" { body.removeFirst() }
+        if body.last == ":" { body.removeLast() }
+        return cell.count >= 3 && !body.isEmpty && body.allSatisfy { $0 == "-" }
+    }
+
+    /// A pipe that separates cells: not escaped, not inside a code span.
+    private static func hasPipe(_ row: String) -> Bool {
+        splitCells(row).count > 1
     }
 
     private static func cells(_ row: String) -> [String] {
-        var body = row
-        if body.hasPrefix("|") { body.removeFirst() }
-        if body.hasSuffix("|") { body.removeLast() }
-        return body.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        var parts = splitCells(row)
+        if parts.count > 1, parts.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { parts.removeFirst() }
+        if parts.count > 1, parts.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { parts.removeLast() }
+        return parts.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Splits on cell-separating pipes; an escaped `\|` and pipes inside backtick code stay
+    /// in the cell (the escape's backslash is dropped).
+    private static func splitCells(_ row: String) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var inCode = false
+        var escaped = false
+        for char in row {
+            if escaped {
+                if char != "|" { current.append("\\") }
+                current.append(char)
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else if char == "`" {
+                inCode.toggle()
+                current.append(char)
+            } else if char == "|", !inCode {
+                parts.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        if escaped { current.append("\\") }
+        parts.append(current)
+        return parts
     }
 
     private static func leadingWidth(_ line: String) -> Int {
@@ -217,13 +264,14 @@ public enum ChatMarkdown {
             number = Int(digits) ?? 1
             rest = after.dropFirst(2)
         }
+        // `[ ]` / `[x]` followed by a space or nothing: an empty task item is still one.
         var checked: Bool?
-        if rest.hasPrefix("[ ] ") {
-            checked = false
-            rest = rest.dropFirst(4)
-        } else if rest.hasPrefix("[x] ") || rest.hasPrefix("[X] ") {
-            checked = true
-            rest = rest.dropFirst(4)
+        for (box, value) in [("[ ]", false), ("[x]", true), ("[X]", true)] where rest.hasPrefix(box) {
+            let after = rest.dropFirst(box.count)
+            guard after.isEmpty || after.first == " " else { continue }
+            checked = value
+            rest = after
+            break
         }
         return (ordered, number, ChatMarkdownListItem(
             text: rest.trimmingCharacters(in: .whitespaces), depth: depth, checked: checked))

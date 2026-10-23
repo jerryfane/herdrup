@@ -72,4 +72,26 @@ final class ChatMarkdownTests: XCTestCase {
             .list(ordered: true, start: 3, items: [ChatMarkdownListItem(text: "three"), ChatMarkdownListItem(text: "four")]),
         ])
     }
+
+    /// Only a real delimiter row (as many cells as the header, each `---`-like) and a pipe
+    /// outside inline code make a table; prose with a stray pipe stays prose.
+    func testProseWithAPipeIsNotATable() {
+        XCTAssertEqual(ChatMarkdown.blocks("a|b\n-|-\nrest"), [.paragraph("a|b\n-|-\nrest")])
+        XCTAssertEqual(ChatMarkdown.blocks("x | y | z\n---|---"), [.paragraph("x | y | z\n---|---")])
+        XCTAssertEqual(ChatMarkdown.blocks("run `a|b` now\n---|---"), [.paragraph("run `a|b` now\n---|---")])
+        XCTAssertEqual(ChatMarkdown.blocks("| `a|b` | c |\n|---|:-:|\n| 1 \\| 2 | 3 |"), [
+            .table(header: ["`a|b`", "c"], rows: [["1 | 2", "3"]]),
+        ])
+    }
+
+    func testBareTaskBoxesAreCheckedAndUnchecked() {
+        XCTAssertEqual(ChatMarkdown.blocks("- [x]\n- [ ]\n- [X] done\n- [y] no"), [
+            .list(ordered: false, start: 1, items: [
+                ChatMarkdownListItem(text: "", checked: true),
+                ChatMarkdownListItem(text: "", checked: false),
+                ChatMarkdownListItem(text: "done", checked: true),
+                ChatMarkdownListItem(text: "[y] no"),
+            ]),
+        ])
+    }
 }
