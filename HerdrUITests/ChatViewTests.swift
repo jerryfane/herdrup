@@ -190,6 +190,23 @@ final class ChatViewTests: XCTestCase {
         XCTAssertFalse(refused.contains("agent.transcript"), "the transcript is on the guest allowlist: \(refused)")
     }
 
+    /// A paused share (its agent not in the pane's foreground) still has its conversation in
+    /// omp's session file: the Chat tab, the guest's first, loads it instead of spinning.
+    func testGuestChatLoadsWhilePaused() {
+        let app = launch("guestpaused", ["HERDR_MOCK_GUEST_CHAT": "1"])
+        let tab = app.buttons["guest-tab-chat"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 12), "a paused omp share keeps its Chat tab")
+        XCTAssertTrue(tab.isSelected, "Chat should be the guest's first tab")
+        let chat = app.scrollViews["chat-view"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 8))
+        XCTAssertTrue(poll(8, every: 0.3) { self.turns(chat) > 0 },
+                      "a paused agent's chat should load its turns (turns=\(turns(chat)))")
+        XCTAssertFalse(app.descendants(matching: .any)["chat-loading"].exists, "no endless spinner")
+        XCTAssertTrue(app.descendants(matching: .any)["chat-ask-waiting"].waitForExistence(timeout: 8),
+                      "the conversation's question shows read-only")
+        attach(app, "chat-guest-paused")
+    }
+
     /// A host that predates guest transcripts: no Chat tab, the terminal as before.
     func testGuestHasNoChatTabOnAnOlderHost() {
         let app = launch("guestpane")

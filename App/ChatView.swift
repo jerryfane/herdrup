@@ -191,8 +191,13 @@ struct ChatView: View {
     let viewer: ChatViewer
     /// The pane id to follow events for (owner); nil for a guest, who polls.
     let eventsPaneID: String?
-    /// Only the front, visible chat keeps itself current.
+    /// The chat is the front, visible view: it loads the conversation (and older pages)
+    /// whenever it is, live or not.
     let isActive: Bool
+    /// The agent can change the conversation (an owner's agent, a guest's running share):
+    /// the chat keeps itself current by events and polling. Otherwise (a paused share) it
+    /// loads what the session file holds once, as it comes on screen.
+    let live: Bool
     /// The agent's status as the page knows it: a change prompts a refresh.
     let agentStatus: String?
     /// The page's ground, for the top fade.
@@ -278,9 +283,13 @@ struct ChatView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-view")
         .accessibilityValue("turns=\(model.turns.count)")
-        .task(id: isActive) {
+        .task(id: [isActive, live]) {
             guard isActive else { return }
-            await model.follow(client: client, paneID: eventsPaneID)
+            if live {
+                await model.follow(client: client, paneID: eventsPaneID)
+            } else {
+                await model.refresh(client: client)
+            }
         }
         .onChange(of: agentStatus) { _, _ in
             guard isActive else { return }

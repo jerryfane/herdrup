@@ -121,7 +121,7 @@ struct GuestPaneView: View {
                 if showingChat {
                     ChatView(client: client, model: chatModel,
                              viewer: .guest(name: access.guestName, ownerName: access.ownerName),
-                             eventsPaneID: nil, isActive: availability == .running,
+                             eventsPaneID: nil, isActive: true, live: availability == .running,
                              agentStatus: agent?.agentStatus, ground: Palette.groundMachine,
                              onOpenTerminal: { tab = .terminal })
                 }

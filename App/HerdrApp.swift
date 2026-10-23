@@ -5618,7 +5618,7 @@ struct TerminalPaneContent: View {
                     .overlay {
                         if showingChat {
                             ChatView(client: client, model: chatModel, viewer: .owner, eventsPaneID: paneID,
-                                     isActive: isForeground, agentStatus: agent?.agentStatus,
+                                     isActive: isForeground, live: true, agentStatus: agent?.agentStatus,
                                      ground: Palette.groundMachine,
                                      onOpenTerminal: { setShowsChat(false) })
                         }
