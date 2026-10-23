@@ -61,7 +61,9 @@ struct AskPush: Equatable, Sendable {
 }
 
 /// The notification category one question gets: one action per option. Action titles are
-/// the option texts, so each ask needs its own category.
+/// the option texts, so each ask needs its own category. The identifier carries the second
+/// it was registered (`herdr.ask.<seconds>.<ask id>`) so a later prune can tell a category
+/// whose notification is still on its way from one whose notification is gone.
 struct AskCategory: Equatable, Sendable {
     struct Action: Equatable, Sendable {
         let identifier: String
@@ -69,13 +71,17 @@ struct AskCategory: Equatable, Sendable {
     }
 
     static let identifierPrefix = "herdr.ask."
+    /// How long a registered category survives a prune without a delivered notification.
+    /// iOS gives a service extension about 30 s, so a notification still in flight after
+    /// this has been delivered (or dropped) and the delivered set is authoritative.
+    static let inFlightGrace: TimeInterval = 120
     static let actionPrefix = "herdr.ask.option."
 
     let identifier: String
     let actions: [Action]
 
-    init(_ ask: AskPush) {
-        identifier = Self.identifierPrefix + ask.askID
+    init(_ ask: AskPush, registeredAt: Date = Date()) {
+        identifier = Self.identifierPrefix + "\(Int(registeredAt.timeIntervalSince1970)).\(ask.askID)"
         // The action carries the option's INDEX, not its text: the response handler reads the
         // text back from the same payload, so no option text has to survive as an identifier.
         actions = ask.options.enumerated().map { index, option in
@@ -89,12 +95,29 @@ struct AskCategory: Equatable, Sendable {
         return Int(actionIdentifier.dropFirst(actionPrefix.count))
     }
 
+    /// When an ask category was registered, read back from its identifier; nil for any other
+    /// category.
+    static func registeredAt(_ identifier: String) -> Date? {
+        guard identifier.hasPrefix(identifierPrefix),
+              let seconds = Int(identifier.dropFirst(identifierPrefix.count).prefix { $0 != "." }) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: TimeInterval(seconds))
+    }
+
     /// Which registered categories to keep when `adding` one. Registration replaces the
     /// app's whole set, and every question adds a category, so ask categories whose
-    /// notification is gone are dropped (their buttons can no longer be pressed); anything
-    /// that is not an ask category is kept untouched.
-    static func retained(existing: [String], delivered: Set<String>, adding: String) -> Set<String> {
-        var keep = Set(existing.filter { !$0.hasPrefix(identifierPrefix) || delivered.contains($0) })
+    /// notification is gone are dropped (their buttons can no longer be pressed). An ask
+    /// category registered within `inFlightGrace` is kept even when its notification is not
+    /// delivered yet: another question's extension may have registered it a moment ago and
+    /// still be about to show it. Anything that is not an ask category is kept untouched.
+    static func retained(existing: [String], delivered: Set<String>, adding: String, now: Date = Date()) -> Set<String> {
+        var keep = Set(existing.filter { identifier in
+            guard identifier.hasPrefix(identifierPrefix) else { return true }
+            if delivered.contains(identifier) { return true }
+            guard let registered = registeredAt(identifier) else { return false }
+            return now.timeIntervalSince(registered) < inFlightGrace
+        })
         keep.insert(adding)
         return keep
     }

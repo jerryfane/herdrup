@@ -70,8 +70,9 @@ final class AskPushPayloadTests: XCTestCase {
 final class AskCategoryTests: XCTestCase {
     func testOneAuthenticatedActionPerOptionInOrder() throws {
         let ask = try XCTUnwrap(AskPush(userInfo: questionPush(options: ["Merge", "Wait", "Abort"])))
-        let category = AskCategory(ask)
-        XCTAssertEqual(category.identifier, "herdr.ask.call_42")
+        let category = AskCategory(ask, registeredAt: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(category.identifier, "herdr.ask.1000.call_42")
+        XCTAssertEqual(AskCategory.registeredAt(category.identifier), Date(timeIntervalSince1970: 1_000))
         XCTAssertEqual(category.actions, [
             .init(identifier: "herdr.ask.option.0", title: "Merge"),
             .init(identifier: "herdr.ask.option.1", title: "Wait"),
@@ -95,11 +96,25 @@ final class AskCategoryTests: XCTestCase {
     }
 
     func testRegistrationDropsAskCategoriesNoLongerOnScreen() {
+        let now = Date(timeIntervalSince1970: 10_000)
         let keep = AskCategory.retained(
-            existing: ["herdr.ask.old", "herdr.ask.shown", "someone.else"],
-            delivered: ["herdr.ask.shown", ""],
-            adding: "herdr.ask.new")
-        XCTAssertEqual(keep, ["herdr.ask.shown", "someone.else", "herdr.ask.new"])
+            existing: ["herdr.ask.9000.old", "herdr.ask.9000.shown", "herdr.ask.unparsable", "someone.else"],
+            delivered: ["herdr.ask.9000.shown", ""],
+            adding: "herdr.ask.10000.new",
+            now: now)
+        XCTAssertEqual(keep, ["herdr.ask.9000.shown", "someone.else", "herdr.ask.10000.new"])
+    }
+
+    /// Two questions pushed moments apart: the second extension registers while the first
+    /// notification is still on its way, so the first category is not delivered yet. It
+    /// must survive, or the first notification shows without buttons (#488 review f1).
+    func testACategoryStillInFlightSurvivesTheNextRegistration() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let first = "herdr.ask.\(10_000 - 2).call_42"
+        let expired = "herdr.ask.\(10_000 - Int(AskCategory.inFlightGrace)).call_41"
+        let keep = AskCategory.retained(existing: [first, expired], delivered: [],
+                                        adding: "herdr.ask.10000.call_43", now: now)
+        XCTAssertEqual(keep, [first, "herdr.ask.10000.call_43"])
     }
 }
 
