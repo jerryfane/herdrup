@@ -3,7 +3,7 @@
 # parallel jobs; each job has already built the app and test bundles into .build-dd
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
-#   iphone-terminal  TERMINAL_CLASSES on iPhone
+#   iphone-terminal  TERMINAL_CLASSES, then ChatViewTests in its own round, on iPhone
 #   iphone-app       HerdrFontTests, then StatusMotionTests in its own round, then
 #                    every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
 #                    tests on iPhone
@@ -15,10 +15,10 @@
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
 # The iPhone rounds are complementary BY CONSTRUCTION: iphone-terminal runs exactly
-# TERMINAL_CLASSES and settings-gram runs GramTests, while iphone-app skips those same
-# identifiers, so a new test class lands in iphone-app without anyone listing it. A
-# misspelled or renamed entry would silently drop that class, so iphone-terminal
-# fails unless its result bundle shows every listed class executed tests.
+# TERMINAL_CLASSES plus ChatViewTests and settings-gram runs GramTests, while iphone-app
+# skips those same identifiers, so a new test class lands in iphone-app without anyone
+# listing it. A misspelled or renamed entry would silently drop that class, so
+# iphone-terminal fails unless its result bundles show every listed class executed tests.
 set -uo pipefail
 
 shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-gram|focused}"
@@ -140,15 +140,17 @@ run_suite() {
   return 1
 }
 
-# Fails unless every TERMINAL_CLASSES entry executed at least one test in the bundle.
+# Fails unless every class named after the bundle executed at least one test in it.
 check_classes_ran() {
-  xcrun xcresulttool get test-results tests --path "$1" 2>/dev/null |
+  local bundle="$1"
+  shift
+  xcrun xcresulttool get test-results tests --path "$bundle" 2>/dev/null |
     python3 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
 except ValueError:
-    print("::error::no readable result bundle to check the terminal classes against")
+    print("::error::no readable result bundle to check " + ", ".join(sys.argv[1:]) + " against")
     sys.exit(1)
 ran = set()
 def walk(node, suite):
@@ -162,9 +164,9 @@ for node in data.get("testNodes", []):
     walk(node, None)
 missing = [name for name in sys.argv[1:] if name not in ran]
 for name in missing:
-    print(f"::error::TERMINAL_CLASSES entry {name} executed no tests; it would run in neither iPhone shard")
+    print(f"::error::{name} executed no tests in this round; the listed name no longer matches a class, so that class falls through to the iphone-app catch-all round")
 sys.exit(1 if missing else 0)
-' "${TERMINAL_CLASSES[@]}"
+' "$@"
 }
 
 swiftterm_api() {
@@ -224,7 +226,7 @@ case "$shard" in
     only=()
     for class in "${TERMINAL_CLASSES[@]}"; do only+=("-only-testing:HerdrUITests/$class"); done
     run_suite iPhoneTerminal "$IPHONE_UDID" 40m "${only[@]}" || failed=1
-    check_classes_ran TestReceipts/iPhoneTerminal-first.xcresult || failed=1
+    check_classes_ran TestReceipts/iPhoneTerminal-first.xcresult "${TERMINAL_CLASSES[@]}" || failed=1
     # GramTests run in settings-gram: after #445 this shard had ~40 min of tests against
     # ~26 (iphone-app) and ~24 (ipad), and settings-stack finished in ~13 min (runs
     # 39128731625, 39132955146, 39137628334).
@@ -232,6 +234,7 @@ case "$shard" in
     # pushed iPhoneApp to 29 min of tests against its 30 m budget, which run 39930335960
     # exceeded. This shard had ~18 min of tests in that run against 40 m.
     run_suite iPhoneChat "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ChatViewTests || failed=1
+    check_classes_ran TestReceipts/iPhoneChat-first.xcresult ChatViewTests || failed=1
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
