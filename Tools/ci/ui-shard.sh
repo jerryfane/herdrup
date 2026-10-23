@@ -3,7 +3,8 @@
 # parallel jobs; each job has already built the app and test bundles into .build-dd
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
-#   iphone-terminal  TERMINAL_CLASSES, then ChatViewTests in its own round, on iPhone
+#   iphone-terminal  TERMINAL_CLASSES, then ChatViewTests and PagingTests in rounds of
+#                    their own, on iPhone
 #   iphone-app       HerdrFontTests, then StatusMotionTests in its own round, then
 #                    every other HerdrUITests class on iPhone, then the SwiftTerm UIKit API
 #                    tests on iPhone
@@ -15,9 +16,9 @@
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
 #
 # The iPhone rounds are complementary BY CONSTRUCTION: iphone-terminal runs exactly
-# TERMINAL_CLASSES plus ChatViewTests and settings-gram runs GramTests, while iphone-app
-# skips those same identifiers, so a new test class lands in iphone-app without anyone
-# listing it. A misspelled or renamed entry would silently drop that class, so
+# TERMINAL_CLASSES plus ChatViewTests and PagingTests and settings-gram runs GramTests,
+# while iphone-app skips those same identifiers, so a new test class lands in iphone-app
+# without anyone listing it. A misspelled or renamed entry would silently drop that class, so
 # iphone-terminal fails unless its result bundles show every listed class executed tests.
 set -uo pipefail
 
@@ -235,6 +236,12 @@ case "$shard" in
     # exceeded. This shard had ~18 min of tests in that run against 40 m.
     run_suite iPhoneChat "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ChatViewTests || failed=1
     check_classes_ran TestReceipts/iPhoneChat-first.xcresult ChatViewTests || failed=1
+    # PagingTests (~4.3 min) run here too: every class in the app round slowed together
+    # from run to run (23.7, 26.9 and 29.0 min of tests in runs 39938860577, 39954390114
+    # and 39966934030), and 39966934030 ran out of the 30 m on the last class. This shard
+    # had ~26 min of tests in its slowest recent run (39944992620) against 40 m + 10 m.
+    run_suite iPhonePaging "$IPHONE_UDID" 10m -only-testing:HerdrUITests/PagingTests || failed=1
+    check_classes_ran TestReceipts/iPhonePaging-first.xcresult PagingTests || failed=1
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
@@ -243,7 +250,7 @@ case "$shard" in
     # its 30 m on the last class.
     run_suite iPhoneStatusMotion "$IPHONE_UDID" 10m -only-testing:HerdrUITests/StatusMotionTests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
-      -skip-testing:HerdrUITests/ChatViewTests)
+      -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/PagingTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
