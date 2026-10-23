@@ -622,7 +622,7 @@ struct RootView: View {
         case .chatView:
             ChatViewMockHome()
         case .guestChat:
-            GuestPaneMockHost(scenario: .running)
+            GuestPaneMockHost(scenario: .blocked)
         }
     }
 

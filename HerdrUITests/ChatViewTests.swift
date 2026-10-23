@@ -8,6 +8,16 @@ final class ChatViewTests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
+    /// `HERDR_MOCK_STILL` keeps every agent off "working" and `HERDR_STEADY_CARET` stops the
+    /// hidden terminal's caret: a working spinner, a pulse or a blinking caret never lets
+    /// XCUITest's idle wait finish (a minute per action). `still: false` keeps the working
+    /// agents (keephair is only listed outside the Idle group while it works).
+    private func launch(_ mock: String, _ environment: [String: String] = [:], still: Bool = true) -> XCUIApplication {
+        var quiet = ["HERDR_STEADY_CARET": "1"]
+        if still { quiet["HERDR_MOCK_STILL"] = "1" }
+        return XCUIApplication.launched(mock: mock, environment: quiet.merging(environment) { _, new in new })
+    }
+
     private func openAgent(_ name: String, in app: XCUIApplication) {
         let row = app.staticTexts[name].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 12), "the home should list \(name)")
@@ -34,10 +44,10 @@ final class ChatViewTests: XCTestCase {
 
     /// An omp agent opens in Chat by default; the switch flips to the terminal and back.
     func testOmpAgentOpensInChatAndSwitches() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview")
         openAgent("herdr-app", in: app)
 
-        let chat = app.otherElements["chat-view"]
+        let chat = app.scrollViews["chat-view"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10), "an omp agent should open in Chat")
         XCTAssertTrue(app.buttons["chat-switch-chat"].isSelected, "Chat should be the selected segment")
         XCTAssertTrue(app.descendants(matching: .any)["chat-ask"].waitForExistence(timeout: 8),
@@ -55,17 +65,17 @@ final class ChatViewTests: XCTestCase {
 
     /// A Claude agent has no Chat: no switch, the terminal as before.
     func testClaudeAgentHasNoSwitch() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview", still: false)
         openAgent("keephair", in: app)
         XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10), "a Claude agent opens its terminal")
         XCTAssertFalse(app.buttons["chat-switch-chat"].exists, "only omp agents get the switch")
-        XCTAssertFalse(app.otherElements["chat-view"].exists)
+        XCTAssertFalse(app.scrollViews["chat-view"].exists)
     }
 
     /// Settings shows the default (Chat); with Terminal chosen, omp agents open in the
     /// terminal, the switch still offering Chat.
     func testSettingsDefaultDecidesWhereOmpOpens() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview")
         let settings = app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
@@ -76,20 +86,19 @@ final class ChatViewTests: XCTestCase {
         XCTAssertTrue(picker.buttons["Terminal"].isSelected)
         attach(app, "chat-settings")
 
-        let terminalFirst = XCUIApplication.launched(mock: "chatview",
-                                                     environment: ["HERDR_MOCK_CHAT_OPENS_IN": "terminal"])
+        let terminalFirst = launch("chatview", ["HERDR_MOCK_CHAT_OPENS_IN": "terminal"])
         openAgent("herdr-app", in: terminalFirst)
         let terminal = terminalFirst.buttons["chat-switch-terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "an omp agent still offers the switch")
         XCTAssertTrue(terminal.isSelected, "with Terminal the default, the page opens in the terminal")
-        XCTAssertFalse(terminalFirst.otherElements["chat-view"].exists)
+        XCTAssertFalse(terminalFirst.scrollViews["chat-view"].exists)
     }
 
     /// Scrolling to the top loads older turns.
     func testScrollingUpLoadsOlderTurns() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview")
         openAgent("herdr-app", in: app)
-        let chat = app.otherElements["chat-view"]
+        let chat = app.scrollViews["chat-view"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
         XCTAssertTrue(poll(8, every: 0.3) { self.turns(chat) > 0 }, "the newest page should load")
         let first = turns(chat)
@@ -103,9 +112,9 @@ final class ChatViewTests: XCTestCase {
 
     /// The thought line and the steps line expand.
     func testThoughtAndStepsExpand() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview")
         openAgent("herdr-app", in: app)
-        XCTAssertTrue(app.otherElements["chat-view"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 10))
 
         guard let thought = visibleButton("chat-thought", in: app) else {
             return XCTFail("a work group on screen should show its thought")
@@ -125,7 +134,7 @@ final class ChatViewTests: XCTestCase {
 
     /// Tapping an option answers the question; the card then shows the choice.
     func testAnsweringTheQuestion() {
-        let app = XCUIApplication.launched(mock: "chatview")
+        let app = launch("chatview")
         openAgent("herdr-app", in: app)
         let option = app.buttons["chat-ask-option-0"]
         XCTAssertTrue(option.waitForExistence(timeout: 10), "the owner should get answer buttons")
@@ -137,8 +146,7 @@ final class ChatViewTests: XCTestCase {
 
     /// A server that cannot answer through the UI sends the owner to the terminal.
     func testRefusedAnswerOffersTheTerminal() {
-        let app = XCUIApplication.launched(mock: "chatview",
-                                           environment: ["HERDR_MOCK_CHAT_ANSWER": "ask_ui_not_found"])
+        let app = launch("chatview", ["HERDR_MOCK_CHAT_ANSWER": "ask_ui_not_found"])
         openAgent("herdr-app", in: app)
         let option = app.buttons["chat-ask-option-0"]
         XCTAssertTrue(option.waitForExistence(timeout: 10))
@@ -154,12 +162,12 @@ final class ChatViewTests: XCTestCase {
     /// A shared omp agent on a host serving guests its transcript: the Chat tab, first;
     /// the question read-only; no note cards.
     func testGuestChatTabIsReadOnly() {
-        let app = XCUIApplication.launched(mock: "guestchat")
+        let app = launch("guestchat")
         let tab = app.buttons["guest-tab-chat"]
         XCTAssertTrue(tab.waitForExistence(timeout: 12), "the guest should get a Chat tab")
         XCTAssertTrue(tab.isSelected, "Chat should be the guest's first tab")
         XCTAssertTrue(app.buttons["guest-tab-terminal"].exists)
-        let chat = app.otherElements["chat-view"]
+        let chat = app.scrollViews["chat-view"]
         XCTAssertTrue(chat.waitForExistence(timeout: 8))
         XCTAssertTrue(app.descendants(matching: .any)["chat-ask-waiting"].waitForExistence(timeout: 8),
                       "the guest sees the question waiting for the owner")
@@ -177,10 +185,29 @@ final class ChatViewTests: XCTestCase {
 
     /// A host that predates guest transcripts: no Chat tab, the terminal as before.
     func testGuestHasNoChatTabOnAnOlderHost() {
-        let app = XCUIApplication.launched(mock: "guest")
-        XCTAssertTrue(app.buttons["guest-tab-terminal"].waitForExistence(timeout: 12)
-                      || app.terminalSurface.waitForExistence(timeout: 4))
+        let app = launch("guestpane")
+        XCTAssertTrue(app.otherElements["guest-terminal"].waitForExistence(timeout: 12))
         XCTAssertFalse(app.buttons["guest-tab-chat"].exists, "no capability, no Chat tab")
-        XCTAssertFalse(app.otherElements["chat-view"].exists)
+        XCTAssertFalse(app.scrollViews["chat-view"].exists)
+    }
+
+    // MARK: - Screenshots
+
+    /// The mockups' four screens (iPhone/iPad × own/shared), for the visual comparison.
+    /// Not still, so the iPad sidebar shows keephair working as in the mockup; the guest's
+    /// host also offers Gram (its tab and unread badge are in the mockup).
+    func testScreenshotOwnChat() {
+        let app = launch("chatview", still: false)
+        openAgent("herdr-app", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-ask"].waitForExistence(timeout: 10))
+        sleep(2)
+        attach(app, "shot-own")
+    }
+
+    func testScreenshotSharedChat() {
+        let app = launch("guestchat", ["HERDR_MOCK_GUEST_FEATURES": "gram"], still: false)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-ask-waiting"].waitForExistence(timeout: 15))
+        sleep(2)
+        attach(app, "shot-guest")
     }
 }

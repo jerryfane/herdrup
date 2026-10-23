@@ -122,7 +122,7 @@ final class ChatMockConversation: @unchecked Sendable {
 
     /// Older filler turns first (so there is history to page in), then the mockup's turns.
     private func buildTurns() -> [[[String: Any]]] {
-        let fillerCount = 22
+        let fillerCount = 40
         var turns: [[[String: Any]]] = (0..<fillerCount).map { index in
             let at = Self.daysAgo(fillerCount - index + 1, hour: 11, minute: 15)
             let n = index + 1
@@ -322,13 +322,18 @@ struct ChatMockTransport: HerdrTransport {
         base.stream(requestLine)
     }
 
+    /// `HERDR_MOCK_STILL=1`: no agent reads working. A working row's spinner animates
+    /// forever, which keeps XCUITest from ever seeing the app idle.
+    private static let still = ProcessInfo.processInfo.environment["HERDR_MOCK_STILL"] == "1"
+
     /// herdr-app (omp, waiting on the question; working once answered), a Claude agent and a
     /// second omp agent, as in the iPad mockup's sidebar.
     private static var agentsJSON: String {
-        let status = ChatMockConversation.owner.isAnswered ? "working" : "blocked"
+        let working = still ? "idle" : "working"
+        let status = ChatMockConversation.owner.isAnswered ? working : "blocked"
         return [
             #"{"pane_id":"\#(paneID)","name":"herdr-app","agent":"omp","agent_status":"\#(status)","cwd":"/root/herdr","terminal_title_stripped":"Merge #305 and update the servers?"}"#,
-            #"{"pane_id":"w9:p2","name":"keephair","agent":"claude","agent_status":"working","cwd":"/root/keephair-repo","terminal_title_stripped":"Running the iPad tests"}"#,
+            #"{"pane_id":"w9:p2","name":"keephair","agent":"claude","agent_status":"\#(working)","cwd":"/root/keephair-repo","terminal_title_stripped":"Running the iPad tests"}"#,
             #"{"pane_id":"w9:p3","name":"llm-opt","agent":"omp","agent_status":"idle","cwd":"/root/llm-opt","terminal_title_stripped":"Bench results posted"}"#,
         ].joined(separator: ",")
     }

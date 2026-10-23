@@ -158,7 +158,7 @@ struct GuestMockTransport: HerdrTransport {
         switch method {
         case "ping":
             if Self.chat {
-                return #"{"id":"\#(id)","result":{"type":"pong","capabilities":{"agent_transcript":true}}}"#
+                return #"{"id":"\#(id)","result":{"type":"pong","version":"0.9.4","protocol":22,"capabilities":{"agent_transcript":true}}}"#
             }
             return #"{"id":"\#(id)","result":{"type":"pong"}}"#
         case "agent.transcript":

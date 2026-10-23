@@ -207,6 +207,8 @@ struct ChatView: View {
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
+    /// The top of the list is within reach (40 pt) of the viewport's top.
+    @State private var topVisible = false
 
     private static let scrollSpace = "chat-scroll"
     private static let bottomID = "chat-bottom"
@@ -387,10 +389,11 @@ struct ChatView: View {
         .onGeometryChange(for: Bool.self) { proxyGeometry in
             proxyGeometry.frame(in: .named(Self.scrollSpace)).maxY > -40
         } action: { visible in
+            topVisible = visible
             if visible { loadOlder(proxy) }
         }
         // `landed` flips after the first scroll; the sentinel may already be on screen.
-        .onChange(of: landed) { _, _ in loadOlder(proxy) }
+        .onChange(of: landed) { _, _ in if topVisible { loadOlder(proxy) } }
     }
 
     /// Fetches the next older page and keeps the row that was on top where it was.
@@ -594,6 +597,7 @@ struct ChatView: View {
                 HStack(spacing: 8) {
                     Image(systemName: item.done ? "checkmark" : "circle")
                         .font(.system(size: item.done ? 11 : 10, weight: .semibold))
+                        .foregroundStyle(item.done ? ChatStyle.ok : Palette.textDim)
                         .frame(width: 14)
                     Text(item.text).font(Typography.app(14))
                         .strikethrough(item.done, color: Palette.textFaint.opacity(0.6))
