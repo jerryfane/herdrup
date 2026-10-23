@@ -150,7 +150,7 @@ import json, sys
 try:
     data = json.load(sys.stdin)
 except ValueError:
-    print("::error::no readable result bundle to check the terminal classes against")
+    print("::error::no readable result bundle to check " + ", ".join(sys.argv[1:]) + " against")
     sys.exit(1)
 ran = set()
 def walk(node, suite):
@@ -164,7 +164,7 @@ for node in data.get("testNodes", []):
     walk(node, None)
 missing = [name for name in sys.argv[1:] if name not in ran]
 for name in missing:
-    print(f"::error::{name} executed no tests; it would run in neither iPhone shard")
+    print(f"::error::{name} executed no tests in this round; the listed name no longer matches a class, so that class falls through to the iphone-app catch-all round")
 sys.exit(1 if missing else 0)
 ' "$@"
 }
