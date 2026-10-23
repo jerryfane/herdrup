@@ -29,8 +29,12 @@ enum AskPushAnswer {
         defer { if background != .invalid { UIApplication.shared.endBackgroundTask(background) } }
 
         let candidates = loadRoutes().candidates(machineID: ask.machineID, onlySavedHost: onlySavedHost())
+        // iOS gives a background action about 30 s, and one unreachable host can take its
+        // whole 15 s connect timeout, so no new host is tried once that would overrun.
+        let deadline = Date().addingTimeInterval(14)
         let outcome = await AskAnswerOutcome.resolve(candidates: candidates) { endpoint in
-            await attempt(ask, option: option, through: endpoint)
+            guard Date() < deadline else { return .unreachable }
+            return await attempt(ask, option: option, through: endpoint)
         }
         await post(outcome, for: ask, option: option)
     }

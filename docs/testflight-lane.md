@@ -84,6 +84,20 @@ uploads; a plain run is a signing dry-run.
 The bundle id, the shared distribution certificate, and the `Herdrup App Store` profile
 are created via the ASC API on Linux, not by hand.
 
+The app embeds two extensions, each signed with its own App Store profile in the
+`Distribution` configuration (project.yml), and each needs an explicit entry in the
+export options' `provisioningProfiles` and the same `CFBundleVersion` as the app:
+
+| Target | Bundle id | Profile |
+|---|---|---|
+| `HerdrWidgets` (Live Activity) | `com.jerryfane.herdr.widgets` | `Herdrup Widgets App Store` |
+| `HerdrNotificationService` (question buttons, #483) | `com.jerryfane.herdr.notificationservice` | `Herdrup Notification Service App Store` |
+
+Neither extension needs a capability: the notification service extension registers its
+categories through the shared notification center, with no App Group. testflight.yml
+provisions, exports and stamps the widget only; until it does the same for the
+notification service extension, the `Distribution` archive cannot sign that extension.
+
 ## Verification
 
 - Every change must keep the buildbox iphonesimulator build green at the exact head (the
