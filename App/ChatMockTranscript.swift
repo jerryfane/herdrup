@@ -1,6 +1,26 @@
 #if DEBUG
 import Foundation
 import HerdrKit
+import SwiftUI
+
+/// The `chatview` mock's root: the Agents home over `ChatMockTransport`, with the omp agent
+/// `herdr-app` blocked on a question. Each launch starts from the Settings default named by
+/// `HERDR_MOCK_CHAT_OPENS_IN` (`chat` unless set), so one test's choice can't leak into the next.
+struct ChatViewMockHome: View {
+    private static let freshPreference: Void = UserDefaults.standard.set(
+        ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_OPENS_IN"] ?? ChatPreference.chat,
+        forKey: ChatPreference.key)
+
+    @State private var client: HerdrClient = {
+        _ = ChatViewMockHome.freshPreference
+        return HerdrClient(transport: ChatMockTransport())
+    }()
+
+    var body: some View {
+        TerminalHomeView(client: client, onDisconnect: {}, onTrustHostKey: { _ in false },
+                         livePaneIDs: [ChatMockTransport.paneID, "w9:p2", "w9:p3"])
+    }
+}
 
 /// The `chatview` screenshot mock and UI-test host: a synthetic omp conversation served as
 /// `agent.transcript` pages, the way herdr pages a session file (turns, newest page first,

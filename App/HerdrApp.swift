@@ -619,6 +619,10 @@ struct RootView: View {
             GuestPaneMockHost(
                 scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked
                     : mode == .guestOldHost ? .oldHost : .running)
+        case .chatView:
+            ChatViewMockHome()
+        case .guestChat:
+            GuestPaneMockHost(scenario: .running)
         }
     }
 
@@ -9372,6 +9376,9 @@ enum ScreenshotMock {
     case archivedClose
     // The Agents home on a machine with three running herdr sessions: the session pills (#347).
     case sessions
+    // The omp Chat view (#481): the Agents home over `ChatMockTransport`, and a guest's
+    // shared omp agent with its Chat tab (#482).
+    case chatView, guestChat
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9445,6 +9452,11 @@ enum ScreenshotMock {
         case "guestblocked": return .guestBlocked
         // A host older than guest resizing: it refuses the guest's `pane.set_pty_size`.
         case "guestoldhost": return .guestOldHost
+        // `chatview`: the owner's Agents home whose omp agent opens in Chat, over a synthetic
+        // paged transcript (`ChatMockTransport`). `guestchat`: the guest's view-only pane of a
+        // shared omp agent on a host that serves guests its transcript.
+        case "chatview": return .chatView
+        case "guestchat": return .guestChat
         default: return .list
         }
     }
