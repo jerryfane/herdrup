@@ -53,12 +53,18 @@ final class GuestUploadResilienceTests: XCTestCase {
         XCTAssertEqual(staged, payload)
     }
 
-    func testAChunkTheHostRefusedIsNotResent() async throws {
+    func testAChunkTheHostRefusedAfterADroppedConnectionIsNotResentAgain() async throws {
         let chunk = HerdrClient.gramUploadChunkBytes
         let (url, _) = try file(chunk * 3)
+        var dropped = false
+        let lock = NSLock()
         let transport = RecordingTransport { method, params in
             guard method == "gram.upload_chunk", params["offset"] as? Int == chunk else {
                 return RecordingTransport.okResult
+            }
+            // The first try loses its connection; the resend reaches the host, which refuses it.
+            if lock.withLock({ defer { dropped = true }; return !dropped }) {
+                throw TransportError.closedBeforeResponse
             }
             return RecordingTransport.errorReply(code: "gram_file_error", message: "offset mismatch")
         }
@@ -69,7 +75,8 @@ final class GuestUploadResilienceTests: XCTestCase {
         } catch let error as APIError {
             XCTAssertEqual(error.code, "gram_file_error")
         }
-        XCTAssertEqual(chunks(transport).map(\.offset), [0, chunk])
+        XCTAssertEqual(chunks(transport).map(\.offset), [0, chunk, chunk],
+                       "resent once for the dropped connection, never for the host's refusal")
     }
 
     func testAChunkIsSentAtMostFourTimesThenTheConnectionErrorSurfaces() async throws {
