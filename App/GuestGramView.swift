@@ -2,8 +2,9 @@ import HerdrKit
 import SwiftUI
 import UIKit
 
-/// The two tabs of a guest's agent screen. Gram shows only when the owner shares it.
-enum GuestPaneTab: Hashable { case terminal, gram }
+/// The tabs of a guest's agent screen. Gram shows only when the owner shares it; Chat only
+/// for an omp agent on a host that serves guests its transcript (#482).
+enum GuestPaneTab: Hashable { case chat, terminal, gram }
 
 /// A guest's Gram for the shared agent (herdrup#338): the agent's Grams since the grant and
 /// the guest's own posts, newest first, with the guest's own read marks. The state and its
