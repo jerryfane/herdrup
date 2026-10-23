@@ -652,11 +652,64 @@ public actor HerdrClient {
         }
     }
 
-    /// Raw bytes per upload chunk. The SSH transport caps a whole request command
-    /// near 120 KB, and the request JSON is base64'd twice on the way out (the
+    /// Raw bytes per upload chunk on the SSH transport, and the default
+    /// `HerdrTransport.gramUploadChunkBytes`. The SSH transport caps a whole request
+    /// command near 120 KB, and the request JSON is base64'd twice on the way out (the
     /// inner `data_base64`, then the argv itself), a ~1.78x expansion. 48 KiB raw
     /// lands around 87 KB of command — safely under the cap with headroom.
     static let gramUploadChunkBytes = 48 * 1024
+
+    /// The pauses before each resend of a chunk whose connection failed: three
+    /// resends, so a chunk gets four attempts.
+    static let gramChunkRetryDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(3)]
+
+    /// True when a request died with its connection, so the host either never saw it or
+    /// answered into a closed socket: the relay or host closed the socket, the host was
+    /// offline or busy, the connection dropped or timed out, or it closed before the
+    /// reply. A host's own answer (`APIError`) and a refused or failed handshake are not.
+    static func isDroppedConnection(_ error: Error) -> Bool {
+        switch error {
+        case let guest as GuestError:
+            switch guest {
+            case .connectionClosed, .hostOffline, .hostBusy: return true
+            default: return false
+            }
+        case let transport as TransportError:
+            switch transport {
+            case .closedBeforeResponse, .requestTimedOut: return true
+            default: return false
+            }
+        case is URLError:
+            return true
+        default:
+            // URLSession reports a dropped WebSocket as a POSIX socket error.
+            return (error as NSError).domain == NSPOSIXErrorDomain
+        }
+    }
+
+    /// One `gram.upload_chunk`. A chunk whose connection failed is sent again, the
+    /// SAME bytes at the SAME offset under the SAME `upload_id`, up to
+    /// `gramChunkRetryDelays.count` more times: the daemon accepts an exact replay of
+    /// a chunk it already committed (a lost reply) and appends one it never got, so the
+    /// upload resumes rather than restarting from offset 0 under a new id. An error the
+    /// daemon answered with is thrown at once.
+    private func gramUploadChunk(uploadID: String, offset: UInt64, dataBase64: String) async throws {
+        var delays = Self.gramChunkRetryDelays[...]
+        while true {
+            do {
+                _ = try await call(
+                    "gram.upload_chunk",
+                    GramUploadChunkParams(uploadID: uploadID, offset: offset, dataBase64: dataBase64),
+                    as: JSONNull.self)
+                return
+            } catch {
+                guard !Task.isCancelled, Self.isDroppedConnection(error), let delay = delays.popFirst() else {
+                    throw error
+                }
+                try await Task.sleep(for: delay)
+            }
+        }
+    }
 
     /// Raw bytes per streamed frame. The streaming path has no argv, so the
     /// 120 KB command cap does not apply; this is the daemon's own
@@ -699,7 +752,9 @@ public actor HerdrClient {
     /// Streams over one held channel when the daemon advertises
     /// `gram_upload_stream`, else falls back to per-chunk `gram.upload_chunk` —
     /// still reading from disk, so neither path holds the whole file in memory
-    /// and a 100 MB attachment costs one chunk of resident bytes.
+    /// and a 100 MB attachment costs one chunk of resident bytes. Per-chunk, the
+    /// chunk size is the transport's (`HerdrTransport.gramUploadChunkBytes`), and a
+    /// chunk whose connection failed is resent at its offset (`gramUploadChunk`).
     ///
     /// `onProgress` (if given) is called on the main actor with
     /// `(bytesSent, totalBytes)` — once at 0, then throttled to ~1% steps, and
@@ -746,7 +801,7 @@ public actor HerdrClient {
         }
         defer { if let channel { Task { await channel.close() } } }
 
-        let chunkBytes = streaming ? Self.gramStreamChunkBytes : Self.gramUploadChunkBytes
+        let chunkBytes = streaming ? Self.gramStreamChunkBytes : transport.gramUploadChunkBytes
 
         // Report at most ~once per 1% (or per chunk, whichever is coarser) so a
         // big file's round-trips don't schedule thousands of UI updates. The total is
@@ -762,11 +817,7 @@ public actor HerdrClient {
             if streaming, let channel {
                 try await channel.sendChunk(offset: UInt64(offset), dataBase64: encoded)
             } else {
-                _ = try await call(
-                    "gram.upload_chunk",
-                    GramUploadChunkParams(
-                        uploadID: uploadID, offset: UInt64(offset), dataBase64: encoded),
-                    as: JSONNull.self)
+                try await gramUploadChunk(uploadID: uploadID, offset: UInt64(offset), dataBase64: encoded)
             }
             offset += chunk.count
             // Throttle ONLY: no `offset >= total` disjunct. That condition is

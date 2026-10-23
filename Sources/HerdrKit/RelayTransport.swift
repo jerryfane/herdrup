@@ -23,6 +23,17 @@ public protocol RelaySocket: Sendable {
 
 public protocol RelaySocketConnector: Sendable {
     func connect(to url: URL) -> RelaySocket
+    /// The longest one `RelayTransport.roundTrip` may take, from opening its socket to
+    /// the reply line. Past it the socket is closed — even while it still waits for the
+    /// upgrade or the host's handshake reply — and the call fails with
+    /// `TransportError.requestTimedOut`. A `stream` has no limit.
+    var roundTripLimit: Duration { get }
+}
+
+extension RelaySocketConnector {
+    /// Every guest call is one short request, and the largest is one upload chunk
+    /// (`RelayTransport.gramUploadChunkBytes`), so a minute only ends a call that is stuck.
+    public var roundTripLimit: Duration { .seconds(60) }
 }
 
 /// Where a guest connects: the relay, the host's relay id, and the host's static key.
@@ -157,6 +168,24 @@ public struct RelayTransport: HerdrTransport {
     /// A returning guest's message-1 payload.
     static let returningHello = Data(#"{"v":1}"#.utf8)
 
+    /// Raw bytes per `gram.upload_chunk` over the relay: 256 KiB. Every relay call is its
+    /// own WebSocket and Noise handshake, so the SSH-sized 48 KiB chunk made a 6 MB
+    /// photo 123 connections. The SSH argv cap behind 48 KiB does not apply here; the
+    /// host's limits do, and this size keeps clear of each:
+    /// - base64 makes the request line about 349.7 KB, which `encryptChunked` splits
+    ///   into 6 Noise messages of at most 65,535 B (the relay caps a message at 70,000 B);
+    /// - the host closes a session that has 32 undelivered messages queued
+    ///   (`overloaded`), and 6 fit even if it delivers none before the last arrives;
+    /// - the guest gate accepts at most 512 KiB decoded per chunk (this is half), and
+    ///   the API reads at most 1 MiB per request line (this is a third);
+    /// - the API must receive the whole line within 5 s of its first message, so the
+    ///   phone's uplink needs about 70 KB/s (0.56 Mbit/s). 384 KiB would need
+    ///   0.84 Mbit/s, which a weak cellular uplink does not always sustain.
+    /// A 6 MB photo is 23 connections.
+    static let gramUploadChunkBytes = 256 * 1024
+
+    public var gramUploadChunkBytes: Int { Self.gramUploadChunkBytes }
+
     public init(endpoint: RelayEndpoint, identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
                 onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil) {
         self.endpoint = endpoint
@@ -165,15 +194,48 @@ public struct RelayTransport: HerdrTransport {
         self.onFeatures = onFeatures
     }
 
-    private func open() async throws -> RelaySession {
+    private func open(through connector: RelaySocketConnector) async throws -> RelaySession {
         let session = try await RelaySession.open(
             endpoint: endpoint, identity: identity, hello: Self.returningHello, connector: connector)
         onFeatures?(GuestFeatures(helloReply: session.reply))
         return session
     }
 
+    /// Fails with `TransportError.requestTimedOut` after the connector's `roundTripLimit`
+    /// and closes the call's socket. Without a limit, a connection whose upgrade or
+    /// handshake reply never came left the call (and an upload behind it) waiting forever.
+    /// The wait does not depend on the socket honouring the close: the call answers on
+    /// the deadline (or its cancellation) either way.
     public func roundTrip(_ requestLine: String) async throws -> String {
-        let session = try await open()
+        let sockets = ClosableConnector(connector)
+        let outcome = FirstOutcome<String>()
+        let work = Task {
+            do {
+                outcome.offer(.success(try await exchange(requestLine, through: sockets)))
+            } catch {
+                outcome.offer(.failure(error))
+            }
+        }
+        let end = { @Sendable (error: Error) in
+            guard outcome.offer(.failure(error)) else { return }
+            sockets.close()
+            work.cancel()
+        }
+        let expired = TransportError.requestTimedOut(host: endpoint.relay.host ?? endpoint.relay.absoluteString)
+        let timer = Task { [limit = connector.roundTripLimit] in
+            guard (try? await Task.sleep(for: limit)) != nil else { return }
+            end(expired)
+        }
+        defer { timer.cancel() }
+        return try await withTaskCancellationHandler {
+            try await outcome.value()
+        } onCancel: {
+            end(CancellationError())
+        }
+    }
+
+    private func exchange(_ requestLine: String, through connector: RelaySocketConnector) async throws -> String {
+        let session = try await open(through: connector)
         defer { session.close() }
         try await session.sendLine(requestLine)
         var lines = LineAccumulator()
@@ -189,7 +251,7 @@ public struct RelayTransport: HerdrTransport {
             let holder = SessionHolder()
             let task = Task {
                 do {
-                    let session = try await open()
+                    let session = try await open(through: connector)
                     guard holder.adopt(session) else { continuation.finish(); return }
                     try await session.sendLine(requestLine)
                     var lines = LineAccumulator()
@@ -263,6 +325,72 @@ private final class SessionHolder: @unchecked Sendable {
             return self.session
         }
         session?.close()
+    }
+}
+
+/// Opens one call's socket through `base` and lets the call's deadline close it, even
+/// before `RelaySession.open` has a session to close. A socket opened after the close
+/// is closed at once.
+private final class ClosableConnector: RelaySocketConnector, @unchecked Sendable {
+    private let base: RelaySocketConnector
+    private let lock = NSLock()
+    private var socket: RelaySocket?
+    private var closed = false
+
+    init(_ base: RelaySocketConnector) {
+        self.base = base
+    }
+
+    var roundTripLimit: Duration { base.roundTripLimit }
+
+    func connect(to url: URL) -> RelaySocket {
+        let socket = base.connect(to: url)
+        let late = lock.withLock { () -> Bool in
+            if closed { return true }
+            self.socket = socket
+            return false
+        }
+        if late { socket.close() }
+        return socket
+    }
+
+    func close() {
+        let socket = lock.withLock { () -> RelaySocket? in
+            closed = true
+            defer { self.socket = nil }
+            return self.socket
+        }
+        socket?.close()
+    }
+}
+
+/// The first result offered wins and is what `value()` returns; later offers are dropped.
+private final class FirstOutcome<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Value, Error>?
+    private var waiter: CheckedContinuation<Value, Error>?
+
+    /// True when `result` is the first offer.
+    @discardableResult
+    func offer(_ result: Result<Value, Error>) -> Bool {
+        let (first, waiter) = lock.withLock { () -> (Bool, CheckedContinuation<Value, Error>?) in
+            guard self.result == nil else { return (false, nil) }
+            self.result = result
+            defer { self.waiter = nil }
+            return (true, self.waiter)
+        }
+        waiter?.resume(with: result)
+        return first
+    }
+
+    func value() async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            let ready = lock.withLock { () -> Result<Value, Error>? in
+                if result == nil { waiter = continuation }
+                return result
+            }
+            if let ready { continuation.resume(with: ready) }
+        }
     }
 }
 

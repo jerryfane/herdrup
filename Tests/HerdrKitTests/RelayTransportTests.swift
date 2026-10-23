@@ -54,8 +54,10 @@ final class FakeConnector: RelaySocketConnector, @unchecked Sendable {
     private let make: () -> FakeRelaySocket
     private(set) var urls: [URL] = []
     private(set) var sockets: [FakeRelaySocket] = []
+    let roundTripLimit: Duration
 
-    init(make: @escaping () -> FakeRelaySocket) {
+    init(roundTripLimit: Duration = .seconds(60), make: @escaping () -> FakeRelaySocket) {
+        self.roundTripLimit = roundTripLimit
         self.make = make
     }
 
