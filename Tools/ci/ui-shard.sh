@@ -81,27 +81,32 @@ boot_simulator() {
 # the home screen still showed the app as "Installing…". This only installs: nothing
 # launches the app, so each test's first launch is still the real XCTest launch.
 # xcodebuild installs the same build again; that install finds the system settled.
+# Every round that launches an app through XCUIApplication on a booted simulator does this:
+# run_suite (the Debug app) and the iPad Settings regression (the Distribution app).
+# swiftterm_api runs package unit tests in a test host, with no app for XCUITest to launch.
 APP_UNDER_TEST=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
+SETTINGS_APP_UNDER_TEST=.build-dd-settings-stack/Build/Products/Distribution-iphonesimulator/Herdr.app
 install_app_under_test() {
-  local udid="$1" log="$2" bundle_id start
-  if [ ! -d "$APP_UNDER_TEST" ]; then
-    echo "::error::app under test not found at $APP_UNDER_TEST"
+  local udid="$1" log="$2" app="${3:-$APP_UNDER_TEST}" bundle_id start
+  if [ ! -d "$app" ]; then
+    echo "::error::app under test not found at $app"
     return 1
   fi
-  bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || {
-    echo "::error::cannot read CFBundleIdentifier from $APP_UNDER_TEST"
+  bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist") || {
+    echo "::error::cannot read CFBundleIdentifier from $app"
     return 1
   }
   start=$(date +%s)
-  echo "$(date -u +%FT%TZ) install $bundle_id on $udid" >"$log"
+  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >"$log"
   if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
-      xcrun simctl install "$udid" "$APP_UNDER_TEST" >>"$log" 2>&1; then
+      xcrun simctl install "$udid" "$app" >>"$log" 2>&1; then
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
     return 1
   fi
   # simctl install returns when installd is done; the container proves the system has it.
-  if ! xcrun simctl get_app_container "$udid" "$bundle_id" app >>"$log" 2>&1; then
-    echo "::error::$bundle_id has no app container on $udid after install; see $log"
+  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 1m \
+      xcrun simctl get_app_container "$udid" "$bundle_id" app >>"$log" 2>&1; then
+    echo "::error::$bundle_id has no app container on $udid after install (or the query timed out); see $log"
     return 1
   fi
   echo "$(date -u +%FT%TZ) installed in $(( $(date +%s) - start )) s" | tee -a "$log"
@@ -233,6 +238,8 @@ PY
       exit 1
     fi
     label="SwiftTermUIKit-$device"
+    # No install_app_under_test here: these are package unit tests, and no XCUIApplication
+    # launches an app, so the cold-boot install race (#418) does not apply.
     boot_simulator "$udid" "../../TestReceipts/$label-boot.log" || exit 1
     if ! "$TIMEOUT_BIN" --signal=INT 15m xcodebuild test-without-building -scheme "$scheme" \
         -destination "platform=iOS Simulator,id=$udid" \
@@ -333,9 +340,14 @@ case "$shard" in
       failed=1
     elif ! boot_simulator "$IPAD_UDID" TestReceipts/settings-device-stack-boot.log; then
       failed=1
+    elif ! {
+        xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
+        xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
+        install_app_under_test "$IPAD_UDID" TestReceipts/settings-device-stack-install.log \
+          "$SETTINGS_APP_UNDER_TEST"
+      }; then
+      failed=1
     else
-      xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
-      xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr.uitests.xctrunner 2>/dev/null || true
       "$TIMEOUT_BIN" --signal=INT 40m xcodebuild test-without-building -xctestrun "${settings_runs[0]}" \
           -destination "platform=iOS Simulator,id=$IPAD_UDID" \
           -parallel-testing-enabled NO \
