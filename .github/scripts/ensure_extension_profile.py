@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Ensure an App Store distribution profile for the widget extension exists and is
-installed, so the manual Distribution archive can sign the widget target.
+"""Ensure an App Store distribution profile for each named app extension exists and is
+installed, so the manual Distribution archive can sign the extension targets.
 
-Option B (owner-approved, directive 61335/61376): create the profile via the App Store
+Usage: ensure_extension_profile.py TARGET [TARGET ...], TARGET being a key of TARGETS
+(`widgets`, `notificationservice`). Each target runs the same sequence on its own.
+
+Option B (owner-approved, directive 61335/61376 for the widget; extended to the
+notification service extension by the owner on 2026-10-23): create the profile via the App Store
 Connect API, reusing the team's EXISTING distribution certificate — no cloud signing,
 no owner portal step. Idempotent: reuses an existing active profile of the same name.
 
@@ -22,11 +26,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import jwt  # PyJWT (installed in the widget-signing venv)
+import jwt  # PyJWT (installed in the extension-signing venv)
 
-BUNDLE_ID = "com.jerryfane.herdr.widgets"
-BUNDLE_NAME = "Herdrup Widgets"
-PROFILE_NAME = "Herdrup Widgets App Store"
+# name -> what to ensure. `label` only names the target in log lines; `file` is the
+# installed profile's filename. No capabilities are enabled on either bundle id.
+TARGETS = {
+    "widgets": {
+        "bundle_id": "com.jerryfane.herdr.widgets",
+        "bundle_name": "Herdrup Widgets",
+        "profile_name": "Herdrup Widgets App Store",
+        "file": "herdr-widgets.mobileprovision",
+        "label": "widget",
+    },
+    "notificationservice": {
+        "bundle_id": "com.jerryfane.herdr.notificationservice",
+        "bundle_name": "Herdrup Notification Service",
+        "profile_name": "Herdrup Notification Service App Store",
+        "file": "herdr-notificationservice.mobileprovision",
+        "label": "notification service",
+    },
+}
 PROFILE_TYPE = "IOS_APP_STORE"
 DIST_TYPES = ("DISTRIBUTION", "IOS_DISTRIBUTION")
 BASE = "https://api.appstoreconnect.apple.com/v1"
@@ -74,23 +93,24 @@ def die(msg, payload=None):
     sys.exit(1)
 
 
-def ensure_bundle_id():
-    q = urllib.parse.quote(BUNDLE_ID)
+def ensure_bundle_id(t):
+    bundle_id, bundle_name = t["bundle_id"], t["bundle_name"]
+    q = urllib.parse.quote(bundle_id)
     st, r = api("GET", f"/bundleIds?filter[identifier]={q}&limit=1")
     if st != 200:
         die(f"ASC bundleIds query failed (HTTP {st}) — the key may lack "
             "Certificates/Identifiers access.", r)
     if r.get("data"):
         rid = r["data"][0]["id"]
-        print(f"bundle id exists: {BUNDLE_ID} ({rid})")
+        print(f"bundle id exists: {bundle_id} ({rid})")
         return rid
     st, r = api("POST", "/bundleIds", {"data": {"type": "bundleIds", "attributes": {
-        "identifier": BUNDLE_ID, "name": BUNDLE_NAME, "platform": "IOS"}}})
+        "identifier": bundle_id, "name": bundle_name, "platform": "IOS"}}})
     if st not in (200, 201):
-        die(f"could not CREATE bundle id {BUNDLE_ID} (HTTP {st}) — the ASC key likely "
-            "lacks permission. STOP and have the owner mint the widget profile.", r)
+        die(f"could not CREATE bundle id {bundle_id} (HTTP {st}) — the ASC key likely "
+            f"lacks permission. STOP and have the owner mint the {t['label']} profile.", r)
     rid = r["data"]["id"]
-    print(f"created bundle id: {BUNDLE_ID} ({rid})")
+    print(f"created bundle id: {bundle_id} ({rid})")
     return rid
 
 
@@ -107,24 +127,26 @@ def distribution_cert_ids():
     return ids
 
 
-def find_active_profile():
-    q = urllib.parse.quote(PROFILE_NAME)
+def find_active_profile(t):
+    profile_name = t["profile_name"]
+    q = urllib.parse.quote(profile_name)
     st, r = api("GET", f"/profiles?filter[name]={q}&limit=1")
     if st == 200 and r.get("data"):
         prof = r["data"][0]
         if prof.get("attributes", {}).get("profileState") == "ACTIVE":
-            print(f"reusing active profile: {PROFILE_NAME} ({prof['id']})")
+            print(f"reusing active profile: {profile_name} ({prof['id']})")
             return prof
         # Not active (expired/invalid) — remove so we can recreate cleanly.
         api("DELETE", f"/profiles/{prof['id']}")
-        print(f"deleted stale profile {PROFILE_NAME} ({prof['id']})")
+        print(f"deleted stale profile {profile_name} ({prof['id']})")
     return None
 
 
-def create_profile(bundle_rid, cert_ids):
+def create_profile(t, bundle_rid, cert_ids):
+    profile_name = t["profile_name"]
     body = {"data": {
         "type": "profiles",
-        "attributes": {"name": PROFILE_NAME, "profileType": PROFILE_TYPE},
+        "attributes": {"name": profile_name, "profileType": PROFILE_TYPE},
         "relationships": {
             "bundleId": {"data": {"type": "bundleIds", "id": bundle_rid}},
             "certificates": {"data": [{"type": "certificates", "id": cid} for cid in cert_ids]},
@@ -132,14 +154,14 @@ def create_profile(bundle_rid, cert_ids):
     }}
     st, r = api("POST", "/profiles", body)
     if st not in (200, 201):
-        die(f"could not CREATE the widget profile '{PROFILE_NAME}' (HTTP {st}) — the "
+        die(f"could not CREATE the {t['label']} profile '{profile_name}' (HTTP {st}) — the "
             "ASC key likely lacks permission. STOP and have the owner mint it.", r)
     prof = r["data"]
-    print(f"created profile: {PROFILE_NAME} ({prof['id']})")
+    print(f"created profile: {profile_name} ({prof['id']})")
     return prof
 
 
-def install(prof):
+def install(t, prof):
     content = prof.get("attributes", {}).get("profileContent")
     if not content:
         st, r = api("GET", f"/profiles/{prof['id']}")
@@ -147,20 +169,25 @@ def install(prof):
     if not content:
         die("the profile has no profileContent to install.", prof)
     os.makedirs(INSTALL_DIR, exist_ok=True)
-    out = os.path.join(INSTALL_DIR, "herdr-widgets.mobileprovision")
+    out = os.path.join(INSTALL_DIR, t["file"])
     with open(out, "wb") as f:
         f.write(base64.b64decode(content))
-    print(f"installed widget profile -> {out}")
+    print(f"installed {t['label']} profile -> {out}")
 
 
-def main():
+def main(names):
+    if not names or any(n not in TARGETS for n in names):
+        die(f"usage: {os.path.basename(sys.argv[0])} TARGET [TARGET ...] "
+            f"with TARGET in {', '.join(TARGETS)} (got: {' '.join(names) or 'none'})")
     global TOKEN
     TOKEN = make_token()
-    bundle_rid = ensure_bundle_id()
-    cert_ids = distribution_cert_ids()
-    prof = find_active_profile() or create_profile(bundle_rid, cert_ids)
-    install(prof)
+    for name in names:
+        t = TARGETS[name]
+        bundle_rid = ensure_bundle_id(t)
+        cert_ids = distribution_cert_ids()
+        prof = find_active_profile(t) or create_profile(t, bundle_rid, cert_ids)
+        install(t, prof)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

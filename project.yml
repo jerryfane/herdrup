@@ -403,7 +403,7 @@ targets:
   # HerdrKit: the app does the answering. Signing mirrors HerdrWidgets: unsigned in the
   # simulator builds, automatic for the Mac lane, and for the Distribution archive its own
   # App Store profile ("Herdrup Notification Service App Store", bundle id
-  # com.jerryfane.herdr.notificationservice), which must exist before CI can archive.
+  # com.jerryfane.herdr.notificationservice), created in CI like the widget's (testflight.yml).
   HerdrNotificationService:
     type: app-extension
     platform: iOS

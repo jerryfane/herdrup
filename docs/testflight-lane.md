@@ -95,8 +95,14 @@ export options' `provisioningProfiles` and the same `CFBundleVersion` as the app
 
 Neither extension needs a capability: the notification service extension registers its
 categories through the shared notification center, with no App Group. testflight.yml
-provisions, exports and stamps the widget only; until it does the same for the
-notification service extension, the `Distribution` archive cannot sign that extension.
+handles both the same way (Option B, owner-approved; the notification service extension
+was added by the owner on 2026-10-23): `.github/scripts/ensure_extension_profile.py
+widgets notificationservice` creates each explicit App ID if missing (team FXQ5Z9HHY6,
+no capabilities), reuses or creates its App Store profile with the existing Apple
+Distribution certificate, and installs it; the generated `ExportOptions.plist` names
+both profiles; and the build-number step stamps `CFBundleVersion` into
+`HerdrWidgets/Info.plist` and `HerdrNotificationService/Info.plist`. If the ASC key
+cannot create an App ID or profile, that step fails loudly and the owner mints it.
 
 ## Verification
 
