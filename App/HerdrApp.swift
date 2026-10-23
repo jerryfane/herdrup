@@ -397,17 +397,27 @@ struct RootView: View {
     /// client and a token. Idempotent + fire-and-forget — a server without the method just throws.
     /// The relay capability rides along when enrollment succeeded (usually from cache); without it
     /// the token is still registered, so a machine with its own APNs key keeps pushing.
-    private func registerPush(with explicitClient: HerdrClient? = nil) {
+    private func registerPush(with explicitClient: HerdrClient? = nil, credentials explicitCredentials: SSHCredentials? = nil) {
         // Prefer the client the caller JUST built (connect/reconnect pass it in) over the @State
         // `client`, which the SwiftUI setter may not have published through yet on the same tick.
         guard let client = explicitClient ?? self.client, let token = push.deviceToken else { return }
+        let routeCredentials = explicitCredentials ?? credentials
         Task { @MainActor in
             let capability = await PushCenter.relay.capability(kind: .device, token: token)
             // Read the prefs AFTER enrolling (which can take up to its timeout), so a toggle
             // flipped meanwhile is not overwritten by this call's older snapshot.
             let p = PushCenter.Prefs.current
             let muted = Array(MuteStore.shared.mutedPanes)
-            try? await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram, mutedPanes: muted, relayCapability: capability)
+            do {
+                try await client.registerDevice(token: token, needsInput: p.needsInput, dies: p.dies, finishes: p.finishes, gram: p.gram, mutedPanes: muted, relayCapability: capability)
+            } catch {
+                return
+            }
+            // This daemon may now push questions with answer buttons (#483); they name it by its
+            // install id, so remember which connection reaches that id for when one is pressed.
+            guard let routeCredentials,
+                  let machineID = try? await client.agentListing().originMachineID else { return }
+            AskPushAnswer.recordRoute(machineID: machineID, credentials: routeCredentials)
         }
     }
 
@@ -702,7 +712,7 @@ struct RootView: View {
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             revealHome(generation: generation)
         }
-        registerPush(with: newClient)   // re-send a cached token to the freshly-connected server
+        registerPush(with: newClient, credentials: creds)   // re-send a cached token to the freshly-connected server
         registerActivityPush(with: newClient)   // and any existing Live Activity token (reclaimed activity)
         // Request the notification permission PROMPT here — push can now actually deliver: the build
         // carries the aps-environment entitlement AND the server runs the 2c APNs sender. This is the
@@ -764,7 +774,7 @@ struct RootView: View {
         transport = newTransport
         client = newClient
         session += 1
-        registerPush(with: newClient)   // the reconnect built a fresh client actor — re-register the token with it
+        registerPush(with: newClient, credentials: creds)   // the reconnect built a fresh client actor — re-register the token with it
         registerActivityPush(with: newClient)   // re-register the Live Activity token with the fresh client too
     }
 
@@ -789,7 +799,7 @@ struct RootView: View {
         transport = scoped
         client = newClient
         session += 1
-        registerPush(with: newClient)          // each session is its own herdr server
+        registerPush(with: newClient, credentials: creds)      // each session is its own herdr server
         registerActivityPush(with: newClient)
     }
 

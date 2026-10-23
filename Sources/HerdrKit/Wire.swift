@@ -462,23 +462,29 @@ struct AgentListResult: Decodable {
     /// The answering daemon's own `ping` capabilities. Absent on daemons that
     /// predate the field.
     let originCapabilities: ServerCapabilities?
+    /// The answering daemon's install id. Absent on daemons that predate the field.
+    let originMachineID: String?
 
     enum CodingKeys: String, CodingKey {
         case agents
         case originCapabilities = "origin_capabilities"
+        case originMachineID = "origin_machine_id"
     }
 }
 
 /// `agent.list` with the answering daemon's capabilities (`origin_capabilities`).
 /// `originCapabilities` is nil on a daemon that predates the field; `ping` is the
-/// fallback there.
+/// fallback there. `originMachineID` is the install id a question push names as its
+/// `machine_id`, which is how a lock-screen answer finds its way back to this daemon.
 public struct AgentListing: Sendable, Equatable {
     public let agents: [AgentInfo]
     public let originCapabilities: ServerCapabilities?
+    public let originMachineID: String?
 
-    public init(agents: [AgentInfo], originCapabilities: ServerCapabilities?) {
+    public init(agents: [AgentInfo], originCapabilities: ServerCapabilities?, originMachineID: String? = nil) {
         self.agents = agents
         self.originCapabilities = originCapabilities
+        self.originMachineID = originMachineID
     }
 }
 

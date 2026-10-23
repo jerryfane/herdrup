@@ -83,5 +83,15 @@ let package = Package(
             name: "HerdrKitIsolationTests",
             dependencies: ["HerdrKit"],
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]),
+        // The question-push logic behind the lock-screen buttons (#483). Like AgentActivityState
+        // above, nothing links this product: the app and the notification service
+        // extension compile these files as sources (the extension only AskPush.swift, so
+        // it stays free of HerdrKit's SSH stack). The target exists so Linux CI tests them.
+        .target(
+            name: "AskPush",
+            path: "AskPush"),
+        .testTarget(
+            name: "AskPushTests",
+            dependencies: ["AskPush"]),
     ]
 )

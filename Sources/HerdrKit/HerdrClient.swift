@@ -81,7 +81,8 @@ public actor HerdrClient {
     /// extra `ping`.
     public func agentListing() async throws -> AgentListing {
         let result = try await call("agent.list", EmptyParams(), as: AgentListResult.self)
-        return AgentListing(agents: result.agents, originCapabilities: result.originCapabilities)
+        return AgentListing(agents: result.agents, originCapabilities: result.originCapabilities,
+                            originMachineID: result.originMachineID)
     }
 
     private struct MachineStatusResult: Decodable {
