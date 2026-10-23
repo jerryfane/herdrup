@@ -1656,6 +1656,46 @@ public actor HerdrClient {
         }
     }
 
+    // MARK: - omp Chat view (agent.transcript / agent.answer)
+
+    /// One page of an omp agent's conversation (`agent.transcript`), oldest entry first.
+    /// `before` pages back from an older page's cursor; `after` returns what was appended
+    /// (or changed) since a page's `after` cursor; neither asks for the newest turns.
+    /// `limit` counts turns and is clamped to the server's 1...50.
+    ///
+    /// The refusals the view acts on are typed (`AgentTranscriptError`); an older server
+    /// that cannot deserialize the method reports `.unsupported` like a non-omp agent.
+    public func agentTranscript(
+        target: String, before: String? = nil, after: String? = nil, limit: UInt32? = nil
+    ) async throws -> AgentTranscriptPage {
+        let params = AgentTranscriptParams(target: target, before: before, after: after,
+                                           limit: limit.map { min(max($0, 1), 50) })
+        do {
+            return try await call("agent.transcript", params, as: AgentTranscriptPage.self)
+        } catch let error as APIError {
+            switch error.code {
+            case "agent_not_found": throw AgentTranscriptError.agentNotFound
+            case "transcript_unsupported": throw AgentTranscriptError.unsupported
+            case "transcript_unavailable": throw AgentTranscriptError.unavailable
+            case "cursor_expired": throw AgentTranscriptError.cursorExpired
+            case "invalid_request"
+                where error.message.lowercased().contains("unknown variant")
+                    && error.message.contains("agent.transcript"):
+                throw AgentTranscriptError.unsupported
+            default: throw error
+            }
+        }
+    }
+
+    /// Answer omp's pending `ask` question by picking `option` (`agent.answer`). Server
+    /// refusals arrive as the plain `APIError` (`ask_not_pending`, `ask_unsupported`,
+    /// `ask_ui_not_found`, `selection_mismatch`, `forbidden`).
+    public func agentAnswer(target: String, askID: String, option: String) async throws -> AgentAnswerStatus {
+        try await call("agent.answer",
+                       AgentAnswerParams(target: target, askID: askID, option: option),
+                       as: AgentAnswerResult.self).status
+    }
+
     // MARK: - Guest access (owner)
 
     /// Create a one-use invite for a live agent (`guest.invite.create`). `target` is the

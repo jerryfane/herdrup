@@ -1,0 +1,231 @@
+import Foundation
+
+/// The block structure of an omp reply, for the Chat view to lay out natively: paragraphs,
+/// headings, lists, fenced code, GitHub tables, quotes and rules. Inline styling (bold,
+/// italic, inline code, links) stays in each block's text for the view to render; only the
+/// block split — the part with real logic — lives here, where it is unit-tested on Linux.
+public enum ChatMarkdownBlock: Equatable, Sendable {
+    case paragraph(String)
+    case heading(level: Int, String)
+    /// Items keep their own inline markdown. `start` is the first number of an ordered list.
+    case list(ordered: Bool, start: Int, items: [ChatMarkdownListItem])
+    case code(language: String?, String)
+    case table(header: [String], rows: [[String]])
+    case quote(String)
+    case rule
+}
+
+public struct ChatMarkdownListItem: Equatable, Sendable {
+    public let text: String
+    /// Nesting depth, 0 for a top-level item (two spaces or a tab per level).
+    public let depth: Int
+    /// `- [x]` / `- [ ]` task items.
+    public let checked: Bool?
+
+    public init(text: String, depth: Int = 0, checked: Bool? = nil) {
+        self.text = text
+        self.depth = depth
+        self.checked = checked
+    }
+}
+
+public enum ChatMarkdown {
+    public static func blocks(_ markdown: String) -> [ChatMarkdownBlock] {
+        let lines = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        var blocks: [ChatMarkdownBlock] = []
+        var paragraph: [String] = []
+        var i = 0
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            blocks.append(.paragraph(paragraph.joined(separator: "\n")))
+            paragraph = []
+        }
+
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                i += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                flushParagraph()
+                let fence = String(trimmed.prefix(3))
+                let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                var code: [String] = []
+                i += 1
+                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
+                    code.append(lines[i])
+                    i += 1
+                }
+                i += 1
+                blocks.append(.code(language: language.isEmpty ? nil : language, code.joined(separator: "\n")))
+                continue
+            }
+
+            if isRule(trimmed) {
+                flushParagraph()
+                blocks.append(.rule)
+                i += 1
+                continue
+            }
+
+            if let (level, text) = heading(trimmed) {
+                flushParagraph()
+                blocks.append(.heading(level: level, text))
+                i += 1
+                continue
+            }
+
+            if trimmed.contains("|"), i + 1 < lines.count,
+               isTableSeparator(lines[i + 1].trimmingCharacters(in: .whitespaces)) {
+                flushParagraph()
+                let header = cells(trimmed)
+                var rows: [[String]] = []
+                i += 2
+                while i < lines.count {
+                    let row = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard !row.isEmpty, row.contains("|") else { break }
+                    var cells = cells(row)
+                    // Pad or cut to the header's width so the grid stays rectangular.
+                    if cells.count < header.count { cells += Array(repeating: "", count: header.count - cells.count) }
+                    rows.append(Array(cells.prefix(header.count)))
+                    i += 1
+                }
+                blocks.append(.table(header: header, rows: rows))
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                var quoted: [String] = []
+                while i < lines.count {
+                    let q = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard q.hasPrefix(">") else { break }
+                    quoted.append(String(q.dropFirst()).trimmingCharacters(in: .whitespaces))
+                    i += 1
+                }
+                blocks.append(.quote(quoted.joined(separator: "\n")))
+                continue
+            }
+
+            if let first = listItem(line) {
+                flushParagraph()
+                var items = [first.item]
+                i += 1
+                while i < lines.count {
+                    let next = lines[i]
+                    if next.trimmingCharacters(in: .whitespaces).isEmpty {
+                        // A blank line inside a list continues it only if another item follows.
+                        if i + 1 < lines.count, let after = listItem(lines[i + 1]), after.ordered == first.ordered {
+                            i += 1
+                            continue
+                        }
+                        break
+                    }
+                    if let item = listItem(next) {
+                        guard item.ordered == first.ordered || item.item.depth > 0 else { break }
+                        items.append(item.item)
+                        i += 1
+                        continue
+                    }
+                    // A lazy continuation line belongs to the previous item.
+                    if leadingWidth(next) > 0 || !startsBlock(next.trimmingCharacters(in: .whitespaces)) {
+                        let last = items.removeLast()
+                        items.append(ChatMarkdownListItem(
+                            text: last.text + "\n" + next.trimmingCharacters(in: .whitespaces),
+                            depth: last.depth, checked: last.checked))
+                        i += 1
+                        continue
+                    }
+                    break
+                }
+                blocks.append(.list(ordered: first.ordered, start: first.number, items: items))
+                continue
+            }
+
+            paragraph.append(trimmed)
+            i += 1
+        }
+        flushParagraph()
+        return blocks
+    }
+
+    // MARK: - Pieces
+
+    private static func startsBlock(_ trimmed: String) -> Bool {
+        trimmed.hasPrefix("```") || trimmed.hasPrefix(">") || heading(trimmed) != nil || isRule(trimmed)
+    }
+
+    private static func isRule(_ trimmed: String) -> Bool {
+        let compact = trimmed.replacingOccurrences(of: " ", with: "")
+        guard compact.count >= 3, let first = compact.first, "-*_".contains(first) else { return false }
+        return compact.allSatisfy { $0 == first }
+    }
+
+    private static func heading(_ trimmed: String) -> (Int, String)? {
+        let hashes = trimmed.prefix { $0 == "#" }.count
+        guard (1...6).contains(hashes) else { return nil }
+        let rest = trimmed.dropFirst(hashes)
+        guard rest.first == " " else { return nil }
+        var text = rest.trimmingCharacters(in: .whitespaces)
+        while text.hasSuffix("#") { text.removeLast() }
+        return (hashes, text.trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func isTableSeparator(_ trimmed: String) -> Bool {
+        guard trimmed.contains("-"), trimmed.contains("|") || trimmed.contains(":") else { return false }
+        return trimmed.allSatisfy { "|-: ".contains($0) }
+    }
+
+    private static func cells(_ row: String) -> [String] {
+        var body = row
+        if body.hasPrefix("|") { body.removeFirst() }
+        if body.hasSuffix("|") { body.removeLast() }
+        return body.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    private static func leadingWidth(_ line: String) -> Int {
+        var width = 0
+        for char in line {
+            if char == " " { width += 1 } else if char == "\t" { width += 2 } else { break }
+        }
+        return width
+    }
+
+    private static func listItem(_ line: String) -> (ordered: Bool, number: Int, item: ChatMarkdownListItem)? {
+        let depth = leadingWidth(line) / 2
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        var ordered = false
+        var number = 1
+        var rest: Substring
+        if let marker = trimmed.first, "-*+".contains(marker), trimmed.dropFirst().first == " " {
+            rest = trimmed.dropFirst(2)
+        } else {
+            let digits = trimmed.prefix { $0.isASCII && $0.isNumber }
+            guard !digits.isEmpty, digits.count <= 9 else { return nil }
+            let after = trimmed.dropFirst(digits.count)
+            guard let dot = after.first, dot == "." || dot == ")", after.dropFirst().first == " " else { return nil }
+            ordered = true
+            number = Int(digits) ?? 1
+            rest = after.dropFirst(2)
+        }
+        var checked: Bool?
+        if rest.hasPrefix("[ ] ") {
+            checked = false
+            rest = rest.dropFirst(4)
+        } else if rest.hasPrefix("[x] ") || rest.hasPrefix("[X] ") {
+            checked = true
+            rest = rest.dropFirst(4)
+        }
+        return (ordered, number, ChatMarkdownListItem(
+            text: rest.trimmingCharacters(in: .whitespaces), depth: depth, checked: checked))
+    }
+}
