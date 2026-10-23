@@ -47,7 +47,7 @@ final class AgentListChromeTests: XCTestCase {
         }
         XCTAssertTrue(window.frame.minX > 0 || window.frame.minY > 0, "must be in a window")
         XCTAssertTrue(back.waitForExistence(timeout: 5))
-        waitForSettledFrame(window)
+        window.waitForSettledFrame()
         attach(app, "ipad-window-back-right")
         XCTAssertGreaterThan(back.frame.minX, title.frame.maxX, "window: Back joins the right-hand capsule")
         // The window controls' pill is ~21.5 pt tall, centred ~31.5 pt below the window's
@@ -62,7 +62,7 @@ final class AgentListChromeTests: XCTestCase {
             _ = refresh.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(refresh.exists, "Gram should open with its header")
-        waitForSettledFrame(refresh)   // the section switch may still be animating
+        refresh.waitForSettledFrame()   // the section switch may still be animating
         attach(app, "ipad-window-gram")
         assertLinesUpWithWindowControls(refresh, in: window, "Gram")
         if !startedFullScreen {
@@ -101,18 +101,6 @@ final class AgentListChromeTests: XCTestCase {
         XCTAssertGreaterThan(abs(capsule - panel), 6, "\(section): the capsule should show on the controls' line")
         XCTAssertLessThan(abs(nearEdge - panel), 4,
                           "\(section): the capsule must not reach up to the panel's top edge")
-    }
-
-    /// iPadOS animates a restored or resized window into place; frames read during that
-    /// animation, and taps aimed with them, are wrong.
-    private func waitForSettledFrame(_ element: XCUIElement) {
-        var last = element.frame
-        for _ in 0..<20 {
-            Thread.sleep(forTimeInterval: 0.3)
-            let now = element.frame
-            if now == last { return }
-            last = now
-        }
     }
 
     func testSearchFiltersAndClears() {

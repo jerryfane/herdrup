@@ -55,4 +55,16 @@ extension XCUIElement {
     func waitForNotHittable(timeout: TimeInterval) -> Bool {
         poll(timeout, every: 0.1) { !isHittable }
     }
+
+    /// iPadOS animates a restored or resized window into place; frames read during that
+    /// animation, and taps aimed with them, are wrong.
+    func waitForSettledFrame() {
+        var last = frame
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.3)
+            let now = frame
+            if now == last { return }
+            last = now
+        }
+    }
 }

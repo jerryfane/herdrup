@@ -22,6 +22,17 @@ final class SettingsTests: XCTestCase {
         }
         // Check process state before queries/activate can relaunch a crashed app.
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        window.waitForSettledFrame()
+        // iPadOS can settle a corner drag out of full screen at a system window size just over
+        // 600 pt (CI run 39966934030 stopped at 613 pt, #491), so Settings would never be
+        // compact. Drag this window's own corner once more, to 480 pt from its left edge.
+        if window.frame.width >= 600 {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+                .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: 480, dy: window.frame.height - 20)))
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+            window.waitForSettledFrame()
+        }
         XCTAssertLessThan(window.frame.width, 600, "The regression must exercise compact Settings")
         let compactWidth = window.frame.width
         app.buttons["Settings"].firstMatch.tap()
