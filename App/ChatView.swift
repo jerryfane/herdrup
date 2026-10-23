@@ -570,7 +570,7 @@ struct ChatView: View {
                     Text(ChatNoteStyle.kicker(note, tsMs: tsMs))
                         .font(Typography.machine(10.5, .semibold)).tracking(1.2)
                         .foregroundStyle(Palette.textFaint).lineLimit(1)
-                    Text(note.title).font(Typography.app(14.5)).foregroundStyle(Palette.text).lineLimit(1)
+                    Text(ChatNoteStyle.title(note)).font(Typography.app(14.5)).foregroundStyle(Palette.text).lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
@@ -835,13 +835,19 @@ enum ChatNoteStyle {
         }
     }
 
+    /// "GITMOOT · 4:51 PM", as the mockup labels it; the sender goes after the title.
     static func kicker(_ note: TranscriptNote, tsMs: UInt64) -> String {
         let source = sourceName(note.source).uppercased()
-        if let from = note.from, !from.isEmpty { return "\(source) · FROM \(from.uppercased())" }
         guard tsMs > 0 else { return source }
         let time = Date(timeIntervalSince1970: TimeInterval(tsMs) / 1000)
             .formatted(date: .omitted, time: .shortened)
         return "\(source) · \(time.uppercased())"
+    }
+
+    /// "Review approved · herdr #305 · from herdr-kimi-review".
+    static func title(_ note: TranscriptNote) -> String {
+        guard let from = note.from, !from.isEmpty else { return note.title }
+        return "\(note.title) · from \(from)"
     }
 }
 
@@ -856,7 +862,7 @@ private struct ChatNoteSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(ChatNoteStyle.kicker(note, tsMs: 0))
                         .font(Typography.machine(10.5, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Text(note.title).font(Typography.app(18, .semibold)).foregroundStyle(Palette.text)
+                    Text(ChatNoteStyle.title(note)).font(Typography.app(18, .semibold)).foregroundStyle(Palette.text)
                         .fixedSize(horizontal: false, vertical: true)
                     ChatMarkdownView(markdown: note.body)
                 }

@@ -69,7 +69,7 @@ struct ChatMarkdownView: View {
     }
 
     private func listRow(_ item: ChatMarkdownListItem, marker: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Group {
                 if let checked = item.checked {
                     Image(systemName: checked ? "checkmark.square" : "square")
@@ -85,7 +85,7 @@ struct ChatMarkdownView: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.leading, CGFloat(item.depth) * 18 + 4)
+        .padding(.leading, CGFloat(item.depth) * 18 + 20)
     }
 }
 

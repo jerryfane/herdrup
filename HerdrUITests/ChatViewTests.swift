@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 /// The omp Chat view (#481 owner, #482 guest), against `ChatMockTransport` (the `chatview`
@@ -79,6 +80,12 @@ final class ChatViewTests: XCTestCase {
         let settings = app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // The split view's "Text & typing" page holds it on iPad.
+            let page = app.buttons["Text & typing"].firstMatch
+            XCTAssertTrue(page.waitForExistence(timeout: 6))
+            page.tap()
+        }
         let picker = app.segmentedControls["settings-omp-opens-in"]
         XCTAssertTrue(picker.waitForExistence(timeout: 6), "Settings should offer the omp default")
         XCTAssertTrue(picker.buttons["Chat"].isSelected, "Chat should be the default")

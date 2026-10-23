@@ -334,7 +334,7 @@ struct ChatMockTransport: HerdrTransport {
         return [
             #"{"pane_id":"\#(paneID)","name":"herdr-app","agent":"omp","agent_status":"\#(status)","cwd":"/root/herdr","terminal_title_stripped":"Merge #305 and update the servers?"}"#,
             #"{"pane_id":"w9:p2","name":"keephair","agent":"claude","agent_status":"\#(working)","cwd":"/root/keephair-repo","terminal_title_stripped":"Running the iPad tests"}"#,
-            #"{"pane_id":"w9:p3","name":"llm-opt","agent":"omp","agent_status":"idle","cwd":"/root/llm-opt","terminal_title_stripped":"Bench results posted"}"#,
+            #"{"pane_id":"w9:p3","name":"llm-opt","agent":"omp","agent_status":"done","cwd":"/root/llm-opt","terminal_title_stripped":"Bench results posted"}"#,
         ].joined(separator: ",")
     }
 }
