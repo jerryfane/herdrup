@@ -50,6 +50,12 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   prediction and how many guesses were shown, confirmed and wrong.
 - **Gram** — direct messaging between you and your agents: get pinged when one needs input, send text,
   and share images, videos, or files (several at once) straight to an agent.
+- **omp Chat view** — an omp agent's page opens as a conversation read from its session file:
+  your prompts as bubbles, its replies in rendered markdown, its thinking and tool steps folded
+  into one expandable line, notes, the plan and its questions as cards you answer with a tap
+  ("Answer in Terminal" when the server cannot). The Chat | Terminal switch under the header
+  flips to the live terminal; Settings → omp Chat sets which one opens first. Older turns load
+  as you scroll up. Needs a herdr that serves `agent.transcript`; other agents keep the terminal.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation
@@ -65,6 +71,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   get a one-use invite (QR code or link), watch the live terminal and message the agent through
   a relay, end to end encrypted, with every message labelled `<name> (via HerdrUp):`. Settings →
   Shared access lists who has access on each machine, revokes it, and shows the activity log.
+  When the host serves it, a guest of an omp agent also gets a read-only Chat tab (no notes,
+  questions shown waiting for the owner).
 
 ## Requirements
 

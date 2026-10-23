@@ -1140,6 +1140,10 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// `pane.history` pages older scrollback by cursor, and `pane.stream` resets carry
     /// `history_cursor` (herdr terminal history paging).
     public let paneHistory: Bool
+    /// `agent.transcript` pages an omp agent's conversation for the Chat view (herdr#306).
+    public let agentTranscript: Bool
+    /// `agent.answer` answers omp's pending `ask` question from the app (herdr#308).
+    public let agentAnswer: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1151,6 +1155,8 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentForget = "agent_forget"
         case apiBridgeMulti = "api_bridge_multi"
         case paneHistory = "pane_history"
+        case agentTranscript = "agent_transcript"
+        case agentAnswer = "agent_answer"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1167,6 +1173,8 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         agentForget = try c.decodeIfPresent(Bool.self, forKey: .agentForget) ?? false
         apiBridgeMulti = try c.decodeIfPresent(Bool.self, forKey: .apiBridgeMulti) ?? false
         paneHistory = try c.decodeIfPresent(Bool.self, forKey: .paneHistory) ?? false
+        agentTranscript = try c.decodeIfPresent(Bool.self, forKey: .agentTranscript) ?? false
+        agentAnswer = try c.decodeIfPresent(Bool.self, forKey: .agentAnswer) ?? false
     }
 }
 

@@ -228,6 +228,10 @@ case "$shard" in
     # GramTests run in settings-gram: after #445 this shard had ~40 min of tests against
     # ~26 (iphone-app) and ~24 (ipad), and settings-stack finished in ~13 min (runs
     # 39128731625, 39132955146, 39137628334).
+    # ChatViewTests (#485, ~3.5 min on a hosted runner) run here: in the app round they
+    # pushed iPhoneApp to 29 min of tests against its 30 m budget, which run 39930335960
+    # exceeded. This shard had ~18 min of tests in that run against 40 m.
+    run_suite iPhoneChat "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ChatViewTests || failed=1
     ;;
   iphone-app)
     run_suite font-contract "$IPHONE_UDID" 10m -only-testing:HerdrFontTests || failed=1
@@ -235,7 +239,8 @@ case "$shard" in
     # a slow hosted runner): with them in the app round, #433's run 38703928881 ran out of
     # its 30 m on the last class.
     run_suite iPhoneStatusMotion "$IPHONE_UDID" 10m -only-testing:HerdrUITests/StatusMotionTests || failed=1
-    skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests)
+    skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
+      -skip-testing:HerdrUITests/ChatViewTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1

@@ -619,6 +619,10 @@ struct RootView: View {
             GuestPaneMockHost(
                 scenario: mode == .guestPaused ? .paused : mode == .guestBlocked ? .blocked
                     : mode == .guestOldHost ? .oldHost : .running)
+        case .chatView:
+            ChatViewMockHome()
+        case .guestChat:
+            GuestPaneMockHost(scenario: .blocked)
         }
     }
 
@@ -5293,6 +5297,15 @@ struct TerminalPaneContent: View {
     /// lets a freshly-spawned agent flip rawKeys→intent once its composer appears,
     /// so a pre-filled task sends as a proper prompt.
     @State private var agent: AgentInfo?
+    /// The omp Chat view (#481): its conversation, kept across Chat ↔ Terminal switches.
+    @StateObject private var chatModel: ChatModel
+    /// The switch position: Settings' default, or this agent's last choice this session.
+    @State private var showsChat: Bool
+    /// The machine answers `agent.transcript` (ping `agent_transcript`). Probed per pane.
+    @State private var transcriptCapable = false
+    /// The key row's height when it last showed: in Chat the terminal underneath keeps the
+    /// height it has in Terminal view, so switching never resizes the PTY.
+    @State private var keyRowHeight: CGFloat = ChatPaneLayout.lastKeyRowHeight
     /// Per-agent push mute, toggled from the header's ⋯ menu (keyed by this pane's
     /// public id — the same id the push payload carries).
     @ObservedObject private var mute = MuteStore.shared
@@ -5432,9 +5445,26 @@ struct TerminalPaneContent: View {
         _agent = State(initialValue: agent)
         _reply = State(initialValue: initialReply)
         _pendingPrefill = State(initialValue: !initialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        _chatModel = StateObject(wrappedValue: ChatModel(target: paneID))
+        _showsChat = State(initialValue: ChatPreference.showsChat(paneID: paneID))
     }
 
     private var group: AgentGroup? { agent.map { AgentRow(info: $0).group } }
+    /// The page offers the Chat view: an omp agent whose machine serves `agent.transcript`,
+    /// until the server says it cannot give this agent a transcript.
+    private var chatAvailable: Bool {
+        transcriptCapable && ChatPreference.isOmp(agent?.agent) && !chatModel.unsupported
+    }
+    private var showingChat: Bool { chatAvailable && showsChat }
+
+    private func setShowsChat(_ value: Bool) {
+        showsChat = value
+        ChatPreference.remember(paneID: paneID, showsChat: value)
+        if value {
+            terminalInputFocused = false
+            if findOpen { toggleFind() }
+        }
+    }
     /// The pane header label: the agent's NAME first (matching the list), then the model (kind) and
     /// the cwd folder as context — each appended only when it adds information. E.g.
     /// "herdr-app · claude · herdr-ios"; a name equal to its kind or folder collapses to just the name.
@@ -5500,6 +5530,13 @@ struct TerminalPaneContent: View {
             Palette.groundMachine.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                // omp agents on a machine with `agent_transcript`: the Chat | Terminal switch
+                // (#481). Other agents and older servers keep exactly today's page.
+                if chatAvailable {
+                    ChatTerminalSwitch(showsChat: Binding(get: { showsChat }, set: { setShowsChat($0) }))
+                        .padding(.top, 2).padding(.bottom, 4)
+                        .accessibilityHidden(!isForeground)
+                }
                 // A one-time, dismissible offer to move Claude Code off its laggy
                 // fullscreen renderer onto the smooth inline "classic" one. Sits BELOW
                 // the header and ABOVE the terminal so it takes its own flow space and
@@ -5518,6 +5555,7 @@ struct TerminalPaneContent: View {
                                  // The find and reply fields own their own responders.
                                  // Terminal focus is never inferred from device idiom.
                                  wantsTerminalKeyFocus: isForeground && !replyFocused && !findFocused
+                                     && !showingChat
                                      && terminalInputFocused,
                                  // Set by the collapse chevron so the resign in updateUIView can
                                  // tell a deliberate dismissal from an incidental body pass.
@@ -5570,6 +5608,21 @@ struct TerminalPaneContent: View {
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalHistoryLoading)
                     }
+                    // In Chat the terminal stays mounted under it (its stream stays warm for
+                    // the switch back) at the height it has with the key row showing, so the
+                    // switch never resizes the PTY.
+                    .padding(.bottom, showingChat ? keyRowHeight : 0)
+                    .opacity(showingChat ? 0 : 1)
+                    .allowsHitTesting(!showingChat)
+                    .accessibilityHidden(showingChat)
+                    .overlay {
+                        if showingChat {
+                            ChatView(client: client, model: chatModel, viewer: .owner, eventsPaneID: paneID,
+                                     isActive: isForeground, live: true, agentStatus: agent?.agentStatus,
+                                     ground: Palette.groundMachine,
+                                     onOpenTerminal: { setShowsChat(false) })
+                        }
+                    }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
                 // note and the quick keys above it) takes layout height. Every extra line,
                 // the toolbar, attachments, the drag handle and the editor draw upward
@@ -5590,7 +5643,14 @@ struct TerminalPaneContent: View {
                                         // reporting only that nothing happened.
                                         .accessibilityIdentifier("terminal-action-note")
                                 }
-                                controlBar
+                                // Chat hides the key row: the composer is its only input.
+                                if !showingChat {
+                                    controlBar
+                                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                                            keyRowHeight = height
+                                            ChatPaneLayout.lastKeyRowHeight = height
+                                        }
+                                }
                             }
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomChromeHeight = $0 }
                             // The terminal's height no longer depends on the composer, so it
@@ -5630,6 +5690,9 @@ struct TerminalPaneContent: View {
         .task(id: paneID) {
             await refresh()
             await deliverPrefillIfNeeded()
+        }
+        .task(id: paneID) {
+            transcriptCapable = (try? await client.serverCapabilities())?.agentTranscript ?? false
         }
         // Re-resolve status each time the pane returns to the front; drop either
         // keyboard owner when it backgrounds so a hidden keep-mounted pane cannot
@@ -5727,6 +5790,7 @@ struct TerminalPaneContent: View {
                 PaneHeaderRefreshButton(identifier: "terminal-refresh") {
                     streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
                     Task { await refresh() }   // and re-resolve the agent's status/identity
+                    if showingChat { Task { await chatModel.reload(client: client) } }
                 }
                 // Per-agent actions (⋯), only for an agent pane — as before, where they lived
                 // on the status row that exists only when the pane has a status group.
@@ -5906,6 +5970,8 @@ struct TerminalPaneContent: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
+            // Find searches the terminal: from Chat it opens there.
+            if showingChat { setShowsChat(false) }
             findOpen = true
             findFocused = true
             // An armed one-shot Ctrl would otherwise encode the next keystroke as a control
@@ -7306,6 +7372,7 @@ struct SettingsView: View {
                                 Group {
                                     appearanceSection
                                     typingSection
+                                    chatSection
                                 }
                                 previewsSection
                                 troubleSection
@@ -7360,9 +7427,10 @@ struct SettingsView: View {
     /// iPad/Mac "Text & typing": the same controls the iPhone index shows inline, given
     /// their own split-view detail so the settings are reachable on regular-width layouts.
     private func appearanceDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "Text & typing", subtitle: "Text size and instant typing", showBack: showBack) {
+        detailScaffold(title: "Text & typing", subtitle: "Text size, instant typing and omp chat", showBack: showBack) {
             appearanceControls
             typingSection
+            chatSection
         }
     }
 
@@ -8531,6 +8599,7 @@ struct SettingsView: View {
     /// Instant typing (`PredictionEngine.Mode` raw value); every open terminal reads the
     /// same key, so a change applies to the next key typed.
     @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
+    @AppStorage(ChatPreference.key) private var ompOpensIn = ChatPreference.defaultValue
 
     /// The terminal font size (points), the same app-wide pref the per-agent ⋯ menu
     /// and ⌘± drive. Writing it here live-updates any open terminal (LiveTerminalView
@@ -8577,6 +8646,37 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("TEXT SIZE")
             appearanceControls
+        }
+    }
+
+    /// "omp agents open in": Chat (default) or Terminal (#481). The page's switch overrides
+    /// it per agent for the session.
+    private var chatSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("OMP CHAT")
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("omp agents open in").font(Typography.app(17)).foregroundStyle(Palette.text)
+                    Spacer(minLength: 8)
+                    Picker("omp agents open in", selection: $ompOpensIn) {
+                        Text("Chat").tag(ChatPreference.chat)
+                        Text("Terminal").tag(ChatPreference.terminal)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityIdentifier("settings-omp-opens-in")
+                }
+                .padding(.horizontal, 18).padding(.vertical, 8)
+                .frame(minHeight: 52)
+                rowDivider
+                Text("Chat shows omp's replies, thinking and steps as a conversation. Claude Code and Codex agents always open in the terminal.")
+                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+            }
+            .settingsGroup()
+            .padding(.horizontal, 16).padding(.top, 10)
         }
     }
 
@@ -9276,6 +9376,9 @@ enum ScreenshotMock {
     case archivedClose
     // The Agents home on a machine with three running herdr sessions: the session pills (#347).
     case sessions
+    // The omp Chat view (#481): the Agents home over `ChatMockTransport`, and a guest's
+    // shared omp agent with its Chat tab (#482).
+    case chatView, guestChat
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9349,6 +9452,11 @@ enum ScreenshotMock {
         case "guestblocked": return .guestBlocked
         // A host older than guest resizing: it refuses the guest's `pane.set_pty_size`.
         case "guestoldhost": return .guestOldHost
+        // `chatview`: the owner's Agents home whose omp agent opens in Chat, over a synthetic
+        // paged transcript (`ChatMockTransport`). `guestchat`: the guest's view-only pane of a
+        // shared omp agent on a host that serves guests its transcript.
+        case "chatview": return .chatView
+        case "guestchat": return .guestChat
         default: return .list
         }
     }

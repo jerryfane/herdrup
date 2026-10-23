@@ -16,9 +16,18 @@ struct GuestPaneView: View {
         self.client = client
         self.access = access
         self.features = features
+        _chatModel = StateObject(wrappedValue: ChatModel(target: access.agentTarget))
         _tab = tab
         self.onClose = onClose
     }
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The shared agent's conversation for the Chat tab (#482).
+    @StateObject private var chatModel: ChatModel
+    /// The host serves `agent.transcript` to guests (its pong's `agent_transcript`).
+    @State private var transcriptCapable = false
+    /// The Chat tab has been made the default once; after that the guest's own pick stands.
+    @State private var chatDefaulted = false
 
     /// Whether the shared agent can be reached right now.
     private enum Availability: Equatable {
@@ -84,23 +93,38 @@ struct GuestPaneView: View {
     /// The owner shares this agent's Gram with the guest (the host's hello says so).
     private var showsGram: Bool { features.current?.gram == true }
     private var showingGram: Bool { showsGram && tab == .gram }
+    /// The Chat tab: a shared omp agent on a host that serves guests its transcript, until
+    /// the host says it cannot.
+    private var showsChat: Bool {
+        transcriptCapable && ChatPreference.isOmp(agent?.agent) && !chatModel.unsupported
+    }
+    private var showingChat: Bool { showsChat && tab == .chat }
+    /// Neither Gram nor Chat covers the terminal.
+    private var showingTerminal: Bool { !showingGram && !showingChat }
 
-    /// The page's ground: the terminal's on the Terminal tab, as the owner's terminal page,
-    /// and the app's on Gram, as the owner's Gram.
+    /// The page's ground: the terminal's on the Terminal and Chat tabs, as the owner's
+    /// pages, and the app's on Gram, as the owner's Gram.
     private var pageGround: Color { showingGram ? Palette.ground : Palette.groundMachine }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             statusRow
-            if showsGram { tabStrip }
+            if showsGram || showsChat { tabStrip }
             ZStack(alignment: .bottom) {
-                // The terminal stays mounted under the Gram tab, so its stream and scrollback
-                // survive a look at Gram.
+                // The terminal stays mounted under the Gram and Chat tabs, so its stream and
+                // scrollback survive a look at them.
                 terminalArea
-                    .opacity(showingGram ? 0 : 1)
-                    .allowsHitTesting(!showingGram)
-                    .accessibilityHidden(showingGram)
+                    .opacity(showingTerminal ? 1 : 0)
+                    .allowsHitTesting(showingTerminal)
+                    .accessibilityHidden(!showingTerminal)
+                if showingChat {
+                    ChatView(client: client, model: chatModel,
+                             viewer: .guest(name: access.guestName, ownerName: access.ownerName),
+                             eventsPaneID: nil, isActive: true, live: availability == .running,
+                             agentStatus: agent?.agentStatus, ground: Palette.groundMachine,
+                             onOpenTerminal: { tab = .terminal })
+                }
                 if showingGram {
                     GuestGramList(client: client, access: access, model: gram)
                         .background(Palette.ground)
@@ -130,7 +154,21 @@ struct GuestPaneView: View {
             await guestPush.connected(access, client: client, features: current)
             if current.gram { await gram.refresh(client: client, access: access) }
         }
+        // The Chat tab exists only where the host serves guests `agent.transcript`.
+        .task(id: access.id) {
+            transcriptCapable = (try? await client.serverCapabilities())?.agentTranscript ?? false
+        }
+        // A shared omp agent opens in Chat, once; afterwards the guest's own pick stands.
+        .onChange(of: showsChat, initial: true) { _, available in
+            if available, !chatDefaulted {
+                chatDefaulted = true
+                if tab == .terminal { tab = .chat }
+            } else if !available, tab == .chat {
+                tab = .terminal
+            }
+        }
         .onChange(of: tab) { _, _ in
+            if showingChat, findOpen { toggleFind() }
             guard showingGram else { return }
             if findOpen { toggleFind() }
             Task {
@@ -165,21 +203,35 @@ struct GuestPaneView: View {
 
     // MARK: - Tabs
 
+    /// Chat · Terminal · Gram, as many as this share offers. On iPad (regular width) a
+    /// compact centred capsule with fixed-width tabs, not a strip across the whole page.
     private var tabStrip: some View {
-        HStack(spacing: 4) {
-            tabButton("Terminal", systemImage: "terminal", tab: .terminal, id: "guest-tab-terminal")
-            tabButton("Gram", systemImage: "paperplane", tab: .gram, id: "guest-tab-gram",
-                      badge: gram.unreadCount)
+        let compact = sizeClass == .regular
+        return HStack(spacing: 4) {
+            if showsChat {
+                tabButton("Chat", systemImage: "bubble.left", tab: .chat, id: "guest-tab-chat", compact: compact)
+            }
+            tabButton("Terminal", systemImage: "terminal", tab: .terminal, id: "guest-tab-terminal", compact: compact)
+            if showsGram {
+                tabButton("Gram", systemImage: "paperplane", tab: .gram, id: "guest-tab-gram",
+                          badge: gram.unreadCount, compact: compact)
+            }
         }
         .padding(3)
         .background(Capsule().fill(Palette.surface))
         .overlay(Capsule().stroke(Palette.hairlineQuiet, lineWidth: 1))
+        .fixedSize(horizontal: compact, vertical: false)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("guest-tab-strip")
         .padding(.horizontal, 16).padding(.vertical, 8)
         .frame(maxWidth: .infinity)
     }
 
+    /// One tab of the compact (iPad) strip: three of them fill the mockup's 450 pt capsule.
+    private static let compactTabWidth: CGFloat = 145
+
     private func tabButton(_ title: String, systemImage: String, tab value: GuestPaneTab, id: String,
-                           badge: Int = 0) -> some View {
+                           badge: Int = 0, compact: Bool = false) -> some View {
         let selected = tab == value
         return Button {
             tab = value
@@ -196,7 +248,8 @@ struct GuestPaneView: View {
                 }
             }
             .foregroundStyle(selected ? Palette.text : Palette.textDim)
-            .frame(maxWidth: .infinity, minHeight: 34)
+            .frame(maxWidth: compact ? nil : .infinity, minHeight: 34)
+            .frame(width: compact ? Self.compactTabWidth : nil)
             .background(Capsule().fill(selected ? Palette.surfaceRaised : Color.clear))
             .contentShape(Capsule())
         }
@@ -241,6 +294,7 @@ struct GuestPaneView: View {
                     PaneHeaderRefreshButton(identifier: "guest-refresh") {
                         streamGen += 1
                         Task { await refresh() }
+                        if showingChat { Task { await chatModel.reload(client: client) } }
                     }
                 }
                 actionsMenu
@@ -260,10 +314,10 @@ struct GuestPaneView: View {
 
     /// The owner's ⋯, trimmed to what a guest may do: copy the screen or the recent output
     /// (`agent.read`) and the guest's own text size on the Terminal tab, and this share's
-    /// notifications (GuestPushCenter, as in Guest Settings) on both tabs.
+    /// notifications (GuestPushCenter, as in Guest Settings) on every tab.
     private var actionsMenu: some View {
         Menu {
-            if !showingGram {
+            if showingTerminal {
                 TerminalCopyMenuSection(client: client, paneID: access.agentTarget)
                 // Hidden where the host refuses guest resizing: the size could not change.
                 if !resizeRefused && (availability == .running || availability == .connecting) {
@@ -429,7 +483,7 @@ struct GuestPaneView: View {
             .overlay(alignment: .bottom) {
                 VStack(spacing: 0) {
                     Group {
-                        if showingGram && note == nil && connectionNote == nil && uploadBytes == nil && !isBlocked {
+                        if !showingTerminal && note == nil && connectionNote == nil && uploadBytes == nil && !isBlocked {
                             Color.clear.frame(height: 4)
                         } else {
                             noteRow.padding(.top, 2).padding(.bottom, 10)
@@ -591,6 +645,8 @@ struct GuestPaneView: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
+            // Find searches the terminal: from Chat it opens there.
+            if showingChat { tab = .terminal }
             findOpen = true
             findFocused = true
         }

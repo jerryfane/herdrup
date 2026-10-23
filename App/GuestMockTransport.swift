@@ -31,6 +31,13 @@ struct GuestMockTransport: HerdrTransport {
         return GuestFeatures(gram: parts.contains("gram"), push: parts.contains("push"))
     }()
 
+    /// The host serves guests the shared agent's transcript (#482): its pong advertises
+    /// `agent_transcript` and `agent.transcript` answers with the synthetic guest
+    /// conversation. On under `HERDR_MOCK_GUEST_CHAT` or the `guestchat` mock; otherwise
+    /// the host predates it and the Chat tab stays hidden. `agent.answer` stays forbidden.
+    static let chat = ProcessInfo.processInfo.environment["HERDR_MOCK_GUEST_CHAT"] != nil
+        || ScreenshotMock.mode == .guestChat
+
     /// The APNs token the mock push system hands out once "permission" is granted.
     static let deviceToken = "mock-apns-token-guest"
 
@@ -96,6 +103,7 @@ struct GuestMockTransport: HerdrTransport {
     private func allows(_ method: String) -> Bool {
         if Self.gramMethods.contains(method) { return Self.features?.gram == true }
         if Self.pushMethods.contains(method) { return Self.features?.push == true }
+        if method == "agent.transcript" { return Self.chat }
         return Self.allowlist.contains(method) && !(scenario == .oldHost && method == "pane.set_pty_size")
     }
 
@@ -149,7 +157,12 @@ struct GuestMockTransport: HerdrTransport {
         }
         switch method {
         case "ping":
+            if Self.chat {
+                return #"{"id":"\#(id)","result":{"type":"pong","version":"0.9.4","protocol":22,"capabilities":{"agent_transcript":true}}}"#
+            }
             return #"{"id":"\#(id)","result":{"type":"pong"}}"#
+        case "agent.transcript":
+            return ChatMockConversation.guest.transcript(id: id, params: params)
         case "agent.list":
             return #"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(sharedAgentJSON),\#(Self.otherAgentJSON)]}}"#
         case "agent.get":
