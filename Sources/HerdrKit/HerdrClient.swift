@@ -682,8 +682,10 @@ public actor HerdrClient {
         case is URLError:
             return true
         default:
-            // URLSession reports a dropped WebSocket as a POSIX socket error.
-            return (error as NSError).domain == NSPOSIXErrorDomain
+            // URLSessionRelaySocket rethrows URLSession's own error for a dropped socket:
+            // an NSURLErrorDomain error, or a POSIX one for a reset connection.
+            let domain = (error as NSError).domain
+            return domain == NSURLErrorDomain || domain == NSPOSIXErrorDomain
         }
     }
 
