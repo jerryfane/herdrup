@@ -136,6 +136,7 @@ targets:
       # The notification service extension that adds answer buttons to question pushes
       # (#483), embedded in PlugIns the same way.
       - target: HerdrNotificationService
+      - target: HerdrShareExtension
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
@@ -436,4 +437,50 @@ targets:
         Distribution:
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup Notification Service App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+
+  HerdrShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: HerdrShareExtension
+      - path: App/SavedHosts.swift
+      - path: App/GuestKeychain.swift
+      - path: App/KeychainHostKeyPolicy.swift
+      - path: App/ShareStorage.swift
+    dependencies:
+      - package: HerdrKit
+        product: HerdrKit
+    info:
+      path: HerdrShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Herdrup
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 100
+              NSExtensionActivationSupportsMovieWithMaxCount: 100
+              NSExtensionActivationSupportsFileWithMaxCount: 100
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.share
+        MARKETING_VERSION: "1.0.12"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        DEVELOPMENT_TEAM: FXQ5Z9HHY6
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: HerdrShareExtension/HerdrShare.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HERDR_SHARE_EXTENSION"
+        APPLICATION_EXTENSION_API_ONLY: YES
+      configs:
+        Distribution:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup Share Extension App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"

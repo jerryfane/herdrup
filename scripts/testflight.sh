@@ -40,6 +40,10 @@ command -v xcodegen >/dev/null || { echo "error: xcodegen not found (brew instal
 
 echo "==> xcodegen generate"
 xcodegen generate
+for plist in App/Info.plist HerdrWidgets/Info.plist HerdrNotificationService/Info.plist HerdrShareExtension/Info.plist; do
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$plist"
+done
 
 echo "==> archive ($CONFIG, build $BUILD_NUMBER)"
 xcodebuild archive \

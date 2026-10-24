@@ -118,6 +118,8 @@ jobs:
               || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" HerdrNotificationService/Info.plist
             echo "notification service CFBundleVersion is now $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' HerdrNotificationService/Info.plist)"
           fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" HerdrShareExtension/Info.plist 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" HerdrShareExtension/Info.plist
 
       - name: Import signing certificate (throwaway keychain)
         # Signing material lives ONLY in a throwaway keychain deleted in the always()
@@ -170,15 +172,11 @@ jobs:
           python3 -m venv /tmp/extsign
           /tmp/extsign/bin/pip install --quiet --disable-pip-version-check 'pyjwt~=2.9' 'cryptography~=43.0'
 
-      - name: Ensure the extension App Store profiles (ASC API)
-        # Option B (owner-approved, directive 61335 / 61376; extended to the notification
-        # service extension by the owner on 2026-10-23): create-or-reuse an App Store
-        # profile for each extension bundle id (com.jerryfane.herdr.widgets,
-        # com.jerryfane.herdr.notificationservice; no capabilities) via the App Store
-        # Connect API, reusing the team's existing distribution certificate — no cloud
-        # signing, no owner portal step. The script FAILS LOUDLY if the key cannot create
-        # a bundle id / profile; that is the signal to STOP and have the OWNER mint it —
-        # it never touches the distribution cert or mints anything by hand.
+      - name: Ensure app and extension App Store profiles (ASC API)
+        # Owner approved App Group and keychain sharing for #500. Reuse the team's
+        # existing certificate and refresh the app profile if its entitlements changed.
+        # App Group registration/association must exist in Apple Developer; the helper
+        # refuses to sign when the resulting profile lacks the shared container.
         env:
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -189,7 +187,7 @@ jobs:
           trap 'rm -f "$KEYFILE"' EXIT
           echo "$ASC_P8_BASE64" | base64 --decode > "$KEYFILE"
           ASC_KEYFILE="$KEYFILE" /tmp/extsign/bin/python3 .github/scripts/ensure_extension_profile.py \
-            widgets notificationservice
+            app widgets notificationservice share
 
       - name: Write ExportOptions.plist
         env:
@@ -210,6 +208,7 @@ jobs:
               <key>com.jerryfane.herdr</key><string>${PROFILE_NAME}</string>
               <key>com.jerryfane.herdr.widgets</key><string>Herdrup Widgets App Store</string>
               <key>com.jerryfane.herdr.notificationservice</key><string>Herdrup Notification Service App Store</string>
+              <key>com.jerryfane.herdr.share</key><string>Herdrup Share Extension App Store</string>
             </dict>
           </dict>
           </plist>

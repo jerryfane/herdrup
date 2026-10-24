@@ -53,13 +53,13 @@ struct KeychainGuestKeyStore: GuestKeyStore {
 /// install: leaving a share removes the grant, not the key.
 enum GuestDevice {
     static func identity() throws -> GuestIdentity {
-        #if DEBUG
+        #if DEBUG && !HERDR_SHARE_EXTENSION
         if ScreenshotMock.mode != nil { return try GuestIdentity.loadOrCreate(store: mockKeyStore) }
         #endif
         return try GuestIdentity.loadOrCreate(store: KeychainGuestKeyStore())
     }
 
-    #if DEBUG
+    #if DEBUG && !HERDR_SHARE_EXTENSION
     /// A fixed key, so mock screens never touch the Keychain and show a stable fingerprint.
     private static let mockKeyStore = InMemoryGuestKeyStore(key: Data((1...32).map { UInt8($0) }))
     #endif

@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
-"""Ensure an App Store distribution profile for each named app extension exists and is
-installed, so the manual Distribution archive can sign the extension targets.
+"""Ensure and install the distribution profiles used by the TestFlight lane.
 
-Usage: ensure_extension_profile.py TARGET [TARGET ...], TARGET being a key of TARGETS
-(`widgets`, `notificationservice`). Each target runs the same sequence on its own.
-
-Option B (owner-approved, directive 61335/61376 for the widget; extended to the
-notification service extension by the owner on 2026-10-23): create the profile via the App Store
-Connect API, reusing the team's EXISTING distribution certificate — no cloud signing,
-no owner portal step. Idempotent: reuses an existing active profile of the same name.
-
-If the ASC key lacks permission to create the bundle id or the profile, this FAILS
-LOUDLY with a clear message. Per the overnight directive that is the signal to STOP and
-leave the profile for the owner to mint — this script never falls back to touching the
-distribution certificate or minting anything by hand.
-
-Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEYFILE (path to the .p8).
+Usage: ensure_extension_profile.py TARGET [TARGET ...], with targets from TARGETS.
+The owner approved the app/share App Group and keychain signing changes for #500.
+Existing distribution certificates are reused. Profiles lacking required App Group
+entitlements are regenerated; missing portal associations fail before the archive.
+No credential or CI-secret changes are needed.
 """
 import base64
 import json
 import os
 import sys
+import plistlib
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -28,9 +20,24 @@ import urllib.request
 
 import jwt  # PyJWT (installed in the extension-signing venv)
 
-# name -> what to ensure. `label` only names the target in log lines; `file` is the
-# installed profile's filename. No capabilities are enabled on either bundle id.
+# Profile filenames are local to the signing runner. Only app/share need App Groups.
 TARGETS = {
+    "app": {
+        "bundle_id": "com.jerryfane.herdr",
+        "bundle_name": "Herdrup",
+        "profile_name": "Herdrup App Store",
+        "file": "herdr.mobileprovision",
+        "label": "app",
+        "app_group": "group.com.jerryfane.herdr",
+    },
+    "share": {
+        "bundle_id": "com.jerryfane.herdr.share",
+        "bundle_name": "Herdrup Share Extension",
+        "profile_name": "Herdrup Share Extension App Store",
+        "file": "herdr-share.mobileprovision",
+        "label": "share extension",
+        "app_group": "group.com.jerryfane.herdr",
+    },
     "widgets": {
         "bundle_id": "com.jerryfane.herdr.widgets",
         "bundle_name": "Herdrup Widgets",
@@ -114,6 +121,45 @@ def ensure_bundle_id(t):
     return rid
 
 
+def ensure_app_groups(t, bundle_rid):
+    if "app_group" not in t:
+        return
+    st, result = api("GET", f"/bundleIds/{bundle_rid}/bundleIdCapabilities")
+    if st != 200:
+        die(f"cannot read capabilities for {t['bundle_id']}", result)
+    if any(c.get("attributes", {}).get("capabilityType") == "APP_GROUPS"
+           for c in result.get("data", [])):
+        return
+    st, result = api("POST", "/bundleIdCapabilities", {"data": {
+        "type": "bundleIdCapabilities",
+        "attributes": {"capabilityType": "APP_GROUPS"},
+        "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_rid}}},
+    }})
+    if st not in (200, 201):
+        die(f"cannot enable App Groups for {t['bundle_id']}", result)
+
+
+def profile_content(prof):
+    content = prof.get("attributes", {}).get("profileContent")
+    if not content:
+        st, result = api("GET", f"/profiles/{prof['id']}")
+        if st != 200:
+            die("cannot read signing profile", result)
+        content = result.get("data", {}).get("attributes", {}).get("profileContent")
+    if not content:
+        die("the profile has no profileContent to install")
+    return base64.b64decode(content, validate=True)
+
+
+def supports_app_group(t, prof):
+    if "app_group" not in t:
+        return True
+    decoded = subprocess.run(["security", "cms", "-D"], input=profile_content(prof),
+                             capture_output=True, check=True).stdout
+    entitlements = plistlib.loads(decoded).get("Entitlements", {})
+    return t["app_group"] in entitlements.get("com.apple.security.application-groups", [])
+
+
 def distribution_cert_ids():
     st, r = api("GET", "/certificates?limit=200")
     if st != 200:
@@ -133,11 +179,13 @@ def find_active_profile(t):
     st, r = api("GET", f"/profiles?filter[name]={q}&limit=1")
     if st == 200 and r.get("data"):
         prof = r["data"][0]
-        if prof.get("attributes", {}).get("profileState") == "ACTIVE":
+        if prof.get("attributes", {}).get("profileState") == "ACTIVE" and supports_app_group(t, prof):
             print(f"reusing active profile: {profile_name} ({prof['id']})")
             return prof
         # Not active (expired/invalid) — remove so we can recreate cleanly.
-        api("DELETE", f"/profiles/{prof['id']}")
+        status, result = api("DELETE", f"/profiles/{prof['id']}")
+        if status != 204:
+            die(f"could not replace stale profile {profile_name}", result)
         print(f"deleted stale profile {profile_name} ({prof['id']})")
     return None
 
@@ -162,16 +210,11 @@ def create_profile(t, bundle_rid, cert_ids):
 
 
 def install(t, prof):
-    content = prof.get("attributes", {}).get("profileContent")
-    if not content:
-        st, r = api("GET", f"/profiles/{prof['id']}")
-        content = r.get("data", {}).get("attributes", {}).get("profileContent")
-    if not content:
-        die("the profile has no profileContent to install.", prof)
+    content = profile_content(prof)
     os.makedirs(INSTALL_DIR, exist_ok=True)
     out = os.path.join(INSTALL_DIR, t["file"])
     with open(out, "wb") as f:
-        f.write(base64.b64decode(content))
+        f.write(content)
     print(f"installed {t['label']} profile -> {out}")
 
 
@@ -184,8 +227,14 @@ def main(names):
     for name in names:
         t = TARGETS[name]
         bundle_rid = ensure_bundle_id(t)
+        ensure_app_groups(t, bundle_rid)
         cert_ids = distribution_cert_ids()
         prof = find_active_profile(t) or create_profile(t, bundle_rid, cert_ids)
+        if not supports_app_group(t, prof):
+            die(f"Profile for {t['bundle_id']} lacks {t['app_group']}. In Apple Developer "
+                "Certificates, Identifiers & Profiles, register the App Group and assign it "
+                "to both com.jerryfane.herdr and com.jerryfane.herdr.share, then rerun. "
+                "No archive was signed with an incomplete profile.")
         install(t, prof)
 
 

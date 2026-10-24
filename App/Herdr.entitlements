@@ -8,5 +8,9 @@
 	     cleanly. Inert for the iphonesimulator build (never code-signed). -->
 	<key>aps-environment</key>
 	<string>$(APS_ENVIRONMENT)</string>
+	<key>com.apple.security.application-groups</key>
+	<array><string>group.com.jerryfane.herdr</string></array>
+	<key>keychain-access-groups</key>
+	<array><string>$(AppIdentifierPrefix)com.jerryfane.herdr</string></array>
 </dict>
 </plist>
