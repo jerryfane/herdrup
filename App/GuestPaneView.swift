@@ -454,7 +454,7 @@ struct GuestPaneView: View {
         switch availability {
         case .paused:
             return ("pause.fill", "\(access.agentName) isn't running",
-                    "Your access is paused until \(access.ownerName) starts it again. Your messages and files so far are still in the transcript.")
+                    "The shared agent isn't available in this terminal. Your messages and files so far are still in the transcript.")
         case .offline:
             return ("wifi.slash", "\(access.machineLabel) is offline",
                     "HerdrUp will reconnect when \(access.ownerName)'s machine is back online.")
@@ -531,7 +531,13 @@ struct GuestPaneView: View {
     }
 
     private var placeholder: Text {
-        guard canCompose else { return Text(availability == .lost ? "Access ended" : "Paused") }
+        switch availability {
+        case .connecting: return Text("Connecting…")
+        case .paused: return Text("Agent unavailable")
+        case .offline: return Text("Machine offline")
+        case .lost: return Text("Access removed")
+        case .running: break
+        }
         let full = access.composerPlaceholder
         guard full.hasSuffix(access.guestName) else { return Text(full) }
         let lead = String(full.dropLast(access.guestName.count))
