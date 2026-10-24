@@ -3847,7 +3847,7 @@ struct LiveTerminalView: UIViewRepresentable {
 /// One background-task assertion, ended exactly once: by the work it covers finishing, or by
 /// iOS running out of background time, whichever comes first.
 @MainActor
-private final class BackgroundAssertion {
+final class BackgroundAssertion {
     private var id = UIBackgroundTaskIdentifier.invalid
 
     init(name: String) {

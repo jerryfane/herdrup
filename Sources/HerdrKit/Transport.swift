@@ -91,6 +91,16 @@ public protocol HerdrTransport: Sendable {
     /// Opens a connection, writes one request line, and streams response lines
     /// until the peer closes or the task is cancelled.
     func stream(_ requestLine: String) -> AsyncThrowingStream<String, Error>
+
+    /// Raw file bytes per `gram.upload_chunk` request. Each chunk is one `roundTrip`,
+    /// so this sets how many connections a per-chunk upload costs. The default is the
+    /// SSH-sized `HerdrClient.gramUploadChunkBytes`; a transport without the SSH
+    /// argv cap (`RelayTransport`) sends larger chunks.
+    var gramUploadChunkBytes: Int { get }
+}
+
+extension HerdrTransport {
+    public var gramUploadChunkBytes: Int { HerdrClient.gramUploadChunkBytes }
 }
 
 /// Optional host capability for changing saved-machine federation through Herdr's CLI.
@@ -164,8 +174,10 @@ public enum TransportError: Error, CustomStringConvertible {
     /// experiences as an endless spinner rather than as a failure.
     case connectTimedOut(host: String, onTailnet: Bool)
     /// A request on a held `api-bridge --multi` channel got no reply within its bound
-    /// (`RequestChannelSettings.requestTimeout`). The per-request path cannot hang
+    /// (`RequestChannelSettings.requestTimeout`). The per-request SSH path cannot hang
     /// this way: a dead link ends its exec channel, while a held channel can go silent.
+    /// A relay call (`RelayTransport.roundTrip`) that outlives its connector's
+    /// `roundTripLimit` fails with this too; `host` is then the relay's host name.
     case requestTimedOut(host: String)
 
     public var description: String {

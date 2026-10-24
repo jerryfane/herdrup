@@ -730,8 +730,11 @@ struct GuestPaneView: View {
         sending = true
         note = nil
         let batch = attachments
+        // Leaving the app or locking the phone mid-upload suspends it, which drops the
+        // relay connection and fails the send; this keeps it running for iOS's grace period.
+        let background = BackgroundAssertion(name: "herdr.guest.send")
         Task {
-            defer { sending = false; uploadBytes = nil; sendingAttachmentID = nil }
+            defer { sending = false; uploadBytes = nil; sendingAttachmentID = nil; background.end() }
             failedAttachmentID = nil
             do {
                 var prompt = text
