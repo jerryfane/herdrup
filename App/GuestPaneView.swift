@@ -124,7 +124,9 @@ struct GuestPaneView: View {
                              viewer: .guest(name: access.guestName, ownerName: access.ownerName),
                              eventsPaneID: nil, isActive: true, live: availability == .running,
                              agentStatus: agent?.agentStatus, ground: Palette.groundMachine,
-                             onOpenTerminal: { tab = .terminal })
+                             onOpenTerminal: { tab = .terminal },
+                             findRequest: findRequest,
+                             onFindResult: { index, total in findMatches = (index, total) })
                 }
                 if showingGram {
                     GuestGramList(client: client, access: access, model: gram)
@@ -169,9 +171,8 @@ struct GuestPaneView: View {
             }
         }
         .onChange(of: tab) { _, _ in
-            if showingChat, findOpen { toggleFind() }
-            guard showingGram else { return }
             if findOpen { toggleFind() }
+            guard showingGram else { return }
             Task {
                 await gram.refresh(client: client, access: access)
                 await gram.markAllRead(client: client)
@@ -428,8 +429,10 @@ struct GuestPaneView: View {
                     isAtTail: terminalAtTail,
                     fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
-                    findRequest: findRequest,
-                    onFindResult: { index, total in findMatches = (index, total) })
+                    findRequest: showingChat ? nil : findRequest,
+                    onFindResult: { index, total in
+                        if !showingChat { findMatches = (index, total) }
+                    })
                     .id(streamGen)
                     .accessibilityIdentifier("guest-terminal")
                     // The owner's terminal inset.
@@ -509,6 +512,9 @@ struct GuestPaneView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .background(pageGround)
+                .overlay(alignment: .top) {
+                    if showingChat { ChatComposerFade(ground: pageGround) }
+                }
             }
     }
 
@@ -664,8 +670,6 @@ struct GuestPaneView: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
-            // Find searches the terminal: from Chat it opens there.
-            if showingChat { tab = .terminal }
             findOpen = true
             findFocused = true
         }

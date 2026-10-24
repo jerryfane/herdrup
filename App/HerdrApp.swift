@@ -5325,11 +5325,11 @@ struct TerminalPaneContent: View {
     private var showingChat: Bool { chatAvailable && showsChat }
 
     private func setShowsChat(_ value: Bool) {
+        if findOpen { toggleFind() }
         showsChat = value
         ChatPreference.remember(paneID: paneID, showsChat: value)
         if value {
             terminalInputFocused = false
-            if findOpen { toggleFind() }
         }
     }
     /// The pane header label: the agent's NAME first (matching the list), then the model (kind) and
@@ -5444,8 +5444,10 @@ struct TerminalPaneContent: View {
                                  liveness: terminalLiveness,
                                  controlArmed: $ctrlArmed,
                                  userInputToken: userInputToken,
-                                 findRequest: findRequest,
-                                 onFindResult: { index, total in findMatches = (index, total) })
+                                 findRequest: showingChat ? nil : findRequest,
+                                 onFindResult: { index, total in
+                                     if !showingChat { findMatches = (index, total) }
+                                 })
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .accessibilityIdentifier("terminal-surface")
@@ -5487,7 +5489,9 @@ struct TerminalPaneContent: View {
                             ChatView(client: client, model: chatModel, viewer: .owner, eventsPaneID: paneID,
                                      isActive: isForeground, live: true, agentStatus: agent?.agentStatus,
                                      ground: Palette.groundMachine,
-                                     onOpenTerminal: { setShowsChat(false) })
+                                     onOpenTerminal: { setShowsChat(false) },
+                                     findRequest: findRequest,
+                                     onFindResult: { index, total in findMatches = (index, total) })
                         }
                     }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
@@ -5529,6 +5533,9 @@ struct TerminalPaneContent: View {
                         // Opaque, so rows the composer grows over do not show through the
                         // gaps between the keycaps and around the card.
                         .background(Palette.groundMachine)
+                        .overlay(alignment: .top) {
+                            if showingChat { ChatComposerFade(ground: Palette.groundMachine) }
+                        }
                     }
             }
         }
@@ -5851,8 +5858,6 @@ struct TerminalPaneContent: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
-            // Find searches the terminal: from Chat it opens there.
-            if showingChat { setShowsChat(false) }
             findOpen = true
             findFocused = true
             // An armed one-shot Ctrl would otherwise encode the next keystroke as a control

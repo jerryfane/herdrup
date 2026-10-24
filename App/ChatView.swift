@@ -222,6 +222,37 @@ private enum ChatRow: Identifiable {
         case .outgoing(let message): return "outgoing:" + message.id
         }
     }
+
+    var searchText: String {
+        let text: String
+        switch self {
+        case .day: return ""
+        case .prompt(let turn):
+            guard case .user(let prompt, _) = turn.prompt?.kind else { return "" }
+            if let bundle = GramAttachmentPrompt.parse(prompt) {
+                text = ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
+            } else {
+                text = prompt
+            }
+        case .outgoing(let message):
+            text = ([message.text] + message.files.map(\.name)).joined(separator: "\n")
+        case .item(let item):
+            switch item {
+            case .work(let work):
+                text = (work.thoughts + work.steps.map { $0.intent + "\n" + ($0.detail ?? "") }).joined(separator: "\n")
+            case .reply(_, let reply, _), .summary(_, let reply): text = reply
+            case .note(_, _, let note): text = note.title + "\n" + note.body
+            case .plan(_, let items):
+                text = items.map { [$0.phase, $0.text, $0.blocker].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
+            case .ask(_, let ask, _):
+                text = (ask.questions.flatMap { [$0.question] + $0.options } + (ask.answer ?? [])).joined(separator: "\n")
+            case .turnFailed(_, _, let error): text = error ?? ""
+            }
+        }
+        let parsed = try? AttributedString(markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        return parsed.map { String($0.characters) } ?? text
+    }
 }
 
 /// The omp Chat view: the conversation read from omp's session file, newest at the bottom,
@@ -244,6 +275,8 @@ struct ChatView: View {
     /// The page's ground, for the top fade.
     let ground: Color
     let onOpenTerminal: () -> Void
+    var findRequest: FindRequest? = nil
+    var onFindResult: (Int, Int) -> Void = { _, _ in }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
@@ -252,22 +285,90 @@ struct ChatView: View {
     @State private var openNote: TranscriptNote?
     @State private var viewportHeight: CGFloat = 0
     @State private var atBottom = true
+    @State private var followingLatest = true
+    @State private var visibleRowID: String?
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
     /// The top of the list is within reach (40 pt) of the viewport's top.
     @State private var topVisible = false
+    @State private var selectedSearchHit: String?
+    @State private var openQuestionID: String?
+
+    private var searchHits: [ChatSearchHit] {
+        let query = findRequest?.term ?? ""
+        guard !query.isEmpty else { return [] }
+        return rows.flatMap { ChatSearch.hits(rowID: $0.id, text: $0.searchText, query: query) }
+    }
+
+    private func updateSearch(_ proxy: ScrollViewProxy, step: Bool = false) {
+        let hits = searchHits
+        guard !hits.isEmpty else {
+            selectedSearchHit = nil
+            onFindResult(0, 0)
+            return
+        }
+        let current = hits.firstIndex { $0.id == selectedSearchHit }
+        let index: Int
+        if step, let current {
+            index = (current + (findRequest?.direction == .backward ? hits.count - 1 : 1)) % hits.count
+        } else {
+            index = current ?? 0
+        }
+        let hit = hits[index]
+        let moved = selectedSearchHit != hit.id
+        selectedSearchHit = hit.id
+        onFindResult(index + 1, hits.count)
+        atBottom = false
+        followingLatest = false
+        if let row = rows.first(where: { $0.id == hit.rowID }), case .item(.work(let work)) = row {
+            expanded.insert("t:" + work.id)
+            expanded.insert("s:" + work.id)
+            for item in work.steps { expanded.insert("d:" + item.id) }
+        }
+        guard moved || step else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard selectedSearchHit == hit.id, findRequest != nil else { return }
+            proxy.scrollTo("search:" + hit.id, anchor: .center)
+        }
+    }
 
     private static let scrollSpace = "chat-scroll"
     private static let bottomID = "chat-bottom"
 
     var body: some View {
+        let hits = searchHits
+        let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     topSentinel(proxy)
+                    if findRequest != nil {
+                        HStack {
+                            Text("Searching loaded history").font(Typography.app(12 * textScale))
+                            Spacer()
+                            if model.hasOlder {
+                                Button("Load older") { Task { await model.loadOlder(client: client) } }
+                                    .disabled(model.loadingOlder)
+                            }
+                        }
+                        .accessibilityIdentifier("chat-search-scope")
+                    }
                     ForEach(rows) { row in
-                        rowView(row).id(row.id)
+                        VStack(alignment: .leading, spacing: 6) {
+                            rowView(row)
+                            ForEach(hitsByRow[row.id] ?? []) { hit in
+                                Text(ChatSearch.highlighted(hit.excerpt, query: findRequest?.term ?? ""))
+                                    .font(Typography.app(13 * textScale))
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(selectedSearchHit == hit.id ? Palette.surfaceRaised : Color.clear)
+                                    .accessibilityIdentifier("chat-search-result")
+                                    .id("search:" + hit.id)
+                            }
+                        }
+                        .id(row.id)
                     }
                     if !model.currentPlan.isEmpty {
                         planCard(model.currentPlan)
@@ -310,14 +411,40 @@ struct ChatView: View {
                 .padding(.bottom, 10)
                 .frame(maxWidth: ChatStyle.columnWidth)
                 .frame(maxWidth: .infinity)
+                .scrollTargetLayout()
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
+                    guard landed, followingLatest, findRequest == nil else { return }
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
             }
             .coordinateSpace(name: Self.scrollSpace)
             .scrollDismissesKeyboard(.interactively)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+            .scrollPosition(id: $visibleRowID, anchor: .top)
+            .onScrollPhaseChange { old, new in
+                if new == .interacting { followingLatest = false }
+                if new == .idle, old == .interacting || old == .decelerating {
+                    followingLatest = atBottom && findRequest == nil
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                viewportHeight = $0
+                if landed, followingLatest, findRequest == nil {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
             .overlay(alignment: .top) {
                 LinearGradient(colors: [ground, ground.opacity(0)], startPoint: .top, endPoint: .bottom)
                     .frame(height: 26)
                     .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottom) {
+                if landed, !atBottom, findRequest == nil {
+                    ChatLatestButton {
+                        followingLatest = true
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    }
+                    .padding(.bottom, 12)
+                }
             }
             .overlay {
                 if !model.loaded {
@@ -327,7 +454,7 @@ struct ChatView: View {
                 }
             }
             .task(id: model.loaded) {
-                guard model.loaded, !landed else { return }
+                guard model.loaded, !landed, findRequest == nil else { return }
                 for _ in 0..<8 {
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                     try? await Task.sleep(nanoseconds: 60_000_000)
@@ -335,15 +462,11 @@ struct ChatView: View {
                 }
                 landed = true
             }
-            // New entries while the reader is at the newest: follow them down.
-            .onChange(of: rows.last?.id) { _, _ in
-                guard landed, atBottom else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            .onChange(of: findRequest) { old, new in
+                if old?.term != new?.term { selectedSearchHit = nil }
+                updateSearch(proxy, step: old?.term == new?.term && old?.generation != new?.generation)
             }
-            .onChange(of: model.working) { _, _ in
-                guard landed, atBottom else { return }
-                proxy.scrollTo(Self.bottomID, anchor: .bottom)
-            }
+            .onChange(of: hits) { _, _ in updateSearch(proxy) }
         }
         .background(ground)
         .accessibilityElement(children: .contain)
@@ -384,7 +507,28 @@ struct ChatView: View {
         .sheet(item: Binding(get: { openNote.map(IdentifiedNote.init) }, set: { openNote = $0?.note })) { item in
             ChatNoteSheet(note: item.note)
         }
+        .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
+            ChatContentSheet {
+                if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
+                   let item = turn.items.first(where: { $0.id == openQuestionID }),
+                   case .ask(let id, let ask, let pending) = item {
+                    VStack(alignment: .leading, spacing: 12) {
+                        questionCard(id: id, ask: ask, pending: pending)
+                        if case .user(let text, _) = turn.prompt?.kind, !text.isEmpty {
+                            DisclosureGroup("Show context") {
+                                ChatMarkdownView(markdown: text)
+                            }
+                            .font(Typography.app(14 * textScale))
+                        }
+                    }
+                } else {
+                    Text("This question is no longer available.")
+                }
+            }
+            .accessibilityIdentifier("chat-question-sheet")
+        }
         .environment(\.chatTextScale, textScale)
+        .environment(\.chatSearchQuery, findRequest?.term ?? "")
     }
 
     // MARK: - Rows
@@ -420,6 +564,19 @@ struct ChatView: View {
         }
     }
 
+    private func questionCard(id: String, ask: TranscriptAsk, pending: TranscriptPendingAsk?) -> some View {
+        ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer,
+                    answering: model.answeringAskID == id,
+                    problem: model.answerProblem?.askID == id ? model.answerProblem : nil,
+                    onAnswer: { option in
+                        Task { await model.answer(client: client, askID: id, option: option) }
+                    },
+                    onOpenTerminal: {
+                        openQuestionID = nil
+                        onOpenTerminal()
+                    })
+    }
+
     @ViewBuilder
     private func itemView(_ item: TranscriptItem) -> some View {
         switch item {
@@ -434,14 +591,13 @@ struct ChatView: View {
         case .plan:
             EmptyView() // The current snapshot stays visible once at the conversation's end.
         case .ask(let id, let ask, let pending):
-            ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer,
-                        answering: model.answeringAskID == id,
-                        problem: model.answerProblem?.askID == id ? model.answerProblem : nil,
-                        onAnswer: { option in
-                            Task { await model.answer(client: client, askID: id, option: option) }
-                        },
-                        onOpenTerminal: onOpenTerminal)
-                .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 6) {
+                questionCard(id: id, ask: ask, pending: pending)
+                Button("Open question") { openQuestionID = id }
+                    .font(Typography.app(13 * textScale))
+                    .accessibilityIdentifier("chat-question-open")
+            }
+            .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
         case .turnFailed(_, let status, let error):
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: status == .aborted ? "stop.circle" : "exclamationmark.circle")
@@ -497,7 +653,7 @@ struct ChatView: View {
 
     /// Fetches the next older page and keeps the row that was on top where it was.
     private func loadOlder(_ proxy: ScrollViewProxy, retry: Bool = false) {
-        guard landed, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
+        guard landed, findRequest == nil, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
         let anchor = rows.first?.id
         Task {
             await model.loadOlder(client: client)
@@ -994,30 +1150,23 @@ enum ChatNoteStyle {
 private struct ChatNoteSheet: View {
     let note: TranscriptNote
     @Environment(\.chatTextScale) private var textScale
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(ChatNoteStyle.kicker(note, tsMs: 0))
-                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Text(ChatNoteStyle.title(note)).font(Typography.app(18 * textScale, .semibold)).foregroundStyle(Palette.text)
-                        .fixedSize(horizontal: false, vertical: true)
+        ChatContentSheet {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(ChatNoteStyle.title(note))
+                    .font(Typography.app(18 * textScale, .semibold))
+                    .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(ChatNoteStyle.kicker(note, tsMs: 0))
+                    .font(Typography.machine(10.5 * textScale, .semibold))
+                    .foregroundStyle(Palette.textFaint)
+                DisclosureGroup("Show context") {
                     ChatMarkdownView(markdown: note.body)
                 }
-                .padding(16)
-                .frame(maxWidth: ChatStyle.columnWidth, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-            .background(Palette.ground.ignoresSafeArea())
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.accessibilityIdentifier("chat-note-done")
-                }
+                .font(Typography.app(14 * textScale))
             }
         }
-        .presentationDetents([.medium, .large])
         .accessibilityIdentifier("chat-note-sheet")
     }
 }

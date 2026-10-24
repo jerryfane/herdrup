@@ -66,6 +66,52 @@ final class ChatUXSmokeTests: XCTestCase {
         record(app, "Three-column table wraps within the phone width")
     }
 
+    func testSearchRevealsThoughtAndKeepsActiveChat() {
+        let app = launch()
+        app.buttons["terminal-find"].tap()
+        let field = app.textFields["terminal-find-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText(".*[x]")
+        let result = app.staticTexts["chat-search-result"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(result.label.contains(".*[x]"))
+        XCTAssertTrue(app.scrollViews["chat-view"].exists)
+        XCTAssertTrue(app.otherElements["chat-thought-open"].exists || app.descendants(matching: .any)["chat-thought-open"].exists)
+        record(app, "Literal punctuation search reveals rendered thought without switching to Terminal")
+        app.buttons["terminal-find"].tap()
+        XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
+        XCTAssertTrue(app.buttons["chat-jump-latest"].waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["chat-jump-latest"].tap()
+        XCTAssertTrue(app.staticTexts["chat-model"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["chat-model"].isHittable, app.debugDescription)
+        record(app, "Centered clear-glass jump returns to latest above composer fade")
+    }
+
+    func testQuestionSheetFitsAndExpandsContext() {
+        let app = launch()
+        app.buttons["terminal-find"].tap()
+        let field = app.textFields["terminal-find-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText("Merge #305")
+        XCTAssertTrue(app.staticTexts["chat-search-result"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["terminal-find"].tap()
+        guard let open = app.buttons.matching(identifier: "chat-question-open").allElementsBoundByIndex.first(where: \.isHittable) else {
+            return XCTFail(app.debugDescription)
+        }
+        open.tap()
+        let context = app.buttons["Show context"]
+        XCTAssertTrue(context.waitForExistence(timeout: 5), app.debugDescription)
+        record(app, "Question-first content-sized sheet")
+        context.tap()
+        XCTAssertTrue(app.buttons["Done"].exists)
+        record(app, "Question sheet expands context without losing question state")
+        context.tap()
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.scrollViews["chat-view"].exists)
+    }
+
     func testRefreshFailureKeepsLoadedConversation() {
         let app = launch(failingRefresh: true)
         XCTAssertTrue(app.staticTexts["Review the table"].waitForExistence(timeout: 12), app.debugDescription)

@@ -14,6 +14,10 @@ struct ChatAttachmentBundle: View {
     @State private var openTask: Task<Void, Never>?
 
     @Environment(\.chatTextScale) private var textScale
+    @Environment(\.chatSearchQuery) private var searchQuery
+    private var showingFiles: Bool {
+        expanded || (!searchQuery.isEmpty && files.contains { $0.name.localizedCaseInsensitiveContains(searchQuery) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -24,7 +28,7 @@ struct ChatAttachmentBundle: View {
                     Image(systemName: "paperclip")
                     Text("\(files.count) attachment\(files.count == 1 ? "" : "s")")
                     Spacer(minLength: 8)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    Image(systemName: showingFiles ? "chevron.up" : "chevron.down")
                         .font(Typography.app(11 * textScale, .semibold))
                 }
                 .font(Typography.app(14 * textScale, .medium))
@@ -32,16 +36,16 @@ struct ChatAttachmentBundle: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            .accessibilityValue(showingFiles ? "Expanded" : "Collapsed")
             .accessibilityIdentifier("chat-attachment-bundle")
 
-            if expanded {
+            if showingFiles {
                 ForEach(files) { file in
                     Button { open(file) } label: {
                         HStack(spacing: 9) {
                             Image(systemName: file.isImage ? "photo" : "doc")
                                 .font(Typography.app(20 * textScale))
-                            Text(file.name)
+                            Text(ChatSearch.highlighted(file.name, query: searchQuery))
                                 .font(Typography.app(14 * textScale, .medium))
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)

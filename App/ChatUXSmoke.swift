@@ -15,7 +15,7 @@ enum ChatUXSmoke {
         let params = request["params"] as? [String: Any] ?? [:]
         responses += 1
         if responses > 1 {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(3))
             if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_FAIL_REFRESH"] == "1" {
                 return ChatMockConversation.error(id: id, code: "transcript_unavailable", message: "Smoke refresh unavailable")
             }
@@ -27,8 +27,8 @@ enum ChatUXSmoke {
               var entries = result["entries"] as? [[String: Any]] else { return original }
         entries.append(["id": "ux-user", "kind": "user", "author": "owner",
                         "text": "Check typography and wrapped tables.", "ts_ms": timestamp])
-        entries.append(["id": "ux-thought", "kind": "thought",
-                        "text": "**Check the table**\n\nUse *wrapped* cells and `literal` code.\n\n- Keep the caption\n- Preserve Unicode: café", "ts_ms": timestamp + 1])
+        entries.append(["id": "ux-thought", "kind": "thinking",
+                        "text": "**Check the table**\n\nUse *wrapped* cells and `literal` code.\n\n- Keep the caption\n- Preserve Unicode: café\n- Find literal `.*[x]` safely.", "ts_ms": timestamp + 1])
         entries.append(["id": "ux-reply", "kind": "reply", "final": true,
                         "text": "## Wrapped table\n\n| Metric | Description | Result |\n| --- | --- | --- |\n| Latency | A deliberately long description that must wrap within its column | +12% |\n| Unicode | café 東京 résumé | 42 |\n\nA complete fixture response.", "ts_ms": timestamp + 2])
         result["entries"] = entries
