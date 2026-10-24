@@ -373,7 +373,7 @@ struct GuestPaneView: View {
             GuestStatusPill(label: "CONNECTING", color: Palette.textDim, dot: Palette.textFaint,
                             fill: Palette.surfaceRaised, pulsing: false)
         case .paused, .offline, .lost:
-            GuestStatusPill(label: availability == .offline ? "OFFLINE" : "NOT RUNNING",
+            GuestStatusPill(label: availability == .offline ? "OFFLINE" : availability == .lost ? "ACCESS REMOVED" : "NOT RUNNING",
                             color: Palette.textDim, dot: Palette.textFaint, fill: Palette.surfaceRaised,
                             pulsing: false)
         case .running:
