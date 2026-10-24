@@ -51,3 +51,22 @@ extension EnvironmentValues {
         set { self[ChatSearchQueryKey.self] = newValue }
     }
 }
+
+struct ChatSearchResults: View {
+    let hits: [ChatSearchHit]
+    let query: String
+    let selectedID: String?
+    @Environment(\.chatTextScale) private var textScale
+
+    var body: some View {
+        ForEach(hits) { hit in
+            Text(ChatSearch.highlighted(hit.excerpt, query: query))
+                .font(Typography.app(13 * textScale))
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(selectedID == hit.id ? Palette.surfaceRaised : Color.clear)
+                .accessibilityIdentifier("chat-search-result")
+                .id("search:" + hit.id)
+        }
+    }
+}

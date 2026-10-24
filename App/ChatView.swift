@@ -356,19 +356,7 @@ struct ChatView: View {
                         .accessibilityIdentifier("chat-search-scope")
                     }
                     ForEach(rows) { row in
-                        VStack(alignment: .leading, spacing: 6) {
-                            rowView(row)
-                            ForEach(hitsByRow[row.id] ?? []) { hit in
-                                Text(ChatSearch.highlighted(hit.excerpt, query: findRequest?.term ?? ""))
-                                    .font(Typography.app(13 * textScale))
-                                    .padding(8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(selectedSearchHit == hit.id ? Palette.surfaceRaised : Color.clear)
-                                    .accessibilityIdentifier("chat-search-result")
-                                    .id("search:" + hit.id)
-                            }
-                        }
-                        .id(row.id)
+                        searchableRow(row, hits: hitsByRow[row.id] ?? [])
                     }
                     if !model.currentPlan.isEmpty {
                         planCard(model.currentPlan)
@@ -508,27 +496,37 @@ struct ChatView: View {
             ChatNoteSheet(note: item.note)
         }
         .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
-            ChatContentSheet {
-                if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
-                   let item = turn.items.first(where: { $0.id == openQuestionID }),
-                   case .ask(let id, let ask, let pending) = item {
-                    VStack(alignment: .leading, spacing: 12) {
-                        questionCard(id: id, ask: ask, pending: pending)
-                        if case .user(let text, _) = turn.prompt?.kind, !text.isEmpty {
-                            DisclosureGroup("Show context") {
-                                ChatMarkdownView(markdown: text)
-                            }
-                            .font(Typography.app(14 * textScale))
-                        }
-                    }
-                } else {
-                    Text("This question is no longer available.")
-                }
-            }
-            .accessibilityIdentifier("chat-question-sheet")
+            questionSheet
         }
         .environment(\.chatTextScale, textScale)
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
+    }
+
+    private func searchableRow(_ row: ChatRow, hits: [ChatSearchHit]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            rowView(row)
+            ChatSearchResults(hits: hits, query: findRequest?.term ?? "", selectedID: selectedSearchHit)
+        }
+        .id(row.id)
+    }
+
+    private var questionSheet: some View {
+        ChatContentSheet {
+            if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
+               let item = turn.items.first(where: { $0.id == openQuestionID }),
+               case .ask(let id, let ask, let pending) = item {
+                VStack(alignment: .leading, spacing: 12) {
+                    questionCard(id: id, ask: ask, pending: pending)
+                    if case .user(let text, _) = turn.prompt?.kind, !text.isEmpty {
+                        DisclosureGroup("Show context") { ChatMarkdownView(markdown: text) }
+                            .font(Typography.app(14 * textScale))
+                    }
+                }
+            } else {
+                Text("This question is no longer available.")
+            }
+        }
+        .accessibilityIdentifier("chat-question-sheet")
     }
 
     // MARK: - Rows
