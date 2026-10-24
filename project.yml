@@ -85,6 +85,9 @@ targets:
       # HerdrClient path. One copy, so the mock and the tests cannot drift. The file is
       # wrapped in `#if DEBUG`, so Release builds compile it to nothing.
       - path: Tests/HerdrKitTests/MockWireFixtures.swift
+      # The question-push logic (#483), shared with the notification service extension
+      # and tested on Linux as the `AskPush` package target.
+      - path: AskPush
     dependencies:
       # Declared in step ONE rather than when a screen first needs it. Linking
       # HerdrKit into an iOS app exercises the libssh2 system library, the module
@@ -130,6 +133,9 @@ targets:
       # the extension). INERT for the buildbox sim build's signing (never signed); the
       # Distribution archive needs the widget's own App Store profile — see testflight.yml.
       - target: HerdrWidgets
+      # The notification service extension that adds answer buttons to question pushes
+      # (#483), embedded in PlugIns the same way.
+      - target: HerdrNotificationService
     # Add the UI-test bundle to the auto-generated `Herdr` scheme's TEST action, so
     # `xcodebuild test -scheme Herdr -only-testing:HerdrUITests` runs it. This does NOT
     # touch the scheme's build/archive action, so the TestFlight lane (`-scheme Herdr`
@@ -389,4 +395,45 @@ targets:
         Distribution:
           CODE_SIGN_STYLE: Manual
           PROVISIONING_PROFILE_SPECIFIER: "Herdrup Widgets App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+
+  # Notification service extension (#483): gives an omp question push its answer buttons
+  # on the lock screen by registering a per-question category before the alert shows.
+  # Compiles only the Foundation-only question logic (AskPush/AskPush.swift), not
+  # HerdrKit: the app does the answering. Signing mirrors HerdrWidgets: unsigned in the
+  # simulator builds, automatic for the Mac lane, and for the Distribution archive its own
+  # App Store profile ("Herdrup Notification Service App Store", bundle id
+  # com.jerryfane.herdr.notificationservice), created in CI like the widget's (testflight.yml).
+  HerdrNotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: HerdrNotificationService
+      - path: AskPush/AskPush.swift
+    dependencies:
+      - sdk: UserNotifications.framework
+    info:
+      path: HerdrNotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: herdrup
+        # Must MATCH the app's, like the widget's (see the app target).
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NotificationService"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.notificationservice
+        # Bump with the app's and the widget's: an extension's version must match its app's.
+        MARKETING_VERSION: "1.0.11"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        DEVELOPMENT_TEAM: FXQ5Z9HHY6
+        CODE_SIGN_STYLE: Automatic
+      configs:
+        Distribution:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: "Herdrup Notification Service App Store"
           CODE_SIGN_IDENTITY: "Apple Distribution"

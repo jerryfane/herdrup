@@ -84,6 +84,26 @@ uploads; a plain run is a signing dry-run.
 The bundle id, the shared distribution certificate, and the `Herdrup App Store` profile
 are created via the ASC API on Linux, not by hand.
 
+The app embeds two extensions, each signed with its own App Store profile in the
+`Distribution` configuration (project.yml), and each needs an explicit entry in the
+export options' `provisioningProfiles` and the same `CFBundleVersion` as the app:
+
+| Target | Bundle id | Profile |
+|---|---|---|
+| `HerdrWidgets` (Live Activity) | `com.jerryfane.herdr.widgets` | `Herdrup Widgets App Store` |
+| `HerdrNotificationService` (question buttons, #483) | `com.jerryfane.herdr.notificationservice` | `Herdrup Notification Service App Store` |
+
+Neither extension needs a capability: the notification service extension registers its
+categories through the shared notification center, with no App Group. testflight.yml
+handles both the same way (Option B, owner-approved; the notification service extension
+was added by the owner on 2026-10-23): `.github/scripts/ensure_extension_profile.py
+widgets notificationservice` creates each explicit App ID if missing (team FXQ5Z9HHY6,
+no capabilities), reuses or creates its App Store profile with the existing Apple
+Distribution certificate, and installs it; the generated `ExportOptions.plist` names
+both profiles; and the build-number step stamps `CFBundleVersion` into
+`HerdrWidgets/Info.plist` and `HerdrNotificationService/Info.plist`. If the ASC key
+cannot create an App ID or profile, that step fails loudly and the owner mints it.
+
 ## Verification
 
 - Every change must keep the buildbox iphonesimulator build green at the exact head (the
