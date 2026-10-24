@@ -6362,17 +6362,16 @@ struct TerminalPaneContent: View {
     }
 
     /// Whether the reply can take one more attachment, the gate every way in shares:
-    /// under the count cap, and a pane whose agent has a name and an intent prompt (the
-    /// only destination `sendPromptWithAttachments` can deliver to). Says why when not.
+    /// under the count cap and addressed to a named agent. Uploading to Gram does not
+    /// require a ready prompt; the host separately decides whether to accept the prompt.
     private func replyTakesAttachment() -> Bool {
         guard replyAttachments.count < ComposerStaging.maxAttachments else {
             actionNote = "Up to \(ComposerStaging.maxAttachments) attachments at a time."
             return false
         }
-        guard let currentAgent = agent, router.mode(for: currentAgent) == .intent,
-              currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard agent?.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
-            actionNote = "Attachments need a named agent with a ready prompt."
+            actionNote = "Choose a named agent to attach files."
             return false
         }
         return true
@@ -6558,11 +6557,11 @@ struct TerminalPaneContent: View {
     private func sendPromptWithAttachments(_ text: String, attachments: [ComposerAttachment]) {
         // The destination is captured BEFORE the first await: `agent` is re-resolved on
         // every refresh, and a batch can span minutes.
-        guard !sending, let currentAgent = agent, router.mode(for: currentAgent) == .intent,
-              let target = currentAgent.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard !sending else { return }
+        guard let target = agent?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
               !target.isEmpty
         else {
-            actionNote = "Attachments need a named agent with a ready prompt."
+            actionNote = "Choose a named agent to attach files."
             return
         }
 

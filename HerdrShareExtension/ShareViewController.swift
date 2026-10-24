@@ -48,6 +48,7 @@ final class ShareViewController: UIViewController {
 private struct ShareRecipient: Identifiable {
     let id: String
     let name: String
+    let target: String
     let machine: String
     let guest: Bool
     let client: HerdrClient
@@ -151,7 +152,7 @@ private final class ShareModel: ObservableObject {
             try Task.checkCancellation()
             for agent in agents {
                 guard let name = agent.name, !name.isEmpty, agent.archived == nil else { continue }
-                recipients.append(ShareRecipient(id: "owner/\(host.id)/\(credentials.session ?? "default")/\(name)", name: name,
+                recipients.append(ShareRecipient(id: "owner/\(host.id)/\(credentials.session ?? "default")/\(name)", name: agent.displayName, target: name,
                                                  machine: credentials.session.map { "\(host.label) · \($0)" } ?? host.label,
                                                  guest: false, client: client))
             }
@@ -172,7 +173,7 @@ private final class ShareModel: ObservableObject {
                 return
             }
             guard features.gram else { return }
-            recipients.append(ShareRecipient(id: "guest/\(access.id)", name: name,
+            recipients.append(ShareRecipient(id: "guest/\(access.id)", name: agent.displayName, target: name,
                                              machine: "\(access.machineLabel) · Shared by \(access.ownerName)",
                                              guest: true, client: client))
         } catch is CancellationError {
@@ -248,9 +249,9 @@ private final class ShareModel: ObservableObject {
 
     private func post(_ recipient: ShareRecipient, text: String, attachment: HerdrClient.GramFileAttachment?) async throws -> String {
         if recipient.guest {
-            return try await recipient.client.guestGramPost(text: text, to: recipient.name, attachment: attachment).id
+            return try await recipient.client.guestGramPost(text: text, to: recipient.target, attachment: attachment).id
         }
-        return try await recipient.client.gramPost(text: text, to: recipient.name, attachment: attachment).id
+        return try await recipient.client.gramPost(text: text, to: recipient.target, attachment: attachment).id
     }
 
     func close() {
@@ -358,13 +359,21 @@ private struct ShareSheet: View {
                     }
                 }
             }
-            .searchable(text: $model.search, prompt: "Find an agent")
+            .searchable(text: $model.search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find an agent")
             .navigationTitle("Herdrup")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: cancel) }
-                ToolbarItem(placement: .confirmationAction) { Button("Send", action: send).disabled(!model.canSend) }
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button("Send", action: send)
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canSend)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(.regularMaterial)
+                .accessibilityIdentifier("share-send-button")
         }
     }
 }
