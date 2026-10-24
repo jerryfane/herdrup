@@ -154,7 +154,7 @@ final class ChatUXSmokeTests: XCTestCase {
         record(app, "Question answer persists in the open content-sized sheet")
         app.buttons["Done"].tap()
         record(app, "Agent surface immediately after closing the question sheet")
-        XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     func testRefreshFailureKeepsLoadedConversation() {

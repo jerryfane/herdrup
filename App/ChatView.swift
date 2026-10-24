@@ -283,9 +283,9 @@ struct ChatView: View {
     private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
     @State private var expanded: Set<String> = []
     @State private var openNote: TranscriptNote?
-    @State private var viewportHeight: CGFloat = 0
     @State private var atBottom = true
     @State private var followingLatest = true
+    @State private var scrollPosition = ChatScrollPosition()
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
@@ -334,7 +334,6 @@ struct ChatView: View {
     }
 
     private static let scrollSpace = "chat-scroll"
-    private static let bottomID = "chat-bottom"
 
     var body: some View {
         let hits = searchHits
@@ -359,7 +358,7 @@ struct ChatView: View {
             Task { await model.refresh(client: client) }
         }
         .sheet(item: Binding(get: { openNote.map(IdentifiedNote.init) }, set: { openNote = $0?.note })) { item in
-            ChatNoteSheet(note: item.note, onClose: { openNote = nil })
+            ChatNoteSheet(note: item.note)
         }
         .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
             questionSheet
@@ -374,10 +373,9 @@ struct ChatView: View {
         }
         .coordinateSpace(name: Self.scrollSpace)
         .scrollDismissesKeyboard(.interactively)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-            viewportHeight = $0
-            if landed, followingLatest, findRequest == nil {
-                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if findRequest != nil {
+                searchScope.padding(.horizontal, 16).padding(.vertical, 8).background(ground)
             }
         }
         .overlay(alignment: .top) {
@@ -389,7 +387,7 @@ struct ChatView: View {
             if landed, !atBottom, findRequest == nil {
                 ChatLatestButton {
                     followingLatest = true
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    scrollPosition.jumpToLatest()
                 }
                 .padding(.bottom, 60)
             }
@@ -404,9 +402,9 @@ struct ChatView: View {
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
             for _ in 0..<8 {
-                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                scrollPosition.jumpToLatest()
                 try? await Task.sleep(nanoseconds: 60_000_000)
-                if atBottom { break }
+                if scrollPosition.isAtBottom { break }
             }
             landed = true
         }
@@ -421,16 +419,12 @@ struct ChatView: View {
         let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
         return VStack(alignment: .leading, spacing: 10) {
             topSentinel(proxy)
-            searchScope
             ForEach(rows) { row in
                 searchableRow(row, hits: hitsByRow[row.id] ?? [])
             }
             sessionFooter
             // Keep the final line above the 48 pt composer fade when landing at the tail.
-            Color.clear.frame(height: 49).id(Self.bottomID)
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).minY } action: { minY in
-                    atBottom = minY <= viewportHeight + 8
-                }
+            Color.clear.frame(height: 49)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -438,15 +432,19 @@ struct ChatView: View {
         .frame(maxWidth: ChatStyle.columnWidth)
         .frame(maxWidth: .infinity)
         .background {
-            ScrollActivityObserver(isEnabled: isActive) { scrolling in
-                followingLatest = !scrolling && atBottom && findRequest == nil
-            }
+            ScrollActivityObserver(isEnabled: isActive, onChange: { scrolling in
+                followingLatest = !scrolling && scrollPosition.isAtBottom && findRequest == nil
+            }, onSample: { view in
+                scrollPosition.view = view
+                if followingLatest, model.loaded, findRequest == nil,
+                   !view.isTracking, !view.isDragging, !view.isDecelerating {
+                    scrollPosition.jumpToLatest()
+                }
+                let bottom = scrollPosition.isAtBottom
+                if atBottom != bottom { atBottom = bottom }
+            })
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
-            guard landed, followingLatest, findRequest == nil else { return }
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
         }
     }
 
@@ -530,7 +528,7 @@ struct ChatView: View {
         .id(row.id)
     }
 
-    private var questionSheet: some View {
+        ChatContentSheet {
         ChatContentSheet(onClose: { openQuestionID = nil }) {
             if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
                let item = turn.items.first(where: { $0.id == openQuestionID }),
@@ -1167,11 +1165,10 @@ enum ChatNoteStyle {
 /// The full text of a note card. Notes never notify; this is the only place they open.
 private struct ChatNoteSheet: View {
     let note: TranscriptNote
-    let onClose: () -> Void
     @Environment(\.chatTextScale) private var textScale
 
     var body: some View {
-        ChatContentSheet(onClose: onClose) {
+        ChatContentSheet {
             VStack(alignment: .leading, spacing: 10) {
                 Text(ChatNoteStyle.title(note))
                     .font(Typography.app(18 * textScale, .semibold))

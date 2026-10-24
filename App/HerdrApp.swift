@@ -1545,6 +1545,7 @@ private final class AgentRosterLiveEventsBuffer {
 struct ScrollActivityObserver: UIViewRepresentable {
     let isEnabled: Bool
     let onChange: (Bool) -> Void
+    var onSample: ((UIScrollView) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(isEnabled: isEnabled, onChange: onChange)
@@ -1559,6 +1560,7 @@ struct ScrollActivityObserver: UIViewRepresentable {
 
     func updateUIView(_ uiView: ProbeView, context: Context) {
         context.coordinator.onChange = onChange
+        context.coordinator.onSample = onSample
         context.coordinator.setEnabled(isEnabled)
         context.coordinator.attach(from: uiView)
     }
@@ -1570,6 +1572,7 @@ struct ScrollActivityObserver: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var onChange: (Bool) -> Void
+        var onSample: ((UIScrollView) -> Void)?
         private weak var scrollView: UIScrollView?
         private var displayLink: CADisplayLink?
         private var isEnabled: Bool
@@ -1616,6 +1619,7 @@ struct ScrollActivityObserver: UIViewRepresentable {
 
         @objc private func tick(_ link: CADisplayLink) {
             guard isEnabled, let scrollView else { return }
+            onSample?(scrollView)
             let active = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
             if active {
                 if !isActive {
@@ -3043,9 +3047,6 @@ struct TerminalHomeView: View {
                     .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
             }
             .tint(Palette.text)
-            // The kept-alive pane covers these tabs. Modal dismissal must not return
-            // VoiceOver focus to the visually hidden roster underneath it.
-            .accessibilityHidden(frontID != nil)
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
             // covers it and captures touches; otherwise the overlay is fully inert.
