@@ -3043,6 +3043,9 @@ struct TerminalHomeView: View {
                     .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
             }
             .tint(Palette.text)
+            // The kept-alive pane covers these tabs. Modal dismissal must not return
+            // VoiceOver focus to the visually hidden roster underneath it.
+            .accessibilityHidden(frontID != nil)
             // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
             // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
             // covers it and captures touches; otherwise the overlay is fully inert.

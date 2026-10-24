@@ -286,7 +286,6 @@ struct ChatView: View {
     @State private var viewportHeight: CGFloat = 0
     @State private var atBottom = true
     @State private var followingLatest = true
-    @State private var visibleRowID: String?
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
@@ -375,7 +374,6 @@ struct ChatView: View {
         }
         .coordinateSpace(name: Self.scrollSpace)
         .scrollDismissesKeyboard(.interactively)
-        .scrollPosition(id: $visibleRowID, anchor: .top)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
             viewportHeight = $0
             if landed, followingLatest, findRequest == nil {
@@ -439,7 +437,6 @@ struct ChatView: View {
         .padding(.bottom, 10)
         .frame(maxWidth: ChatStyle.columnWidth)
         .frame(maxWidth: .infinity)
-        .scrollTargetLayout()
         .background {
             ScrollActivityObserver(isEnabled: isActive) { scrolling in
                 followingLatest = !scrolling && atBottom && findRequest == nil
