@@ -64,6 +64,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   over the terminal's bottom rows instead of shrinking it, so typing never resizes the
   agent's screen. On iPhone, Send dismisses the keyboard without forcing a history reader
   back to live output. On iPad, the composer stays focused; use Collapse keyboard to dismiss it.
+  Files can upload to a named agent even while it is asking a question. If the host refuses
+  the accompanying prompt, the composer keeps the text and sent-file chips for retry.
 - **Host picker** — native system typography for names, addresses, and guidance, with
   higher-contrast supporting text and the app's text-size preference respected.
   Copyable shell commands and terminal output retain their monospaced fonts.
@@ -73,6 +75,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   sheet open until it confirms delivery. Open Herdrup once after updating to make existing
   saved connections available to the extension. Credentials remain in the existing Keychain.
   The sheet uses each machine's remembered herdr session, including named sessions.
+  Federated agents use readable machine names. Send stays above the keyboard while you
+  search recipients or type a message.
 - **Guest access** — share one agent with someone outside your machines from its ••• menu. They
   get a one-use invite (QR code or link), watch the live terminal and message the agent through
   a relay, end to end encrypted, with every message labelled `<name> (via HerdrUp):`. Settings →
