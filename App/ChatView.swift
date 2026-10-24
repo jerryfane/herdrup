@@ -339,147 +339,14 @@ struct ChatView: View {
 
     var body: some View {
         let hits = searchHits
-        let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    topSentinel(proxy)
-                    if findRequest != nil {
-                        HStack {
-                            Text("Searching loaded history").font(Typography.app(12 * textScale))
-                            Spacer()
-                            if model.hasOlder {
-                                Button("Load older") { Task { await model.loadOlder(client: client) } }
-                                    .disabled(model.loadingOlder)
-                            }
-                        }
-                        .accessibilityIdentifier("chat-search-scope")
-                    }
-                    ForEach(rows) { row in
-                        searchableRow(row, hits: hitsByRow[row.id] ?? [])
-                    }
-                    if !model.currentPlan.isEmpty {
-                        planCard(model.currentPlan)
-                    }
-                    if agentStatus == "working" || (agentStatus == nil && model.working != nil) {
-                        ChatWorkingDots(intent: model.working?.intent)
-                    }
-                    if let recap = model.recap, model.working == nil,
-                       agentStatus != "working", !model.hasPendingSend {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Rectangle().fill(Palette.hairline).frame(height: 1).accessibilityHidden(true)
-                            Text(ChatInline.styled(recap.text, size: 13 * textScale))
-                                .foregroundStyle(Palette.textDim)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.vertical, 8)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("chat-recap")
-                    }
-                    if let sessionModel = model.sessionModel {
-                        Text(sessionModel.id)
-                            .font(Typography.machine(11.5 * textScale))
-                            .foregroundStyle(Palette.textFaint)
-                            .padding(.leading, 4).padding(.vertical, 4)
-                            .accessibilityLabel("Model: \(sessionModel.provider), \(sessionModel.id)")
-                            .accessibilityIdentifier("chat-model")
-                    }
-                    if let failure = model.failure {
-                        Text(failure).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint)
-                            .frame(maxWidth: .infinity)
-                            .accessibilityIdentifier("chat-failure")
-                    }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).minY } action: { minY in
-                            atBottom = minY <= viewportHeight + 8
-                        }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
-                .frame(maxWidth: ChatStyle.columnWidth)
-                .frame(maxWidth: .infinity)
-                .scrollTargetLayout()
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
-                    guard landed, followingLatest, findRequest == nil else { return }
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
-            }
-            .coordinateSpace(name: Self.scrollSpace)
-            .scrollDismissesKeyboard(.interactively)
-            .scrollPosition(id: $visibleRowID, anchor: .top)
-            .onScrollPhaseChange { old, new in
-                if new == .interacting { followingLatest = false }
-                if new == .idle, old == .interacting || old == .decelerating {
-                    followingLatest = atBottom && findRequest == nil
-                }
-            }
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-                viewportHeight = $0
-                if landed, followingLatest, findRequest == nil {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
-            }
-            .overlay(alignment: .top) {
-                LinearGradient(colors: [ground, ground.opacity(0)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 26)
-                    .allowsHitTesting(false)
-            }
-            .overlay(alignment: .bottom) {
-                if landed, !atBottom, findRequest == nil {
-                    ChatLatestButton {
-                        followingLatest = true
-                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    }
-                    .padding(.bottom, 12)
-                }
-            }
-            .overlay {
-                if !model.loaded {
-                    ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
-                } else if rows.isEmpty, model.failure == nil {
-                    Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
-                }
-            }
-            .task(id: model.loaded) {
-                guard model.loaded, !landed, findRequest == nil else { return }
-                for _ in 0..<8 {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if atBottom { break }
-                }
-                landed = true
-            }
-            .onChange(of: findRequest) { old, new in
-                if old?.term != new?.term { selectedSearchHit = nil }
-                updateSearch(proxy, step: old?.term == new?.term && old?.generation != new?.generation)
-            }
-            .onChange(of: hits) { _, _ in updateSearch(proxy) }
+            transcriptScroll(proxy, hits: hits)
         }
         .background(ground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-view")
         .accessibilityValue("turns=\(model.turns.count)")
-        .overlay(alignment: .top) {
-            if model.manualRefreshing || model.refreshReceipt != nil {
-                HStack(spacing: 10) {
-                    if model.manualRefreshing { ProgressView().controlSize(.small) }
-                    Text(model.manualRefreshing ? "Refreshing chat…" : model.refreshReceipt ?? "")
-                        .font(Typography.app(13 * textScale))
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !model.manualRefreshing {
-                        Button { model.refreshReceipt = nil } label: {
-                            Image(systemName: "xmark").frame(width: 32, height: 32)
-                        }
-                        .accessibilityLabel("Dismiss refresh result")
-                    }
-                }
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
-                .padding(8)
-                .accessibilityIdentifier("chat-refresh-result")
-            }
-        }
+        .overlay(alignment: .top) { refreshStatus }
         .task(id: [isActive, live]) {
             guard isActive else { return }
             if live {
@@ -500,6 +367,160 @@ struct ChatView: View {
         }
         .environment(\.chatTextScale, textScale)
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
+    }
+
+    private func transcriptScroll(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+        ScrollView {
+            transcriptColumn(proxy, hits: hits)
+        }
+        .coordinateSpace(name: Self.scrollSpace)
+        .scrollDismissesKeyboard(.interactively)
+        .scrollPosition(id: $visibleRowID, anchor: .top)
+        .onScrollPhaseChange { old, new in
+            if new == .interacting { followingLatest = false }
+            if new == .idle, old == .interacting || old == .decelerating {
+                followingLatest = atBottom && findRequest == nil
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+            viewportHeight = $0
+            if landed, followingLatest, findRequest == nil {
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            }
+        }
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [ground, ground.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 26)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
+            if landed, !atBottom, findRequest == nil {
+                ChatLatestButton {
+                    followingLatest = true
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+                .padding(.bottom, 12)
+            }
+        }
+        .overlay {
+            if !model.loaded {
+                ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
+            } else if rows.isEmpty, model.failure == nil {
+                Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
+            }
+        }
+        .task(id: model.loaded) {
+            guard model.loaded, !landed, findRequest == nil else { return }
+            for _ in 0..<8 {
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if atBottom { break }
+            }
+            landed = true
+        }
+        .onChange(of: findRequest) { old, new in
+            if old?.term != new?.term { selectedSearchHit = nil }
+            updateSearch(proxy, step: old?.term == new?.term && old?.generation != new?.generation)
+        }
+        .onChange(of: hits) { _, _ in updateSearch(proxy) }
+    }
+
+    private func transcriptColumn(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+        let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
+        return VStack(alignment: .leading, spacing: 10) {
+            topSentinel(proxy)
+            searchScope
+            ForEach(rows) { row in
+                searchableRow(row, hits: hitsByRow[row.id] ?? [])
+            }
+            sessionFooter
+            Color.clear.frame(height: 1).id(Self.bottomID)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).minY } action: { minY in
+                    atBottom = minY <= viewportHeight + 8
+                }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .frame(maxWidth: ChatStyle.columnWidth)
+        .frame(maxWidth: .infinity)
+        .scrollTargetLayout()
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
+            guard landed, followingLatest, findRequest == nil else { return }
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        }
+    }
+
+    @ViewBuilder private var searchScope: some View {
+        if findRequest != nil {
+            HStack {
+                Text("Searching loaded history").font(Typography.app(12 * textScale))
+                Spacer()
+                if model.hasOlder {
+                    Button("Load older") { Task { await model.loadOlder(client: client) } }
+                        .disabled(model.loadingOlder)
+                }
+            }
+            .accessibilityIdentifier("chat-search-scope")
+        }
+    }
+
+    @ViewBuilder private var sessionFooter: some View {
+        if !model.currentPlan.isEmpty { planCard(model.currentPlan) }
+        if live, model.failure == nil,
+           agentStatus == "working" || (agentStatus == nil && model.working != nil) {
+            ChatWorkingDots(intent: model.working?.intent)
+        }
+        recapDivider
+        if let sessionModel = model.sessionModel {
+            Text(sessionModel.id)
+                .font(Typography.machine(11.5 * textScale))
+                .foregroundStyle(Palette.textFaint)
+                .padding(.leading, 4).padding(.vertical, 4)
+                .accessibilityLabel("Model: \(sessionModel.provider), \(sessionModel.id)")
+                .accessibilityIdentifier("chat-model")
+        }
+        if let failure = model.failure {
+            Text(failure).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("chat-failure")
+        }
+    }
+
+    @ViewBuilder private var recapDivider: some View {
+        if let recap = model.recap, model.working == nil,
+           agentStatus != "working", !model.hasPendingSend {
+            VStack(alignment: .leading, spacing: 8) {
+                Rectangle().fill(Palette.hairline).frame(height: 1).accessibilityHidden(true)
+                Text(ChatInline.styled(recap.text, size: 13 * textScale))
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("chat-recap")
+        }
+    }
+
+    @ViewBuilder private var refreshStatus: some View {
+        if model.manualRefreshing || model.refreshReceipt != nil {
+            HStack(spacing: 10) {
+                if model.manualRefreshing { ProgressView().controlSize(.small) }
+                Text(model.manualRefreshing ? "Refreshing chat…" : model.refreshReceipt ?? "")
+                    .font(Typography.app(13 * textScale))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !model.manualRefreshing {
+                    Button { model.refreshReceipt = nil } label: {
+                        Image(systemName: "xmark").frame(width: 32, height: 32)
+                    }
+                    .accessibilityLabel("Dismiss refresh result")
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+            .padding(8)
+            .accessibilityIdentifier("chat-refresh-result")
+        }
     }
 
     private func searchableRow(_ row: ChatRow, hits: [ChatSearchHit]) -> some View {
