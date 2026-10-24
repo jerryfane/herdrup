@@ -133,6 +133,7 @@ private struct ChatMarkdownTable: View {
         }
         .frame(maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewportWidth = $0 }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-markdown-table")
     }
 

@@ -393,7 +393,7 @@ struct ChatView: View {
                     followingLatest = true
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
-                .padding(.bottom, 12)
+                .padding(.bottom, 60)
             }
         }
         .overlay {
@@ -428,7 +428,8 @@ struct ChatView: View {
                 searchableRow(row, hits: hitsByRow[row.id] ?? [])
             }
             sessionFooter
-            Color.clear.frame(height: 1).id(Self.bottomID)
+            // Keep the final line above the 48 pt composer fade when landing at the tail.
+            Color.clear.frame(height: 49).id(Self.bottomID)
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).minY } action: { minY in
                     atBottom = minY <= viewportHeight + 8
                 }
@@ -604,7 +605,7 @@ struct ChatView: View {
             workView(work)
         case .reply(_, let text, _):
             ChatMarkdownView(markdown: text)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chat-reply")
         case .note(_, let tsMs, let note):
             noteCard(note, tsMs: tsMs)

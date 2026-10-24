@@ -153,6 +153,7 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["Done"].exists, "Answering must not dismiss the question sheet")
         record(app, "Question answer persists in the open content-sized sheet")
         app.buttons["Done"].tap()
+        record(app, "Agent surface immediately after closing the question sheet")
         XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
