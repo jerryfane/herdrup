@@ -360,7 +360,7 @@ struct ChatView: View {
             Task { await model.refresh(client: client) }
         }
         .sheet(item: Binding(get: { openNote.map(IdentifiedNote.init) }, set: { openNote = $0?.note })) { item in
-            ChatNoteSheet(note: item.note)
+            ChatNoteSheet(note: item.note, onClose: { openNote = nil })
         }
         .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
             questionSheet
@@ -533,7 +533,7 @@ struct ChatView: View {
     }
 
     private var questionSheet: some View {
-        ChatContentSheet {
+        ChatContentSheet(onClose: { openQuestionID = nil }) {
             if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
                let item = turn.items.first(where: { $0.id == openQuestionID }),
                case .ask(let id, let ask, let pending) = item {
@@ -1169,10 +1169,11 @@ enum ChatNoteStyle {
 /// The full text of a note card. Notes never notify; this is the only place they open.
 private struct ChatNoteSheet: View {
     let note: TranscriptNote
+    let onClose: () -> Void
     @Environment(\.chatTextScale) private var textScale
 
     var body: some View {
-        ChatContentSheet {
+        ChatContentSheet(onClose: onClose) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(ChatNoteStyle.title(note))
                     .font(Typography.app(18 * textScale, .semibold))

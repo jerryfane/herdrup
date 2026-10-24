@@ -32,7 +32,9 @@ enum ChatUXSmoke {
         entries.append(["id": "ux-reply", "kind": "reply", "final": true,
                         "text": "## Wrapped table\n\n| Metric | Description | Result |\n| --- | --- | --- |\n| Latency | A deliberately long description that must wrap within its column | +12% |\n| Unicode | café 東京 résumé | 42 |\n\nA complete fixture response.", "ts_ms": timestamp + 2])
         result["entries"] = entries
-        result["pending_ask"] = NSNull()
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_PENDING_QUESTION"] != "1" {
+            result["pending_ask"] = NSNull()
+        }
         result["working"] = NSNull()
         result["model"] = ["provider": "fixture", "id": "fixture-model"]
         result["plan"] = [
