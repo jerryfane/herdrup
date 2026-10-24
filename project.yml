@@ -448,6 +448,7 @@ targets:
       - path: App/GuestKeychain.swift
       - path: App/KeychainHostKeyPolicy.swift
       - path: App/ShareStorage.swift
+      - path: App/SessionChoice.swift
     dependencies:
       - package: HerdrKit
         product: HerdrKit

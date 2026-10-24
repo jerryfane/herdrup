@@ -127,56 +127,76 @@ private final class ShareModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    private func loadRecipients() async {
+    private func loadOwner(_ host: SavedHost) async {
+        if Task.isCancelled { return }
         let store = SavedHostsStore.shared
-        for host in store.hosts {
-            if Task.isCancelled { return }
-            do {
-                guard let endpoint = HostEndpoint.parse(host.host) else { throw ShareFailure("Invalid host address") }
-                let credentials: SSHCredentials
-                switch host.auth {
-                case .key:
-                    guard let key = store.key(for: host), !key.isEmpty else { throw ShareFailure("Unlock Herdrup to access the saved key") }
-                    credentials = SSHCredentials(host: endpoint.host, port: endpoint.port, username: host.username,
-                                                 privateKeyPEM: key, remoteSocketPath: "")
-                case .password:
-                    guard let password = store.password(for: host), !password.isEmpty else { throw ShareFailure("Unlock Herdrup to access the saved password") }
-                    credentials = SSHCredentials(host: endpoint.host, port: endpoint.port, username: host.username,
-                                                 password: password, remoteSocketPath: "")
-                }
-                let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: KeychainHostKeyPolicy.shared)
-                transports.append(transport)
-                let client = HerdrClient(transport: transport)
-                for agent in try await client.agentList() {
-                    guard let name = agent.name, !name.isEmpty, agent.archived == nil else { continue }
-                    recipients.append(ShareRecipient(id: "owner/\(host.id)/\(name)", name: name,
-                                                     machine: host.label, guest: false, client: client))
-                }
-            } catch { connectionErrors.append("\(host.label): \(error.localizedDescription)") }
-        }
         do {
-            let data = ShareStorage.defaults.data(forKey: ShareStorage.guestsKey)
-            let guests = try data.map { try JSONDecoder().decode([GuestAccess].self, from: $0) } ?? []
-            if !guests.isEmpty {
-                let identity = try GuestDevice.identity()
-                for access in guests {
-                    if Task.isCancelled { return }
-                    do {
-                        let features = ShareFeatures()
-                        let client = HerdrClient(transport: access.transport(identity: identity, onFeatures: { features.set($0) }))
-                        let agents = try await client.agentList()
-                        guard agents.contains(where: { $0.terminalID == access.agentTarget || $0.name == access.agentName }) else {
-                            connectionErrors.append("\(access.agentName): this share is no longer available. Open Herdrup to check access.")
-                            continue
-                        }
-                        guard features.gram else { continue }
-                        recipients.append(ShareRecipient(id: "guest/\(access.id)", name: access.agentName,
-                                                         machine: "\(access.machineLabel) · Shared by \(access.ownerName)",
-                                                         guest: true, client: client))
-                    } catch { connectionErrors.append("\(access.agentName): \(error.localizedDescription)") }
-                }
+            guard let endpoint = HostEndpoint.parse(host.host) else { throw ShareFailure("Invalid host address") }
+            var credentials: SSHCredentials
+            switch host.auth {
+            case .key:
+                guard let key = store.key(for: host), !key.isEmpty else { throw ShareFailure("Unlock Herdrup to access the saved key") }
+                credentials = SSHCredentials(host: endpoint.host, port: endpoint.port, username: host.username,
+                                             privateKeyPEM: key, remoteSocketPath: "")
+            case .password:
+                guard let password = store.password(for: host), !password.isEmpty else { throw ShareFailure("Unlock Herdrup to access the saved password") }
+                credentials = SSHCredentials(host: endpoint.host, port: endpoint.port, username: host.username,
+                                             password: password, remoteSocketPath: "")
             }
-        } catch { connectionErrors.append(error.localizedDescription) }
+            credentials.session = SessionChoice.remembered(for: credentials)
+            let transport = CitadelTransport(credentials: credentials, hostKeyPolicy: KeychainHostKeyPolicy.shared)
+            transports.append(transport)
+            let client = HerdrClient(transport: transport)
+            let agents = try await client.agentList()
+            try Task.checkCancellation()
+            for agent in agents {
+                guard let name = agent.name, !name.isEmpty, agent.archived == nil else { continue }
+                recipients.append(ShareRecipient(id: "owner/\(host.id)/\(credentials.session ?? "default")/\(name)", name: name,
+                                                 machine: credentials.session.map { "\(host.label) · \($0)" } ?? host.label,
+                                                 guest: false, client: client))
+            }
+        } catch is CancellationError {
+        } catch { connectionErrors.append("\(host.label): \(error.localizedDescription)") }
+    }
+
+    private func loadGuest(_ access: GuestAccess, identity: GuestIdentity) async {
+        if Task.isCancelled { return }
+        do {
+            let features = ShareFeatures()
+            let client = HerdrClient(transport: access.transport(identity: identity, onFeatures: { features.set($0) }))
+            let agents = try await client.agentList()
+            try Task.checkCancellation()
+            guard let agent = agents.first(where: { $0.terminalID == access.agentTarget || $0.name == access.agentName }),
+                  let name = agent.name, !name.isEmpty else {
+                connectionErrors.append("\(access.agentName): this share is no longer available. Open Herdrup to check access.")
+                return
+            }
+            guard features.gram else { return }
+            recipients.append(ShareRecipient(id: "guest/\(access.id)", name: name,
+                                             machine: "\(access.machineLabel) · Shared by \(access.ownerName)",
+                                             guest: true, client: client))
+        } catch is CancellationError {
+        } catch { connectionErrors.append("\(access.agentName): \(error.localizedDescription)") }
+    }
+
+    private func loadRecipients() async {
+        // Independent connections overlap; one sleeping machine must not delay
+        // every later machine by another full SSH connection timeout.
+        await withTaskGroup(of: Void.self) { group in
+            for host in SavedHostsStore.shared.hosts {
+                group.addTask { @MainActor in await self.loadOwner(host) }
+            }
+            do {
+                let data = ShareStorage.defaults.data(forKey: ShareStorage.guestsKey)
+                let guests = try data.map { try JSONDecoder().decode([GuestAccess].self, from: $0) } ?? []
+                if !guests.isEmpty {
+                    let identity = try GuestDevice.identity()
+                    for access in guests {
+                        group.addTask { @MainActor in await self.loadGuest(access, identity: identity) }
+                    }
+                }
+            } catch { connectionErrors.append(error.localizedDescription) }
+        }
         let recent = ShareStorage.defaults.stringArray(forKey: ShareStorage.recentKey) ?? []
         recipients.sort {
             let a = recent.firstIndex(of: $0.id) ?? Int.max

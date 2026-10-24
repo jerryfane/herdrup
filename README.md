@@ -72,6 +72,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   staged on disk and uploaded with progress; links and text become Gram messages. Keep the
   sheet open until it confirms delivery. Open Herdrup once after updating to make existing
   saved connections available to the extension. Credentials remain in the existing Keychain.
+  The sheet uses each machine's remembered herdr session, including named sessions.
 - **Guest access** — share one agent with someone outside your machines from its ••• menu. They
   get a one-use invite (QR code or link), watch the live terminal and message the agent through
   a relay, end to end encrypted, with every message labelled `<name> (via HerdrUp):`. Settings →
