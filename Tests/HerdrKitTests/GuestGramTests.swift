@@ -262,6 +262,38 @@ final class GuestGramTests: XCTestCase {
         XCTAssertEqual(transport.requests.map { $0.params["offset"] as? Int }, [0, piece, 2 * piece])
     }
 
+    func testChatDownloadDiscoversSizeFromTheFirstAuthorizedChunk() async throws {
+        let file = Data("chat attachment".utf8)
+        let transport = chunkHost(size: "\(file.count)") { offset in
+            Data(file[offset..<min(offset + 4, file.count)])
+        }
+        let (_, _, data) = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1")
+        XCTAssertEqual(data, file)
+        XCTAssertEqual(transport.requests.map { $0.params["offset"] as? Int }, [0, 4, 8, 12])
+    }
+
+    func testChatDownloadRejectsSizeChangesAfterDiscovery() async throws {
+        let transport = RecordingTransport { _, params in
+            let offset = params["offset"] as? Int ?? 0
+            let size = offset == 0 ? 8 : 9
+            return #"{"id":"x","result":{"type":"gram_file_chunk","name":"a","mime":"","size":\#(size),"sha256":"x","offset":\#(offset),"data_base64":"YWJjZA=="}}"#
+        }
+        do {
+            _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1")
+            XCTFail("an attachment cannot change size midway through download")
+        } catch GramError.invalidFileData {}
+        XCTAssertEqual(transport.requests.count, 2)
+    }
+
+    func testChatDownloadRejectsOversizedMetadataBeforeAllocatingTheFile() async throws {
+        let transport = chunkHost(size: "\(UInt64.max)") { _ in Data() }
+        do {
+            _ = try await HerdrClient(transport: transport).gramGetFileChunked(id: "m1")
+            XCTFail("unknown-size downloads still enforce the file ceiling")
+        } catch GramError.invalidFileData {}
+        XCTAssertEqual(transport.requests.count, 1)
+    }
+
     func testChunkedDownloadRejectsAHostThatStopsShort() async throws {
         let transport = RecordingTransport { _, params in
             let offset = params["offset"] as? Int ?? 0

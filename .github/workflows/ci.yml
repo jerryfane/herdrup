@@ -131,6 +131,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Record native runner capacity
+        run: |
+          printf 'Runner: %s; environment: %s; OS: %s\n' "${RUNNER_NAME:-unknown}" "${RUNNER_ENVIRONMENT:-unknown}" "${RUNNER_OS:-unknown}"
+          df -Pk "$GITHUB_WORKSPACE"
+
       # SwiftTerm is vendored; cache any remaining resolved remote packages.
       # xcodebuild re-resolves against the generated project's package settings.
       - name: Cache Swift packages

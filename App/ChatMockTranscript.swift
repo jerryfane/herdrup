@@ -295,6 +295,7 @@ struct ChatMockTransport: HerdrTransport {
     private let base = MockTransport()
 
     func roundTrip(_ requestLine: String) async throws -> String {
+        if let response = await ChatUXSmoke.reply(requestLine) { return response }
         let request = ChatMockConversation.requestObject(requestLine)
         let id = request["id"] as? String ?? "mock"
         let params = request["params"] as? [String: Any] ?? [:]

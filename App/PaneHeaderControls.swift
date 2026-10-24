@@ -38,21 +38,26 @@ struct PaneHeaderCapsule<Content: View>: View {
     }
 }
 
-/// Reconnect and refresh: the page re-creates the terminal's stream and re-reads the agent.
+/// Refresh the active surface; terminal callers reconnect, chat callers retain loaded history.
 struct PaneHeaderRefreshButton: View {
     let identifier: String
+    var refreshing = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .medium))
+            Group {
+                if refreshing { ProgressView().controlSize(.small) }
+                else { Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .medium)) }
+            }
                 .foregroundStyle(Palette.text)
                 .frame(width: 40, height: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(refreshing)
         .accessibilityIdentifier(identifier)
-        .accessibilityLabel("Reconnect and refresh")
+        .accessibilityLabel(refreshing ? "Refreshing" : "Refresh")
     }
 }
 

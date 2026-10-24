@@ -56,6 +56,12 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   ("Answer in Terminal" when the server cannot). The Chat | Terminal switch under the header
   flips to the live terminal; Settings → omp Chat sets which one opens first. Older turns load
   as you scroll up. Needs a herdr that serves `agent.transcript`; other agents keep the terminal.
+  Sending adds a local bubble immediately. Its receipt distinguishes sending, agent acceptance,
+  uncertain delivery and definite refusal; a matching new transcript prompt replaces it once.
+  Older history and other authors do not acknowledge a local send. Herdr-generated attachment
+  envelopes appear as collapsed file bundles, with captions preserved. Opening a file uses
+  Gram's permission-checked, size-bounded download and existing viewer; unrecognized instructions
+  remain visible as text.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation
