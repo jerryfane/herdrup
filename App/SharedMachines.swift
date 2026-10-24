@@ -29,10 +29,10 @@ final class SharedMachinesStore: ObservableObject {
             return SharedMachinesStore(defaults: nil, machines: seeded)
         }
         #endif
-        return SharedMachinesStore(defaults: .standard)
+        return SharedMachinesStore(defaults: ShareStorage.defaults)
     }()
 
-    static let defaultsKey = "dev.herdr.sharedMachines.v1"
+    static let defaultsKey = ShareStorage.guestsKey
 
     /// Nil keeps the list in memory only (screenshot mocks and UI tests).
     private let defaults: UserDefaults?

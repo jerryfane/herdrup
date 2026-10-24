@@ -1,36 +1,6 @@
 import SwiftUI
 import HerdrKit
 
-/// The herdr session last picked on each machine (#347), so a relaunch or a reconnect
-/// opens the same session. Keyed by `user@host:port`; nil means the default session.
-enum SessionChoice {
-    private static let defaultsKey = "sessions.selected"
-
-    static func machineKey(_ creds: SSHCredentials) -> String {
-        "\(creds.username)@\(HostKey.canonical(host: creds.host, port: creds.port))"
-    }
-
-    static func remembered(for creds: SSHCredentials) -> String? {
-        let all = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        guard let name = all[machineKey(creds)], CitadelTransport.isSessionName(name) else { return nil }
-        return name
-    }
-
-    static func remember(_ session: String?, for creds: SSHCredentials) {
-        var all = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        all[machineKey(creds)] = session
-        UserDefaults.standard.set(all, forKey: defaultsKey)
-    }
-
-    /// The bucket for per-machine stores (saved terminals): pane IDs only mean something
-    /// inside one session, so a named session gets its own. The default session keeps the
-    /// plain `host:port` key every existing saved terminal already lives under.
-    static func storeKey(_ creds: SSHCredentials) -> String {
-        let base = HostKey.canonical(host: creds.host, port: creds.port)
-        guard let name = creds.session, name != "default" else { return base }
-        return base + "#" + name
-    }
-}
 
 /// What the app last saw of each herdr session on the connected machine (#386), kept
 /// above the Agents screen so it survives the remount a session switch causes. The

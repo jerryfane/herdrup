@@ -39,6 +39,16 @@ run cannot read them): `DIST_CERT_P12_BASE64`, `DIST_CERT_PASSWORD`,
   (`CODE_SIGN_STYLE: Manual`, `PROVISIONING_PROFILE_SPECIFIER: "Herdrup App Store"`,
   `CODE_SIGN_IDENTITY: "Apple Distribution"`). Used only by the CI archive.
 - `Release` stays automatic — it belongs to the Mac fallback lane, not the CI.
+- The share extension (`com.jerryfane.herdr.share`) uses its own manual distribution profile.
+  The main app and share extension both require `group.com.jerryfane.herdr`; the owner
+  registers and associates the group in Apple Developer before the first release. The
+  profile helper enables the capability, replaces profiles missing that group, and checks
+  the decoded profile entitlements before signing. Widgets and the notification service
+  do not join this group.
+- Both targets use the main app's existing Keychain access group
+  `$(AppIdentifierPrefix)com.jerryfane.herdr`, preserving existing credential items.
+  Only connection metadata moves to App Group defaults when the updated app first opens.
+  All extension versions are stamped to match the app before archive/export.
 
 ## Export compliance
 

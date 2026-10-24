@@ -47,7 +47,7 @@ struct SavedHost: Codable, Identifiable, Hashable {
 final class SavedHostsStore: ObservableObject {
     static let shared = SavedHostsStore()
 
-    private let defaultsKey = "dev.herdr.savedHosts.v1"
+    private let defaultsKey = ShareStorage.hostsKey
     private let keychain = KeychainCredentialStore(service: "dev.herdr.credentials")
     /// A host's password lives in its own Keychain service so a host's key and
     /// password never collide on the same account id. Same device-only discipline.
@@ -56,7 +56,7 @@ final class SavedHostsStore: ObservableObject {
     @Published private(set) var hosts: [SavedHost]
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+        if let data = ShareStorage.defaults.data(forKey: defaultsKey),
            let decoded = try? JSONDecoder().decode([SavedHost].self, from: data) {
             hosts = decoded
         } else {
@@ -161,7 +161,7 @@ final class SavedHostsStore: ObservableObject {
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(hosts) else { return }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        ShareStorage.defaults.set(data, forKey: defaultsKey)
     }
 }
 
