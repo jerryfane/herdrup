@@ -376,12 +376,6 @@ struct ChatView: View {
         .coordinateSpace(name: Self.scrollSpace)
         .scrollDismissesKeyboard(.interactively)
         .scrollPosition(id: $visibleRowID, anchor: .top)
-        .onScrollPhaseChange { old, new in
-            if new == .interacting { followingLatest = false }
-            if new == .idle, old == .interacting || old == .decelerating {
-                followingLatest = atBottom && findRequest == nil
-            }
-        }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
             viewportHeight = $0
             if landed, followingLatest, findRequest == nil {
@@ -445,6 +439,11 @@ struct ChatView: View {
         .frame(maxWidth: ChatStyle.columnWidth)
         .frame(maxWidth: .infinity)
         .scrollTargetLayout()
+        .background {
+            ScrollActivityObserver(isEnabled: isActive) { scrolling in
+                followingLatest = !scrolling && atBottom && findRequest == nil
+            }
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
             guard landed, followingLatest, findRequest == nil else { return }
             proxy.scrollTo(Self.bottomID, anchor: .bottom)

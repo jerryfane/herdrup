@@ -1542,7 +1542,7 @@ private final class AgentRosterLiveEventsBuffer {
 /// tracking/deceleration flags on the display link. This is the same path on iOS 17,
 /// iOS 18+, and macOS Designed-for-iPad, so the oldest supported runtime is not left
 /// on an unprotected fallback path.
-private struct ScrollActivityObserver: UIViewRepresentable {
+struct ScrollActivityObserver: UIViewRepresentable {
     let isEnabled: Bool
     let onChange: (Bool) -> Void
 
@@ -1558,6 +1558,7 @@ private struct ScrollActivityObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ProbeView, context: Context) {
+        context.coordinator.onChange = onChange
         context.coordinator.setEnabled(isEnabled)
         context.coordinator.attach(from: uiView)
     }
@@ -1568,7 +1569,7 @@ private struct ScrollActivityObserver: UIViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
-        private let onChange: (Bool) -> Void
+        var onChange: (Bool) -> Void
         private weak var scrollView: UIScrollView?
         private var displayLink: CADisplayLink?
         private var isEnabled: Bool
