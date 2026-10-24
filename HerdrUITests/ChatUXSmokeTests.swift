@@ -54,7 +54,7 @@ final class ChatUXSmokeTests: XCTestCase {
 
         app.buttons["terminal-actions"].tap()
         app.buttons["Reset"].tap()
-        guard let table = app.scrollViews.matching(identifier: "chat-markdown-table").allElementsBoundByIndex.last else {
+        guard let table = app.descendants(matching: .any).matching(identifier: "chat-markdown-table").allElementsBoundByIndex.last else {
             return XCTFail("The fixture table must be rendered: \(app.debugDescription)")
         }
         for _ in 0..<4 where !table.isHittable { chat.swipeDown() }
@@ -84,7 +84,9 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["chat-jump-latest"].waitForExistence(timeout: 5), app.debugDescription)
         app.buttons["chat-jump-latest"].tap()
         XCTAssertTrue(app.staticTexts["chat-model"].waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["chat-model"].isHittable, app.debugDescription)
+        let modelVisible = NSPredicate(format: "hittable == true")
+        expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
+        waitForExpectations(timeout: 5)
         record(app, "Centered clear-glass jump returns to latest above composer fade")
     }
 
@@ -109,7 +111,7 @@ final class ChatUXSmokeTests: XCTestCase {
         record(app, "Question sheet expands context without losing question state")
         context.tap()
         app.buttons["Done"].tap()
-        XCTAssertTrue(app.scrollViews["chat-view"].exists)
+        XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
     func testRefreshFailureKeepsLoadedConversation() {

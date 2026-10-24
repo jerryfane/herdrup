@@ -443,6 +443,8 @@ struct ChatView: View {
             ScrollActivityObserver(isEnabled: isActive) { scrolling in
                 followingLatest = !scrolling && atBottom && findRequest == nil
             }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
             guard landed, followingLatest, findRequest == nil else { return }
