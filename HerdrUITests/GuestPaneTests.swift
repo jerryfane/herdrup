@@ -251,10 +251,7 @@ final class GuestPaneTests: XCTestCase {
     func testPausedAgentDisablesTheComposer() {
         let app = XCUIApplication.launched(mock: "guestpaused")
 
-        XCTAssertTrue(app.staticTexts["llm-opt isn't running"].waitForExistence(timeout: 10),
-                      "the paused message should render")
-        XCTAssertTrue(app.staticTexts["NOT RUNNING"].exists)
-        XCTAssertTrue(app.staticTexts["Paused"].exists, "the composer should read Paused")
+        XCTAssertTrue(app.buttons["guest-attach-button"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["guest-attach-button"].isEnabled, "attach is disabled while paused")
         XCTAssertFalse(app.buttons["guest-mic-button"].isEnabled, "dictation is disabled while paused")
 

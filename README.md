@@ -73,6 +73,12 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   Shared access lists who has access on each machine, revokes it, and shows the activity log.
   When the host serves it, a guest of an omp agent also gets a read-only Chat tab (no notes,
   questions shown waiting for the owner).
+  Multiple shares from the same authenticated host appear in one agent list, with separate
+  permissions and settings per agent. Owner setup stays collapsed under “Connect your own
+  machine” when shares exist. Unavailable agents, offline hosts, and removed access are shown
+  separately rather than calling all three “paused”. Each relay connection selects and verifies
+  its grant before sending a request; accepting another agent's invite does not replace an
+  existing share on updated hosts. Previously revoked shares need a fresh invitation.
 
 ## Requirements
 

@@ -99,7 +99,7 @@ final class GuestUploadResilienceTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data((RecordingTransport.okResult + "\n").utf8)] }
         let connector = host.connector()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: connector)
         let relayChunk = 256 * 1024
         let (url, payload) = try file(relayChunk * 2 + 5)
 
@@ -120,7 +120,7 @@ final class GuestUploadResilienceTests: XCTestCase {
     func testARelayCallWhoseHandshakeNeverAnswersTimesOutAndClosesItsSocket() async throws {
         // The socket takes message 1 and never delivers message 2 or a close.
         let connector = FakeConnector(roundTripLimit: .milliseconds(300)) { FakeRelaySocket() }
-        let transport = RelayTransport(endpoint: FakeHost().endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: FakeHost().endpoint, identity: identity, connector: connector)
         let started = ContinuousClock.now
 
         let result = await Self.outcome(within: .seconds(10)) { try await transport.roundTrip("x") }

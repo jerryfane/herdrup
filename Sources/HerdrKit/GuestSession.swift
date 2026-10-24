@@ -40,7 +40,7 @@ public struct GuestAccess: Codable, Equatable, Hashable, Sendable, Identifiable 
         identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
         onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil
     ) -> RelayTransport {
-        RelayTransport(endpoint: endpoint, identity: identity, connector: connector, onFeatures: onFeatures)
+        RelayTransport(guestID: guestID, endpoint: endpoint, identity: identity, connector: connector, onFeatures: onFeatures)
     }
 }
 

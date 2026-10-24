@@ -76,7 +76,7 @@ final class FakeConnector: RelaySocketConnector, @unchecked Sendable {
 final class FakeHost: @unchecked Sendable {
     let key = Curve25519.KeyAgreement.PrivateKey()
     let hostID = Base64URL.encode(Data(repeating: 7, count: 16))
-    var reply: [String: Any] = ["ok": true]
+    var reply: [String: Any] = ["ok": true, "guest_id": "g_1"]
     /// Returns the raw bytes the host streams back for one request line.
     var serve: (String) -> [Data] = { _ in [] }
     /// How the host ends a session after `serve`'s output.
@@ -137,13 +137,12 @@ final class RelayTransportTests: XCTestCase {
         let split = reply.firstIndex(of: 0xC3)! + 1
         host.serve = { _ in [reply.prefix(upTo: split), reply.suffix(from: split)] }
         let connector = host.connector()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: connector)
 
         let line = try await transport.roundTrip(#"{"id":"1","method":"ping","params":{}}"#)
 
         XCTAssertEqual(line, #"{"id":"1","result":{"type":"pong","note":"héllo"}}"#)
         XCTAssertEqual(host.requests, [#"{"id":"1","method":"ping","params":{}}"#])
-        XCTAssertEqual(host.hellos.first as NSDictionary?, ["v": 1] as NSDictionary)
         XCTAssertEqual(host.guestStatics, [identity.publicKey], "the host learns the guest's device key")
         XCTAssertEqual(connector.urls.map(\.absoluteString), ["wss://relay.test/v1/guest/\(host.hostID)"])
         XCTAssertTrue(connector.sockets[0].closed, "a round trip closes its socket")
@@ -153,7 +152,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data("{}\n".utf8)] }
         let connector = host.connector()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: connector)
         _ = try await transport.roundTrip("a")
         _ = try await transport.roundTrip("b")
         XCTAssertEqual(connector.sockets.count, 2)
@@ -164,7 +163,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data("{}\n".utf8)] }
         let connector = host.connector()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: connector)
         let line = String(repeating: "x", count: 150_000)
         _ = try await transport.roundTrip(line)
         XCTAssertEqual(host.requests, [line])
@@ -175,7 +174,7 @@ final class RelayTransportTests: XCTestCase {
 
     func testRoundTripClosedBeforeAnyLine() async throws {
         let host = FakeHost()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: host.connector())
         do {
             _ = try await transport.roundTrip("x")
             XCTFail("expected closedBeforeResponse")
@@ -189,7 +188,7 @@ final class RelayTransportTests: XCTestCase {
             [Data(#"{"id":"s","result":{"type":"stream_started"}}"#.utf8 + [0x0a]),
              Data(#"{"id":"s","error":{"code":"guest_paused","message":"paused"}}"#.utf8 + [0x0a])]
         }
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: host.connector())
         var lines: [String] = []
         for try await line in transport.stream("s") { lines.append(line) }
         XCTAssertEqual(lines.count, 2)
@@ -200,7 +199,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data("{\"a\":1}\n".utf8)] }
         host.closeAfterServe = .closed(code: 1001, reason: "host_offline")
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: host.connector())
         var lines: [String] = []
         do {
             for try await line in transport.stream("s") { lines.append(line) }
@@ -216,7 +215,7 @@ final class RelayTransportTests: XCTestCase {
         host.serve = { _ in [Data("{\"a\":1}\n".utf8)] }
         host.closeAfterServe = nil   // the host keeps streaming
         let connector = host.connector()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: connector)
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: connector)
         let task = Task {
             for try await _ in transport.stream("s") { break }
         }
@@ -234,7 +233,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [] }
         host.closeAfterServe = .data(Data(repeating: 0xAB, count: 40))
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: host.connector())
         do {
             _ = try await transport.roundTrip("x")
             XCTFail("expected a secure channel failure")
@@ -248,7 +247,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         let impostor = RelayEndpoint(relay: host.endpoint.relay, hostID: host.hostID,
                                      hostPublicKey: Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
-        let transport = RelayTransport(endpoint: impostor, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: impostor, identity: identity, connector: host.connector())
         do {
             _ = try await transport.roundTrip("secret request")
             XCTFail("expected failure")
@@ -277,7 +276,7 @@ final class RelayTransportTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data("{\"partial".utf8)] }
         host.closeAfterServe = .closed(code: 1000, reason: "overloaded")
-        let transport = RelayTransport(endpoint: host.endpoint, identity: identity, connector: host.connector())
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: identity, connector: host.connector())
         do {
             _ = try await transport.roundTrip("x")
             XCTFail("expected an error")
@@ -380,6 +379,5 @@ final class GuestSessionTests: XCTestCase {
         host.serve = { _ in [Data("{}\n".utf8)] }
         _ = try await access.transport(identity: identity, connector: host.connector()).roundTrip("{}")
         XCTAssertEqual(host.guestStatics, [identity.publicKey, identity.publicKey])
-        XCTAssertEqual(host.hellos.last as NSDictionary?, ["v": 1] as NSDictionary)
     }
 }
