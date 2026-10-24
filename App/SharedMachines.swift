@@ -1,6 +1,20 @@
 import Foundation
 import HerdrKit
 
+struct SharedMachineGroup: Identifiable {
+    struct Identity: Hashable {
+        let hostID: String
+        let publicKey: Data
+
+        init(_ access: GuestAccess) {
+            hostID = access.endpoint.hostID
+            publicKey = access.endpoint.hostPublicKey
+        }
+    }
+    let id: Identity
+    var accesses: [GuestAccess]
+}
+
 /// Machines someone else shared with this phone ("Shared with you"). Each entry is a
 /// grant for one agent on one machine; it holds no secret (the device key lives in
 /// the Keychain), so the list is plain JSON in UserDefaults.
@@ -24,6 +38,22 @@ final class SharedMachinesStore: ObservableObject {
     private let defaults: UserDefaults?
 
     @Published private(set) var machines: [GuestAccess]
+
+    /// Display names are not identity: two hosts can use the same label.
+    var groups: [SharedMachineGroup] {
+        var groups: [SharedMachineGroup] = []
+        var indexes: [SharedMachineGroup.Identity: Int] = [:]
+        for access in machines {
+            let identity = SharedMachineGroup.Identity(access)
+            if let index = indexes[identity] {
+                groups[index].accesses.append(access)
+            } else {
+                indexes[identity] = groups.count
+                groups.append(SharedMachineGroup(id: identity, accesses: [access]))
+            }
+        }
+        return groups
+    }
 
     init(defaults: UserDefaults?, machines: [GuestAccess] = []) {
         self.defaults = defaults

@@ -171,9 +171,8 @@ struct RootView: View {
     @ViewBuilder
     private var liveContent: some View {
         if let openGuest {
-            GuestHomeView(
+            SharedMachineHomeView(
                 access: openGuest,
-                connect: { try GuestConnection.open(openGuest) },
                 onBack: guestCanGoBack ? { self.openGuest = nil } : nil,
                 onLeave: { self.openGuest = nil })
             .id(openGuest.id)
@@ -216,10 +215,9 @@ struct RootView: View {
         }
     }
 
-    /// A guest-only phone (no machines of its own, one share) launches straight into
-    /// that share's home, which then has nowhere to go back to.
+    /// A guest-only phone with one shared host opens its combined agent list.
     private var guestCanGoBack: Bool {
-        client != nil || !SavedHostsStore.shared.hosts.isEmpty || sharedMachines.machines.count > 1
+        client != nil || !SavedHostsStore.shared.hosts.isEmpty || sharedMachines.groups.count > 1
     }
 
     private func autoOpenSharedMachine() {
@@ -228,8 +226,8 @@ struct RootView: View {
         #endif
         guard !didAutoOpenGuest else { return }
         didAutoOpenGuest = true
-        if SavedHostsStore.shared.hosts.isEmpty, sharedMachines.machines.count == 1 {
-            openGuest = sharedMachines.machines[0]
+        if SavedHostsStore.shared.hosts.isEmpty, sharedMachines.groups.count == 1 {
+            openGuest = sharedMachines.groups.first?.accesses.first
         }
     }
 
@@ -737,6 +735,7 @@ struct ConnectView: View {
     @State private var scannedInvite: GuestInvite?
     /// The add/edit sheet target; nil = closed.
     @State private var editorTarget: HostEditorTarget?
+    @State private var showingOwnerSetup = false
     /// The scan-to-connect sheet (#126) — the path that needs no key, no host address and
     /// no knowledge of what a daemon is.
     @State private var showingPairing = false
@@ -747,22 +746,26 @@ struct ConnectView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     header
-                    // Saved machines — the list you manage + tap to connect. Empty on
-                    // first launch, where the Add button below is the way in.
-                    if savedHosts.hosts.isEmpty {
-                        emptyState
-                    } else {
+                    if !savedHosts.hosts.isEmpty {
                         savedHostsSection
                     }
-                    if !sharedMachines.machines.isEmpty {
+                    if sharedMachines.machines.isEmpty {
+                        if savedHosts.hosts.isEmpty { emptyState }
+                        scanButton
+                        addHostButton
+                    } else {
                         sharedSection
+                        DisclosureGroup("Connect your own machine", isExpanded: $showingOwnerSetup) {
+                            VStack(spacing: 18) {
+                                emptyState
+                                scanButton
+                                addHostButton
+                            }
+                            .padding(.top, 12)
+                        }
+                        .foregroundStyle(Palette.text)
+                        .accessibilityIdentifier("owner-setup-disclosure")
                     }
-                    // Scanning is the PRIMARY action and manual entry the fallback, not
-                    // the other way round. The manual path asks for a host address, a
-                    // username and an ed25519 private key — three things a new user does
-                    // not have and cannot be expected to produce from this screen.
-                    scanButton
-                    addHostButton
                     // Someone shared an agent: their invite, as a QR code or a link.
                     inviteButtons
                 }
@@ -802,23 +805,19 @@ struct ConnectView: View {
         VStack(alignment: .leading, spacing: 8) {
             connectSectionLabel("SHARED WITH YOU")
             VStack(spacing: 0) {
-                ForEach(Array(sharedMachines.machines.enumerated()), id: \.element.id) { index, access in
+                ForEach(Array(sharedMachines.groups.enumerated()), id: \.element.id) { index, group in
+                    let access = group.accesses[0]
                     if index > 0 { connectRowDivider }
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         onOpenShared(access)
                     } label: {
                         connectRow(icon: "person.2", title: access.machineLabel,
-                                   subtitle: "\(access.agentName) · shared by \(access.ownerName)")
+                                   subtitle: "\(group.accesses.map(\.agentName).joined(separator: ", ")) · shared by \(access.ownerName)")
                     }
                     .buttonStyle(ConnectRowButtonStyle(held: false))
                     .disabled(connecting != nil)
                     .accessibilityIdentifier("shared-machine-row")
-                    // Never rebuilt while open: see StableContextMenu.swift.
-                    .stableContextMenu {
-                        StableMenuItem("Leave share", systemImage: "rectangle.portrait.and.arrow.right",
-                                       role: .destructive) { sharedMachines.remove(access) }
-                    }
                 }
             }
             .settingsGroup()
@@ -941,7 +940,7 @@ struct ConnectView: View {
                     .font(connectFont(34, .bold))
                     .foregroundStyle(Palette.text)
                     .accessibilityAddTraits(.isHeader)
-                Text("connect to your machine")
+                Text(sharedMachines.machines.isEmpty ? "connect to your machine" : "your shared agents")
                     .font(connectFont(16))
                     .foregroundStyle(Palette.textDim)
             }

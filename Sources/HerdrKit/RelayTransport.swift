@@ -161,12 +161,18 @@ final class RelaySession: @unchecked Sendable {
 public struct RelayTransport: HerdrTransport {
     public let endpoint: RelayEndpoint
     let identity: GuestIdentity
+    private let guestID: String
     let connector: RelaySocketConnector
     /// Hears each session's hello `features`, before the session's request is answered.
     let onFeatures: (@Sendable (GuestFeatures) -> Void)?
 
-    /// A returning guest's message-1 payload.
-    static let returningHello = Data(#"{"v":1}"#.utf8)
+    /// Encoded once per transport; every request authenticates the same grant.
+    private let returningHello: Data
+
+    private struct ReturningHello: Encodable {
+        let v = 1
+        let guest_id: String
+    }
 
     /// Raw bytes per `gram.upload_chunk` over the relay: 256 KiB. Every relay call is its
     /// own WebSocket and Noise handshake, so the SSH-sized 48 KiB chunk made a 6 MB
@@ -186,17 +192,24 @@ public struct RelayTransport: HerdrTransport {
 
     public var gramUploadChunkBytes: Int { Self.gramUploadChunkBytes }
 
-    public init(endpoint: RelayEndpoint, identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
+    public init(guestID: String, endpoint: RelayEndpoint, identity: GuestIdentity, connector: RelaySocketConnector = URLSessionRelayConnector(),
                 onFeatures: (@Sendable (GuestFeatures) -> Void)? = nil) {
         self.endpoint = endpoint
         self.identity = identity
+        self.guestID = guestID
+        // These two primitive fields have no failing Encodable implementation.
+        self.returningHello = try! JSONEncoder().encode(ReturningHello(guest_id: guestID))
         self.connector = connector
         self.onFeatures = onFeatures
     }
 
     private func open(through connector: RelaySocketConnector) async throws -> RelaySession {
         let session = try await RelaySession.open(
-            endpoint: endpoint, identity: identity, hello: Self.returningHello, connector: connector)
+            endpoint: endpoint, identity: identity, hello: returningHello, connector: connector)
+        guard session.reply["guest_id"] as? String == guestID else {
+            session.close()
+            throw GuestError.revoked
+        }
         onFeatures?(GuestFeatures(helloReply: session.reply))
         return session
     }

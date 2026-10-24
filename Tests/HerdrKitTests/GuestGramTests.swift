@@ -35,11 +35,11 @@ final class GuestGramTests: XCTestCase {
         let host = FakeHost()
         host.serve = { _ in [Data("{}\n".utf8)] }
         let log = FeatureLog()
-        let transport = RelayTransport(endpoint: host.endpoint, identity: GuestIdentity(privateKey: .init()),
+        let transport = RelayTransport(guestID: "g_1", endpoint: host.endpoint, identity: GuestIdentity(privateKey: .init()),
                                        connector: host.connector(), onFeatures: { log.append($0) })
 
         _ = try await transport.roundTrip("a")
-        host.reply = ["ok": true, "features": ["gram": true, "push": true]]
+        host.reply = ["ok": true, "guest_id": "g_1", "features": ["gram": true, "push": true]]
         _ = try await transport.roundTrip("b")
         for try await _ in transport.stream("c") {}
 

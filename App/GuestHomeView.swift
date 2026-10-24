@@ -37,6 +37,7 @@ struct GuestHomeView: View {
     /// Called after the share was removed (Leave, or Remove once access is lost).
     let onLeave: () -> Void
     let pollInterval: Duration
+    let embedded: Bool
 
     enum Tab: Hashable { case agents, settings }
 
@@ -63,18 +64,33 @@ struct GuestHomeView: View {
     @AppStorage("ui.fontScale") private var uiFontScale: Double = 1.0
 
     init(access: GuestAccess, connect: @escaping () throws -> GuestConnection,
-         pollInterval: Duration = .seconds(5),
+         pollInterval: Duration = .seconds(5), embedded: Bool = false,
          onBack: (() -> Void)?, onLeave: @escaping () -> Void) {
         self.access = access
         self.connect = connect
         self.pollInterval = pollInterval
+        self.embedded = embedded
         self.onBack = onBack
         self.onLeave = onLeave
     }
 
     var body: some View {
         let _ = uiFontScale
-        ZStack {
+        Group {
+            if embedded {
+                content
+                    .fullScreenCover(isPresented: $showingPane) {
+                        if let connection {
+                            GuestPaneView(client: connection.client, access: access, features: connection.features,
+                                          tab: $paneTab) { showingPane = false }
+                        }
+                    }
+                    .confirmationDialog("Remove \(access.agentName)?", isPresented: $confirmingRemove,
+                                        titleVisibility: .visible) {
+                        Button("Remove share", role: .destructive) { leave() }
+                    }
+            } else {
+                ZStack {
             TabView(selection: $tab) {
                 agentsTab
                     .tag(Tab.agents)
@@ -92,6 +108,8 @@ struct GuestHomeView: View {
                 }
                 .transition(.move(edge: .trailing).combined(with: .opacity))
                 .zIndex(1)
+            }
+                }
             }
         }
         .task { await poll() }
@@ -175,7 +193,7 @@ struct GuestHomeView: View {
     @ViewBuilder
     private var content: some View {
         if let connectError {
-            message(icon: "key.slash", title: "Can't use this phone's key", body: connectError)
+            message(icon: "key.slash", title: "\(access.agentName): key unavailable", body: connectError)
         } else {
             switch status {
             case .loading:
@@ -192,7 +210,7 @@ struct GuestHomeView: View {
                 message(icon: "wifi.slash", title: "\(access.machineLabel) is offline",
                         body: "\(access.agentName) will show here again when the machine is back.")
             case .lost(let why):
-                message(icon: "person.crop.circle.badge.xmark", title: "Access removed", body: why) {
+                message(icon: "person.crop.circle.badge.xmark", title: "\(access.agentName): access removed", body: why) {
                     Button { confirmingRemove = true } label: {
                         Text("Remove share")
                             .font(Typography.app(13.5, .semibold)).foregroundStyle(Palette.died)
@@ -211,7 +229,7 @@ struct GuestHomeView: View {
     /// The shared agent as a Messages-style row, like the owner's roster (#352): full width
     /// on the ground, the round avatar with its status badge, the name over the preview, and
     /// an inset divider. With no listed agent, or one the host reports as not the pane's
-    /// foreground program, it reads "isn't running" with a paused pill and a dimmed avatar.
+    /// foreground program, it reads "Agent unavailable" with a dimmed avatar.
     private func agentRow(_ row: AgentRow?) -> some View {
         let running = row.map { $0.info.guestRunning != false } ?? false
         let group = running ? row?.group : nil
@@ -219,7 +237,7 @@ struct GuestHomeView: View {
             Color.clear.frame(width: 20, height: 1)
             AgentAvatar(name: access.agentName,
                         badge: group.map(AgentAvatarBadge.init) ?? .none,
-                        badgeLabel: group?.label ?? "paused")
+                        badgeLabel: group?.label ?? "Agent unavailable")
                 .opacity(running ? 1 : 0.55)
                 .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
@@ -227,12 +245,6 @@ struct GuestHomeView: View {
                     Text(access.agentName)
                         .font(.system(size: 17 * Typography.scale, weight: .semibold))
                         .foregroundStyle(Palette.text).lineLimit(1)
-                    if !running {
-                        Text("paused")
-                            .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Capsule().fill(Palette.textDim.opacity(0.12)))
-                    }
                     Spacer(minLength: 6)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 12, weight: .semibold))
@@ -240,7 +252,7 @@ struct GuestHomeView: View {
                         .accessibilityHidden(true)
                 }
                 // A waiting agent's preview reads in the primary colour, like an unread message.
-                Text(running ? row.map(meta) ?? "" : "\(access.agentName) isn't running")
+                Text(running ? row.map(meta) ?? "" : "Agent unavailable")
                     .font(.system(size: 15 * Typography.scale))
                     .foregroundStyle(group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
