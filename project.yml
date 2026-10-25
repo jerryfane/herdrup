@@ -235,7 +235,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr
-        MARKETING_VERSION: "1.1.0"
+        MARKETING_VERSION: "1.1.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
@@ -382,7 +382,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.widgets
-        MARKETING_VERSION: "1.1.0"
+        MARKETING_VERSION: "1.1.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
@@ -426,7 +426,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.notificationservice
         # Bump with the app's and the widget's: an extension's version must match its app's.
-        MARKETING_VERSION: "1.1.0"
+        MARKETING_VERSION: "1.1.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
@@ -470,7 +470,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jerryfane.herdr.share
-        MARKETING_VERSION: "1.1.0"
+        MARKETING_VERSION: "1.1.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
