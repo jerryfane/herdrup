@@ -287,6 +287,7 @@ struct ChatView: View {
     @State private var followingLatest = true
     @State private var userScrolling = false
     @State private var scrollPosition = ChatScrollPosition()
+    @State private var latestRequestCount = 0
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
@@ -387,8 +388,10 @@ struct ChatView: View {
         .overlay(alignment: .bottom) {
             if landed, !atBottom, findRequest == nil {
                 ChatLatestButton {
+                    latestRequestCount += 1
                     followingLatest = true
                 }
+                .accessibilityValue("requests=\(latestRequestCount) follow=\(followingLatest) drag=\(userScrolling) offset=\(scrollPosition.view?.contentOffset.y ?? -1) content=\(scrollPosition.view?.contentSize.height ?? -1) viewport=\(scrollPosition.view?.bounds.height ?? -1)")
                 .padding(.bottom, 60)
             }
         }

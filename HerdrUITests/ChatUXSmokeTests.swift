@@ -15,7 +15,7 @@ final class ChatUXSmokeTests: XCTestCase {
         }
         XCTAssertTrue(agent.waitForExistence(timeout: 12), app.debugDescription)
         agent.tap()
-        XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 12), app.debugDescription)
         return app
     }
 
@@ -28,13 +28,13 @@ final class ChatUXSmokeTests: XCTestCase {
 
     private func dismissTextSizeMenu(_ app: XCUIApplication) {
         if app.buttons["terminal-font-increase"].exists {
-            app.scrollViews["chat-view"].coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.4)).tap()
+            app.descendants(matching: .any)["chat-view"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.4)).tap()
         }
     }
 
     func testChatSizeTablesMetadataAndRefresh() {
         let app = launch()
-        let chat = app.scrollViews["chat-view"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
         let model = app.staticTexts["chat-model"]
         XCTAssertTrue(model.waitForExistence(timeout: 12), app.debugDescription)
         XCTAssertTrue(model.label.contains("fixture-model"))
@@ -92,9 +92,15 @@ final class ChatUXSmokeTests: XCTestCase {
         app.buttons["terminal-find"].tap()
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
         XCTAssertTrue(app.buttons["chat-jump-latest"].waitForExistence(timeout: 5), app.debugDescription)
+        print("JUMP_BEFORE \(app.buttons["chat-jump-latest"].debugDescription)")
         app.buttons["chat-jump-latest"].tap()
         XCTAssertTrue(app.staticTexts["chat-model"].waitForExistence(timeout: 5), app.debugDescription)
         record(app, "Tail position immediately after jumping")
+        if app.buttons["chat-jump-latest"].exists {
+            print("JUMP_AFTER \(app.buttons["chat-jump-latest"].debugDescription)")
+        } else {
+            print("JUMP_AFTER control removed")
+        }
         let modelVisible = NSPredicate(format: "hittable == true")
         expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
         waitForExpectations(timeout: 5)
@@ -120,8 +126,12 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertEqual(count.label, "2/2")
         app.buttons["terminal-refresh"].tap()
         XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertEqual(count.label, "2/2", "Refreshing must preserve the selected literal match without duplicate entries")
-        record(app, "Unicode match count and wraparound remain stable after refresh")
+        XCTAssertEqual(count.label, "2/3", "The new reply must add one match without moving the selected table match")
+        app.buttons["terminal-refresh"].tap()
+        XCTAssertTrue(app.staticTexts["Refreshing chat…"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
+        XCTAssertEqual(count.label, "2/3", "A no-change refresh must not duplicate the incoming reply")
+        record(app, "Unicode search counts an incoming reply and preserves selection through a no-change refresh")
         app.buttons["terminal-find"].tap()
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
     }
