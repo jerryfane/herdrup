@@ -321,9 +321,13 @@ public final class TranscriptStore {
         guard hasOlder, !loadingOlder, let before = beforeCursor else { return }
         loadingOlder = true
         onChange?()
+        // Every exit clears the flag; the success path clears it before merging so the
+        // change notification that shows the new page also re-enables "Load older".
         defer {
-            loadingOlder = false
-            onChange?()
+            if loadingOlder {
+                loadingOlder = false
+                onChange?()
+            }
         }
         let version = generation
         let page: AgentTranscriptPage
@@ -340,6 +344,7 @@ public final class TranscriptStore {
             throw error
         }
         guard version == generation else { return }
+        loadingOlder = false
         mergeOlder(page)
     }
 
