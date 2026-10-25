@@ -260,6 +260,52 @@ final class ScrollTests: XCTestCase {
         XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
     }
 
+    /// The non-drag variant: the Mac's wheel and trackpad move `contentOffset` with neither
+    /// `isDragging` nor `isDecelerating` set, and the paging that waited for those flags never
+    /// paged there (#523 item 10). `history-scroll-top` writes offset 0 the same way, after the
+    /// seed has settled; landing at the top must page, and each later landing pages the next.
+    func testReachingTheTopWithoutADragPagesOlderHistory() {
+        let app = XCUIApplication.launched(mock: "historypaging")
+        XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10))
+        let probe = app.descendants(matching: .any)["history-paging-requests"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 10), "history-paging-requests probe missing")
+        Thread.sleep(forTimeInterval: 2.0)
+        XCTAssertTrue(probe.label.hasPrefix("requests=0"), "paged before any scroll (\(probe.label))")
+
+        let top = app.buttons["history-scroll-top"]
+        XCTAssertTrue(top.waitForExistence(timeout: 5), "history-scroll-top action missing")
+        top.tap()
+        XCTAssertTrue(poll(10, every: 0.1) { probe.label.contains("hc-2001") },
+                      "reaching the top without a drag requested nothing (\(probe.label))")
+        let chained = poll(30, every: 0.5) {
+            if probe.label.contains("hc-1501") { return true }
+            top.tap()
+            return probe.label.contains("hc-1501")
+        }
+        XCTAssertTrue(chained, "the next landing at the top did not page (\(probe.label))")
+        XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
+    }
+
+    /// The tap-to-load receipt. A keyframe with five rows of history leaves the pane within a
+    /// screen of the top from the start, so nothing pages by itself; the "Load earlier output"
+    /// capsule is offered instead, and a tap on it requests the page above the keyframe.
+    func testLoadEarlierCapsulePagesOlderHistory() {
+        let app = XCUIApplication.launched(mock: "historypaging",
+                                           environment: ["HERDR_MOCK_HISTORY_KEYFRAME_ROWS": "5"])
+        XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10))
+        let probe = app.descendants(matching: .any)["history-paging-requests"]
+        XCTAssertTrue(probe.waitForExistence(timeout: 10), "history-paging-requests probe missing")
+        let loadEarlier = app.buttons["terminal-load-earlier"]
+        XCTAssertTrue(loadEarlier.waitForExistence(timeout: 10), "the load-earlier capsule was not offered")
+        XCTAssertEqual(loadEarlier.label, "Load earlier output")
+        XCTAssertTrue(probe.label.hasPrefix("requests=0"), "paged before anyone asked (\(probe.label))")
+
+        loadEarlier.tap()
+        XCTAssertTrue(poll(10, every: 0.1) { probe.label.contains("cursors=hc-2296") },
+                      "the tap requested no page (\(probe.label))")
+        XCTAssertTrue(probe.label.hasPrefix("requests=1"), probe.label)
+    }
+
     // MARK: - helpers
 
     /// Parses the `keyframe-history-reads` probe: "requested=N answered=N cancelled=N".

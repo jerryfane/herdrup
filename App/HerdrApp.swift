@@ -5269,8 +5269,10 @@ struct TerminalPaneContent: View {
     /// False while the pane is scrolled away from its newest output. Drives the
     /// "Latest" pill. Starts true so the pill stays hidden until the reader scrolls.
     @State private var terminalAtTail = true
-    /// True while the terminal loads an older page of its history (the top capsule).
-    @State private var terminalHistoryLoading = false
+    /// What the terminal's top history capsule shows: loading, the load-earlier offer, or nothing.
+    @State private var terminalHistoryPaging = TerminalHistoryPaging.hidden
+    /// Bumped by the capsule's "Load earlier output" tap; the terminal pages once per bump.
+    @State private var loadEarlierHistoryToken = 0
     /// The terminal's current height: the room the composer grows over.
     @State private var terminalHeight: CGFloat = 0
     /// The note and quick-key row above the composer. With the composer's resting row,
@@ -5440,7 +5442,8 @@ struct TerminalPaneContent: View {
                                  },
                                  jumpToTailToken: jumpToTailToken,
                                  onTailStateChange: { terminalAtTail = $0 },
-                                 onHistoryLoadingChange: { terminalHistoryLoading = $0 },
+                                 onHistoryPagingChange: { terminalHistoryPaging = $0 },
+                                 loadEarlierHistoryToken: loadEarlierHistoryToken,
                                  // The host's current belief, so a `streamGen` remount seeds a
                                  // fresh Coordinator instead of replaying the last jump.
                                  isAtTail: terminalAtTail,
@@ -5481,12 +5484,13 @@ struct TerminalPaneContent: View {
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                     }
-                    // An overlay for the same reason: touches pass through to the terminal.
+                    // An overlay for the same reason: only the offer capsule hit-tests, and
+                    // the loading one lets touches through to the terminal.
                     .overlay(alignment: .top) {
                         ZStack {
-                            if terminalHistoryLoading { TerminalHistoryLoadingCapsule() }
+                            TerminalHistoryCapsule(state: terminalHistoryPaging) { loadEarlierHistoryToken += 1 }
                         }
-                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryLoading)
+                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryPaging)
                     }
                     // In Chat the terminal stays mounted under it (its stream stays warm for
                     // the switch back) at the height it has with the key row showing, so the
@@ -10428,6 +10432,8 @@ struct KeyframeHistoryReadProbe: View {
 /// at a time, down to row 1 (null cursor). Every page is held for `heldPageNanos` so the
 /// loading capsule is on screen long enough for a UI test to see it. Each request's cursor is
 /// logged in order, so a test can tell whether the app chained the cursors it was given.
+/// `HERDR_MOCK_HISTORY_KEYFRAME_ROWS` shortens the keyframe's history (a pane within a screen
+/// of the top of its history, which pages on request rather than by itself).
 final class HistoryPagingDriver: @unchecked Sendable {
     final class RequestLog: @unchecked Sendable {
         private let lock = NSLock()
@@ -10443,8 +10449,23 @@ final class HistoryPagingDriver: @unchecked Sendable {
 
     static let requests = RequestLog()
     static let totalRows = 2300
-    static let keyframeRows = 300
+    static let keyframeRows =
+        ProcessInfo.processInfo.environment["HERDR_MOCK_HISTORY_KEYFRAME_ROWS"].flatMap(Int.init) ?? 300
     static let heldPageNanos: UInt64 = 1_500_000_000
+    /// The mock pane's terminal, for `scrollToTop`. Every DEBUG attach registers; only this
+    /// mock keeps it.
+    @MainActor private static weak var terminal: UIScrollView?
+
+    @MainActor static func register(_ view: UIScrollView) {
+        guard ScreenshotMock.mode == .historyPaging else { return }
+        terminal = view
+    }
+
+    /// Puts the terminal at the top of its scrollback the way a Mac wheel or trackpad scroll
+    /// can: an offset write with no drag and no deceleration behind it.
+    @MainActor static func scrollToTop() {
+        terminal?.setContentOffset(.zero, animated: false)
+    }
 
     private static func row(_ n: Int) -> String {
         let pad = String(repeating: "-", count: (n * 7) % 30)
@@ -10501,24 +10522,30 @@ final class HistoryPagingDriver: @unchecked Sendable {
 }
 
 /// DEBUG receipt for the history-paging test: `HistoryPagingDriver.requests` as the label of
-/// `history-paging-requests`, refreshed while the mock pane is up.
+/// `history-paging-requests`, refreshed while the mock pane is up, and the
+/// `history-scroll-top` action (see `HistoryPagingDriver.scrollToTop`).
 struct HistoryPagingProbe: View {
     @State private var summary = HistoryPagingDriver.requests.summary
 
     var body: some View {
-        Color.clear
-            .frame(width: 1, height: 1)
-            .allowsHitTesting(false)
-            .accessibilityElement()
-            .accessibilityIdentifier("history-paging-requests")
-            .accessibilityLabel(summary)
-            .task {
-                while !Task.isCancelled {
-                    let now = HistoryPagingDriver.requests.summary
-                    if now != summary { summary = now }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
+        HStack(spacing: 0) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+                .accessibilityElement()
+                .accessibilityIdentifier("history-paging-requests")
+                .accessibilityLabel(summary)
+            Button("top") { HistoryPagingDriver.scrollToTop() }
+                .font(.caption2)
+                .accessibilityIdentifier("history-scroll-top")
+        }
+        .task {
+            while !Task.isCancelled {
+                let now = HistoryPagingDriver.requests.summary
+                if now != summary { summary = now }
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
+        }
     }
 }
 

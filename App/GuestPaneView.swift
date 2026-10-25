@@ -79,8 +79,10 @@ struct GuestPaneView: View {
     /// owner's jump button shows (`JumpToLatestButton`), and its tap bumps the token.
     @State private var terminalAtTail = true
     @State private var jumpToTailToken = 0
-    /// True while the terminal loads an older page of its history (the top capsule).
-    @State private var terminalHistoryLoading = false
+    /// What the terminal's top history capsule shows: loading, the load-earlier offer, or nothing.
+    @State private var terminalHistoryPaging = TerminalHistoryPaging.hidden
+    /// Bumped by the capsule's "Load earlier output" tap; the terminal pages once per bump.
+    @State private var loadEarlierHistoryToken = 0
     /// The note row's height over the composer, and the terminal's: the composer floats over
     /// the terminal (as the owner's does), so only its resting row takes layout height.
     @State private var bottomChromeHeight: CGFloat = 0
@@ -434,7 +436,8 @@ struct GuestPaneView: View {
                     onStreamEnded: streamEnded,
                     jumpToTailToken: jumpToTailToken,
                     onTailStateChange: { terminalAtTail = $0 },
-                    onHistoryLoadingChange: { terminalHistoryLoading = $0 },
+                    onHistoryPagingChange: { terminalHistoryPaging = $0 },
+                    loadEarlierHistoryToken: loadEarlierHistoryToken,
                     isAtTail: terminalAtTail,
                     fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
@@ -460,11 +463,11 @@ struct GuestPaneView: View {
                     }
                     .overlay(alignment: .top) {
                         ZStack {
-                            if terminalHistoryLoading {
-                                TerminalHistoryLoadingCapsule(identifier: "guest-history-loading")
+                            TerminalHistoryCapsule(state: terminalHistoryPaging, identifierPrefix: "guest") {
+                                loadEarlierHistoryToken += 1
                             }
                         }
-                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryLoading)
+                        .animation(.easeInOut(duration: 0.15), value: terminalHistoryPaging)
                     }
             }
             if let message = centerMessage {
