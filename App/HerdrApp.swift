@@ -5470,10 +5470,14 @@ struct TerminalPaneContent: View {
                     // A visible, one-finger replacement for the double tap that used to
                     // jump to the tail (given back to SwiftTerm, which needs it for word
                     // select). An OVERLAY, not a gesture, for the reason stated above:
-                    // only the pill itself hit-tests, taps elsewhere reach the terminal.
-                    .overlay(alignment: .bottomTrailing) {
+                    // only the button itself hit-tests, taps elsewhere reach the terminal.
+                    .overlay(alignment: .bottom) {
                         ZStack {
-                            if !terminalAtTail { TerminalJumpToLatestPill { jumpToTailToken += 1 } }
+                            if !terminalAtTail {
+                                JumpToLatestButton(label: "Jump to latest output", identifier: "terminal-jump-latest",
+                                                   regularGlass: true) { jumpToTailToken += 1 }
+                                    .padding(.bottom, 16)
+                            }
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
                     }
@@ -5540,9 +5544,6 @@ struct TerminalPaneContent: View {
                         // Opaque, so rows the composer grows over do not show through the
                         // gaps between the keycaps and around the card.
                         .background(Palette.groundMachine)
-                        .overlay(alignment: .top) {
-                            if showingChat { ChatComposerFade(ground: Palette.groundMachine) }
-                        }
                     }
             }
         }

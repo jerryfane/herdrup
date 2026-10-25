@@ -2,14 +2,15 @@ import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false) -> XCUIApplication {
+                        copyFixture: Bool = false, plan: String = "") -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
             "HERDR_CHAT_UX_FAIL_REFRESH": failingRefresh ? "1" : "0",
             "HERDR_CHAT_UX_PENDING_QUESTION": pendingQuestion ? "1" : "0",
             "HERDR_CHAT_UX_LARGE": large ? "1" : "0",
-            "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0"
+            "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
+            "HERDR_CHAT_UX_PLAN": plan
         ])
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -33,6 +34,24 @@ final class ChatUXSmokeTests: XCTestCase {
         if app.buttons["terminal-font-increase"].exists {
             app.descendants(matching: .any)["chat-view"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.4)).tap()
         }
+    }
+
+    /// The space between the model label, the transcript's last line, and the composer card.
+    /// At the tail nothing scrolls under the composer, so no fade-sized spacer pads it.
+    private func tailGap(_ app: XCUIApplication) -> CGFloat {
+        let composer = app.descendants(matching: .any)["composer-card"].firstMatch
+        XCTAssertTrue(composer.exists, app.debugDescription)
+        return composer.frame.minY - app.staticTexts["chat-model"].frame.maxY
+    }
+
+    private func assertTailGap(_ app: XCUIApplication, _ moment: String) {
+        var gap = tailGap(app)
+        for _ in 0..<10 where gap > 32 {
+            Thread.sleep(forTimeInterval: 0.3)
+            gap = tailGap(app)
+        }
+        XCTAssertGreaterThanOrEqual(gap, 0, "\(moment): the model label must sit above the composer")
+        XCTAssertLessThanOrEqual(gap, 32, "\(moment): at most about 20 pt between the model label and the composer")
     }
 
     func testChatSizeTablesMetadataAndRefresh() {
@@ -62,6 +81,11 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Review the table"].exists)
         app.buttons["Dismiss refresh result"].tap()
+        let modelVisible = NSPredicate(format: "hittable == true")
+        expectation(for: modelVisible, evaluatedWith: model)
+        waitForExpectations(timeout: 5)
+        assertTailGap(app, "Following the tail after a refresh")
+        record(app, "Tail gap between the model label and the composer")
         record(app, "Manual chat refresh completes without clearing the conversation")
 
         app.buttons["terminal-actions"].tap()
@@ -77,6 +101,51 @@ final class ChatUXSmokeTests: XCTestCase {
         let description = app.staticTexts["A deliberately long description that must wrap within its column"].firstMatch
         XCTAssertGreaterThan(description.frame.height, 30)
         record(app, "Three-column table wraps within the phone width")
+    }
+
+    func testPlanCardCollapsesToTheCurrentWork() {
+        let app = launch(plan: "six")
+        let toggle = app.buttons["chat-plan-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertEqual(toggle.label, "To-do, 2 of 6 done")
+        let rows = ["one", "two", "three", "four", "five", "six"].map { app.staticTexts["Plan item \($0)"] }
+        XCTAssertEqual(rows.map(\.exists), [false, false, true, true, true, false],
+                       "collapsed shows the in-progress item and the next two: \(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["Build"].exists)
+        XCTAssertTrue(app.staticTexts["Ship"].exists)
+        let more = app.buttons["chat-plan-more"]
+        XCTAssertTrue(more.exists, app.debugDescription)
+        XCTAssertEqual(more.label, "+3 more")
+        record(app, "Collapsed TODO shows the current work and +3 more")
+
+        toggle.tap()
+        XCTAssertTrue(rows[0].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(rows.map(\.exists), Array(repeating: true, count: 6))
+        XCTAssertFalse(more.exists, "expanded, nothing is hidden")
+        record(app, "Expanded TODO shows every item")
+
+        toggle.tap()
+        XCTAssertTrue(rows[0].waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(more.exists)
+        more.tap()
+        XCTAssertTrue(rows[5].waitForExistence(timeout: 5), "+3 more expands too: \(app.debugDescription)")
+        XCTAssertEqual(rows.map(\.exists), Array(repeating: true, count: 6))
+    }
+
+    func testFinishedPlanShowsOnlyItsHeader() {
+        let app = launch(plan: "done")
+        let toggle = app.buttons["chat-plan-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertEqual(toggle.label, "To-do, 3 of 3 done")
+        XCTAssertEqual(toggle.value as? String, "All done")
+        let rows = ["one", "two", "three"].map { app.staticTexts["Plan item \($0)"] }
+        XCTAssertEqual(rows.map(\.exists), [false, false, false], "a finished plan collapses to its header")
+        XCTAssertFalse(app.buttons["chat-plan-more"].exists)
+        record(app, "Finished TODO collapses to its header")
+
+        toggle.tap()
+        XCTAssertTrue(rows[0].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(rows.map(\.exists), [true, true, true])
     }
 
     func testSearchRevealsThoughtAndKeepsActiveChat() {
@@ -104,7 +173,8 @@ final class ChatUXSmokeTests: XCTestCase {
         expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
         waitForExpectations(timeout: 5)
         XCTAssertFalse(app.buttons["chat-jump-latest"].exists, "The control must disappear at the measured tail")
-        record(app, "Centered clear-glass jump returns to latest above composer fade")
+        assertTailGap(app, "After the animated jump")
+        record(app, "Centered clear-glass jump returns to latest without a composer fade")
 
         app.buttons["terminal-refresh"].tap()
         XCTAssertTrue(app.staticTexts["Refreshing chat…"].waitForExistence(timeout: 5))

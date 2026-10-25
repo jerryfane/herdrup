@@ -51,10 +51,7 @@ enum ChatUXSmoke {
         }
         result["working"] = NSNull()
         result["model"] = ["provider": "fixture", "id": "fixture-model"]
-        result["plan"] = [
-            ["text": "Review the table", "done": false, "status": "in_progress", "phase": "Verification"],
-            ["text": "Ship after review", "done": false, "status": "blocked", "phase": "Verification", "blocker": "Independent review"]
-        ]
+        result["plan"] = plan(ProcessInfo.processInfo.environment["HERDR_CHAT_UX_PLAN"])
         result["recap"] = ["turn_id": "ux-reply", "text": "Fixture recap only: typography is ready for inspection."]
         return ChatMockConversation.encode(id: id, result: result)
     }
@@ -97,6 +94,33 @@ enum ChatUXSmoke {
             add("large-\(turn)e", ["kind": "turn_end", "status": "done"])
         }
         return entries
+    }
+
+    /// The to-do fixture: by default two open items; `six` puts the in-progress item in the
+    /// middle of six; `done` finishes every item.
+    private static func plan(_ variant: String?) -> [[String: Any]] {
+        switch variant {
+        case "six":
+            return [
+                ["text": "Plan item one", "done": true, "status": "completed", "phase": "Build"],
+                ["text": "Plan item two", "done": true, "status": "completed", "phase": "Build"],
+                ["text": "Plan item three", "done": false, "status": "in_progress", "phase": "Build"],
+                ["text": "Plan item four", "done": false, "status": "pending", "phase": "Build"],
+                ["text": "Plan item five", "done": false, "status": "pending", "phase": "Ship"],
+                ["text": "Plan item six", "done": false, "status": "pending", "phase": "Ship"]
+            ]
+        case "done":
+            return [
+                ["text": "Plan item one", "done": true, "status": "completed"],
+                ["text": "Plan item two", "done": true, "status": "completed"],
+                ["text": "Plan item three", "done": true, "status": "completed"]
+            ]
+        default:
+            return [
+                ["text": "Review the table", "done": false, "status": "in_progress", "phase": "Verification"],
+                ["text": "Ship after review", "done": false, "status": "blocked", "phase": "Verification", "blocker": "Independent review"]
+            ]
+        }
     }
 }
 #endif

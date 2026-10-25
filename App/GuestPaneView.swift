@@ -76,7 +76,7 @@ struct GuestPaneView: View {
     /// terminal fits the agent's grid to the width and the size controls are gone.
     @State private var resizeRefused = false
     /// False while the guest has scrolled the terminal away from its newest output: the
-    /// owner's "Latest" pill shows (`TerminalJumpToLatestPill`), and its tap bumps the token.
+    /// owner's jump button shows (`JumpToLatestButton`), and its tap bumps the token.
     @State private var terminalAtTail = true
     @State private var jumpToTailToken = 0
     /// True while the terminal loads an older page of its history (the top capsule).
@@ -446,12 +446,14 @@ struct GuestPaneView: View {
                     .accessibilityIdentifier("guest-terminal")
                     // The owner's terminal inset.
                     .padding(.horizontal, 8)
-                    // The owner's "Latest" pill while the guest reads history; a local scroll
+                    // The owner's jump button while the guest reads history; a local scroll
                     // (view-only sends nothing).
-                    .overlay(alignment: .bottomTrailing) {
+                    .overlay(alignment: .bottom) {
                         ZStack {
                             if !terminalAtTail {
-                                TerminalJumpToLatestPill(identifier: "guest-latest") { jumpToTailToken += 1 }
+                                JumpToLatestButton(label: "Jump to latest output", identifier: "guest-latest",
+                                                   regularGlass: true) { jumpToTailToken += 1 }
+                                    .padding(.bottom, 16)
                             }
                         }
                         .animation(.easeInOut(duration: 0.15), value: terminalAtTail)
@@ -521,9 +523,6 @@ struct GuestPaneView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .background(pageGround)
-                .overlay(alignment: .top) {
-                    if showingChat { ChatComposerFade(ground: pageGround) }
-                }
             }
     }
 

@@ -351,6 +351,7 @@ struct ChatView: View {
     var onFindResult: (Int, Int, Bool) -> Void = { _, _, _ in }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
     private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
     @State private var expanded: Set<String> = []
@@ -496,12 +497,18 @@ struct ChatView: View {
                 .frame(height: 26)
                 .allowsHitTesting(false)
         }
+        // Fades rows into the composer only while there are rows under it: at the tail the
+        // last line sits clear of the composer, with nothing to fade.
+        .overlay(alignment: .bottom) {
+            if !atBottom { ChatComposerFade(ground: ground) }
+        }
         .overlay(alignment: .bottom) {
             if landed, !atBottom, findRequest == nil {
-                ChatLatestButton {
+                JumpToLatestButton(label: "Jump to latest message", identifier: "chat-jump-latest") {
+                    scrollPosition.animateToLatest()
                     followingLatest = true
                 }
-                .padding(.bottom, 60)
+                .padding(.bottom, 16)
             }
         }
         .overlay {
@@ -548,12 +555,10 @@ struct ChatView: View {
                 searchableRow(row, hits: hitsByRow[row.id] ?? [])
             }
             sessionFooter
-            // Keep the final line above the 48 pt composer fade when landing at the tail.
-            Color.clear.frame(height: 49)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
         .frame(maxWidth: ChatStyle.columnWidth)
         .frame(maxWidth: .infinity)
         .background {
@@ -1065,16 +1070,39 @@ struct ChatView: View {
         .accessibilityIdentifier("chat-note")
     }
 
+    /// Collapsed (the default for the session) the card shows the work at hand: at most three
+    /// rows from `TranscriptPlanWindow`, then "+N more"; a finished plan shows only its header.
     private func planCard(_ items: [TranscriptPlanItem]) -> some View {
         let done = items.filter(\.done).count
+        let allDone = done == items.count
+        let open = expanded.contains("plan")
+        let shown = open ? Array(items.indices) : TranscriptPlanWindow.visible(items)
+        let hidden = items.count - shown.count
         return VStack(alignment: .leading, spacing: 8) {
-            Text("TODO · \(done) OF \(items.count)")
-                .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
-            ForEach(items.indices, id: \.self) { index in
+            Button(action: togglePlan) {
+                HStack(spacing: 6) {
+                    chevron(open: open, color: Palette.textFaint)
+                    Text("TODO · \(done) OF \(items.count)")
+                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
+                    Spacer(minLength: 8)
+                    if !open, allDone {
+                        Text("✓ All done").font(Typography.app(12 * textScale, .semibold)).foregroundStyle(ChatStyle.ok)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("To-do, \(done) of \(items.count) done")
+            .accessibilityValue(!open && allDone ? "All done" : "")
+            .accessibilityHint(open ? "Shows fewer items" : "Shows all items")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("chat-plan-toggle")
+            ForEach(Array(shown.enumerated()), id: \.element) { position, index in
                 let item = items[index]
-                if let phase = item.phase, index == 0 || items[index - 1].phase != phase {
+                if let phase = item.phase, position == 0 || items[shown[position - 1]].phase != phase {
                     Text(phase).font(Typography.app(12 * textScale, .semibold)).foregroundStyle(Palette.textDim)
-                        .padding(.top, index == 0 ? 0 : 4)
+                        .padding(.top, position == 0 ? 0 : 4)
                 }
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: item.done ? "checkmark" :
@@ -1101,6 +1129,17 @@ struct ChatView: View {
                 .accessibilityValue(item.done ? "Done" : item.status == .inProgress ? "In progress" :
                                     item.status == .blocked ? "Blocked" : item.status == .pending ? "Pending" : "Not completed")
             }
+            if hidden > 0, !allDone {
+                Button(action: togglePlan) {
+                    Text("+\(hidden) more").font(Typography.app(12 * textScale, .semibold)).foregroundStyle(Palette.textFaint)
+                        .padding(.leading, 23)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Shows all items")
+                .accessibilityIdentifier("chat-plan-more")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -1120,6 +1159,10 @@ struct ChatView: View {
 
     private func toggle(_ key: String) {
         if expanded.contains(key) { expanded.remove(key) } else { expanded.insert(key) }
+    }
+
+    private func togglePlan() {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { toggle("plan") }
     }
 }
 
