@@ -1,5 +1,10 @@
 import Foundation
+#if !os(Linux)
+// Linux's libswiftObservation does not link in the swift:6.1 image (undefined
+// `swift::threading::fatal`), so the conformance is Apple-only: the app's SwiftUI views
+// observe `phases` there, and nothing observes it in the Linux tests.
 import Observation
+#endif
 
 /// Uploads a composer's attachments while the message is still being written, so Send only
 /// has to post them and prompt. One per composer (the terminal reply, the guest pane, the
@@ -24,8 +29,9 @@ import Observation
 ///   resumes them (`resume()`). A Send already waiting on one keeps it running.
 /// - The draft is abandoned when the composer's state goes (its pane closed): releasing the
 ///   uploader cancels the running upload and discards every finished one nothing posted.
+///
+/// SwiftUI observes `phases` (`Observable`, Apple platforms only: see the import).
 @MainActor
-@Observable
 public final class ComposerUploader {
     /// Byte progress of the running upload, `(sent, total)`.
     public typealias Progress = @MainActor @Sendable (_ sent: Int, _ total: Int) -> Void
@@ -50,7 +56,32 @@ public final class ComposerUploader {
 
     /// Each staged file's upload, by attachment id. Absent for a file this uploader does
     /// not know (never started, removed, or sent).
-    public private(set) var phases: [UUID: Phase] = [:]
+    public private(set) var phases: [UUID: Phase] {
+        get {
+            observePhases()
+            return storedPhases
+        }
+        set {
+            mutatePhases { storedPhases = newValue }
+        }
+    }
+    private var storedPhases: [UUID: Phase] = [:]
+
+    #if !os(Linux)
+    private let registrar = ObservationRegistrar()
+
+    private func observePhases() {
+        registrar.access(self, keyPath: \.phases)
+    }
+
+    private func mutatePhases(_ change: () -> Void) {
+        registrar.withMutation(of: self, keyPath: \.phases, change)
+    }
+    #else
+    private func observePhases() {}
+
+    private func mutatePhases(_ change: () -> Void) { change() }
+    #endif
 
     private struct Job {
         var file: ComposerAttachment
@@ -70,12 +101,12 @@ public final class ComposerUploader {
         var discardOnLanding: Discard?
     }
 
-    @ObservationIgnored private var jobs: [UUID: Job] = [:]
+    private var jobs: [UUID: Job] = [:]
     /// Ids in the order they were added: the upload order.
-    @ObservationIgnored private var order: [UUID] = []
-    @ObservationIgnored private var running: Running?
-    @ObservationIgnored private var runner: Task<Void, Never>?
-    @ObservationIgnored private var attempts = 0
+    private var order: [UUID] = []
+    private var running: Running?
+    private var runner: Task<Void, Never>?
+    private var attempts = 0
     /// What `deinit` cleans up, readable off the main actor.
     private let leftovers = Leftovers()
 
@@ -305,6 +336,10 @@ public final class ComposerUploader {
         }
     }
 }
+
+#if !os(Linux)
+extension ComposerUploader: Observable {}
+#endif
 
 /// The uploads a released `ComposerUploader` must not leave behind: the one running, and
 /// every finished upload nothing posted. Lock-guarded because `deinit` reaches it off the
