@@ -117,9 +117,12 @@ final class ChatUXSmokeTests: XCTestCase {
 
         chat.swipeDown(velocity: .fast)
         XCTAssertFalse(app.staticTexts["chat-model"].isHittable, "The drag must move into history before refreshing")
+        let incoming = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Incoming update ")).firstMatch
+        let previousUpdate = incoming.label
         app.buttons["terminal-refresh"].tap()
         XCTAssertTrue(app.staticTexts["Refreshing chat…"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
+        XCTAssertNotEqual(incoming.label, previousUpdate, "The refresh must deliver changed reply content before checking reader position")
         XCTAssertFalse(app.staticTexts["chat-model"].isHittable, "An incoming reply must not pull the reader out of history")
         XCTAssertTrue(app.buttons["chat-jump-latest"].isHittable)
         record(app, "Incoming content preserves manual history position")
@@ -207,7 +210,7 @@ final class ChatUXSmokeTests: XCTestCase {
         app.buttons["Done"].tap()
         record(app, "Agent surface immediately after closing the question sheet")
         XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.buttons["chat-note-done"].exists, "Done must close only the question sheet")
+        XCTAssertTrue(app.buttons["chat-note-done"].waitForNonExistence(timeout: 5), "Done must close only the question sheet")
     }
 
     func testRefreshFailureKeepsLoadedConversation() {

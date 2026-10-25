@@ -34,10 +34,8 @@ enum ChatUXSmoke {
         if responses > 1 {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])
-        }
-        if responses > 2 {
             entries.append(["id": "ux-incoming-later", "kind": "reply", "final": true,
-                            "text": "A later incoming reply while reading history.", "ts_ms": timestamp + 4])
+                            "text": "Incoming update \(responses).\n\n" + String(repeating: "More streamed content.\n\n", count: responses), "ts_ms": timestamp + 4])
         }
         result["entries"] = entries
         if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_PENDING_QUESTION"] != "1" {
