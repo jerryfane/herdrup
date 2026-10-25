@@ -300,7 +300,7 @@ struct ChatView: View {
         return rows.flatMap { ChatSearch.hits(rowID: $0.id, text: $0.searchText, query: query) }
     }
 
-    private func updateSearch(_ proxy: ScrollViewProxy, step: Bool = false) {
+    private func updateSearch(_ proxy: ScrollViewProxy, step: Bool = false, reveal: Bool = false) {
         let hits = searchHits
         guard !hits.isEmpty else {
             selectedSearchHit = nil
@@ -325,7 +325,7 @@ struct ChatView: View {
             expanded.insert("s:" + work.id)
             for item in work.steps { expanded.insert("d:" + item.id) }
         }
-        guard moved || step else { return }
+        guard moved || step || reveal else { return }
         Task { @MainActor in
             await Task.yield()
             guard selectedSearchHit == hit.id, findRequest != nil else { return }
@@ -375,7 +375,7 @@ struct ChatView: View {
         .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .top, spacing: 0) {
             if findRequest != nil {
-                searchScope.padding(.horizontal, 16).padding(.vertical, 8).background(ground)
+                searchScope(proxy).padding(.horizontal, 16).padding(.vertical, 8).background(ground)
             }
         }
         .overlay(alignment: .top) {
@@ -448,14 +448,19 @@ struct ChatView: View {
         }
     }
 
-    @ViewBuilder private var searchScope: some View {
+    @ViewBuilder private func searchScope(_ proxy: ScrollViewProxy) -> some View {
         if findRequest != nil {
             HStack {
                 Text("Searching loaded history").font(Typography.app(12 * textScale))
                 Spacer()
                 if model.hasOlder {
-                    Button("Load older") { Task { await model.loadOlder(client: client) } }
-                        .disabled(model.loadingOlder)
+                    Button("Load older") {
+                        Task {
+                            await model.loadOlder(client: client)
+                            updateSearch(proxy, reveal: true)
+                        }
+                    }
+                    .disabled(model.loadingOlder)
                 }
             }
             .accessibilityIdentifier("chat-search-scope")
@@ -528,8 +533,8 @@ struct ChatView: View {
         .id(row.id)
     }
 
+    private var questionSheet: some View {
         ChatContentSheet {
-        ChatContentSheet(onClose: { openQuestionID = nil }) {
             if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
                let item = turn.items.first(where: { $0.id == openQuestionID }),
                case .ask(let id, let ask, let pending) = item {

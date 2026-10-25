@@ -125,6 +125,30 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
     }
 
+    func testSearchPagingPreservesSelectedMatchAndLoadedScope() {
+        let app = launch()
+        app.buttons["terminal-find"].tap()
+        let field = app.textFields["terminal-find-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Synthetic question")
+        let count = app.staticTexts["terminal-find-count"]
+        expectation(for: NSPredicate(format: "label == %@", "1/18"), evaluatedWith: count)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.staticTexts["Searching loaded history"].isHittable)
+        app.buttons["Load older"].tap()
+        expectation(for: NSPredicate(format: "label == %@", "21/38"), evaluatedWith: count)
+        waitForExpectations(timeout: 10)
+        app.buttons["Load older"].tap()
+        expectation(for: NSPredicate(format: "label == %@", "23/40"), evaluatedWith: count)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(app.buttons["Load older"].exists)
+        app.buttons["terminal-refresh"].tap()
+        XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
+        XCTAssertEqual(count.label, "23/40", "Refresh must retain paged history and the same selected prompt")
+        record(app, "Loaded-history search expands to all forty prompts and preserves selection across refresh")
+    }
+
     func testQuestionSheetFitsAndExpandsContext() {
         let app = launch(pendingQuestion: true)
         app.buttons["terminal-find"].tap()
