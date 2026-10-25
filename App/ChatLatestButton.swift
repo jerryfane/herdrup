@@ -11,6 +11,7 @@ struct ChatLatestButton: View {
                 .foregroundStyle(Palette.text)
                 .frame(width: 44, height: 44)
                 .modifier(ClearCircle(reduceTransparency: reduceTransparency))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Jump to latest message")
