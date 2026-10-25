@@ -538,4 +538,46 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.entries.map(\.id), ["r1"])
         XCTAssertEqual(store.lastError as? AgentTranscriptError, .unavailable)
     }
+
+    /// Replays agent.transcript responses captured from a real isolated server
+    /// (herdr 071556a9) with a real omp producer (5fa7a6f3) and model-generated
+    /// recaps. Proves the app reads the live wire shape, not only hand-written JSON.
+    func testCapturedLiveServerRecapShowsClearsAndReplacesPerTurn() async throws {
+        func fixture(_ name: String) throws -> String {
+            let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("Fixtures/live-recap-\(name).json")
+            return try String(contentsOf: url, encoding: .utf8)
+        }
+        let replies = try ["transcript-turn1", "transcript-turn2-before-recap", "transcript-turn2"].map(fixture)
+        var call = 0
+        let (client, _) = scripted { _ in
+            defer { call += 1 }
+            return replies[min(call, replies.count - 1)]
+        }
+        let store = TranscriptStore(target: "w1:p1")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertEqual(store.recap?.turnID, "0f44ffc7")
+        XCTAssertEqual(store.recap?.text, "The typo fix in README.md has been completed successfully. "
+            + "Next, verify the fix by reviewing the updated README.md for correctness.")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertNil(store.recap, "new work must clear the previous turn's recap")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertEqual(store.recap?.turnID, "01c9d94d")
+        XCTAssertTrue(store.recap?.text.hasPrefix("The task was to fix a typo in README.md and add") == true)
+        let recapText = try XCTUnwrap(store.recap?.text)
+        let entryTexts = store.entries.compactMap { entry -> String? in
+            switch entry.kind {
+            case let .user(text, _), let .reply(text, _), let .summary(text): text
+            default: nil
+            }
+        }
+        XCTAssertEqual(entryTexts.count, 4, "both real prompts and both real replies decode")
+        XCTAssertFalse(entryTexts.contains(recapText), "the recap must not appear as a conversation entry")
+    }
 }
