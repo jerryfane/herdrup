@@ -86,7 +86,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let result = app.staticTexts["chat-search-result"].firstMatch
         XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(result.label.contains(".*[x]"))
-        XCTAssertTrue(app.scrollViews["chat-view"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.exists)
         XCTAssertTrue(app.otherElements["chat-thought-open"].exists || app.descendants(matching: .any)["chat-thought-open"].exists)
         record(app, "Literal punctuation search reveals rendered thought without switching to Terminal")
         app.buttons["terminal-find"].tap()
@@ -98,6 +98,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let modelVisible = NSPredicate(format: "hittable == true")
         expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
         waitForExpectations(timeout: 5)
+        XCTAssertFalse(app.buttons["chat-jump-latest"].exists, "The control must disappear at the measured tail")
         record(app, "Centered clear-glass jump returns to latest above composer fade")
     }
 
@@ -179,6 +180,7 @@ final class ChatUXSmokeTests: XCTestCase {
         app.buttons["Done"].tap()
         record(app, "Agent surface immediately after closing the question sheet")
         XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["chat-note-done"].exists, "Done must close only the question sheet")
     }
 
     func testRefreshFailureKeepsLoadedConversation() {
