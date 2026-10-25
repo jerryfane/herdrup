@@ -92,15 +92,9 @@ final class ChatUXSmokeTests: XCTestCase {
         app.buttons["terminal-find"].tap()
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
         XCTAssertTrue(app.buttons["chat-jump-latest"].waitForExistence(timeout: 5), app.debugDescription)
-        print("JUMP_BEFORE \(app.buttons["chat-jump-latest"].debugDescription)")
         app.buttons["chat-jump-latest"].tap()
         XCTAssertTrue(app.staticTexts["chat-model"].waitForExistence(timeout: 5), app.debugDescription)
         record(app, "Tail position immediately after jumping")
-        if app.buttons["chat-jump-latest"].exists {
-            print("JUMP_AFTER \(app.buttons["chat-jump-latest"].debugDescription)")
-        } else {
-            print("JUMP_AFTER control removed")
-        }
         let modelVisible = NSPredicate(format: "hittable == true")
         expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
         waitForExpectations(timeout: 5)

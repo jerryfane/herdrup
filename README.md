@@ -69,11 +69,13 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   scroll horizontally only when their columns cannot fit readably.
   Find searches the active Chat or Terminal view. Chat search treats punctuation literally,
   reveals matching work and attachment bundles, and offers previous/next results with a count.
-  It searches loaded history; use Load older to extend that scope. Refresh keeps loaded history
-  and shows progress, completion or failure. Question sheets fit short content and put supporting
+  It searches loaded history; the pinned Load older control extends that scope without losing
+  the selected match. Incoming replies update the count; unchanged refreshes do not duplicate matches.
+  Refresh keeps loaded history and shows progress, completion or failure. Question sheets fit short content and put supporting
   context behind a disclosure. While following the latest messages, streaming content and keyboard
   changes keep the tail visible; scrolling into history or searching stops that follow. The centered
-  glass down arrow returns to the latest message. A 48 pt fade joins chat to the existing composer.
+  glass down arrow has a 44 pt circular touch target and returns to the latest message, then disappears.
+  A 48 pt fade joins chat to the existing composer; the final line stays above it.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation
