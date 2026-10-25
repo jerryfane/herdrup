@@ -38,6 +38,9 @@ final class ChatMockConversation: @unchecked Sendable {
     /// `HERDR_MOCK_CHAT_ANSWER=<code>`: `agent.answer` refuses with that error code (the
     /// "Answer in Terminal" fallback); unset, it answers.
     static let answerRefusal = ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_ANSWER"]
+    /// `HERDR_MOCK_CHAT_ANSWERED=<option>`: the owner's question starts answered, so the
+    /// agent is not blocked on a menu and a reply goes out as a prompt (`agent.prompt`).
+    private static let answeredAtLaunch = ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_ANSWERED"]
 
     let audience: Audience
     private let lock = NSLock()
@@ -47,6 +50,7 @@ final class ChatMockConversation: @unchecked Sendable {
 
     private init(audience: Audience) {
         self.audience = audience
+        answered = audience == .owner ? Self.answeredAtLaunch : nil
     }
 
     var askID: String { audience == .owner ? "call_ask_merge" : "call_ask_bench" }

@@ -170,7 +170,8 @@ final class ChatViewTests: XCTestCase {
     /// recorded trimmed by the agent; it must settle into ONE bubble, the transcript's, with
     /// no pending placeholder left beside it.
     func testSendWithTrailingSpaceReconcilesIntoOneBubble() throws {
-        let app = launch("chatview")
+        // Answered at launch: a blocked agent's reply goes to its menu as keys, not as a prompt.
+        let app = launch("chatview", ["HERDR_MOCK_CHAT_ANSWERED": "Yes, merge and deploy"])
         openAgent("herdr-app", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 10))
         let field = app.textViews["terminal-reply-input"]
