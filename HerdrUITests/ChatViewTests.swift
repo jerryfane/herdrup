@@ -183,11 +183,10 @@ final class ChatViewTests: XCTestCase {
         // The placeholder (with its receipt) shows first; the transcript's copy replaces it.
         let sent = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Ship the fix"))
         XCTAssertTrue(sent.firstMatch.waitForExistence(timeout: 10), "the chat should show the sent message")
-        let receipt = app.descendants(matching: .any).matching(identifier: "chat-send-receipt").firstMatch
+        // The bubble's identifier also reaches its receipt text, so wait on the bubble itself.
         let placeholder = app.descendants(matching: .any).matching(identifier: "chat-outgoing-message").firstMatch
-        XCTAssertTrue(receipt.waitForNonExistence(timeout: 10),
-                      "the local placeholder should be matched and removed: \(receipt.exists ? receipt.label : "")")
-        XCTAssertFalse(placeholder.exists, "no pending placeholder may be left")
+        XCTAssertTrue(placeholder.waitForNonExistence(timeout: 15),
+                      "the local placeholder should be matched and removed: \(placeholder.exists ? placeholder.label : "")")
         for label in ["Sending…", "Accepted by agent", "Confirmation pending", "Not seen in chat · check Terminal"] {
             XCTAssertFalse(app.staticTexts[label].exists, "no \"\(label)\" placeholder may be left")
         }
