@@ -395,6 +395,33 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertTrue(store.outbox.recordedPromptIDs.isEmpty)
     }
 
+    /// The change that shows an older page must already have "Load older" re-enabled;
+    /// otherwise a reader (or UI test) that taps again as soon as the page appears hits a
+    /// still-disabled button and the next page never loads.
+    func testOlderPageIsPublishedWithLoadingAlreadyFinished() async throws {
+        let (client, _) = scripted { params in
+            switch params["before"] as? String {
+            case "page-2": return Self.page([Self.entry("p2")], before: "page-3")
+            case "page-3": return Self.page([Self.entry("p3")])
+            default: return Self.page([Self.entry("p1")], before: "page-2")
+            }
+        }
+        let store = TranscriptStore(target: "agent")
+        await store.refresh(client: client)
+        var loadingWhenPageAppeared: [Bool] = []
+        store.onChange = {
+            if store.entries.contains(where: { $0.id == "p2" }), loadingWhenPageAppeared.isEmpty {
+                loadingWhenPageAppeared.append(store.loadingOlder)
+            }
+        }
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(loadingWhenPageAppeared, [false])
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(store.entries.map(\.id), ["p3", "p2", "p1"])
+        XCTAssertFalse(store.hasOlder)
+        XCTAssertFalse(store.loadingOlder)
+    }
+
     func testRefusedAndPreviousSessionMessagesAreNotMatchedToOtherPrompts() throws {
         func page(_ id: String, session: String) throws -> AgentTranscriptPage {
             struct Envelope: Decodable { let result: AgentTranscriptPage }
