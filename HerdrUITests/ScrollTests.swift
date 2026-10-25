@@ -248,7 +248,10 @@ final class ScrollTests: XCTestCase {
 
         let capsule = app.descendants(matching: .any)["terminal-history-loading"]
         var sawCapsule = false
-        let chained = poll(40, every: 0.1) {
+        // A page that lands with the terminal at rest keeps the reader's rows, so the second
+        // page waits until the reader has scrolled back through all 500 rows of the first:
+        // ~20 swipe rounds of ~3 s, plus the held pages.
+        let chained = poll(120, every: 0.1) {
             if !sawCapsule && capsule.exists { sawCapsule = true }
             if probe.label.contains("hc-1501") { return true }
             viewport.swipeDown(velocity: .fast)
