@@ -10,6 +10,10 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     /// Items keep their own inline markdown. `start` is the first number of an ordered list.
     case list(ordered: Bool, start: Int, items: [ChatMarkdownListItem])
     case code(language: String?, String)
+    /// A CLOSED fence whose language is a diagram the app draws (today only `mermaid`).
+    /// While the closing fence has not arrived (a reply still streaming) it stays `.code`,
+    /// so a half-written diagram is never sent to the renderer.
+    case diagram(kind: String, source: String)
     case table(header: [String], rows: [[String]])
     case quote(String)
     case rule
@@ -65,8 +69,14 @@ public enum ChatMarkdown {
                     code.append(lines[i])
                     i += 1
                 }
+                let closed = i < lines.count
                 i += 1
-                blocks.append(.code(language: language.isEmpty ? nil : language, code.joined(separator: "\n")))
+                let source = code.joined(separator: "\n")
+                if closed, let kind = diagramKind(language) {
+                    blocks.append(.diagram(kind: kind, source: source))
+                } else {
+                    blocks.append(.code(language: language.isEmpty ? nil : language, source))
+                }
                 continue
             }
 
@@ -160,6 +170,12 @@ public enum ChatMarkdown {
 
     private static func startsBlock(_ trimmed: String) -> Bool {
         trimmed.hasPrefix("```") || trimmed.hasPrefix(">") || heading(trimmed) != nil || isRule(trimmed)
+    }
+
+    /// The diagram a fence's info string names (its first word, any case), if the app draws it.
+    private static func diagramKind(_ language: String) -> String? {
+        let word = language.split(whereSeparator: \.isWhitespace).first.map { $0.lowercased() }
+        return word == "mermaid" ? "mermaid" : nil
     }
 
     private static func isRule(_ trimmed: String) -> Bool {

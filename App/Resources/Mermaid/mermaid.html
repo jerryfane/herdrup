@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- The offscreen page MermaidRenderer draws chat diagrams in. The page itself may run no
+     script and load nothing: mermaid.min.js and each render call are injected by the app
+     (evaluateJavaScript / callAsyncJavaScript), which page CSP does not govern, so a
+     diagram's SVG cannot run an inline handler. The SVG's own <style> needs inline style. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, shrink-to-fit=no">
+<style>
+html, body { margin: 0; padding: 0; background: #1D2038; -webkit-text-size-adjust: 100%; }
+#out { position: absolute; left: 0; top: 0; }
+#out svg { display: block; }
+</style>
+</head>
+<body><div id="out"></div></body>
+</html>

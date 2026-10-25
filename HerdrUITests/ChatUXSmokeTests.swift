@@ -2,7 +2,7 @@ import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false, plan: String = "") -> XCUIApplication {
+                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
@@ -10,7 +10,8 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_PENDING_QUESTION": pendingQuestion ? "1" : "0",
             "HERDR_CHAT_UX_LARGE": large ? "1" : "0",
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
-            "HERDR_CHAT_UX_PLAN": plan
+            "HERDR_CHAT_UX_PLAN": plan,
+            "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0"
         ])
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -146,6 +147,55 @@ final class ChatUXSmokeTests: XCTestCase {
         toggle.tap()
         XCTAssertTrue(rows[0].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(rows.map(\.exists), [true, true, true])
+    }
+
+    /// #523 item 1: a closed ```mermaid fence is drawn as a diagram (not its code), tapping it
+    /// opens the zoomable viewer, "Show code" swaps in the source, and search still finds
+    /// words that are only in the diagram source.
+    func testMermaidReplyRendersADiagramThatOpensTheViewer() {
+        let app = launch(mermaid: true)
+        let block = app.descendants(matching: .any)["chat-mermaid"].firstMatch
+        XCTAssertTrue(block.waitForExistence(timeout: 12), app.debugDescription)
+        let image = app.buttons["chat-mermaid-image"].firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 30),
+                      "The diagram must finish rendering offscreen: \(app.debugDescription)")
+        XCTAssertFalse(app.staticTexts["chat-mermaid-error"].exists, "The fixture diagram is valid mermaid")
+        XCTAssertGreaterThan(image.frame.width, 40, "\(image.frame)")
+        XCTAssertGreaterThan(image.frame.height, 40, "\(image.frame)")
+        XCTAssertTrue(image.label.hasPrefix("Mermaid diagram, graph TD"), image.label)
+        let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "D[Render offscreen]")).firstMatch
+        XCTAssertFalse(code.exists, "The diagram source must not be drawn as code")
+        record(app, "Mermaid reply drawn as a diagram")
+
+        image.tap()
+        let viewer = app.descendants(matching: .any)["chat-mermaid-viewer"].firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertGreaterThan(viewer.frame.height, 100, "\(viewer.frame)")
+        record(app, "Mermaid viewer full screen")
+        app.buttons["chat-mermaid-viewer-done"].tap()
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 10))
+
+        // The chat follows its tail, so the block's header can sit under the top bar: bring
+        // it into view the way a reader would.
+        let toggle = app.buttons["chat-mermaid-toggle"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        for _ in 0..<4 where !toggle.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        XCTAssertTrue(toggle.isHittable, "\(toggle.frame)")
+        toggle.tap()
+        XCTAssertTrue(code.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["chat-mermaid-image"].exists)
+        toggle.tap()
+        XCTAssertTrue(app.buttons["chat-mermaid-image"].waitForExistence(timeout: 5))
+
+        app.buttons["terminal-find"].tap()
+        let field = app.textFields["terminal-find-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Render offscreen")
+        expectation(for: NSPredicate(format: "label == %@", "1/1"), evaluatedWith: app.staticTexts["terminal-find-count"])
+        waitForExpectations(timeout: 5)
     }
 
     func testSearchRevealsThoughtAndKeepsActiveChat() {
