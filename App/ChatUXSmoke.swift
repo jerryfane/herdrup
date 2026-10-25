@@ -35,6 +35,10 @@ enum ChatUXSmoke {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])
         }
+        if responses > 2 {
+            entries.append(["id": "ux-incoming-later", "kind": "reply", "final": true,
+                            "text": "A later incoming reply while reading history.", "ts_ms": timestamp + 4])
+        }
         result["entries"] = entries
         if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_PENDING_QUESTION"] != "1" {
             result["pending_ask"] = NSNull()

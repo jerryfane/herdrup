@@ -91,6 +91,8 @@ final class ChatUXSmokeTests: XCTestCase {
         record(app, "Literal punctuation search reveals rendered thought without switching to Terminal")
         app.buttons["terminal-find"].tap()
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        chat.swipeDown(velocity: .fast)
         XCTAssertTrue(app.buttons["chat-jump-latest"].waitForExistence(timeout: 5), app.debugDescription)
         app.buttons["chat-jump-latest"].tap()
         XCTAssertTrue(app.staticTexts["chat-model"].waitForExistence(timeout: 5), app.debugDescription)
@@ -100,6 +102,27 @@ final class ChatUXSmokeTests: XCTestCase {
         waitForExpectations(timeout: 5)
         XCTAssertFalse(app.buttons["chat-jump-latest"].exists, "The control must disappear at the measured tail")
         record(app, "Centered clear-glass jump returns to latest above composer fade")
+
+        app.buttons["terminal-refresh"].tap()
+        XCTAssertTrue(app.staticTexts["Refreshing chat…"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Incoming café update after refresh."].isHittable)
+        XCTAssertTrue(app.staticTexts["chat-model"].isHittable, "New content must retain the tail while following")
+
+        app.textViews["terminal-reply-input"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        expectation(for: modelVisible, evaluatedWith: app.staticTexts["chat-model"])
+        waitForExpectations(timeout: 5)
+        record(app, "Following latest keeps the final line above the keyboard and composer")
+
+        chat.swipeDown(velocity: .fast)
+        XCTAssertFalse(app.staticTexts["chat-model"].isHittable, "The drag must move into history before refreshing")
+        app.buttons["terminal-refresh"].tap()
+        XCTAssertTrue(app.staticTexts["Refreshing chat…"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.staticTexts["chat-model"].isHittable, "An incoming reply must not pull the reader out of history")
+        XCTAssertTrue(app.buttons["chat-jump-latest"].isHittable)
+        record(app, "Incoming content preserves manual history position")
     }
 
     func testUnicodeSearchNavigationSurvivesRefresh() {
