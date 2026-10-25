@@ -285,6 +285,7 @@ struct ChatView: View {
     @State private var openNote: TranscriptNote?
     @State private var atBottom = true
     @State private var followingLatest = true
+    @State private var userScrolling = false
     @State private var scrollPosition = ChatScrollPosition()
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
@@ -387,7 +388,6 @@ struct ChatView: View {
             if landed, !atBottom, findRequest == nil {
                 ChatLatestButton {
                     followingLatest = true
-                    scrollPosition.jumpToLatest()
                 }
                 .padding(.bottom, 60)
             }
@@ -433,9 +433,17 @@ struct ChatView: View {
         .frame(maxWidth: .infinity)
         .background {
             ScrollActivityObserver(isEnabled: isActive, onChange: { scrolling in
-                followingLatest = !scrolling && scrollPosition.isAtBottom && findRequest == nil
+                // A tap tracks too. Only an actual drag/deceleration may cancel
+                // follow intent; otherwise the jump button cancels its own request.
+                guard !scrolling, userScrolling else { return }
+                userScrolling = false
+                followingLatest = scrollPosition.isAtBottom && findRequest == nil
             }, onSample: { view in
                 scrollPosition.view = view
+                if view.isDragging || view.isDecelerating {
+                    if !userScrolling { userScrolling = true }
+                    if followingLatest { followingLatest = false }
+                }
                 if followingLatest, model.loaded, findRequest == nil,
                    !view.isTracking, !view.isDragging, !view.isDecelerating {
                     scrollPosition.jumpToLatest()
