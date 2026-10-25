@@ -1,13 +1,15 @@
 import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
-    private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false) -> XCUIApplication {
+    private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
+                        copyFixture: Bool = false) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
             "HERDR_CHAT_UX_FAIL_REFRESH": failingRefresh ? "1" : "0",
             "HERDR_CHAT_UX_PENDING_QUESTION": pendingQuestion ? "1" : "0",
-            "HERDR_CHAT_UX_LARGE": large ? "1" : "0"
+            "HERDR_CHAT_UX_LARGE": large ? "1" : "0",
+            "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0"
         ])
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -262,5 +264,87 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(failure.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Review the table"].exists)
         record(app, "Refresh failure remains visible without removing loaded chat")
+    }
+
+    /// What the chat's Copy last wrote, from the DEBUG `chat-copy-probe` (JSON in its label).
+    /// Never `UIPasteboard`: a pasteboard read raises the system paste prompt, which nothing
+    /// answers in CI (see TerminalSelectionTests' lesson 2).
+    private func copiedText(_ app: XCUIApplication) -> String? {
+        let label = app.descendants(matching: .any)["chat-copy-probe"].firstMatch.label
+        let json = (try? JSONSerialization.jsonObject(with: Data(label.utf8))) as? [String: Any]
+        return json?["copied"] as? String
+    }
+
+    private func waitForCopied(_ app: XCUIApplication, _ expected: String, timeout: TimeInterval = 5,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while copiedText(app) != expected, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertEqual(copiedText(app), expected, "the clipboard write", file: file, line: line)
+    }
+
+    /// Long-presses `element` (a right click on a Mac opens the same menu) and waits for its
+    /// menu's `entry`.
+    private func openMenu(_ app: XCUIApplication, on element: XCUIElement, entry: String,
+                         file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        element.press(forDuration: 1.2)
+        let button = app.buttons[entry].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "the message menu offers \(entry): \(app.debugDescription)",
+                      file: file, line: line)
+        return button
+    }
+
+    /// Item 5 of #523: a reply's and a prompt's text can be copied and selected. The reply's
+    /// menu copies it without markdown syntax, or as markdown; Select Text opens the message
+    /// in a selectable text view; a fenced code block has its own Copy.
+    func testMessagesCopyAndSelectText() {
+        let app = launch(copyFixture: true)
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        let paragraph = app.staticTexts["Copy this reply, then paste it."].firstMatch
+        XCTAssertTrue(paragraph.waitForExistence(timeout: 12), app.debugDescription)
+        for _ in 0..<4 where !paragraph.isHittable { chat.swipeDown() }
+        XCTAssertTrue(paragraph.isHittable, app.debugDescription)
+        XCTAssertNil(copiedText(app), "precondition: nothing copied yet")
+
+        let codeCopy = app.buttons["gram-code-copy"].firstMatch
+        XCTAssertTrue(codeCopy.exists, "a chat code block has the Gram code block's Copy: \(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["swift"].exists, "a multi-line code block names its language")
+        codeCopy.tap()
+        expectation(for: NSPredicate(format: "label == %@", "Copied"), evaluatedWith: codeCopy)
+        waitForExpectations(timeout: 5)
+        record(app, "Chat code block with language header and Copy")
+
+        let copy = openMenu(app, on: paragraph, entry: "Copy")
+        XCTAssertTrue(app.buttons["Copy as Markdown"].exists, "a reply offers Copy as Markdown")
+        XCTAssertTrue(app.buttons["Select Text"].exists, "a reply offers Select Text")
+        record(app, "Reply message menu")
+        copy.tap()
+        waitForCopied(app, "Copy this reply, then paste it.\n\nlet copied = true\nprint(copied)")
+        XCTAssertTrue(app.buttons["Copy as Markdown"].waitForNonExistence(timeout: 5), "the menu closes after Copy")
+
+        openMenu(app, on: paragraph, entry: "Copy as Markdown").tap()
+        waitForCopied(app, "Copy **this** reply, then *paste* it.\n\n```swift\nlet copied = true\nprint(copied)\n```")
+        XCTAssertTrue(app.buttons["Select Text"].waitForNonExistence(timeout: 5), "the menu closes after Copy as Markdown")
+
+        openMenu(app, on: paragraph, entry: "Select Text").tap()
+        let textView = app.textViews["chat-select-text"]
+        XCTAssertTrue(textView.waitForExistence(timeout: 5), app.debugDescription)
+        let selectable = textView.value as? String ?? ""
+        XCTAssertTrue(selectable.contains("Copy this reply, then paste it."), "the sheet shows the reply: \(selectable)")
+        XCTAssertTrue(selectable.contains("let copied = true\nprint(copied)"), "the sheet shows the code: \(selectable)")
+        XCTAssertFalse(selectable.contains("**"), "the sheet shows the reply as read, not its markdown: \(selectable)")
+        record(app, "Select Text sheet with the reply")
+        app.buttons["chat-select-text-done"].tap()
+        XCTAssertTrue(textView.waitForNonExistence(timeout: 5), "Done closes the Select Text sheet")
+
+        let bubble = app.staticTexts["Check typography and wrapped tables."].firstMatch
+        for _ in 0..<6 where !bubble.isHittable { chat.swipeDown() }
+        XCTAssertTrue(bubble.isHittable, app.debugDescription)
+        let bubbleCopy = openMenu(app, on: bubble, entry: "Copy")
+        XCTAssertFalse(app.buttons["Copy as Markdown"].exists, "a prompt is copied as typed, with no markdown variant")
+        XCTAssertTrue(app.buttons["Select Text"].exists, "a prompt offers Select Text")
+        bubbleCopy.tap()
+        waitForCopied(app, "Check typography and wrapped tables.")
     }
 }

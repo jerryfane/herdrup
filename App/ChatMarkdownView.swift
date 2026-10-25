@@ -18,7 +18,6 @@ struct ChatMarkdownView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .textSelection(.enabled)
     }
 
     @ViewBuilder
@@ -42,17 +41,8 @@ struct ChatMarkdownView: View {
                 }
             }
             .padding(.top, 2)
-        case .code(_, let code):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(Typography.machine(13 * textScale))
-                    .foregroundStyle(Palette.text)
-                    .lineSpacing(3)
-                    .fixedSize()
-                    .padding(.horizontal, 12).padding(.vertical, 10)
-            }
-            .background(RoundedRectangle(cornerRadius: 12).fill(Palette.surface))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.hairlineQuiet, lineWidth: 1))
+        case .code(let language, let code):
+            GramCodeBlock(code: code, language: language)
         case .table(let header, let rows):
             ChatMarkdownTable(header: header, rows: rows)
         case .quote(let text):
