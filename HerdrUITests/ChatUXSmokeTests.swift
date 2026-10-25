@@ -1,12 +1,13 @@
 import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
-    private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false) -> XCUIApplication {
+    private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
             "HERDR_CHAT_UX_FAIL_REFRESH": failingRefresh ? "1" : "0",
-            "HERDR_CHAT_UX_PENDING_QUESTION": pendingQuestion ? "1" : "0"
+            "HERDR_CHAT_UX_PENDING_QUESTION": pendingQuestion ? "1" : "0",
+            "HERDR_CHAT_UX_LARGE": large ? "1" : "0"
         ])
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -178,6 +179,46 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
         XCTAssertEqual(count.label, "23/40", "Refresh must retain paged history and the same selected prompt")
         record(app, "Loaded-history search expands to all forty prompts and preserves selection across refresh")
+    }
+
+    /// herdrup#523 item 8: a one-letter search on a long chat froze the app until it was
+    /// killed. On the large fixture it must cap the count, draw only a window of results,
+    /// step through matches, and narrow to an exact count as the term grows.
+    func testOneLetterSearchOnLargeChatCapsAndStaysResponsive() {
+        let app = launch(large: true)
+        app.buttons["terminal-find"].tap()
+        let field = app.textFields["terminal-find-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("e")
+        let count = app.staticTexts["terminal-find-count"]
+        let capped = { (index: Int) in NSPredicate(format: "label == %@", "Match \(index) of 500 or more matches") }
+        expectation(for: capped(1), evaluatedWith: count)
+        waitForExpectations(timeout: 10)
+        XCTAssertEqual(app.state, .runningForeground)
+        let results = app.staticTexts.matching(identifier: "chat-search-result")
+        XCTAssertGreaterThan(results.count, 0)
+        XCTAssertLessThanOrEqual(results.count, 23, "Only the selected match's neighbourhood is drawn, not every match")
+
+        app.buttons["terminal-find-next"].tap()
+        expectation(for: capped(2), evaluatedWith: count)
+        waitForExpectations(timeout: 5)
+        app.buttons["terminal-find-previous"].tap()
+        expectation(for: capped(1), evaluatedWith: count)
+        waitForExpectations(timeout: 5)
+        app.buttons["terminal-find-previous"].tap()
+        expectation(for: capped(500), evaluatedWith: count)
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(app.state, .runningForeground)
+        record(app, "One-letter search on a long chat caps at 500+ and wraps to the last match")
+
+        for letter in "xample" { field.typeText(String(letter)) }
+        expectation(for: NSPredicate(format: "label == %@", "1/480"), evaluatedWith: count)
+        waitForExpectations(timeout: 10)
+        app.buttons["terminal-find-next"].tap()
+        expectation(for: NSPredicate(format: "label == %@", "2/480"), evaluatedWith: count)
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(app.state, .runningForeground)
     }
 
     func testQuestionSheetFitsAndExpandsContext() {

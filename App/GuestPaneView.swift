@@ -64,7 +64,7 @@ struct GuestPaneView: View {
     @State private var findTerm = ""
     @State private var findGeneration = 0
     @State private var findDirection: FindRequest.Direction = .forward
-    @State private var findMatches: (Int, Int) = (0, 0)
+    @State private var findMatches: (Int, Int, Bool) = (0, 0, false)
     @FocusState private var findFocused: Bool
     @StateObject private var composerKeyboard = ComposerKeyboard()
     /// The guest's own terminal text size (A− / A+), separate from the owner's setting.
@@ -126,7 +126,7 @@ struct GuestPaneView: View {
                              agentStatus: agent?.agentStatus, ground: Palette.groundMachine,
                              onOpenTerminal: { tab = .terminal },
                              findRequest: findRequest,
-                             onFindResult: { index, total in findMatches = (index, total) })
+                             onFindResult: { index, total, capped in findMatches = (index, total, capped) })
                 }
                 if showingGram {
                     GuestGramList(client: client, access: access, model: gram)
@@ -279,7 +279,7 @@ struct GuestPaneView: View {
             if findOpen {
                 InlineSearchField(
                     placeholder: "Find", text: $findTerm, focus: $findFocused,
-                    matches: (index: findMatches.0, total: findMatches.1),
+                    matches: (index: findMatches.0, total: findMatches.1, capped: findMatches.2),
                     onNext: { stepFind(.forward) }, onPrevious: { stepFind(.backward) },
                     identifierPrefix: "guest-find")
             } else {
@@ -431,7 +431,7 @@ struct GuestPaneView: View {
                     controlArmed: .constant(false),
                     findRequest: showingChat ? nil : findRequest,
                     onFindResult: { index, total in
-                        if !showingChat { findMatches = (index, total) }
+                        if !showingChat { findMatches = (index, total, false) }
                     })
                     .id(streamGen)
                     .accessibilityIdentifier("guest-terminal")
@@ -667,7 +667,7 @@ struct GuestPaneView: View {
         if findOpen {
             findOpen = false
             findTerm = ""
-            findMatches = (0, 0)
+            findMatches = (0, 0, false)
             findFocused = false
         } else {
             findOpen = true

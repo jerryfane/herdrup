@@ -5284,8 +5284,8 @@ struct TerminalPaneContent: View {
     /// next match", which is the whole interaction.
     @State private var findGeneration = 0
     @State private var findDirection: FindRequest.Direction = .forward
-    /// `(index, total)` from the terminal, rendered as "3/17".
-    @State private var findMatches: (Int, Int) = (0, 0)
+    /// `(index, total, capped)` from the terminal or the Chat, rendered as "3/17" or "3/500+".
+    @State private var findMatches: (Int, Int, Bool) = (0, 0, false)
     @FocusState private var findFocused: Bool
 
     private var findRequest: FindRequest? {
@@ -5451,7 +5451,7 @@ struct TerminalPaneContent: View {
                                  userInputToken: userInputToken,
                                  findRequest: showingChat ? nil : findRequest,
                                  onFindResult: { index, total in
-                                     if !showingChat { findMatches = (index, total) }
+                                     if !showingChat { findMatches = (index, total, false) }
                                  })
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
@@ -5496,7 +5496,7 @@ struct TerminalPaneContent: View {
                                      ground: Palette.groundMachine,
                                      onOpenTerminal: { setShowsChat(false) },
                                      findRequest: findRequest,
-                                     onFindResult: { index, total in findMatches = (index, total) })
+                                     onFindResult: { index, total, capped in findMatches = (index, total, capped) })
                         }
                     }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
@@ -5844,7 +5844,7 @@ struct TerminalPaneContent: View {
             placeholder: "Find",
             text: $findTerm,
             focus: $findFocused,
-            matches: (index: findMatches.0, total: findMatches.1),
+            matches: (index: findMatches.0, total: findMatches.1, capped: findMatches.2),
             onNext: { stepFind(.forward) },
             onPrevious: { stepFind(.backward) },
             identifierPrefix: "terminal-find"
@@ -5860,7 +5860,7 @@ struct TerminalPaneContent: View {
         if findOpen {
             findOpen = false
             findTerm = ""
-            findMatches = (0, 0)
+            findMatches = (0, 0, false)
             findFocused = false
         } else {
             findOpen = true

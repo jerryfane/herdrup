@@ -223,36 +223,66 @@ private enum ChatRow: Identifiable {
         }
     }
 
-    var searchText: String {
-        let text: String
+    /// The row's searchable text before markdown is stripped (`plainSearchText`).
+    var searchSource: String {
         switch self {
         case .day: return ""
         case .prompt(let turn):
             guard case .user(let prompt, _) = turn.prompt?.kind else { return "" }
             if let bundle = GramAttachmentPrompt.parse(prompt) {
-                text = ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
-            } else {
-                text = prompt
+                return ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
             }
+            return prompt
         case .outgoing(let message):
-            text = ([message.text] + message.files.map(\.name)).joined(separator: "\n")
+            return ([message.text] + message.files.map(\.name)).joined(separator: "\n")
         case .item(let item):
             switch item {
             case .work(let work):
-                text = (work.thoughts + work.steps.map { $0.intent + "\n" + ($0.detail ?? "") }).joined(separator: "\n")
-            case .reply(_, let reply, _), .summary(_, let reply): text = reply
-            case .note(_, _, let note): text = note.title + "\n" + note.body
+                return (work.thoughts + work.steps.map { $0.intent + "\n" + ($0.detail ?? "") }).joined(separator: "\n")
+            case .reply(_, let reply, _), .summary(_, let reply): return reply
+            case .note(_, _, let note): return note.title + "\n" + note.body
             case .plan(_, let items):
-                text = items.map { [$0.phase, $0.text, $0.blocker].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
+                return items.map { [$0.phase, $0.text, $0.blocker].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
             case .ask(_, let ask, _):
-                text = (ask.questions.flatMap { [$0.question] + $0.options } + (ask.answer ?? [])).joined(separator: "\n")
-            case .turnFailed(_, _, let error): text = error ?? ""
+                return (ask.questions.flatMap { [$0.question] + $0.options } + (ask.answer ?? [])).joined(separator: "\n")
+            case .turnFailed(_, _, let error): return error ?? ""
             }
         }
-        let parsed = try? AttributedString(markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        return parsed.map { String($0.characters) } ?? text
     }
+
+    /// What search reads of a row: its text as rendered, without markdown syntax.
+    static func plainSearchText(_ source: String) -> String {
+        guard !source.isEmpty else { return "" }
+        let parsed = try? AttributedString(markdown: source,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        return parsed.map { String($0.characters) } ?? source
+    }
+}
+
+/// Each row's plain search text, kept between searches: parsing every row's markdown on
+/// every keystroke and refresh is what froze long chats (herdrup#523). A row is parsed
+/// again only when its content changes.
+private final class ChatSearchTextCache {
+    private var entries: [String: (source: String, text: String)] = [:]
+
+    func row(for row: ChatRow) -> TranscriptSearchRow {
+        let source = row.searchSource
+        if let entry = entries[row.id], entry.source == source {
+            return TranscriptSearchRow(id: row.id, text: entry.text)
+        }
+        let text = ChatRow.plainSearchText(source)
+        entries[row.id] = (source, text)
+        return TranscriptSearchRow(id: row.id, text: text)
+    }
+}
+
+/// What a search result answers: the query and the transcript it searched.
+private struct ChatSearchKey: Equatable {
+    let query: String
+    let turns: [TranscriptTurn]
+    let outgoing: [TranscriptOutgoingMessage]
+
+    static let none = ChatSearchKey(query: "", turns: [], outgoing: [])
 }
 
 /// The omp Chat view: the conversation read from omp's session file, newest at the bottom,
@@ -276,7 +306,8 @@ struct ChatView: View {
     let ground: Color
     let onOpenTerminal: () -> Void
     var findRequest: FindRequest? = nil
-    var onFindResult: (Int, Int) -> Void = { _, _ in }
+    /// `(index, total, capped)`: `capped` when the matches stop at `TranscriptSearch.matchCap`.
+    var onFindResult: (Int, Int, Bool) -> Void = { _, _, _ in }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
@@ -293,19 +324,53 @@ struct ChatView: View {
     /// The top of the list is within reach (40 pt) of the viewport's top.
     @State private var topVisible = false
     @State private var selectedSearchHit: String?
+    /// The hits for `searchKey`, kept until the term or the transcript changes.
+    @State private var searchResult = TranscriptSearchResult.empty
+    @State private var searchKey = ChatSearchKey.none
+    @State private var searchTexts = ChatSearchTextCache()
     @State private var openQuestionID: String?
 
-    private var searchHits: [ChatSearchHit] {
+    /// How long typing must pause before the term is searched.
+    private static let typingPause: Duration = .milliseconds(180)
+    /// Result excerpts drawn on each side of the selected match.
+    private static let renderedSearchNeighbours = 10
+
+    /// What the search should answer now. Without a term the transcript is left out, so
+    /// refreshes while the find bar is closed start no search work.
+    private var liveSearchKey: ChatSearchKey {
         let query = findRequest?.term ?? ""
-        guard !query.isEmpty else { return [] }
-        return rows.flatMap { ChatSearch.hits(rowID: $0.id, text: $0.searchText, query: query) }
+        return query.isEmpty ? .none : ChatSearchKey(query: query, turns: model.turns, outgoing: model.outgoing)
     }
 
+    /// The hits whose excerpts are drawn: the selected match, its neighbours, and the first
+    /// and last (where Next and Previous wrap to), so a one-letter term does not lay out
+    /// hundreds of results at once.
+    private var renderedSearchHits: [TranscriptSearchHit] {
+        let hits = searchResult.hits
+        guard !(findRequest?.term ?? "").isEmpty, !hits.isEmpty else { return [] }
+        let selected = hits.firstIndex { $0.id == selectedSearchHit } ?? 0
+        let lower = max(0, selected - Self.renderedSearchNeighbours)
+        let upper = min(hits.count, selected + Self.renderedSearchNeighbours + 1)
+        var shown = Array(hits[lower..<upper])
+        if lower > 0 { shown.insert(hits[0], at: 0) }
+        if upper < hits.count { shown.append(hits[hits.count - 1]) }
+        return shown
+    }
+
+    /// Brings the hits up to date with the term and the transcript (searching again only
+    /// when one of them changed), then selects a match and reports the count.
     private func updateSearch(_ proxy: ScrollViewProxy, step: Bool = false, reveal: Bool = false) {
-        let hits = searchHits
+        let key = liveSearchKey
+        if key != searchKey {
+            if key.query != searchKey.query { selectedSearchHit = nil }
+            searchKey = key
+            searchResult = key.query.isEmpty ? .empty
+                : TranscriptSearch.search(rows.lazy.map { searchTexts.row(for: $0) }, query: key.query)
+        }
+        let hits = searchResult.hits
         guard !hits.isEmpty else {
             selectedSearchHit = nil
-            onFindResult(0, 0)
+            onFindResult(0, 0, false)
             return
         }
         let current = hits.firstIndex { $0.id == selectedSearchHit }
@@ -318,7 +383,7 @@ struct ChatView: View {
         let hit = hits[index]
         let moved = selectedSearchHit != hit.id
         selectedSearchHit = hit.id
-        onFindResult(index + 1, hits.count)
+        onFindResult(index + 1, hits.count, searchResult.capped)
         atBottom = false
         followingLatest = false
         if let row = rows.first(where: { $0.id == hit.rowID }), case .item(.work(let work)) = row {
@@ -337,7 +402,7 @@ struct ChatView: View {
     private static let scrollSpace = "chat-scroll"
 
     var body: some View {
-        let hits = searchHits
+        let hits = renderedSearchHits
         ScrollViewReader { proxy in
             transcriptScroll(proxy, hits: hits)
         }
@@ -368,7 +433,7 @@ struct ChatView: View {
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
     }
 
-    private func transcriptScroll(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+    private func transcriptScroll(_ proxy: ScrollViewProxy, hits: [TranscriptSearchHit]) -> some View {
         ScrollView {
             transcriptColumn(proxy, hits: hits)
         }
@@ -408,14 +473,27 @@ struct ChatView: View {
             }
             landed = true
         }
-        .onChange(of: findRequest) { old, new in
-            if old?.term != new?.term { selectedSearchHit = nil }
-            updateSearch(proxy, step: old?.term == new?.term && old?.generation != new?.generation)
+        // One search update per change: a new term (once typing pauses), a step (Next or
+        // Previous), or a new transcript under the same term.
+        .task(id: findRequest?.term ?? "") {
+            guard liveSearchKey != searchKey else { return }
+            if !(findRequest?.term ?? "").isEmpty {
+                do { try await Task.sleep(for: Self.typingPause) } catch { return }
+                guard liveSearchKey != searchKey else { return }
+            }
+            updateSearch(proxy)
         }
-        .onChange(of: hits) { _, _ in updateSearch(proxy) }
+        .onChange(of: findRequest) { old, new in
+            guard old?.term == new?.term, old?.generation != new?.generation else { return }
+            updateSearch(proxy, step: true)
+        }
+        .onChange(of: liveSearchKey) { old, new in
+            guard old.query == new.query else { return }
+            updateSearch(proxy)
+        }
     }
 
-    private func transcriptColumn(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+    private func transcriptColumn(_ proxy: ScrollViewProxy, hits: [TranscriptSearchHit]) -> some View {
         let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
         return VStack(alignment: .leading, spacing: 10) {
             topSentinel(proxy)
@@ -533,10 +611,10 @@ struct ChatView: View {
         }
     }
 
-    private func searchableRow(_ row: ChatRow, hits: [ChatSearchHit]) -> some View {
+    private func searchableRow(_ row: ChatRow, hits: [TranscriptSearchHit]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             rowView(row)
-            ChatSearchResults(hits: hits, query: findRequest?.term ?? "", selectedID: selectedSearchHit)
+            ChatSearchResults(hits: hits, query: searchKey.query, selectedID: selectedSearchHit)
         }
         .id(row.id)
     }
