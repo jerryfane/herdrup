@@ -234,9 +234,9 @@ final class ScrollTests: XCTestCase {
 
     /// The HISTORY-PAGING receipt. The `historypaging` mock's keyframe carries 300 rows and a
     /// `history_cursor`; `pane.history` serves 2000 older rows a held page at a time. Nothing
-    /// may be requested before the reader scrolls; flicking to the top must show the loading
-    /// capsule and request the page above the keyframe's cursor, and the next request must
-    /// carry the cursor that page returned (hc-2001 → hc-1501).
+    /// may be requested before the reader scrolls; flicking to the top must request the page
+    /// above the keyframe's cursor, the loading capsule must show while a page is held, and the
+    /// next request must carry the cursor that page returned (hc-2001 → hc-1501).
     func testScrollingToTheTopPagesOlderHistory() {
         let app = XCUIApplication.launched(mock: "historypaging")
         let viewport = app.terminalSurface
@@ -246,19 +246,26 @@ final class ScrollTests: XCTestCase {
         Thread.sleep(forTimeInterval: 2.0)
         XCTAssertTrue(probe.label.hasPrefix("requests=0"), "paged before any scroll (\(probe.label))")
 
-        let capsule = app.descendants(matching: .any)["terminal-history-loading"]
-        var sawCapsule = false
-        // A page that lands with the terminal at rest keeps the reader's rows, so the second
-        // page waits until the reader has scrolled back through all 500 rows of the first:
-        // ~20 swipe rounds of ~3 s, plus the held pages.
-        let chained = poll(120, every: 0.1) {
-            if !sawCapsule && capsule.exists { sawCapsule = true }
-            if probe.label.contains("hc-1501") { return true }
+        let paged = poll(60, every: 0.1) {
+            if probe.label.contains("hc-2001") { return true }
             viewport.swipeDown(velocity: .fast)
-            if !sawCapsule && capsule.exists { sawCapsule = true }
+            return probe.label.contains("hc-2001")
+        }
+        XCTAssertTrue(paged, "swiping to the top requested no page (\(probe.label))")
+        // The mock holds the page 2 s; the capsule must show while it is held.
+        let capsule = app.descendants(matching: .any)["terminal-history-loading"]
+        XCTAssertTrue(poll(2, every: 0.1) { capsule.exists },
+                      "the loading capsule never showed while a page was held")
+
+        // The first page lands keeping the reader's rows, 500 rows below the new top; jump
+        // back to the top rather than swipe through them. Taps while it is held do nothing.
+        let top = app.buttons["history-scroll-top"]
+        XCTAssertTrue(top.waitForExistence(timeout: 5), "history-scroll-top action missing")
+        let chained = poll(20, every: 0.2) {
+            if probe.label.contains("hc-1501") { return true }
+            top.tap()
             return probe.label.contains("hc-1501")
         }
-        XCTAssertTrue(sawCapsule, "the loading capsule never showed while a page was held")
         XCTAssertTrue(chained, "the second page did not use the first page's cursor (\(probe.label))")
         XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
     }
@@ -266,7 +273,7 @@ final class ScrollTests: XCTestCase {
     /// The non-drag variant: the Mac's wheel and trackpad move `contentOffset` with neither
     /// `isDragging` nor `isDecelerating` set, and the paging that waited for those flags never
     /// paged there (#523 item 10). `history-scroll-top` writes offset 0 the same way, after the
-    /// seed has settled; landing at the top must page, and each later landing pages the next.
+    /// seed has settled, and with no scroll before it; landing at the top must page.
     func testReachingTheTopWithoutADragPagesOlderHistory() {
         let app = XCUIApplication.launched(mock: "historypaging")
         XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10))
@@ -280,13 +287,7 @@ final class ScrollTests: XCTestCase {
         top.tap()
         XCTAssertTrue(poll(10, every: 0.1) { probe.label.contains("hc-2001") },
                       "reaching the top without a drag requested nothing (\(probe.label))")
-        let chained = poll(30, every: 0.5) {
-            if probe.label.contains("hc-1501") { return true }
-            top.tap()
-            return probe.label.contains("hc-1501")
-        }
-        XCTAssertTrue(chained, "the next landing at the top did not page (\(probe.label))")
-        XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
+        XCTAssertTrue(probe.label.hasPrefix("requests=1"), probe.label)
     }
 
     /// The tap-to-load receipt. A keyframe with five rows of history leaves the pane within a

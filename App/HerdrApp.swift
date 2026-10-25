@@ -10430,10 +10430,9 @@ struct KeyframeHistoryReadProbe: View {
 /// is rows `older 1` ... `older 2300`; the keyframe carries the newest 300 of them with a
 /// `history_cursor` for row 2001, and `pane.history` serves the rows above any cursor, a page
 /// at a time, down to row 1 (null cursor). Every page is held for `heldPageNanos` so the
-/// loading capsule is on screen long enough for a UI test to see it: longer than the ~3 s a
-/// swipe-and-check round of `ScrollTests` takes, so a hold cannot fall between two checks.
-/// Each request's cursor is logged in order, so a test can tell whether the app chained the
-/// cursors it was given.
+/// loading capsule stays on screen long enough for a UI test polling it every 0.1 s after the
+/// request to see it. Each request's cursor is logged in order, so a test can tell whether the
+/// app chained the cursors it was given.
 /// `HERDR_MOCK_HISTORY_KEYFRAME_ROWS` shortens the keyframe's history (a pane within a screen
 /// of the top of its history, which pages on request rather than by itself).
 final class HistoryPagingDriver: @unchecked Sendable {
@@ -10453,7 +10452,7 @@ final class HistoryPagingDriver: @unchecked Sendable {
     static let totalRows = 2300
     static let keyframeRows =
         ProcessInfo.processInfo.environment["HERDR_MOCK_HISTORY_KEYFRAME_ROWS"].flatMap(Int.init) ?? 300
-    static let heldPageNanos: UInt64 = 4_000_000_000
+    static let heldPageNanos: UInt64 = 2_000_000_000
     /// The mock pane's terminal, for `scrollToTop`. Every DEBUG attach registers; only this
     /// mock keeps it.
     @MainActor private static weak var terminal: UIScrollView?
