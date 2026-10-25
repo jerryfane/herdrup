@@ -52,10 +52,30 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   and share images, videos, or files (several at once) straight to an agent.
 - **omp Chat view** — an omp agent's page opens as a conversation read from its session file:
   your prompts as bubbles, its replies in rendered markdown, its thinking and tool steps folded
-  into one expandable line, notes, the plan and its questions as cards you answer with a tap
+  into one expandable line, notes, the current checklist and questions you answer with a tap
   ("Answer in Terminal" when the server cannot). The Chat | Terminal switch under the header
   flips to the live terminal; Settings → omp Chat sets which one opens first. Older turns load
   as you scroll up. Needs a herdr that serves `agent.transcript`; other agents keep the terminal.
+  Sending adds a local bubble immediately. Its receipt distinguishes sending, agent acceptance,
+  uncertain delivery and definite refusal; a matching new transcript prompt replaces it once.
+  Older history and other authors do not acknowledge a local send. Herdr-generated attachment
+  envelopes appear as collapsed file bundles, with captions preserved. Opening a file uses
+  Gram's permission-checked, size-bounded download and existing viewer; unrecognized instructions
+  remain visible as text.
+  The model baseline, working dots, checklist and completion divider use current session metadata.
+  A compaction summary is not a completion recap; guests do not receive private recap text or
+  blocker details. Chat text size is separate from terminal text size; the existing size controls
+  and shortcuts affect the selected surface. Markdown tables wrap to the available width and
+  scroll horizontally only when their columns cannot fit readably.
+  Find searches the active Chat or Terminal view. Chat search treats punctuation literally,
+  reveals matching work and attachment bundles, and offers previous/next results with a count.
+  It searches loaded history; the pinned Load older control extends that scope without losing
+  the selected match. Incoming replies update the count; unchanged refreshes do not duplicate matches.
+  Refresh keeps loaded history and shows progress, completion or failure. Question sheets fit short content and put supporting
+  context behind a disclosure. While following the latest messages, streaming content and keyboard
+  changes keep the tail visible; scrolling into history or searching stops that follow. The centered
+  glass down arrow has a 44 pt circular touch target and returns to the latest message, then disappears.
+  A 48 pt fade joins chat to the existing composer; the final line stays above it.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation

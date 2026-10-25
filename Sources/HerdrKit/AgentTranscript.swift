@@ -89,13 +89,51 @@ public struct TranscriptNote: Sendable, Equatable {
     }
 }
 
+public struct TranscriptModel: Decodable, Sendable, Equatable {
+    public let provider: String
+    public let id: String
+}
+
+public struct TranscriptRecap: Decodable, Sendable, Equatable {
+    public let turnID: String
+    public let text: String
+    enum CodingKeys: String, CodingKey {
+        case turnID = "turn_id"
+        case text
+    }
+}
+
+public enum TranscriptTaskStatus: String, Sendable, Equatable {
+    case pending, completed, blocked, unknown
+    case inProgress = "in_progress"
+}
+
 public struct TranscriptPlanItem: Decodable, Sendable, Equatable {
     public let text: String
     public let done: Bool
+    public let status: TranscriptTaskStatus
+    public let phase: String?
+    public let blocker: String?
 
-    public init(text: String, done: Bool) {
+    public init(text: String, done: Bool, status: TranscriptTaskStatus? = nil,
+                phase: String? = nil, blocker: String? = nil) {
         self.text = text
-        self.done = done
+        self.status = status ?? (done ? .completed : .unknown)
+        self.done = self.status == .completed
+        self.phase = phase
+        self.blocker = blocker
+    }
+
+    enum CodingKeys: String, CodingKey { case text, done, status, phase, blocker }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decodeIfPresent(String.self, forKey: .status).flatMap(TranscriptTaskStatus.init(rawValue:))
+        self.init(text: try c.decode(String.self, forKey: .text),
+                  done: try c.decodeIfPresent(Bool.self, forKey: .done) ?? false,
+                  status: status,
+                  phase: try c.decodeIfPresent(String.self, forKey: .phase),
+                  blocker: try c.decodeIfPresent(String.self, forKey: .blocker))
     }
 }
 
@@ -282,10 +320,15 @@ public struct AgentTranscriptPage: Decodable, Sendable, Equatable {
     public let after: String?
     public let pendingAsk: TranscriptPendingAsk?
     public let working: TranscriptWorking?
+    public let model: TranscriptModel?
+    public let plan: [TranscriptPlanItem]?
+    public let recap: TranscriptRecap?
 
     public init(agent: String? = nil, paneID: String? = nil, sessionID: String? = nil,
                 entries: [TranscriptEntry], before: String? = nil, after: String? = nil,
-                pendingAsk: TranscriptPendingAsk? = nil, working: TranscriptWorking? = nil) {
+                pendingAsk: TranscriptPendingAsk? = nil, working: TranscriptWorking? = nil,
+                model: TranscriptModel? = nil, plan: [TranscriptPlanItem]? = nil,
+                recap: TranscriptRecap? = nil) {
         self.agent = agent
         self.paneID = paneID
         self.sessionID = sessionID
@@ -294,10 +337,13 @@ public struct AgentTranscriptPage: Decodable, Sendable, Equatable {
         self.after = after
         self.pendingAsk = pendingAsk
         self.working = working
+        self.model = model
+        self.plan = plan
+        self.recap = recap
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, entries, before, after, working
+        case agent, entries, before, after, working, model, plan, recap
         case paneID = "pane_id"
         case sessionID = "session_id"
         case pendingAsk = "pending_ask"

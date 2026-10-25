@@ -1542,9 +1542,10 @@ private final class AgentRosterLiveEventsBuffer {
 /// tracking/deceleration flags on the display link. This is the same path on iOS 17,
 /// iOS 18+, and macOS Designed-for-iPad, so the oldest supported runtime is not left
 /// on an unprotected fallback path.
-private struct ScrollActivityObserver: UIViewRepresentable {
+struct ScrollActivityObserver: UIViewRepresentable {
     let isEnabled: Bool
     let onChange: (Bool) -> Void
+    var onSample: ((UIScrollView) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(isEnabled: isEnabled, onChange: onChange)
@@ -1558,6 +1559,8 @@ private struct ScrollActivityObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ProbeView, context: Context) {
+        context.coordinator.onChange = onChange
+        context.coordinator.onSample = onSample
         context.coordinator.setEnabled(isEnabled)
         context.coordinator.attach(from: uiView)
     }
@@ -1568,7 +1571,8 @@ private struct ScrollActivityObserver: UIViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
-        private let onChange: (Bool) -> Void
+        var onChange: (Bool) -> Void
+        var onSample: ((UIScrollView) -> Void)?
         private weak var scrollView: UIScrollView?
         private var displayLink: CADisplayLink?
         private var isEnabled: Bool
@@ -1615,6 +1619,7 @@ private struct ScrollActivityObserver: UIViewRepresentable {
 
         @objc private func tick(_ link: CADisplayLink) {
             guard isEnabled, let scrollView else { return }
+            onSample?(scrollView)
             let active = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
             if active {
                 if !isActive {
@@ -5209,6 +5214,7 @@ struct TerminalPaneContent: View {
     /// drive `LiveTerminalView.fontSize` (applied in-place, no view recreation) and
     /// mutated by ⌘± and the ⋯ "Text size" control. Clamped to [9, 24].
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
+    @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
     /// Settings › Typing › Instant typing, handed to `LiveTerminalView.predictiveEcho`.
     @AppStorage(PredictiveEchoSetting.key) private var predictiveEcho = PredictiveEchoSetting.defaultValue
     /// App foreground/background phase. On return to `.active` the front pane's
@@ -5324,11 +5330,11 @@ struct TerminalPaneContent: View {
     private var showingChat: Bool { chatAvailable && showsChat }
 
     private func setShowsChat(_ value: Bool) {
+        if findOpen { toggleFind() }
         showsChat = value
         ChatPreference.remember(paneID: paneID, showsChat: value)
         if value {
             terminalInputFocused = false
-            if findOpen { toggleFind() }
         }
     }
     /// The pane header label: the agent's NAME first (matching the list), then the model (kind) and
@@ -5443,8 +5449,10 @@ struct TerminalPaneContent: View {
                                  liveness: terminalLiveness,
                                  controlArmed: $ctrlArmed,
                                  userInputToken: userInputToken,
-                                 findRequest: findRequest,
-                                 onFindResult: { index, total in findMatches = (index, total) })
+                                 findRequest: showingChat ? nil : findRequest,
+                                 onFindResult: { index, total in
+                                     if !showingChat { findMatches = (index, total) }
+                                 })
                     // Reconnect on refresh: a new id re-creates the view → fresh stream/connection.
                     .id(streamGen)
                     .accessibilityIdentifier("terminal-surface")
@@ -5486,7 +5494,9 @@ struct TerminalPaneContent: View {
                             ChatView(client: client, model: chatModel, viewer: .owner, eventsPaneID: paneID,
                                      isActive: isForeground, live: true, agentStatus: agent?.agentStatus,
                                      ground: Palette.groundMachine,
-                                     onOpenTerminal: { setShowsChat(false) })
+                                     onOpenTerminal: { setShowsChat(false) },
+                                     findRequest: findRequest,
+                                     onFindResult: { index, total in findMatches = (index, total) })
                         }
                     }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the
@@ -5528,6 +5538,9 @@ struct TerminalPaneContent: View {
                         // Opaque, so rows the composer grows over do not show through the
                         // gaps between the keycaps and around the card.
                         .background(Palette.groundMachine)
+                        .overlay(alignment: .top) {
+                            if showingChat { ChatComposerFade(ground: Palette.groundMachine) }
+                        }
                     }
             }
         }
@@ -5653,10 +5666,9 @@ struct TerminalPaneContent: View {
             PaneHeaderCapsule {
                 InlineSearchToggle(isOpen: findOpen, identifier: "terminal-find",
                                    target: CGSize(width: 40, height: 44)) { toggleFind() }
-                PaneHeaderRefreshButton(identifier: "terminal-refresh") {
-                    streamGen += 1            // reconnect the pane's stream (re-create LiveTerminalView)
-                    Task { await refresh() }   // and re-resolve the agent's status/identity
-                    if showingChat { Task { await chatModel.reload(client: client) } }
+                PaneHeaderRefreshButton(identifier: "terminal-refresh",
+                                        refreshing: showingChat && chatModel.manualRefreshing) {
+                    refreshActivePane()
                 }
                 // Per-agent actions (⋯), only for an agent pane — as before, where they lived
                 // on the status row that exists only when the pane has a status group.
@@ -5744,9 +5756,18 @@ struct TerminalPaneContent: View {
             TerminalCopyMenuSection(client: client, paneID: paneID)
             TerminalTextSizeMenuSection(
                 increaseID: "terminal-font-increase", decreaseID: "terminal-font-decrease",
-                onIncrease: { terminalFontSize = min(terminalFontSize + 1, 24) },
-                onDecrease: { terminalFontSize = max(terminalFontSize - 1, 9) },
-                onReset: { terminalFontSize = 12.5 })
+                onIncrease: {
+                    if showingChat { chatFontSize = ChatTextSize.stepped(chatFontSize, by: 1) }
+                    else { terminalFontSize = min(terminalFontSize + 1, 24) }
+                },
+                onDecrease: {
+                    if showingChat { chatFontSize = ChatTextSize.stepped(chatFontSize, by: -1) }
+                    else { terminalFontSize = max(terminalFontSize - 1, 9) }
+                },
+                onReset: {
+                    if showingChat { chatFontSize = ChatTextSize.defaultPoints }
+                    else { terminalFontSize = 12.5 }
+                })
             if agent != nil {
                 Button {
                     guestShare.isSharing = true
@@ -5773,6 +5794,15 @@ struct TerminalPaneContent: View {
         .accessibilityIdentifier("terminal-actions")
     }
 
+    private func refreshActivePane() {
+        if showingChat {
+            Task { await chatModel.manualRefresh(client: client) }
+        } else {
+            streamGen += 1
+            Task { await refresh() }
+        }
+    }
+
     /// Hardware-keyboard shortcuts for this pane, carried by hidden zero-size buttons —
     /// the same pattern the split view uses for Command-K and Command-slash
     /// (`keyboardShortcuts`, :1931-1947).
@@ -5790,10 +5820,7 @@ struct TerminalPaneContent: View {
         .keyboardShortcut("f", modifiers: .command)
         .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
 
-        Button("Reconnect") {
-            streamGen += 1
-            Task { await refresh() }
-        }
+        Button("Refresh active view") { refreshActivePane() }
         .keyboardShortcut("r", modifiers: .command)
         .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
 
@@ -5836,8 +5863,6 @@ struct TerminalPaneContent: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
-            // Find searches the terminal: from Chat it opens there.
-            if showingChat { setShowsChat(false) }
             findOpen = true
             findFocused = true
             // An armed one-shot Ctrl would otherwise encode the next keystroke as a control
@@ -6436,6 +6461,13 @@ struct TerminalPaneContent: View {
         }
         let mode = agent.map { router.mode(for: $0) } ?? .rawKeys
         let plan = router.plan(action: action, pane: paneID, mode: mode)
+        let outgoingModel = showingChat && !autoDelivering ? chatModel : nil
+        let outgoingID: String?
+        if case .submitText(let text) = action, !text.isEmpty {
+            outgoingID = outgoingModel?.stageOutgoing(text: text, author: .owner)
+        } else {
+            outgoingID = nil
+        }
         // CLEARED NOW, NOT WHEN THE ROUND TRIP RETURNS.
         //
         // The composer is content-sized and the terminal takes whatever height is left,
@@ -6486,23 +6518,33 @@ struct TerminalPaneContent: View {
                 if let sequence, keySendSequence == sequence { keySendTask = nil }
             }
             if isKeyAction && keyFailureEpoch != queuedEpoch {
+                outgoingModel?.updateOutgoing(outgoingID, state: .notDelivered("An earlier key send failed."))
+                return
+            }
+            if let outgoingModel, let outgoingID,
+               !(await outgoingModel.prepareOutgoing(outgoingID, client: client)) {
+                restoreClearedReply()
                 return
             }
             do {
                 switch plan {
                 case .prompt(let pane, let text):
-                    try await submitPrompt(pane: pane, text: text)
+                    try await submitPrompt(pane: pane, text: text, outgoingModel: outgoingModel, outgoingID: outgoingID)
                 case .text(let pane, let text):
                     try await client.sendText(pane: pane, text: text)
+                    outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                     actionNote = nil
                 case .rawText(let pane, let text):
                     try await client.sendText(pane: pane, text: text)
+                    outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                     actionNote = nil
                 case .keys(let pane, let keys):
                     try await client.sendKeys(pane: pane, keys: keys)
+                    outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                     actionNote = nil
                 case .refused(let reason):
                     actionNote = "not sent: \(reason)"
+                    outgoingModel?.updateOutgoing(outgoingID, state: .notDelivered(reason))
                     restoreClearedReply()
                     return
                 }
@@ -6510,6 +6552,7 @@ struct TerminalPaneContent: View {
                 // re-resolve agent status and input mode.
                 if !isKeyAction { await refresh() }
             } catch let apiError as APIError {
+                outgoingModel?.updateOutgoing(outgoingID, state: TranscriptSendState(rejection: apiError))
                 if isKeyAction { keyFailureEpoch += 1 }
                 if case .prompt = plan {
                     actionNote = Self.promptRejectionNote(for: apiError)
@@ -6530,6 +6573,7 @@ struct TerminalPaneContent: View {
                     restoreClearedReply()
                 }
             } catch {
+                outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                 if isKeyAction {
                     keyFailureEpoch += 1
                     let suffix = sequence.map { keySendSequence > $0 } == true
@@ -6565,6 +6609,8 @@ struct TerminalPaneContent: View {
             return
         }
 
+        let outgoingModel = showingChat ? chatModel : nil
+        let outgoingID = outgoingModel?.stageOutgoing(text: text, author: .owner, files: attachments)
         sending = true
         let precedingKeySend = keySendTask
         let sender = GramAttachmentSender(
@@ -6585,6 +6631,8 @@ struct TerminalPaneContent: View {
             if let precedingKeySend { await precedingKeySend.value }
             replyFailedAttachmentID = nil
             defer { sending = false; replyUploadBytes = nil; replySendingAttachmentID = nil }
+            if let outgoingModel, let outgoingID,
+               !(await outgoingModel.prepareOutgoing(outgoingID, client: client)) { return }
             let result = await sender.send(
                 attachments,
                 sending: { replySendingAttachmentID = $0.id }
@@ -6599,6 +6647,7 @@ struct TerminalPaneContent: View {
             case .failure(let failure):
                 replyFailedAttachmentID = failure.attachment.id
                 actionNote = failure.note("send failed: \(failure.error)")
+                outgoingModel?.updateOutgoing(outgoingID, state: .notDelivered("Attachment upload did not complete."))
                 return
             }
             replyUploadBytes = nil
@@ -6612,8 +6661,9 @@ struct TerminalPaneContent: View {
             // remembered by message id; it is the prompt that would duplicate). Only a
             // genuine non-delivery keeps everything for the retry.
             do {
-                try await submitPrompt(pane: paneID, text: prompt)
+                try await submitPrompt(pane: paneID, text: prompt, outgoingModel: outgoingModel, outgoingID: outgoingID)
             } catch let apiError as APIError {
+                outgoingModel?.updateOutgoing(outgoingID, state: TranscriptSendState(rejection: apiError))
                 guard PromptRejection(apiError).mayHaveReachedAgent else {
                     actionNote = GramAttachmentSender.progressNote(
                         Self.promptRejectionNote(for: apiError),
@@ -6622,6 +6672,7 @@ struct TerminalPaneContent: View {
                 }
                 actionNote = Self.promptRejectionNote(for: apiError)
             } catch {
+                outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                 actionNote = "couldn't confirm delivery — check the terminal before sending again"
             }
             // Only a definite pre-write rejection keeps the chips and caption
@@ -6668,17 +6719,22 @@ struct TerminalPaneContent: View {
 
     /// A successful PTY write is not proof that the agent submitted a turn.
     /// Keep its receipt visible rather than inviting a duplicate send.
-    private func submitPrompt(pane: String, text: String) async throws {
+    private func submitPrompt(pane: String, text: String,
+                              outgoingModel: ChatModel? = nil, outgoingID: String? = nil) async throws {
+        outgoingModel?.updateOutgoing(outgoingID, state: .sending, wireText: text)
         let result = try await client.prompt(
             pane: pane, text: text,
             waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
         switch result {
         case .submitted:
             actionNote = nil
+            outgoingModel?.updateOutgoing(outgoingID, state: .submitted)
         case .writtenToPty:
-            actionNote = "Sent to terminal; agent submission not verified"
+            outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
+            actionNote = outgoingModel == nil ? "Sent to terminal; agent submission not verified" : nil
         case nil:
-            actionNote = "couldn't confirm delivery — check the terminal before sending again"
+            outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
+            actionNote = outgoingModel == nil ? "couldn't confirm delivery — check the terminal before sending again" : nil
         }
     }
 

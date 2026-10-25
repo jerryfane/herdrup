@@ -295,6 +295,132 @@ final class TranscriptStoreTests: XCTestCase {
         return (HerdrClient(transport: transport), transport)
     }
 
+    func testLiveMetadataReplacesTheSnapshotWithoutOlderPagesRollingItBack() async throws {
+        func metadata(_ page: String, model: String, plan: String) -> String {
+            page.replacingOccurrences(of: #""result":{"#, with:
+                #""result":{"model":{"provider":"test","id":"\#(model)"},"plan":\#(plan),"#)
+        }
+        var round = 0
+        let oldPlan = Self.entry("old-plan", "plan", extra: #""items":[{"text":"Old task","done":false}]"#)
+        let (client, _) = scripted { params in
+            if params["before"] != nil {
+                return metadata(Self.page([Self.entry("older")]), model: "old", plan: #"[{"text":"Old task","done":true}]"#)
+            }
+            defer { round += 1 }
+            switch round {
+            case 0: return metadata(Self.page([oldPlan], before: "older"), model: "first",
+                                   plan: #"[{"text":"Ship","done":false,"status":"in_progress","phase":"Release"}]"#)
+            case 1: return metadata(Self.page([], before: "older"), model: "selected",
+                                   plan: #"[{"text":"Ship","done":false,"status":"blocked","phase":"Release","blocker":"Review"}]"#)
+            default: return metadata(Self.page([]), model: "selected", plan: "[]")
+            }
+        }
+        let store = TranscriptStore(target: "agent")
+        await store.refresh(client: client)
+        XCTAssertEqual(store.model?.id, "first")
+        XCTAssertEqual(store.currentPlan.map(\.status), [.inProgress])
+        await store.refresh(client: client)
+        XCTAssertEqual(store.model?.id, "selected")
+        XCTAssertEqual(store.currentPlan.map(\.status), [.blocked])
+        XCTAssertEqual(store.currentPlan.first?.blocker, "Review")
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(store.model?.id, "selected")
+        XCTAssertEqual(store.currentPlan.map(\.status), [.blocked])
+        await store.refresh(client: client)
+        XCTAssertTrue(store.currentPlan.isEmpty, "an explicit empty snapshot must not revive an older plan")
+    }
+
+    func testOutgoingMessagesReconcileOncePerNewPromptAndAuthor() async {
+        var round = 0
+        let old = Self.entry("old", "user", extra: #""text":"Again","author":"owner""#)
+        let guest = Self.entry("guest", "user", extra: #""text":"Again","author":"guest","author_name":"sam""#)
+        let first = Self.entry("first", "user", extra: #""text":"Again","author":"owner""#)
+        let second = Self.entry("second", "user", extra: #""text":"Again","author":"owner""#)
+        let (client, _) = scripted { _ in
+            defer { round += 1 }
+            switch round {
+            case 0: return Self.page([old])
+            case 1: return Self.page([guest, first])
+            default: return Self.page([first, second])
+            }
+        }
+        let store = TranscriptStore(target: "agent")
+        await store.refresh(client: client)
+        let firstID = store.stageOutgoing(text: "Again", author: .owner)
+        let secondID = store.stageOutgoing(text: "Again", author: .owner)
+        XCTAssertEqual(store.outbox.messages.map(\.id), [firstID, secondID])
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.sending, .sending])
+
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.id), [secondID])
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["first"])
+        await store.refresh(client: client)
+        XCTAssertTrue(store.outbox.messages.isEmpty)
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["first", "second"])
+        XCTAssertEqual(store.turns.map(\.id), ["old", "guest", "first", "second"])
+    }
+
+    func testFirstPageCannotConsumeAnOutgoingMessageBeforeItsSendBoundary() async {
+        var round = 0
+        let (client, _) = scripted { _ in
+            defer { round += 1 }
+            let id = round == 0 ? "old" : "new"
+            return Self.page([Self.entry(id, "user", extra: #""text":"Again","author":"owner""#)])
+        }
+        let store = TranscriptStore(target: "agent")
+        let id = store.stageOutgoing(text: "Again", author: .owner)
+        let prepared = await store.prepareOutgoing(id, client: client)
+        XCTAssertTrue(prepared)
+        XCTAssertEqual(store.outbox.messages.map(\.id), [id])
+        XCTAssertTrue(store.outbox.recordedPromptIDs.isEmpty)
+        await store.refresh(client: client)
+        XCTAssertTrue(store.outbox.messages.isEmpty)
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["new"])
+    }
+
+    func testLoadingOlderHistoryDoesNotAcknowledgeANewSend() async throws {
+        let old = Self.entry("older", "user", extra: #""text":"Again","author":"owner""#)
+        let (client, _) = scripted { params in
+            if params["before"] != nil { return Self.page([old]) }
+            if params["after"] != nil { return Self.page([Self.entry("reply")]) }
+            return Self.page([Self.entry("current")], before: "older-page")
+        }
+        let store = TranscriptStore(target: "agent")
+        await store.refresh(client: client)
+        let id = store.stageOutgoing(text: "Again", author: .owner)
+        try await store.loadOlder(client: client)
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.id), [id])
+        XCTAssertEqual(store.outbox.messages.first?.state, .sending)
+        XCTAssertTrue(store.outbox.recordedPromptIDs.isEmpty)
+    }
+
+    func testRefusedAndPreviousSessionMessagesAreNotMatchedToOtherPrompts() throws {
+        func page(_ id: String, session: String) throws -> AgentTranscriptPage {
+            struct Envelope: Decodable { let result: AgentTranscriptPage }
+            return try JSONDecoder().decode(Envelope.self, from: Data(Self.page([
+                Self.entry(id, "user", extra: #""text":"Again","author":"owner""#)
+            ], session: session).utf8)).result
+        }
+        let store = TranscriptStore(target: "agent")
+        store.applyNewest(try page("old", session: "a"))
+        let refused = store.stageOutgoing(text: "Again", author: .owner)
+        store.updateOutgoing(refused, state: .notDelivered("Agent is asking a question."))
+        store.mergeAfter(try page("other-device", session: "a"))
+        XCTAssertEqual(store.outbox.messages.first?.state, .notDelivered("Agent is asking a question."))
+
+        let uncertain = store.stageOutgoing(text: "Again", author: .owner)
+        store.updateOutgoing(uncertain, state: .unconfirmed)
+        store.applyNewest(try page("replacement", session: "b"))
+        XCTAssertEqual(store.outbox.messages.first(where: { $0.id == uncertain })?.state, .previousSession)
+        XCTAssertFalse(store.outbox.recordedPromptIDs.contains("replacement"))
+        let current = store.stageOutgoing(text: "Again", author: .owner)
+        store.mergeAfter(try page("current-session", session: "b"))
+        XCTAssertFalse(store.outbox.messages.contains(where: { $0.id == current }))
+        XCTAssertTrue(store.outbox.messages.contains(where: { $0.id == uncertain }))
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["current-session"])
+    }
+
     func testOlderPagesPrependWithoutDuplicatesAndStopAtTheStart() async throws {
         let (client, transport) = scripted { params in
             switch params["before"] as? String {
@@ -411,5 +537,47 @@ final class TranscriptStoreTests: XCTestCase {
         await store.refresh(client: client)
         XCTAssertEqual(store.entries.map(\.id), ["r1"])
         XCTAssertEqual(store.lastError as? AgentTranscriptError, .unavailable)
+    }
+
+    /// Replays agent.transcript responses captured from a real isolated server
+    /// (herdr 071556a9) with a real omp producer (5fa7a6f3) and model-generated
+    /// recaps. Proves the app reads the live wire shape, not only hand-written JSON.
+    func testCapturedLiveServerRecapShowsClearsAndReplacesPerTurn() async throws {
+        func fixture(_ name: String) throws -> String {
+            let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("Fixtures/live-recap-\(name).json")
+            return try String(contentsOf: url, encoding: .utf8)
+        }
+        let replies = try ["transcript-turn1", "transcript-turn2-before-recap", "transcript-turn2"].map(fixture)
+        var call = 0
+        let (client, _) = scripted { _ in
+            defer { call += 1 }
+            return replies[min(call, replies.count - 1)]
+        }
+        let store = TranscriptStore(target: "w1:p1")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertEqual(store.recap?.turnID, "0f44ffc7")
+        XCTAssertEqual(store.recap?.text, "The typo fix in README.md has been completed successfully. "
+            + "Next, verify the fix by reviewing the updated README.md for correctness.")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertNil(store.recap, "new work must clear the previous turn's recap")
+
+        await store.refresh(client: client)
+        XCTAssertNil(store.lastError)
+        XCTAssertEqual(store.recap?.turnID, "01c9d94d")
+        XCTAssertTrue(store.recap?.text.hasPrefix("The task was to fix a typo in README.md and add") == true)
+        let recapText = try XCTUnwrap(store.recap?.text)
+        let entryTexts = store.entries.compactMap { entry -> String? in
+            switch entry.kind {
+            case let .user(text, _), let .reply(text, _), let .summary(text): text
+            default: nil
+            }
+        }
+        XCTAssertEqual(entryTexts.count, 4, "both real prompts and both real replies decode")
+        XCTAssertFalse(entryTexts.contains(recapText), "the recap must not appear as a conversation entry")
     }
 }

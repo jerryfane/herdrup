@@ -8,6 +8,7 @@ import SwiftUI
 struct ChatMarkdownView: View {
     let markdown: String
 
+    @Environment(\.chatTextScale) private var textScale
     private var blocks: [ChatMarkdownBlock] { ChatMarkdown.blocks(markdown) }
 
     var body: some View {
@@ -24,12 +25,12 @@ struct ChatMarkdownView: View {
     private func blockView(_ block: ChatMarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
-            Text(ChatInline.styled(text, size: 16))
+            Text(ChatInline.styled(text, size: 16 * textScale))
                 .foregroundStyle(Palette.text)
-                .lineSpacing(3)
+                .lineSpacing(3 * textScale)
                 .fixedSize(horizontal: false, vertical: true)
         case .heading(let level, let text):
-            Text(ChatInline.styled(text, size: level <= 1 ? 19 : level == 2 ? 17.5 : 16, weight: .semibold))
+            Text(ChatInline.styled(text, size: (level == 1 ? 23 : level == 2 ? 20 : 17) * textScale, weight: .semibold))
                 .foregroundStyle(Palette.text)
                 .lineSpacing(2)
                 .padding(.top, 4)
@@ -44,7 +45,7 @@ struct ChatMarkdownView: View {
         case .code(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(Typography.machine(13))
+                    .font(Typography.machine(13 * textScale))
                     .foregroundStyle(Palette.text)
                     .lineSpacing(3)
                     .fixedSize()
@@ -55,7 +56,7 @@ struct ChatMarkdownView: View {
         case .table(let header, let rows):
             ChatMarkdownTable(header: header, rows: rows)
         case .quote(let text):
-            Text(ChatInline.styled(text, size: 15.5))
+            Text(ChatInline.styled(text, size: 15.5 * textScale))
                 .foregroundStyle(Palette.textDim)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -73,14 +74,14 @@ struct ChatMarkdownView: View {
             Group {
                 if let checked = item.checked {
                     Image(systemName: checked ? "checkmark.square" : "square")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13 * textScale, weight: .medium))
                 } else {
-                    Text(marker).font(Typography.app(16))
+                    Text(marker).font(Typography.app(16 * textScale))
                 }
             }
             .foregroundStyle(Palette.textDim)
             .frame(minWidth: 10, alignment: .leading)
-            Text(ChatInline.styled(item.text, size: 16))
+            Text(ChatInline.styled(item.text, size: 16 * textScale))
                 .foregroundStyle(Palette.text)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -89,51 +90,69 @@ struct ChatMarkdownView: View {
     }
 }
 
-/// A GitHub table: a hairline card with a raised header row, as the mockup draws Q5's bench.
+/// Fit ordinary tables to the chat width; scroll only when readable columns cannot fit.
 private struct ChatMarkdownTable: View {
     let header: [String]
     let rows: [[String]]
+    private let columns: Int
+    @Environment(\.chatTextScale) private var textScale
+    @State private var viewportWidth: CGFloat = 0
+
+    init(header: [String], rows: [[String]]) {
+        self.header = header
+        self.rows = rows
+        columns = max(1, rows.reduce(header.count) { max($0, $1.count) })
+    }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+        let cellWidth = max(96 * textScale, floor(viewportWidth / CGFloat(columns)))
+        ScrollView(.horizontal) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
-                    ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                        Text(ChatInline.styled(cell, size: 13, weight: .semibold))
+                    ForEach(0..<columns, id: \.self) { column in
+                        Text(ChatInline.styled(column < header.count ? header[column] : "",
+                                               size: 13 * textScale, weight: .semibold))
                             .foregroundStyle(Palette.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: cellWidth - 24, alignment: .leading)
                             .padding(.horizontal, 12).padding(.vertical, 7)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .background(Palette.surface)
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                ForEach(rows.indices, id: \.self) { index in
                     Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).gridCellUnsizedAxes(.horizontal)
                     GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            cellText(cell)
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(0..<columns, id: \.self) { column in
+                            cell(column < rows[index].count ? rows[index][column] : "", width: cellWidth)
                         }
                     }
                 }
             }
-            .fixedSize()
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.hairline, lineWidth: 1))
         }
+        .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewportWidth = $0 }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chat-markdown-table")
     }
 
-    /// Figures read better in the mono face, and a signed gain in green, as in the mockup.
-    private func cellText(_ cell: String) -> Text {
-        let trimmed = cell.trimmingCharacters(in: .whitespaces)
-        let numeric = trimmed.first.map { $0.isNumber || "+-−$".contains($0) } ?? false
+    private func cell(_ value: String, width: CGFloat) -> some View {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        let numeric = (trimmed.first.map { $0.isNumber || "+-−$".contains($0) } ?? false)
             && trimmed.contains(where: \.isNumber)
-        if numeric {
-            let gain = trimmed.hasPrefix("+")
-            return Text(trimmed).font(Typography.machine(13.5))
-                .foregroundColor(gain ? ChatStyle.ok : Palette.text)
+        return Group {
+            if numeric {
+                Text(ChatInline.styled(trimmed, size: 13.5 * textScale)).monospacedDigit()
+                    .foregroundColor(trimmed.hasPrefix("+") ? ChatStyle.ok : Palette.text)
+            } else {
+                Text(ChatInline.styled(value, size: 14.5 * textScale)).foregroundColor(Palette.text)
+            }
         }
-        return Text(ChatInline.styled(cell, size: 14.5)).foregroundColor(Palette.text)
+        .multilineTextAlignment(numeric ? .trailing : .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: width - 24, alignment: numeric ? .trailing : .leading)
+        .padding(.horizontal, 12).padding(.vertical, 7)
     }
 }
 

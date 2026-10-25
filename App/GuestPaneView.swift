@@ -69,6 +69,7 @@ struct GuestPaneView: View {
     @StateObject private var composerKeyboard = ComposerKeyboard()
     /// The guest's own terminal text size (A− / A+), separate from the owner's setting.
     @AppStorage(GuestTerminalSize.storageKey) private var terminalFontSize = GuestTerminalSize.defaultPoints
+    @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
     /// The host refused guest resizing (an older host): for the rest of this session the
     /// terminal fits the agent's grid to the width and the size controls are gone.
     @State private var resizeRefused = false
@@ -123,7 +124,9 @@ struct GuestPaneView: View {
                              viewer: .guest(name: access.guestName, ownerName: access.ownerName),
                              eventsPaneID: nil, isActive: true, live: availability == .running,
                              agentStatus: agent?.agentStatus, ground: Palette.groundMachine,
-                             onOpenTerminal: { tab = .terminal })
+                             onOpenTerminal: { tab = .terminal },
+                             findRequest: findRequest,
+                             onFindResult: { index, total in findMatches = (index, total) })
                 }
                 if showingGram {
                     GuestGramList(client: client, access: access, model: gram)
@@ -168,9 +171,8 @@ struct GuestPaneView: View {
             }
         }
         .onChange(of: tab) { _, _ in
-            if showingChat, findOpen { toggleFind() }
-            guard showingGram else { return }
             if findOpen { toggleFind() }
+            guard showingGram else { return }
             Task {
                 await gram.refresh(client: client, access: access)
                 await gram.markAllRead(client: client)
@@ -289,12 +291,14 @@ struct GuestPaneView: View {
                 if !showingGram {
                     InlineSearchToggle(isOpen: findOpen, identifier: "guest-find",
                                        target: CGSize(width: 40, height: 44)) { toggleFind() }
-                    // The owner's reconnect: a new stream (`pane.stream`) and a fresh read of
-                    // the agent (`agent.list`), both on the guest allowlist.
-                    PaneHeaderRefreshButton(identifier: "guest-refresh") {
-                        streamGen += 1
-                        Task { await refresh() }
-                        if showingChat { Task { await chatModel.reload(client: client) } }
+                    PaneHeaderRefreshButton(identifier: "guest-refresh",
+                                            refreshing: showingChat && chatModel.manualRefreshing) {
+                        if showingChat {
+                            Task { await chatModel.manualRefresh(client: client) }
+                        } else {
+                            streamGen += 1
+                            Task { await refresh() }
+                        }
                     }
                 }
                 actionsMenu
@@ -319,14 +323,24 @@ struct GuestPaneView: View {
         Menu {
             if showingTerminal {
                 TerminalCopyMenuSection(client: client, paneID: access.agentTarget)
-                // Hidden where the host refuses guest resizing: the size could not change.
-                if !resizeRefused && (availability == .running || availability == .connecting) {
-                    TerminalTextSizeMenuSection(
-                        increaseID: "guest-font-increase", decreaseID: "guest-font-decrease",
-                        onIncrease: { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: 1) },
-                        onDecrease: { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: -1) },
-                        onReset: { terminalFontSize = GuestTerminalSize.defaultPoints })
-                }
+            }
+            // Chat size remains available even when the host cannot resize the terminal.
+            if showingChat || (showingTerminal && !resizeRefused &&
+                               (availability == .running || availability == .connecting)) {
+                TerminalTextSizeMenuSection(
+                    increaseID: "guest-font-increase", decreaseID: "guest-font-decrease",
+                    onIncrease: {
+                        if showingChat { chatFontSize = ChatTextSize.stepped(chatFontSize, by: 1) }
+                        else { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: 1) }
+                    },
+                    onDecrease: {
+                        if showingChat { chatFontSize = ChatTextSize.stepped(chatFontSize, by: -1) }
+                        else { terminalFontSize = GuestTerminalSize.stepped(terminalFontSize, by: -1) }
+                    },
+                    onReset: {
+                        if showingChat { chatFontSize = ChatTextSize.defaultPoints }
+                        else { terminalFontSize = GuestTerminalSize.defaultPoints }
+                    })
             }
             if let action = guestPush.status(for: access).action {
                 Button { runPushAction(action) } label: {
@@ -415,8 +429,10 @@ struct GuestPaneView: View {
                     isAtTail: terminalAtTail,
                     fontSize: CGFloat(GuestTerminalSize.clamped(terminalFontSize)),
                     controlArmed: .constant(false),
-                    findRequest: findRequest,
-                    onFindResult: { index, total in findMatches = (index, total) })
+                    findRequest: showingChat ? nil : findRequest,
+                    onFindResult: { index, total in
+                        if !showingChat { findMatches = (index, total) }
+                    })
                     .id(streamGen)
                     .accessibilityIdentifier("guest-terminal")
                     // The owner's terminal inset.
@@ -496,6 +512,9 @@ struct GuestPaneView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .background(pageGround)
+                .overlay(alignment: .top) {
+                    if showingChat { ChatComposerFade(ground: pageGround) }
+                }
             }
     }
 
@@ -651,8 +670,6 @@ struct GuestPaneView: View {
             findMatches = (0, 0)
             findFocused = false
         } else {
-            // Find searches the terminal: from Chat it opens there.
-            if showingChat { tab = .terminal }
             findOpen = true
             findFocused = true
         }
@@ -736,20 +753,33 @@ struct GuestPaneView: View {
         sending = true
         note = nil
         let batch = attachments
+        let outgoingID = showingChat ? chatModel.stageOutgoing(
+            text: text, author: .guest(name: access.guestName), files: batch) : nil
+        let clearedReply = reply
+        reply = ""
         // Leaving the app or locking the phone mid-upload suspends it, which drops the
         // relay connection and fails the send; this keeps it running for iOS's grace period.
         let background = BackgroundAssertion(name: "herdr.guest.send")
         Task {
             defer { sending = false; uploadBytes = nil; sendingAttachmentID = nil; background.end() }
             failedAttachmentID = nil
+            var promptAttempted = false
+            if let outgoingID, !(await chatModel.prepareOutgoing(outgoingID, client: client)) {
+                if reply.isEmpty { reply = clearedReply }
+                return
+            }
             do {
                 var prompt = text
                 if !batch.isEmpty {
                     let delivered = try await deliver(batch)
                     prompt = GramAttachmentPrompt.text(text, delivered: delivered)
                 }
-                try await client.prompt(pane: access.agentTarget, text: prompt,
-                                        waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
+                chatModel.updateOutgoing(outgoingID, state: .sending, wireText: prompt)
+                promptAttempted = true
+                let receipt = try await client.prompt(
+                    pane: access.agentTarget, text: prompt,
+                    waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
+                chatModel.updateOutgoing(outgoingID, state: receipt == .submitted ? .submitted : .unconfirmed)
                 // Each file's staged bytes went when its gram posted (the sender).
                 let sentIDs = Set(batch.map(\.id))
                 attachments.removeAll { sentIDs.contains($0.id) }
@@ -758,6 +788,22 @@ struct GuestPaneView: View {
                 if !batch.isEmpty, showsGram { await gram.refresh(client: client, access: access) }
             } catch {
                 note = failureNote(error)
+                let state: TranscriptSendState
+                if !promptAttempted {
+                    state = .notDelivered("Attachment upload did not complete.")
+                } else if let api = error as? APIError {
+                    state = TranscriptSendState(rejection: api)
+                } else {
+                    state = .unconfirmed
+                }
+                chatModel.updateOutgoing(outgoingID, state: state)
+                if case .notDelivered = state {
+                    if reply.isEmpty { reply = clearedReply }
+                } else {
+                    // An uncertain response must not leave a one-tap duplicate send.
+                    let sentIDs = Set(batch.map(\.id))
+                    attachments.removeAll { sentIDs.contains($0.id) }
+                }
             }
         }
     }

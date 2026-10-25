@@ -58,6 +58,19 @@ public struct TranscriptTurn: Identifiable, Sendable, Equatable {
     public let prompt: TranscriptEntry?
     public internal(set) var items: [TranscriptItem]
     public let startMs: UInt64
+    public let attachmentPrompt: GramAttachmentPrompt.Parsed?
+
+    init(id: String, prompt: TranscriptEntry?, items: [TranscriptItem], startMs: UInt64) {
+        self.id = id
+        self.prompt = prompt
+        self.items = items
+        self.startMs = startMs
+        if case .user(let text, _)? = prompt?.kind {
+            attachmentPrompt = GramAttachmentPrompt.parse(text)
+        } else {
+            attachmentPrompt = nil
+        }
+    }
 
     public var promptText: String? {
         if case .user(let text, _)? = prompt?.kind { return text }
@@ -190,7 +203,19 @@ public final class TranscriptStore {
     public private(set) var turns: [TranscriptTurn] = []
     public private(set) var pendingAsk: TranscriptPendingAsk?
     public private(set) var working: TranscriptWorking?
+    public private(set) var model: TranscriptModel?
+    public private(set) var recap: TranscriptRecap?
+    public private(set) var plan: [TranscriptPlanItem]?
+
+    public var currentPlan: [TranscriptPlanItem] {
+        if let plan { return plan }
+        for entry in entries.reversed() {
+            if case .plan(let items) = entry.kind { return items }
+        }
+        return []
+    }
     public private(set) var sessionID: String?
+    public private(set) var outbox = TranscriptOutbox()
     /// The server has older turns than the ones loaded.
     public private(set) var hasOlder = false
     /// A page (or a failure) has been applied at least once.
@@ -207,6 +232,8 @@ public final class TranscriptStore {
     private var generation = 0
     private var refreshing = false
     private var refreshAgain = false
+    private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
+    private var hasSnapshot = false
     /// Answers sent from this device that the server has not reported yet, so the card
     /// does not flash its buttons back between the tap and the next refresh.
     private var localAnswers: [String: [String]] = [:]
@@ -225,10 +252,15 @@ public final class TranscriptStore {
     public func refresh(client: HerdrClient) async {
         if refreshing {
             refreshAgain = true
+            await withCheckedContinuation { refreshWaiters.append($0) }
             return
         }
         refreshing = true
-        defer { refreshing = false }
+        defer {
+            refreshing = false
+            for waiter in refreshWaiters { waiter.resume() }
+            refreshWaiters.removeAll(keepingCapacity: true)
+        }
         repeat {
             refreshAgain = false
             await refreshOnce(client: client)
@@ -318,9 +350,46 @@ public final class TranscriptStore {
         regroup()
     }
 
+    /// Draw the local message before the request starts. This never submits or retries it.
+    @discardableResult
+    public func stageOutgoing(text: String, author: TranscriptAuthor, files: [TranscriptAttachment] = []) -> String {
+        let id = outbox.stage(text: text, author: author, entries: entries, sessionID: sessionID,
+                             baselineReady: hasSnapshot, files: files)
+        onChange?()
+        return id
+    }
+
+    public func updateOutgoing(_ id: String, state: TranscriptSendState, wireText: String? = nil) {
+        outbox.update(id, state: state, wireText: wireText)
+        onChange?()
+    }
+
+    /// A first-page send is already visible locally. Establish its history boundary
+    /// before writing, so an old identical prompt cannot be mistaken for its echo.
+    public func prepareOutgoing(_ id: String, client: HerdrClient) async -> Bool {
+        if !hasSnapshot {
+            if refreshing {
+                await withCheckedContinuation { refreshWaiters.append($0) }
+            } else {
+                await refresh(client: client)
+            }
+        }
+        guard hasSnapshot else {
+            updateOutgoing(id, state: .notDelivered("Chat could not load. Retry or use Terminal."))
+            return false
+        }
+        outbox.prepare(id, entries: entries, sessionID: sessionID)
+        return true
+    }
+
     // MARK: Merging (internal for tests)
 
     func applyNewest(_ page: AgentTranscriptPage) {
+        hasSnapshot = true
+        model = page.model
+        plan = page.plan
+        recap = page.recap
+        outbox.reconcile(page.entries, sessionID: page.sessionID)
         entries = Self.unique(page.entries)
         beforeCursor = page.before
         hasOlder = page.before != nil
@@ -342,7 +411,11 @@ public final class TranscriptStore {
     }
 
     func mergeAfter(_ page: AgentTranscriptPage) {
+        model = page.model
+        plan = page.plan
+        recap = page.recap
         var index: [String: Int] = [:]
+        outbox.reconcile(page.entries, sessionID: page.sessionID ?? sessionID)
         for (position, entry) in entries.enumerated() { index[entry.id] = position }
         for entry in page.entries {
             if let position = index[entry.id] {

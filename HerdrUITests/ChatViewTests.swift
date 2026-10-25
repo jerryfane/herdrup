@@ -48,7 +48,7 @@ final class ChatViewTests: XCTestCase {
         let app = launch("chatview")
         openAgent("herdr-app", in: app)
 
-        let chat = app.scrollViews["chat-view"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
         XCTAssertTrue(chat.waitForExistence(timeout: 10), "an omp agent should open in Chat")
         XCTAssertTrue(app.buttons["chat-switch-chat"].isSelected, "Chat should be the selected segment")
         XCTAssertTrue(app.descendants(matching: .any)["chat-ask"].waitForExistence(timeout: 8),
@@ -70,7 +70,7 @@ final class ChatViewTests: XCTestCase {
         openAgent("keephair", in: app)
         XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10), "a Claude agent opens its terminal")
         XCTAssertFalse(app.buttons["chat-switch-chat"].exists, "only omp agents get the switch")
-        XCTAssertFalse(app.scrollViews["chat-view"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["chat-view"].firstMatch.exists)
     }
 
     /// Settings shows the default (Chat); with Terminal chosen, omp agents open in the
@@ -98,14 +98,14 @@ final class ChatViewTests: XCTestCase {
         let terminal = terminalFirst.buttons["chat-switch-terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "an omp agent still offers the switch")
         XCTAssertTrue(terminal.isSelected, "with Terminal the default, the page opens in the terminal")
-        XCTAssertFalse(terminalFirst.scrollViews["chat-view"].exists)
+        XCTAssertFalse(terminalFirst.descendants(matching: .any)["chat-view"].firstMatch.exists)
     }
 
     /// Scrolling to the top loads older turns.
     func testScrollingUpLoadsOlderTurns() {
         let app = launch("chatview")
         openAgent("herdr-app", in: app)
-        let chat = app.scrollViews["chat-view"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
         XCTAssertTrue(poll(8, every: 0.3) { self.turns(chat) > 0 }, "the newest page should load")
         let first = turns(chat)
@@ -121,7 +121,9 @@ final class ChatViewTests: XCTestCase {
     func testThoughtAndStepsExpand() {
         let app = launch("chatview")
         openAgent("herdr-app", in: app)
-        XCTAssertTrue(app.scrollViews["chat-view"].waitForExistence(timeout: 10))
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        XCTAssertTrue(chat.waitForExistence(timeout: 10))
+        chat.swipeDown(velocity: .slow)
 
         guard let thought = visibleButton("chat-thought", in: app) else {
             return XCTFail("a work group on screen should show its thought")
@@ -174,7 +176,7 @@ final class ChatViewTests: XCTestCase {
         XCTAssertTrue(tab.waitForExistence(timeout: 12), "the guest should get a Chat tab")
         XCTAssertTrue(tab.isSelected, "Chat should be the guest's first tab")
         XCTAssertTrue(app.buttons["guest-tab-terminal"].exists)
-        let chat = app.scrollViews["chat-view"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
         XCTAssertTrue(chat.waitForExistence(timeout: 8))
         XCTAssertTrue(app.descendants(matching: .any)["chat-ask-waiting"].waitForExistence(timeout: 8),
                       "the guest sees the question waiting for the owner")
@@ -197,7 +199,7 @@ final class ChatViewTests: XCTestCase {
         let tab = app.buttons["guest-tab-chat"]
         XCTAssertTrue(tab.waitForExistence(timeout: 12), "a paused omp share keeps its Chat tab")
         XCTAssertTrue(tab.isSelected, "Chat should be the guest's first tab")
-        let chat = app.scrollViews["chat-view"]
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
         XCTAssertTrue(chat.waitForExistence(timeout: 8))
         XCTAssertTrue(poll(8, every: 0.3) { self.turns(chat) > 0 },
                       "a paused agent's chat should load its turns (turns=\(turns(chat)))")
@@ -212,7 +214,7 @@ final class ChatViewTests: XCTestCase {
         let app = launch("guestpane")
         XCTAssertTrue(app.otherElements["guest-terminal"].waitForExistence(timeout: 12))
         XCTAssertFalse(app.buttons["guest-tab-chat"].exists, "no capability, no Chat tab")
-        XCTAssertFalse(app.scrollViews["chat-view"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["chat-view"].firstMatch.exists)
     }
 
     // MARK: - Screenshots

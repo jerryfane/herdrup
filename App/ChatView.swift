@@ -32,8 +32,23 @@ struct ChatAnswerProblem: Equatable {
 final class ChatModel: ObservableObject {
     @Published private(set) var turns: [TranscriptTurn] = []
     @Published private(set) var working: TranscriptWorking?
+    @Published private(set) var outgoing: [TranscriptOutgoingMessage] = []
+    @Published private(set) var sessionModel: TranscriptModel?
+    @Published private(set) var currentPlan: [TranscriptPlanItem] = []
+    @Published private(set) var recap: TranscriptRecap?
+
+    var hasPendingSend: Bool {
+        outgoing.contains {
+            switch $0.state {
+            case .sending, .submitted, .unconfirmed: return true
+            case .notDelivered, .previousSession: return false
+            }
+        }
+    }
     @Published private(set) var loaded = false
     @Published private(set) var failure: String?
+    @Published private(set) var manualRefreshing = false
+    @Published var refreshReceipt: String?
     @Published private(set) var hasOlder = false
     @Published private(set) var loadingOlder = false
     @Published private(set) var olderFailed = false
@@ -52,12 +67,32 @@ final class ChatModel: ObservableObject {
 
     var target: String { store.target }
 
+    func stageOutgoing(text: String, author: TranscriptAuthor, files: [ComposerAttachment] = []) -> String {
+        store.stageOutgoing(text: text, author: author, files: files.map {
+            TranscriptAttachment(id: $0.id.uuidString, name: $0.name, isImage: $0.isImage, messageID: $0.messageID)
+        })
+    }
+
+    func prepareOutgoing(_ id: String, client: HerdrClient) async -> Bool {
+        await store.prepareOutgoing(id, client: client)
+    }
+
+    func updateOutgoing(_ id: String?, state: TranscriptSendState, wireText: String? = nil) {
+        guard let id else { return }
+        store.updateOutgoing(id, state: state, wireText: wireText)
+    }
+
     func refresh(client: HerdrClient) async {
         await store.refresh(client: client)
     }
 
-    func reload(client: HerdrClient) async {
-        await store.reload(client: client)
+    func manualRefresh(client: HerdrClient) async {
+        guard !manualRefreshing else { return }
+        manualRefreshing = true
+        refreshReceipt = nil
+        await store.refresh(client: client)
+        manualRefreshing = false
+        refreshReceipt = failure.map { "Refresh failed: \($0)" } ?? "Up to date"
     }
 
     func loadOlder(client: HerdrClient) async {
@@ -143,6 +178,10 @@ final class ChatModel: ObservableObject {
     private func sync() {
         turns = store.turns
         working = store.working
+        outgoing = store.outbox.messages
+        sessionModel = store.model
+        currentPlan = store.currentPlan
+        recap = store.recap
         hasOlder = store.hasOlder
         loadingOlder = store.loadingOlder
         loaded = store.loaded
@@ -173,13 +212,46 @@ private enum ChatRow: Identifiable {
     case day(id: String, ms: UInt64)
     case prompt(TranscriptTurn)
     case item(TranscriptItem)
+    case outgoing(TranscriptOutgoingMessage)
 
     var id: String {
         switch self {
         case .day(let id, _): return "day:" + id
         case .prompt(let turn): return "prompt:" + turn.id
         case .item(let item): return "item:" + item.id
+        case .outgoing(let message): return "outgoing:" + message.id
         }
+    }
+
+    var searchText: String {
+        let text: String
+        switch self {
+        case .day: return ""
+        case .prompt(let turn):
+            guard case .user(let prompt, _) = turn.prompt?.kind else { return "" }
+            if let bundle = GramAttachmentPrompt.parse(prompt) {
+                text = ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
+            } else {
+                text = prompt
+            }
+        case .outgoing(let message):
+            text = ([message.text] + message.files.map(\.name)).joined(separator: "\n")
+        case .item(let item):
+            switch item {
+            case .work(let work):
+                text = (work.thoughts + work.steps.map { $0.intent + "\n" + ($0.detail ?? "") }).joined(separator: "\n")
+            case .reply(_, let reply, _), .summary(_, let reply): text = reply
+            case .note(_, _, let note): text = note.title + "\n" + note.body
+            case .plan(_, let items):
+                text = items.map { [$0.phase, $0.text, $0.blocker].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
+            case .ask(_, let ask, _):
+                text = (ask.questions.flatMap { [$0.question] + $0.options } + (ask.answer ?? [])).joined(separator: "\n")
+            case .turnFailed(_, _, let error): text = error ?? ""
+            }
+        }
+        let parsed = try? AttributedString(markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        return parsed.map { String($0.characters) } ?? text
     }
 }
 
@@ -203,86 +275,77 @@ struct ChatView: View {
     /// The page's ground, for the top fade.
     let ground: Color
     let onOpenTerminal: () -> Void
+    var findRequest: FindRequest? = nil
+    var onFindResult: (Int, Int) -> Void = { _, _ in }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
+    private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
     @State private var expanded: Set<String> = []
     @State private var openNote: TranscriptNote?
-    @State private var viewportHeight: CGFloat = 0
     @State private var atBottom = true
+    @State private var followingLatest = true
+    @State private var userScrolling = false
+    @State private var scrollPosition = ChatScrollPosition()
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
     /// The top of the list is within reach (40 pt) of the viewport's top.
     @State private var topVisible = false
+    @State private var selectedSearchHit: String?
+    @State private var openQuestionID: String?
+
+    private var searchHits: [ChatSearchHit] {
+        let query = findRequest?.term ?? ""
+        guard !query.isEmpty else { return [] }
+        return rows.flatMap { ChatSearch.hits(rowID: $0.id, text: $0.searchText, query: query) }
+    }
+
+    private func updateSearch(_ proxy: ScrollViewProxy, step: Bool = false, reveal: Bool = false) {
+        let hits = searchHits
+        guard !hits.isEmpty else {
+            selectedSearchHit = nil
+            onFindResult(0, 0)
+            return
+        }
+        let current = hits.firstIndex { $0.id == selectedSearchHit }
+        let index: Int
+        if step, let current {
+            index = (current + (findRequest?.direction == .backward ? hits.count - 1 : 1)) % hits.count
+        } else {
+            index = current ?? 0
+        }
+        let hit = hits[index]
+        let moved = selectedSearchHit != hit.id
+        selectedSearchHit = hit.id
+        onFindResult(index + 1, hits.count)
+        atBottom = false
+        followingLatest = false
+        if let row = rows.first(where: { $0.id == hit.rowID }), case .item(.work(let work)) = row {
+            expanded.insert("t:" + work.id)
+            expanded.insert("s:" + work.id)
+            for item in work.steps { expanded.insert("d:" + item.id) }
+        }
+        guard moved || step || reveal else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard selectedSearchHit == hit.id, findRequest != nil else { return }
+            proxy.scrollTo("search:" + hit.id, anchor: .center)
+        }
+    }
 
     private static let scrollSpace = "chat-scroll"
-    private static let bottomID = "chat-bottom"
 
     var body: some View {
+        let hits = searchHits
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    topSentinel(proxy)
-                    ForEach(rows) { row in
-                        rowView(row).id(row.id)
-                    }
-                    if let working = model.working {
-                        workingLine(working).id("chat-working")
-                    }
-                    if let failure = model.failure {
-                        Text(failure).font(Typography.app(13)).foregroundStyle(Palette.textFaint)
-                            .frame(maxWidth: .infinity)
-                            .accessibilityIdentifier("chat-failure")
-                    }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).minY } action: { minY in
-                            atBottom = minY <= viewportHeight + 8
-                        }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
-                .frame(maxWidth: ChatStyle.columnWidth)
-                .frame(maxWidth: .infinity)
-            }
-            .coordinateSpace(name: Self.scrollSpace)
-            .scrollDismissesKeyboard(.interactively)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
-            .overlay(alignment: .top) {
-                LinearGradient(colors: [ground, ground.opacity(0)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 26)
-                    .allowsHitTesting(false)
-            }
-            .overlay {
-                if !model.loaded {
-                    ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
-                } else if rows.isEmpty, model.failure == nil {
-                    Text("No messages yet").font(Typography.app(14)).foregroundStyle(Palette.textFaint)
-                }
-            }
-            .task(id: model.loaded) {
-                guard model.loaded, !landed else { return }
-                for _ in 0..<8 {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if atBottom { break }
-                }
-                landed = true
-            }
-            // New entries while the reader is at the newest: follow them down.
-            .onChange(of: rows.last?.id) { _, _ in
-                guard landed, atBottom else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-            }
-            .onChange(of: model.working) { _, _ in
-                guard landed, atBottom else { return }
-                proxy.scrollTo(Self.bottomID, anchor: .bottom)
-            }
+            transcriptScroll(proxy, hits: hits)
         }
         .background(ground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-view")
         .accessibilityValue("turns=\(model.turns.count)")
+        .overlay(alignment: .top) { refreshStatus }
         .task(id: [isActive, live]) {
             guard isActive else { return }
             if live {
@@ -298,6 +361,203 @@ struct ChatView: View {
         .sheet(item: Binding(get: { openNote.map(IdentifiedNote.init) }, set: { openNote = $0?.note })) { item in
             ChatNoteSheet(note: item.note)
         }
+        .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
+            questionSheet
+        }
+        .environment(\.chatTextScale, textScale)
+        .environment(\.chatSearchQuery, findRequest?.term ?? "")
+    }
+
+    private func transcriptScroll(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+        ScrollView {
+            transcriptColumn(proxy, hits: hits)
+        }
+        .coordinateSpace(name: Self.scrollSpace)
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if findRequest != nil {
+                searchScope(proxy).padding(.horizontal, 16).padding(.vertical, 8).background(ground)
+            }
+        }
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [ground, ground.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 26)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
+            if landed, !atBottom, findRequest == nil {
+                ChatLatestButton {
+                    followingLatest = true
+                }
+                .padding(.bottom, 60)
+            }
+        }
+        .overlay {
+            if !model.loaded {
+                ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
+            } else if rows.isEmpty, model.failure == nil {
+                Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
+            }
+        }
+        .task(id: model.loaded) {
+            guard model.loaded, !landed, findRequest == nil else { return }
+            for _ in 0..<8 {
+                scrollPosition.jumpToLatest()
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if scrollPosition.isAtBottom { break }
+            }
+            landed = true
+        }
+        .onChange(of: findRequest) { old, new in
+            if old?.term != new?.term { selectedSearchHit = nil }
+            updateSearch(proxy, step: old?.term == new?.term && old?.generation != new?.generation)
+        }
+        .onChange(of: hits) { _, _ in updateSearch(proxy) }
+    }
+
+    private func transcriptColumn(_ proxy: ScrollViewProxy, hits: [ChatSearchHit]) -> some View {
+        let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
+        return VStack(alignment: .leading, spacing: 10) {
+            topSentinel(proxy)
+            ForEach(rows) { row in
+                searchableRow(row, hits: hitsByRow[row.id] ?? [])
+            }
+            sessionFooter
+            // Keep the final line above the 48 pt composer fade when landing at the tail.
+            Color.clear.frame(height: 49)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .frame(maxWidth: ChatStyle.columnWidth)
+        .frame(maxWidth: .infinity)
+        .background {
+            ScrollActivityObserver(isEnabled: isActive, onChange: { scrolling in
+                // A tap tracks too. Only an actual drag/deceleration may cancel
+                // follow intent; otherwise the jump button cancels its own request.
+                guard !scrolling, userScrolling else { return }
+                userScrolling = false
+                followingLatest = scrollPosition.isAtBottom && findRequest == nil
+            }, onSample: { view in
+                scrollPosition.view = view
+                if view.isDragging || view.isDecelerating {
+                    if !userScrolling { userScrolling = true }
+                    if followingLatest { followingLatest = false }
+                }
+                if followingLatest, model.loaded, findRequest == nil,
+                   !view.isTracking, !view.isDragging, !view.isDecelerating {
+                    scrollPosition.jumpToLatest()
+                }
+                let bottom = scrollPosition.isAtBottom
+                if atBottom != bottom { atBottom = bottom }
+            })
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder private func searchScope(_ proxy: ScrollViewProxy) -> some View {
+        if findRequest != nil {
+            HStack {
+                Text("Searching loaded history").font(Typography.app(12 * textScale))
+                Spacer()
+                if model.hasOlder {
+                    Button("Load older") {
+                        Task {
+                            await model.loadOlder(client: client)
+                            updateSearch(proxy, reveal: true)
+                        }
+                    }
+                    .disabled(model.loadingOlder)
+                }
+            }
+            .accessibilityIdentifier("chat-search-scope")
+        }
+    }
+
+    @ViewBuilder private var sessionFooter: some View {
+        if !model.currentPlan.isEmpty { planCard(model.currentPlan) }
+        if live, model.failure == nil,
+           agentStatus == "working" || (agentStatus == nil && model.working != nil) {
+            ChatWorkingDots(intent: model.working?.intent)
+        }
+        recapDivider
+        if let sessionModel = model.sessionModel {
+            Text(sessionModel.id)
+                .font(Typography.machine(11.5 * textScale))
+                .foregroundStyle(Palette.textFaint)
+                .padding(.leading, 4).padding(.vertical, 4)
+                .accessibilityLabel("Model: \(sessionModel.provider), \(sessionModel.id)")
+                .accessibilityIdentifier("chat-model")
+        }
+        if let failure = model.failure {
+            Text(failure).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("chat-failure")
+        }
+    }
+
+    @ViewBuilder private var recapDivider: some View {
+        if let recap = model.recap, model.working == nil,
+           agentStatus != "working", !model.hasPendingSend {
+            VStack(alignment: .leading, spacing: 8) {
+                Rectangle().fill(Palette.hairline).frame(height: 1).accessibilityHidden(true)
+                Text(ChatInline.styled(recap.text, size: 13 * textScale))
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("chat-recap")
+        }
+    }
+
+    @ViewBuilder private var refreshStatus: some View {
+        if model.manualRefreshing || model.refreshReceipt != nil {
+            HStack(spacing: 10) {
+                if model.manualRefreshing { ProgressView().controlSize(.small) }
+                Text(model.manualRefreshing ? "Refreshing chat…" : model.refreshReceipt ?? "")
+                    .font(Typography.app(13 * textScale))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !model.manualRefreshing {
+                    Button { model.refreshReceipt = nil } label: {
+                        Image(systemName: "xmark").frame(width: 32, height: 32)
+                    }
+                    .accessibilityLabel("Dismiss refresh result")
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+            .padding(8)
+            .accessibilityIdentifier("chat-refresh-result")
+        }
+    }
+
+    private func searchableRow(_ row: ChatRow, hits: [ChatSearchHit]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            rowView(row)
+            ChatSearchResults(hits: hits, query: findRequest?.term ?? "", selectedID: selectedSearchHit)
+        }
+        .id(row.id)
+    }
+
+    private var questionSheet: some View {
+        ChatContentSheet {
+            if let turn = model.turns.first(where: { $0.items.contains(where: { $0.id == openQuestionID }) }),
+               let item = turn.items.first(where: { $0.id == openQuestionID }),
+               case .ask(let id, let ask, let pending) = item {
+                VStack(alignment: .leading, spacing: 12) {
+                    questionCard(id: id, ask: ask, pending: pending)
+                    if case .user(let text, _) = turn.prompt?.kind, !text.isEmpty {
+                        DisclosureGroup("Show context") { ChatMarkdownView(markdown: text) }
+                            .font(Typography.app(14 * textScale))
+                    }
+                }
+            } else {
+                Text("This question is no longer available.")
+            }
+        }
+        .accessibilityIdentifier("chat-question-sheet")
     }
 
     // MARK: - Rows
@@ -315,6 +575,7 @@ struct ChatView: View {
             }
             for item in turn.items { rows.append(.item(item)) }
         }
+        rows.append(contentsOf: model.outgoing.map(ChatRow.outgoing))
         return rows
     }
 
@@ -327,7 +588,22 @@ struct ChatView: View {
             promptBubble(turn)
         case .item(let item):
             itemView(item)
+        case .outgoing(let message):
+            outgoingBubble(message)
         }
+    }
+
+    private func questionCard(id: String, ask: TranscriptAsk, pending: TranscriptPendingAsk?) -> some View {
+        ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer,
+                    answering: model.answeringAskID == id,
+                    problem: model.answerProblem?.askID == id ? model.answerProblem : nil,
+                    onAnswer: { option in
+                        Task { await model.answer(client: client, askID: id, option: option) }
+                    },
+                    onOpenTerminal: {
+                        openQuestionID = nil
+                        onOpenTerminal()
+                    })
     }
 
     @ViewBuilder
@@ -337,34 +613,33 @@ struct ChatView: View {
             workView(work)
         case .reply(_, let text, _):
             ChatMarkdownView(markdown: text)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chat-reply")
         case .note(_, let tsMs, let note):
             noteCard(note, tsMs: tsMs)
-        case .plan(_, let items):
-            planCard(items)
+        case .plan:
+            EmptyView() // The current snapshot stays visible once at the conversation's end.
         case .ask(let id, let ask, let pending):
-            ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer,
-                        answering: model.answeringAskID == id,
-                        problem: model.answerProblem?.askID == id ? model.answerProblem : nil,
-                        onAnswer: { option in
-                            Task { await model.answer(client: client, askID: id, option: option) }
-                        },
-                        onOpenTerminal: onOpenTerminal)
-                .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 6) {
+                questionCard(id: id, ask: ask, pending: pending)
+                Button("Open question") { openQuestionID = id }
+                    .font(Typography.app(13 * textScale))
+                    .accessibilityIdentifier("chat-question-open")
+            }
+            .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
         case .turnFailed(_, let status, let error):
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: status == .aborted ? "stop.circle" : "exclamationmark.circle")
                     .font(.system(size: 12, weight: .semibold))
                 Text(status == .aborted ? "Stopped" : "Failed\(error.map { " · \($0)" } ?? "")")
-                    .font(Typography.app(14)).lineLimit(3)
+                    .font(Typography.app(14 * textScale)).lineLimit(3)
             }
             .foregroundStyle(status == .aborted ? Palette.textFaint : Palette.died)
             .accessibilityIdentifier("chat-turn-failed")
         case .summary(_, let text):
             HStack(spacing: 10) {
                 Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
-                Text(text).font(Typography.app(13)).foregroundStyle(Palette.textFaint).fixedSize()
+                Text(text).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint).fixedSize()
                 Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
             }
             .padding(.vertical, 4)
@@ -380,12 +655,12 @@ struct ChatView: View {
             if model.loadingOlder {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small).tint(Palette.textDim)
-                    Text("Loading earlier messages").font(Typography.app(13)).foregroundStyle(Palette.textDim)
+                    Text("Loading earlier messages").font(Typography.app(13 * textScale)).foregroundStyle(Palette.textDim)
                 }
                 .accessibilityIdentifier("chat-older-loading")
             } else if model.olderFailed {
                 Button { loadOlder(proxy, retry: true) } label: {
-                    Text("Couldn't load earlier messages · Retry").font(Typography.app(13, .medium))
+                    Text("Couldn't load earlier messages · Retry").font(Typography.app(13 * textScale, .medium))
                         .foregroundStyle(Palette.textDim)
                 }
                 .buttonStyle(.plain)
@@ -407,7 +682,7 @@ struct ChatView: View {
 
     /// Fetches the next older page and keeps the row that was on top where it was.
     private func loadOlder(_ proxy: ScrollViewProxy, retry: Bool = false) {
-        guard landed, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
+        guard landed, findRequest == nil, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
         let anchor = rows.first?.id
         Task {
             await model.loadOlder(client: client)
@@ -421,7 +696,7 @@ struct ChatView: View {
 
     private func dayLabel(_ ms: UInt64) -> some View {
         let (day, time) = ChatDay.label(ms: ms, now: Date())
-        return (Text(day).font(Typography.app(13, .semibold)) + Text(" " + time).font(Typography.app(13)))
+        return (Text(day).font(Typography.app(13 * textScale, .semibold)) + Text(" " + time).font(Typography.app(13 * textScale)))
             .foregroundStyle(Palette.textFaint)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 4)
@@ -433,24 +708,62 @@ struct ChatView: View {
         let byline = byline(for: turn.promptAuthor)
         VStack(alignment: .trailing, spacing: 4) {
             if let byline {
-                Text(byline).font(Typography.app(12, .medium)).foregroundStyle(Palette.textFaint)
+                Text(byline).font(Typography.app(12 * textScale, .medium)).foregroundStyle(Palette.textFaint)
                     .padding(.trailing, 6)
             }
-            Text(turn.promptText ?? "")
-                .font(Typography.app(16))
-                .foregroundStyle(Palette.text)
-                .lineSpacing(1)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14).padding(.top, 9).padding(.bottom, 10)
-                .background(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
-                                                   bottomTrailingRadius: 6, topTrailingRadius: 18)
-                    .fill(Palette.surfaceRaised))
-                .frame(maxWidth: sizeClass == .regular ? 480 : 296, alignment: .trailing)
-                .accessibilityIdentifier("chat-user-bubble")
+            if let attachment = turn.attachmentPrompt {
+                if !attachment.caption.isEmpty { promptText(attachment.caption) }
+                ChatAttachmentBundle(files: attachment.files, client: client)
+                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
+            } else {
+                promptText(turn.promptText ?? "")
+            }
+            if model.store.outbox.recordedPromptIDs.contains(turn.id) {
+                Text("In transcript").font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
+                    .padding(.trailing, 6)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 40)
+    }
+
+    private func promptText(_ text: String) -> some View {
+        Text(text)
+            .font(Typography.app(16 * textScale))
+            .foregroundStyle(Palette.text)
+            .lineSpacing(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .padding(.horizontal, 14).padding(.top, 9).padding(.bottom, 10)
+            .background(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
+                                               bottomTrailingRadius: 6, topTrailingRadius: 18)
+                .fill(Palette.surfaceRaised))
+            .frame(maxWidth: sizeClass == .regular ? 480 : 296, alignment: .trailing)
+            .accessibilityIdentifier("chat-user-bubble")
+    }
+
+    private func outgoingBubble(_ message: TranscriptOutgoingMessage) -> some View {
+        let receipt: String
+        switch message.state {
+        case .sending: receipt = "Sending…"
+        case .submitted: receipt = "Accepted by agent"
+        case .unconfirmed: receipt = "Confirmation pending"
+        case .notDelivered(let reason): receipt = "Not sent · \(reason)"
+        case .previousSession: receipt = "Previous session · confirmation unavailable"
+        }
+        return VStack(alignment: .trailing, spacing: 4) {
+            if !message.text.isEmpty { promptText(message.text) }
+            if !message.files.isEmpty {
+                ChatAttachmentBundle(files: message.files, client: client)
+                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
+            }
+            Text(receipt).font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
+                .padding(.trailing, 6)
+                .accessibilityIdentifier("chat-send-receipt")
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.leading, 40)
+        .accessibilityIdentifier("chat-outgoing-message")
     }
 
     /// Whose prompt this was, when it was not the reader's own.
@@ -476,10 +789,10 @@ struct ChatView: View {
                 Button { toggle(thoughtKey) } label: {
                     HStack(spacing: 6) {
                         chevron(open: expanded.contains(thoughtKey), color: Palette.textFaint)
-                        Text("Thought").font(Typography.app(14, .semibold)).foregroundStyle(Palette.textDim)
+                        Text("Thought").font(Typography.app(14 * textScale, .semibold)).foregroundStyle(Palette.textDim)
                             .fixedSize()
                         if !expanded.contains(thoughtKey) {
-                            Text(ChatDay.firstSentence(thought)).font(Typography.app(14))
+                            Text(ChatInline.styled(ChatDay.firstSentence(thought), size: 14 * textScale))
                                 .foregroundStyle(Palette.textFaint).lineLimit(1).truncationMode(.tail)
                         }
                     }
@@ -491,10 +804,8 @@ struct ChatView: View {
                 .accessibilityHint(expanded.contains(thoughtKey) ? "Collapses the thought" : "Shows the whole thought")
                 .accessibilityIdentifier("chat-thought")
                 if expanded.contains(thoughtKey) {
-                    Text(work.thoughts.joined(separator: "\n\n"))
-                        .font(Typography.app(14)).foregroundStyle(Palette.textDim)
-                        .lineSpacing(2.5)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                         .padding(.vertical, 2).padding(.leading, 12)
                         .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
@@ -527,7 +838,7 @@ struct ChatView: View {
             let count = work.steps.count == 1 ? "1 step" : "\(work.steps.count) steps"
             (Text("\(work.live ? "Working" : "Worked") for \(duration)").foregroundColor(Palette.textDim)
                 + Text(" · \(count)").foregroundColor(Palette.textFaint))
-                .font(Typography.app(14))
+                .font(Typography.app(14 * textScale))
                 .lineLimit(1)
         }
     }
@@ -543,12 +854,12 @@ struct ChatView: View {
                             .fill(step.status == .error ? Palette.died : running ? Palette.working : Palette.hairline)
                             .frame(width: 5, height: 5)
                             .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 2.5 }
-                        Text(step.intent).font(Typography.app(13.5))
+                        Text(step.intent).font(Typography.app(13.5 * textScale))
                             .foregroundStyle(running ? Palette.textDim : Palette.textFaint)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if expanded.contains(detailKey), let detail = step.detail, !detail.isEmpty {
-                        Text(detail).font(Typography.machine(11.5)).foregroundStyle(Palette.textFaint)
+                        Text(detail).font(Typography.machine(11.5 * textScale)).foregroundStyle(Palette.textFaint)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                             .padding(.leading, 12)
@@ -577,9 +888,9 @@ struct ChatView: View {
                     .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surfaceRaised))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(ChatNoteStyle.kicker(note, tsMs: tsMs))
-                        .font(Typography.machine(10.5, .semibold)).tracking(1.2)
+                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2)
                         .foregroundStyle(Palette.textFaint).lineLimit(1)
-                    Text(ChatNoteStyle.title(note)).font(Typography.app(14.5)).foregroundStyle(Palette.text).lineLimit(1)
+                    Text(ChatNoteStyle.title(note)).font(Typography.app(14.5 * textScale)).foregroundStyle(Palette.text).lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
@@ -598,24 +909,39 @@ struct ChatView: View {
 
     private func planCard(_ items: [TranscriptPlanItem]) -> some View {
         let done = items.filter(\.done).count
-        return VStack(alignment: .leading, spacing: 0) {
-            Text("PLAN · \(done) OF \(items.count)")
-                .font(Typography.machine(10.5, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
-                .padding(.bottom, 6)
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(spacing: 8) {
-                    Image(systemName: item.done ? "checkmark" : "circle")
-                        .font(.system(size: item.done ? 11 : 10, weight: .semibold))
-                        .foregroundStyle(item.done ? ChatStyle.ok : Palette.textDim)
-                        .frame(width: 14)
-                    Text(item.text).font(Typography.app(14))
-                        .strikethrough(item.done, color: Palette.textFaint.opacity(0.6))
-                        .fixedSize(horizontal: false, vertical: true)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("TODO · \(done) OF \(items.count)")
+                .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
+            ForEach(items.indices, id: \.self) { index in
+                let item = items[index]
+                if let phase = item.phase, index == 0 || items[index - 1].phase != phase {
+                    Text(phase).font(Typography.app(12 * textScale, .semibold)).foregroundStyle(Palette.textDim)
+                        .padding(.top, index == 0 ? 0 : 4)
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: item.done ? "checkmark" :
+                            item.status == .inProgress ? "arrow.right.circle.fill" :
+                            item.status == .blocked ? "pause.circle" : "circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(item.done ? ChatStyle.ok :
+                            item.status == .inProgress ? Palette.working : Palette.textDim)
+                        .frame(width: 15).padding(.top, 3)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.text).font(Typography.app(14 * textScale, item.status == .inProgress ? .semibold : .regular))
+                            .strikethrough(item.done, color: Palette.textFaint.opacity(0.6))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if item.status == .blocked {
+                            Text(item.blocker.map { "Blocked · \($0)" } ?? "Blocked")
+                                .font(Typography.app(12 * textScale)).foregroundStyle(Palette.textFaint)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
                 .foregroundStyle(item.done ? Palette.textFaint : Palette.textDim)
-                .frame(minHeight: 21)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(item.text)\(item.done ? ", done" : "")")
+                .accessibilityValue(item.done ? "Done" : item.status == .inProgress ? "In progress" :
+                                    item.status == .blocked ? "Blocked" : item.status == .pending ? "Pending" : "Not completed")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -626,19 +952,6 @@ struct ChatView: View {
         .accessibilityIdentifier("chat-plan")
     }
 
-    private func workingLine(_ working: TranscriptWorking) -> some View {
-        HStack(spacing: 8) {
-            Circle().fill(Palette.working).frame(width: 7, height: 7)
-                .background(Circle().fill(Palette.working.opacity(0.18)).frame(width: 15, height: 15))
-            Text("WORKING · \(working.intent.uppercased())")
-                .font(Typography.machine(11.5, .medium)).tracking(0.6)
-                .foregroundStyle(Palette.textDim).lineLimit(1)
-        }
-        .padding(.leading, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Working: \(working.intent)")
-        .accessibilityIdentifier("chat-working")
-    }
 
     private func chevron(open: Bool, color: Color) -> some View {
         Image(systemName: open ? "chevron.down" : "chevron.right")
@@ -674,6 +987,8 @@ struct ChatAskCard: View {
 
     private var question: TranscriptQuestion? { ask.questions.first }
 
+    @Environment(\.chatTextScale) private var textScale
+
     var body: some View {
         Group {
             if let answer = ask.answer {
@@ -694,13 +1009,13 @@ struct ChatAskCard: View {
 
     private func answered(_ answer: [String]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(questionText).font(Typography.app(14, .medium)).foregroundStyle(Palette.textDim)
+            Text(questionText).font(Typography.app(14 * textScale, .medium)).foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ChatStyle.ok)
                 (Text(chooser + " chose ").foregroundColor(Palette.textDim)
-                    + Text(answer.joined(separator: ", ")).font(Typography.app(14.5, .semibold)).foregroundColor(Palette.text))
-                    .font(Typography.app(14.5))
+                    + Text(answer.joined(separator: ", ")).font(Typography.app(14.5 * textScale, .semibold)).foregroundColor(Palette.text))
+                    .font(Typography.app(14.5 * textScale))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
@@ -724,7 +1039,7 @@ struct ChatAskCard: View {
 
     private var open: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(questionText).font(Typography.app(15, .semibold)).foregroundStyle(Palette.text)
+            Text(questionText).font(Typography.app(15 * textScale, .semibold)).foregroundStyle(Palette.text)
                 .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 10)
@@ -759,14 +1074,14 @@ struct ChatAskCard: View {
             HStack(spacing: 8) {
                 Circle().fill(Palette.waiting).frame(width: 7, height: 7)
                 Text("WAITING FOR \(owner.uppercased()) TO ANSWER")
-                    .font(Typography.machine(10.5, .semibold)).tracking(1.2).foregroundStyle(Palette.waiting)
+                    .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.waiting)
             }
             .padding(.top, 10)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("chat-ask-waiting")
         } else if let problem {
             VStack(alignment: .leading, spacing: 8) {
-                Text(problem.message).font(Typography.app(13)).foregroundStyle(Palette.waiting)
+                Text(problem.message).font(Typography.app(13 * textScale)).foregroundStyle(Palette.waiting)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("chat-ask-problem")
                 if problem.offersTerminal { terminalButton }
@@ -782,7 +1097,7 @@ struct ChatAskCard: View {
         Button(action: onOpenTerminal) {
             HStack(spacing: 6) {
                 Image(systemName: "terminal").font(.system(size: 12, weight: .semibold))
-                Text("Answer in Terminal").font(Typography.app(14, .semibold))
+                Text("Answer in Terminal").font(Typography.app(14 * textScale, .semibold))
             }
             .foregroundStyle(Palette.text)
             .padding(.horizontal, 14).frame(height: 36)
@@ -794,9 +1109,9 @@ struct ChatAskCard: View {
 
     private var unanswered: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(questionText).font(Typography.app(14, .medium)).foregroundStyle(Palette.textDim)
+            Text(questionText).font(Typography.app(14 * textScale, .medium)).foregroundStyle(Palette.textDim)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Not answered").font(Typography.app(13)).foregroundStyle(Palette.textFaint)
+            Text("Not answered").font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -805,7 +1120,7 @@ struct ChatAskCard: View {
 
     private func optionLabel(_ option: String, primary: Bool, readOnly: Bool) -> some View {
         Text(option)
-            .font(Typography.app(15, .medium))
+            .font(Typography.app(15 * textScale, .medium))
             .foregroundStyle(readOnly ? Palette.textDim : primary ? Palette.ground : Palette.text)
             .lineLimit(2)
             .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
@@ -863,30 +1178,24 @@ enum ChatNoteStyle {
 /// The full text of a note card. Notes never notify; this is the only place they open.
 private struct ChatNoteSheet: View {
     let note: TranscriptNote
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.chatTextScale) private var textScale
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(ChatNoteStyle.kicker(note, tsMs: 0))
-                        .font(Typography.machine(10.5, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
-                    Text(ChatNoteStyle.title(note)).font(Typography.app(18, .semibold)).foregroundStyle(Palette.text)
-                        .fixedSize(horizontal: false, vertical: true)
+        ChatContentSheet {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(ChatNoteStyle.title(note))
+                    .font(Typography.app(18 * textScale, .semibold))
+                    .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(ChatNoteStyle.kicker(note, tsMs: 0))
+                    .font(Typography.machine(10.5 * textScale, .semibold))
+                    .foregroundStyle(Palette.textFaint)
+                DisclosureGroup("Show context") {
                     ChatMarkdownView(markdown: note.body)
                 }
-                .padding(16)
-                .frame(maxWidth: ChatStyle.columnWidth, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-            .background(Palette.ground.ignoresSafeArea())
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.accessibilityIdentifier("chat-note-done")
-                }
+                .font(Typography.app(14 * textScale))
             }
         }
-        .presentationDetents([.medium, .large])
         .accessibilityIdentifier("chat-note-sheet")
     }
 }
