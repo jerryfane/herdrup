@@ -238,10 +238,14 @@ public final class TranscriptStore {
     /// does not flash its buttons back between the tap and the next refresh.
     private var localAnswers: [String: [String]] = [:]
     private let pageTurns: UInt32
+    /// The clock that ages unmatched sends (`TranscriptOutbox.demoteUnseen`); tests inject one.
+    private let now: () -> Date
 
-    public init(target: String, pageTurns: UInt32 = TranscriptStore.pageTurns) {
+    public init(target: String, pageTurns: UInt32 = TranscriptStore.pageTurns,
+                now: @escaping () -> Date = { Date() }) {
         self.target = target
         self.pageTurns = pageTurns
+        self.now = now
     }
 
     public var isWorking: Bool { working != nil }
@@ -265,6 +269,9 @@ public final class TranscriptStore {
             refreshAgain = false
             await refreshOnce(client: client)
         } while refreshAgain
+        // Never pending forever: a send the transcript still lacks a minute after its
+        // request returned stops reading as pending, even while refreshes fail.
+        if outbox.demoteUnseen(now: now()) { onChange?() }
     }
 
     private func refreshOnce(client: HerdrClient) async {
@@ -365,7 +372,7 @@ public final class TranscriptStore {
     }
 
     public func updateOutgoing(_ id: String, state: TranscriptSendState, wireText: String? = nil) {
-        outbox.update(id, state: state, wireText: wireText)
+        outbox.update(id, state: state, wireText: wireText, now: now())
         onChange?()
     }
 

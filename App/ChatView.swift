@@ -1,5 +1,6 @@
 import HerdrKit
 import SwiftUI
+import UIKit
 
 /// Who is reading the chat. A guest sees the same conversation without notes or step
 /// details (the server leaves them out) and cannot answer omp's questions.
@@ -41,7 +42,7 @@ final class ChatModel: ObservableObject {
         outgoing.contains {
             switch $0.state {
             case .sending, .submitted, .unconfirmed: return true
-            case .notDelivered, .previousSession: return false
+            case .notDelivered, .previousSession, .notSeen: return false
             }
         }
     }
@@ -68,9 +69,11 @@ final class ChatModel: ObservableObject {
     var target: String { store.target }
 
     func stageOutgoing(text: String, author: TranscriptAuthor, files: [ComposerAttachment] = []) -> String {
-        store.stageOutgoing(text: text, author: author, files: files.map {
+        let id = store.stageOutgoing(text: text, author: author, files: files.map {
             TranscriptAttachment(id: $0.id.uuidString, name: $0.name, isImage: $0.isImage, messageID: $0.messageID)
         })
+        followSend()
+        return id
     }
 
     func prepareOutgoing(_ id: String, client: HerdrClient) async -> Bool {
@@ -80,6 +83,18 @@ final class ChatModel: ObservableObject {
     func updateOutgoing(_ id: String?, state: TranscriptSendState, wireText: String? = nil) {
         guard let id else { return }
         store.updateOutgoing(id, state: state, wireText: wireText)
+        followSend()
+    }
+
+    /// Until when a pending send keeps the poll at one second: the minute before an
+    /// unmatched send is demoted, plus the poll that demotes it.
+    private var fastPollUntil = Date.distantPast
+    /// The poll's current sleep; a staged or updated send cancels it to poll sooner.
+    private var pollWait: Task<Void, Never>?
+
+    private func followSend() {
+        fastPollUntil = Date().addingTimeInterval(TranscriptOutbox.unseenAfter + 1)
+        pollWait?.cancel()
     }
 
     func refresh(client: HerdrClient) async {
@@ -141,23 +156,49 @@ final class ChatModel: ObservableObject {
     }
 
     /// Keeps the chat current while it is on screen: the agent's own events where the
-    /// server sends them (owner), a 3 s poll while omp works, and a slow poll otherwise as
-    /// a backstop for a missed event (and for guests, who have no event stream).
+    /// server sends them (owner), a 1 s poll while a send waits to show up in the
+    /// transcript, a 3 s poll while omp works, and a slow poll otherwise as a backstop for a
+    /// missed event (and for guests, who have no event stream).
     func follow(client: HerdrClient, paneID: String?) async {
         await store.refresh(client: client)
         await withTaskGroup(of: Void.self) { group in
             if let paneID {
                 group.addTask { await self.followEvents(client: client, paneID: paneID) }
             }
-            group.addTask {
-                while !Task.isCancelled {
-                    let working = await self.store.isWorking
-                    try? await Task.sleep(nanoseconds: (working ? 3 : 30) * 1_000_000_000)
-                    guard !Task.isCancelled else { return }
-                    await self.store.refresh(client: client)
-                }
-            }
+            group.addTask { await self.poll(client: client) }
         }
+    }
+
+    private func poll(client: HerdrClient) async {
+        while !Task.isCancelled {
+            let woken = await waitForPoll()
+            guard !Task.isCancelled else { return }
+            // A send woke the sleep: start over at the send's faster interval.
+            if woken { continue }
+            await store.refresh(client: client)
+        }
+    }
+
+    /// Sleeps until the next poll is due. True when a staged or updated send cut it short.
+    private func waitForPoll() async -> Bool {
+        let seconds: UInt64
+        if hasPendingSend && Date() < fastPollUntil {
+            seconds = 1
+        } else {
+            seconds = store.isWorking ? 3 : 30
+        }
+        let wait = Task<Void, Never> {
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            return
+        }
+        pollWait = wait
+        await withTaskCancellationHandler {
+            await wait.value
+        } onCancel: {
+            wait.cancel()
+        }
+        if pollWait == wait { pollWait = nil }
+        return wait.isCancelled
     }
 
     private func followEvents(client: HerdrClient, paneID: String) async {
@@ -750,6 +791,7 @@ struct ChatView: View {
         case .unconfirmed: receipt = "Confirmation pending"
         case .notDelivered(let reason): receipt = "Not sent · \(reason)"
         case .previousSession: receipt = "Previous session · confirmation unavailable"
+        case .notSeen: receipt = "Not seen in chat · check Terminal"
         }
         return VStack(alignment: .trailing, spacing: 4) {
             if !message.text.isEmpty { promptText(message.text) }
@@ -760,6 +802,9 @@ struct ChatView: View {
             Text(receipt).font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
                 .padding(.trailing, 6)
                 .accessibilityIdentifier("chat-send-receipt")
+                .onChange(of: receipt) { _, receipt in
+                    UIAccessibility.post(notification: .announcement, argument: receipt)
+                }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 40)

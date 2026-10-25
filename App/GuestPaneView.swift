@@ -805,6 +805,11 @@ struct GuestPaneView: View {
                     attachments.removeAll { sentIDs.contains($0.id) }
                 }
             }
+            // The request returned: look for the prompt in the transcript now rather than
+            // at the next poll (guests have no event stream).
+            if outgoingID != nil, promptAttempted {
+                Task { await chatModel.refresh(client: client) }
+            }
         }
     }
 

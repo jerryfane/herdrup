@@ -95,6 +95,19 @@ final class InputRouterTests: XCTestCase {
         )
     }
 
+    /// The agent records a submitted prompt trimmed; the chat's placeholder is matched
+    /// against that record, so intent mode forwards exactly what will be recorded.
+    func testIntentModeForwardsTrimmedPromptText() {
+        XCTAssertEqual(
+            router.plan(action: .submitText("  ship it \n"), pane: "p1", mode: .intent),
+            .prompt(pane: "p1", text: "ship it")
+        )
+        XCTAssertEqual(
+            router.plan(action: .submitText("line one\nline two "), pane: "p1", mode: .intent),
+            .prompt(pane: "p1", text: "line one\nline two")
+        )
+    }
+
     /// AXIS (the new-agent pre-fill invariant): a pending pre-filled task delivers
     /// as a PROMPT only when the agent is promptable, and WAITS otherwise — it must
     /// never resolve to a normal (rawKeys-capable) reply. Both review witnesses

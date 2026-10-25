@@ -111,7 +111,9 @@ public struct InputRouter: Sendable {
             guard !trimmed.isEmpty else {
                 return .refused(reason: "empty prompt")
             }
-            return .prompt(pane: pane, text: text)
+            // Send what the agent records: it trims a submitted prompt, and the chat
+            // matches its local placeholder against that recorded text.
+            return .prompt(pane: pane, text: trimmed)
 
         case (.submitText(let text), .rawKeys):
             // A pane with no composer still accepts typing. Characters go in

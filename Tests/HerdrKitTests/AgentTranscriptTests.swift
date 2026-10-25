@@ -336,12 +336,18 @@ final class TranscriptStoreTests: XCTestCase {
         let guest = Self.entry("guest", "user", extra: #""text":"Again","author":"guest","author_name":"sam""#)
         let first = Self.entry("first", "user", extra: #""text":"Again","author":"owner""#)
         let second = Self.entry("second", "user", extra: #""text":"Again","author":"owner""#)
+        // What the agent records: trimmed, and CRLF / CR as LF (pi trims a submitted prompt).
+        let trimmed = Self.entry("trimmed", "user", extra: #""text":"hi","author":"owner""#)
+        let pasted = Self.entry("pasted", "user", extra: #""text":"one\ntwo\nthree","author":"owner""#)
+        let guestNewline = Self.entry("guest-newline", "user",
+                                      extra: #""text":"Status?","author":"guest","author_name":"sam""#)
         let (client, _) = scripted { _ in
             defer { round += 1 }
             switch round {
             case 0: return Self.page([old])
             case 1: return Self.page([guest, first])
-            default: return Self.page([first, second])
+            case 2: return Self.page([first, second])
+            default: return Self.page([trimmed, pasted, guestNewline])
             }
         }
         let store = TranscriptStore(target: "agent")
@@ -358,6 +364,73 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertTrue(store.outbox.messages.isEmpty)
         XCTAssertEqual(store.outbox.recordedPromptIDs, ["first", "second"])
         XCTAssertEqual(store.turns.map(\.id), ["old", "guest", "first", "second"])
+
+        let spaced = store.stageOutgoing(text: "hi ", author: .owner)
+        let crlf = store.stageOutgoing(text: "\r\none\r\ntwo\rthree", author: .owner)
+        let guestSend = store.stageOutgoing(text: "Status?\n", author: .guest(name: "sam"))
+        store.updateOutgoing(spaced, state: .submitted, wireText: "hi ")
+        XCTAssertEqual(store.outbox.messages.map(\.id), [spaced, crlf, guestSend])
+        await store.refresh(client: client)
+        XCTAssertTrue(store.outbox.messages.isEmpty,
+                      "a trailing space, CRLF and a guest's trailing newline must not leave a pending duplicate")
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["first", "second", "trimmed", "pasted", "guest-newline"])
+    }
+
+    /// A placeholder never stays pending: a minute after its request returned, or once
+    /// the agent finishes a turn for a later prompt, it reads "Not seen in chat". It still
+    /// goes away if its prompt shows up after all.
+    func testUnmatchedSendIsDemotedAfterAMinuteOrALaterTurn() async {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        var pages: [String] = [
+            Self.page([Self.entry("old", "user", extra: #""text":"Earlier","author":"owner""#)]),
+            Self.page([]),
+            Self.page([]),
+            Self.page([Self.entry("late", "user", extra: #""text":"Ship it","author":"owner""#)]),
+        ]
+        let (client, _) = scripted { _ in pages.isEmpty ? Self.page([]) : pages.removeFirst() }
+        let store = TranscriptStore(target: "agent", now: { clock })
+        await store.refresh(client: client)
+
+        let returned = store.stageOutgoing(text: "Ship it", author: .owner)
+        let uploading = store.stageOutgoing(text: "With files", author: .owner)
+        store.updateOutgoing(returned, state: .unconfirmed)
+        clock += 59
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.unconfirmed, .sending])
+        clock += 1
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.notSeen, .sending],
+                       "a minute after the request returned it stops reading as pending; a send still in flight does not")
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.id), [uploading], "a late record still removes the demoted placeholder")
+        XCTAssertEqual(store.outbox.recordedPromptIDs, ["late"])
+    }
+
+    func testUnmatchedSendIsDemotedWhenTheAgentFinishesALaterTurn() async {
+        let clock = Date(timeIntervalSince1970: 1_000)
+        let end = #""status":"done""#
+        var pages: [String] = [
+            Self.page([Self.entry("old", "user", extra: #""text":"Earlier","author":"owner""#)]),
+            // The turn that was running when the sends went out ends: they may be queued.
+            Self.page([Self.entry("old-end", "turn_end", extra: end)]),
+            // A prompt neither send matches is recorded, then its turn ends.
+            Self.page([Self.entry("other", "user", extra: #""text":"Something else","author":"owner""#),
+                       Self.entry("other-reply", "reply", extra: #""text":"Done.","final":true"#)]),
+            Self.page([Self.entry("other-end", "turn_end", extra: end)]),
+        ]
+        let (client, _) = scripted { _ in pages.isEmpty ? Self.page([]) : pages.removeFirst() }
+        let store = TranscriptStore(target: "agent", now: { clock })
+        await store.refresh(client: client)
+        let queued = store.stageOutgoing(text: "Deploy", author: .owner)
+        store.updateOutgoing(queued, state: .submitted)
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.submitted],
+                       "the end of a turn that began before the send must not demote it")
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.submitted])
+        await store.refresh(client: client)
+        XCTAssertEqual(store.outbox.messages.map(\.state), [.notSeen],
+                       "the agent finished a later turn without recording this prompt")
     }
 
     func testFirstPageCannotConsumeAnOutgoingMessageBeforeItsSendBoundary() async {

@@ -8,6 +8,9 @@ public enum TranscriptSendState: Sendable, Equatable {
     case unconfirmed
     case notDelivered(String)
     case previousSession
+    /// Still unmatched a minute after the request returned, or after the agent finished a
+    /// later turn: no longer pending. It still matches if the prompt shows up after all.
+    case notSeen
 
     public init(rejection error: APIError) {
         switch PromptRejection(error) {
@@ -28,11 +31,18 @@ public struct TranscriptOutgoingMessage: Identifiable, Sendable, Equatable {
     fileprivate var existingPromptIDs: Set<String>
     fileprivate var sessionID: String?
     fileprivate var baselineReady: Bool
+    /// When the prompt request returned (`submitted` or `unconfirmed`); the minute before
+    /// demotion counts from here, so a long attachment upload does not use it up.
+    fileprivate var handedOverAt: Date?
+    /// A prompt this message did not match was recorded after it was sent; the end of
+    /// that turn means this one was not recorded as sent.
+    fileprivate var laterPromptSeen = false
 }
 
 /// A local display buffer, never a retry queue. Reconciliation consumes each new prompt
 /// at most once, so two identical sends cannot both disappear when only one is recorded.
 /// Matching says only that the text is now in the transcript, not which device wrote it.
+/// Text is compared as the agent records it: trimmed, with CRLF and CR read as LF.
 public struct TranscriptOutbox: Sendable {
     public private(set) var messages: [TranscriptOutgoingMessage] = []
     public private(set) var recordedPromptIDs: Set<String> = []
@@ -56,9 +66,16 @@ public struct TranscriptOutbox: Sendable {
         return id
     }
 
-    public mutating func update(_ id: String, state: TranscriptSendState, wireText: String? = nil) {
+    public mutating func update(_ id: String, state: TranscriptSendState, wireText: String? = nil,
+                                now: Date = Date()) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].state = state
+        switch state {
+        case .submitted, .unconfirmed:
+            if messages[index].handedOverAt == nil { messages[index].handedOverAt = now }
+        default:
+            break
+        }
         if let wireText {
             messages[index].wireText = wireText
             if let parsed = GramAttachmentPrompt.parse(wireText) { messages[index].files = parsed.files }
@@ -89,18 +106,76 @@ public struct TranscriptOutbox: Sendable {
             }
         }
         for entry in entries {
-            guard case .user(let text, let author) = entry.kind,
-                  !recordedPromptIDs.contains(entry.id),
-                  let index = messages.firstIndex(where: { message in
-                      switch message.state {
-                      case .notDelivered, .previousSession: return false
-                      default: break
-                      }
-                      return message.baselineReady && !message.existingPromptIDs.contains(entry.id)
-                          && message.wireText == text && message.author == author
-                  }) else { continue }
-            recordedPromptIDs.insert(entry.id)
-            messages.remove(at: index)
+            switch entry.kind {
+            case .user(let text, let author):
+                guard !recordedPromptIDs.contains(entry.id) else { continue }
+                let recorded = Self.normalized(text)
+                if let index = messages.firstIndex(where: { message in
+                    switch message.state {
+                    case .notDelivered, .previousSession: return false
+                    default: break
+                    }
+                    return message.baselineReady && !message.existingPromptIDs.contains(entry.id)
+                        && Self.normalized(message.wireText) == recorded && message.author == author
+                }) {
+                    recordedPromptIDs.insert(entry.id)
+                    messages.remove(at: index)
+                    continue
+                }
+                for index in messages.indices where messages[index].isAwaitingRecord
+                    && !messages[index].existingPromptIDs.contains(entry.id) {
+                    messages[index].laterPromptSeen = true
+                }
+            case .turnEnd:
+                for index in messages.indices where messages[index].isAwaitingRecord
+                    && messages[index].laterPromptSeen {
+                    messages[index].state = .notSeen
+                }
+            default:
+                continue
+            }
+        }
+    }
+
+    /// Demotes a prompt still unmatched `after` seconds after its request returned.
+    /// Returns whether anything changed.
+    @discardableResult
+    public mutating func demoteUnseen(now: Date, after: TimeInterval = TranscriptOutbox.unseenAfter) -> Bool {
+        var changed = false
+        for index in messages.indices where messages[index].isAwaitingRecord {
+            guard let since = messages[index].handedOverAt, now.timeIntervalSince(since) >= after else { continue }
+            messages[index].state = .notSeen
+            changed = true
+        }
+        return changed
+    }
+
+    /// How long a returned prompt may stay unmatched before it stops reading as pending.
+    public static let unseenAfter: TimeInterval = 60
+
+    /// The text as the agent records a submitted prompt: trimmed of surrounding spaces and
+    /// newlines, with CRLF and a lone CR read as LF.
+    static func normalized(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        var afterCR = false
+        for scalar in text.unicodeScalars {
+            if scalar == "\n", afterCR {
+                afterCR = false
+                continue
+            }
+            afterCR = scalar == "\r"
+            scalars.append(afterCR ? "\n" : scalar)
+        }
+        return String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension TranscriptOutgoingMessage {
+    /// The request returned and the prompt is not in the transcript yet.
+    var isAwaitingRecord: Bool {
+        switch state {
+        case .submitted, .unconfirmed: return baselineReady
+        default: return false
         }
     }
 }

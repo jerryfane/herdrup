@@ -166,6 +166,35 @@ final class ChatViewTests: XCTestCase {
         XCTAssertTrue(app.buttons["chat-switch-terminal"].isSelected, "Answer in Terminal should switch to it")
     }
 
+    /// A message sent with a trailing space (an iOS keyboard suggestion adds one) is
+    /// recorded trimmed by the agent; it must settle into ONE bubble, the transcript's, with
+    /// no pending placeholder left beside it.
+    func testSendWithTrailingSpaceReconcilesIntoOneBubble() throws {
+        let app = launch("chatview")
+        openAgent("herdr-app", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-view"].firstMatch.waitForExistence(timeout: 10))
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 8))
+        field.tap()
+        field.typeText("Ship the fix ")
+        let send = try XCTUnwrap(visibleButton("terminal-send-button", in: app), "the reply should be sendable")
+        send.tap()
+
+        // The placeholder (with its receipt) shows first; the transcript's copy replaces it.
+        let sent = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Ship the fix"))
+        XCTAssertTrue(sent.firstMatch.waitForExistence(timeout: 10), "the chat should show the sent message")
+        let receipt = app.descendants(matching: .any).matching(identifier: "chat-send-receipt").firstMatch
+        let placeholder = app.descendants(matching: .any).matching(identifier: "chat-outgoing-message").firstMatch
+        XCTAssertTrue(receipt.waitForNonExistence(timeout: 10),
+                      "the local placeholder should be matched and removed: \(receipt.exists ? receipt.label : "")")
+        XCTAssertFalse(placeholder.exists, "no pending placeholder may be left")
+        for label in ["Sending…", "Accepted by agent", "Confirmation pending", "Not seen in chat · check Terminal"] {
+            XCTAssertFalse(app.staticTexts[label].exists, "no \"\(label)\" placeholder may be left")
+        }
+        XCTAssertTrue(sent.firstMatch.waitForExistence(timeout: 5), "the transcript should show the sent message")
+        XCTAssertEqual(sent.count, 1, "the message should show once, not twice")
+    }
+
     // MARK: - Guest
 
     /// A shared omp agent on a host serving guests its transcript: the Chat tab, first;
