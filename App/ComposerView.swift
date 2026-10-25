@@ -462,6 +462,9 @@ struct ComposerActionIcon: View {
     var tint: Color?
     var primary = false
     var busy = false
+    /// While busy: the share of the files Send waits on that has uploaded (0...1), drawn
+    /// as a ring in place of the spinner. Nil spins.
+    var progress: Double?
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
@@ -471,7 +474,15 @@ struct ComposerActionIcon: View {
                           ? (primary ? .white : ComposerStyle.actionHover)
                           : (primary ? Palette.text : Palette.surfaceRaised))
                 .frame(width: 40, height: 40)
-            if busy {
+            if busy, let progress {
+                ZStack {
+                    Circle().stroke(lineWidth: 2).opacity(0.3)
+                    Circle().trim(from: 0, to: progress)
+                        .stroke(style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 18, height: 18)
+            } else if busy {
                 ComposerSendingIcon()
             } else {
                 image.resizable().renderingMode(.template).scaledToFit()
@@ -567,29 +578,41 @@ enum ClockSpin {
     }
 }
 
-enum ComposerAttachmentState {
+enum ComposerAttachmentState: Equatable {
     case ready
     case waiting
     case uploading(sent: Int, total: Int)
+    /// Its pre-upload landed: Send only has to post it.
+    case uploaded
+    /// Its pre-upload failed: tap the chip to upload it again (Send also retries it).
+    case uploadFailed
     case sending
     case sent
     case failed
 
-    /// One staged file's chip, the same rule in every composer: the file a send stopped
-    /// on is `failed` until the next send, a posted one is `sent`, and while a send runs
-    /// the file in flight shows its upload ring and the rest wait.
+    /// One staged file's chip, the same rule in every composer. The composer's uploader
+    /// (`ComposerUploader`) takes a file from waiting, to its upload ring, to uploaded as
+    /// soon as it is added; while a send runs, the file being posted shows so. The file a
+    /// send stopped on is `failed` until the next send, and a posted one is `sent`.
     static func `for`(
-        _ attachment: ComposerAttachment, sending: Bool, sendingID: UUID?, failedID: UUID?,
-        uploadBytes: (sent: Int, total: Int)?
+        _ attachment: ComposerAttachment, upload: ComposerUploader.Phase?, sending: Bool,
+        sendingID: UUID?, failedID: UUID?
     ) -> ComposerAttachmentState {
         if attachment.id == failedID { return .failed }
         if attachment.messageID != nil { return .sent }
-        guard sending else { return .ready }
-        guard attachment.id == sendingID else { return .waiting }
-        if let upload = uploadBytes {
-            return .uploading(sent: upload.sent, total: upload.total)
+        switch upload {
+        case .uploading(let sent, let total):
+            return .uploading(sent: sent, total: total)
+        case .queued, .paused:
+            return .waiting
+        case .failed:
+            return .uploadFailed
+        case .uploaded:
+            return sending && attachment.id == sendingID ? .sending : .uploaded
+        case nil:
+            guard sending else { return .ready }
+            return attachment.id == sendingID ? .sending : .waiting
         }
-        return .sending
     }
 
     var progress: Double? {
@@ -598,8 +621,7 @@ enum ComposerAttachmentState {
     }
 
     var isFailed: Bool {
-        if case .failed = self { return true }
-        return false
+        self == .failed || self == .uploadFailed
     }
 
     var isSent: Bool {
@@ -618,14 +640,31 @@ enum ComposerAttachmentState {
     func label(size: Int) -> String {
         let sizeLabel = GramFile.displaySize(of: UInt64(max(0, size)))
         switch self {
-        case .ready: return "\(sizeLabel) · Ready"
+        case .ready, .uploaded: return "\(sizeLabel) · Ready"
         case .waiting: return "\(sizeLabel) · Waiting"
         case .uploading:
             guard let progress else { return "Uploading…" }
             return "\(Int((progress * 100).rounded()))% · \(sizeLabel)"
+        case .uploadFailed: return "Upload failed · tap to retry"
         case .sending: return "Sending…"
         case .sent: return "Sent · \(sizeLabel)"
         case .failed: return "Failed · tap send to retry"
+        }
+    }
+
+    /// The chip's accessibility value: where its upload stands.
+    var accessibilityValue: String {
+        switch self {
+        case .ready: return "Not uploaded"
+        case .waiting: return "Waiting to upload"
+        case .uploading:
+            guard let progress else { return "Uploading" }
+            return "Uploading \(Int((progress * 100).rounded())) percent"
+        case .uploaded: return "Uploaded"
+        case .uploadFailed: return "Upload failed"
+        case .sending: return "Sending"
+        case .sent: return "Sent"
+        case .failed: return "Failed"
         }
     }
 }
@@ -637,6 +676,8 @@ struct ComposerAttachmentChip: View {
     let state: ComposerAttachmentState
     let canRemove: Bool
     let onRemove: () -> Void
+    /// Uploads the file again after its pre-upload failed (`ComposerAttachmentState.uploadFailed`).
+    var onRetry: () -> Void = {}
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var hoveringRemove = false
 
@@ -646,7 +687,8 @@ struct ComposerAttachmentChip: View {
                 if state.progress != nil || state.isIndeterminate {
                     TransferRing(progress: state.progress)
                 }
-                Image(state.isSent ? "ComposerCheck" : state.isFailed ? "ComposerAlert" : isImage ? "ComposerPhoto" : "ComposerFile")
+                Image(state.isSent || state == .uploaded ? "ComposerCheck"
+                      : state.isFailed ? "ComposerAlert" : isImage ? "ComposerPhoto" : "ComposerFile")
                     .resizable().renderingMode(.template).frame(width: 19, height: 19)
                     .foregroundStyle(state.isFailed ? Palette.died : state.isSent ? Palette.text : Palette.textDim)
             }
@@ -680,6 +722,14 @@ struct ComposerAttachmentChip: View {
             .opacity(canRemove ? 1 : 0.25)
             .onHover { hoveringRemove = $0 }
             .accessibilityLabel("Remove \(name)")
+        }
+        // A failed pre-upload retries from a tap anywhere on the chip but its remove button.
+        .contentShape(Rectangle())
+        .onTapGesture { if state == .uploadFailed { onRetry() } }
+        .accessibilityElement(children: .contain)
+        .accessibilityValue(state.accessibilityValue)
+        .accessibilityActions {
+            if state == .uploadFailed { Button("Retry upload", action: onRetry) }
         }
         .padding(.leading, 9)
         .padding(.trailing, 3)

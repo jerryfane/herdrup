@@ -239,8 +239,9 @@ struct GramView: View {
     /// Gates Send and the paperclip so a text-only send can't race the load and a
     /// second pick can't start concurrently.
     @State private var loadingPhoto = false
-    /// Byte progress for the active file's icon ring.
-    @State private var uploadBytes: (sent: Int, total: Int)?
+    /// Uploads each staged file as it is added, so Send only posts; its per-file progress
+    /// drives the chips. Released with the page, which abandons the draft.
+    @State private var uploader = ComposerUploader()
     /// The file in flight, while a send runs.
     @State private var sendingAttachmentID: UUID?
     @State private var failedAttachmentID: UUID?
@@ -460,10 +461,13 @@ struct GramView: View {
             isPresented: $showAttachSheet, loading: $loadingPhoto,
             room: { ComposerStaging.maxAttachments - attachedFiles.count }
         ) { outcome in
-            attachedFiles += outcome.files.map {
+            let picked = outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime,
                                    isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
             }
+            attachedFiles += picked
+            // Upload at once, so Send only has to post them.
+            uploader.start(picked, client: client, into: $attachedFiles)
             sendError = outcome.note
         }
         // A tapped file chip opens through the shared viewer (GramFileViewer.swift):
@@ -482,6 +486,8 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
+        // Gram is a persistent tab: coming back picks up the uploads leaving it stopped.
+        .onAppear { uploader.resume() }
         // Backstop: on the way out, cancel an in-flight file open, so a late completion
         // can't strand a temp file after `gramFileViewer`'s cleanup already ran.
         .onDisappear {
@@ -490,6 +496,9 @@ struct GramView: View {
             unreadRuleCaptured = false
             openFileTask?.cancel()
             saveFileTask?.cancel()
+            // Leaving Gram stops its attachments' uploads (a send already waiting on one
+            // keeps it); `onAppear` resumes them.
+            uploader.pause()
             // Staged attachment bytes are deliberately NOT removed here. Gram is a
             // persistent tab (see HerdrApp's TabView), so `onDisappear` fires on a
             // plain tab switch while this view's `@State` — including the chips in
@@ -1402,7 +1411,8 @@ struct GramView: View {
                         Button {
                             Task { await send() }
                         } label: {
-                            ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                            ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending,
+                                               progress: uploader.sendProgress(attachedFiles, sending: sending))
                         }
                         .disabled(!canSend)
                         .fixedSize()
@@ -1699,19 +1709,27 @@ struct GramView: View {
     #endif
 
     private func attachmentChip(_ file: ComposerAttachment) -> some View {
+        // A file still uploading can go: removing it cancels its upload. Only a send in
+        // flight holds the strip, so the batch it is delivering stays whole.
         ComposerAttachmentChip(
             name: file.name, size: file.size, isImage: file.isImage,
-            state: attachmentState(file), canRemove: !sending
-        ) {
-            try? FileManager.default.removeItem(at: file.staged.dir)
-            attachedFiles.removeAll { $0.id == file.id }
-        }
+            state: attachmentState(file), canRemove: !sending,
+            onRemove: { removeAttachment(file.id) },
+            onRetry: { uploader.retry(file.id) }
+        )
         .accessibilityIdentifier("gram-attachment")
     }
 
     private func attachmentState(_ file: ComposerAttachment) -> ComposerAttachmentState {
-        .for(file, sending: sending, sendingID: sendingAttachmentID,
-             failedID: failedAttachmentID, uploadBytes: uploadBytes)
+        .for(file, upload: uploader.phase(of: file.id), sending: sending,
+             sendingID: sendingAttachmentID, failedID: failedAttachmentID)
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        guard let current = attachedFiles.first(where: { $0.id == id }) else { return }
+        attachedFiles.removeAll { $0.id == id }
+        // Cancels a running upload, deletes the staged bytes, and discards a finished upload.
+        uploader.remove(current)
     }
 
     // MARK: - Actions
@@ -2028,7 +2046,6 @@ struct GramView: View {
         defer {
             sending = false
             sendingAttachmentID = nil
-            uploadBytes = nil
             #if DEBUG
             postCallsProbe = MockTransport.gramPostLogSummary
             #endif
@@ -2051,30 +2068,23 @@ struct GramView: View {
             return
         }
 
-        // One upload+post per file (the wire is one-file-per-message), through the shared
-        // `GramAttachmentSender`. The text rides as the FIRST file's caption; the rest
-        // post with no text. `draft` is cleared the instant that first message posts, so
-        // a retry of the remaining files never re-sends the caption onto a different file.
+        // One post per file (the wire is one-file-per-message), through the shared
+        // `GramAttachmentSender`. Each file has been uploading since it was added
+        // (`uploader`): the ones that landed post at once, the rest are awaited. The text
+        // rides as the FIRST file's caption; the rest post with no text. `draft` is
+        // cleared the instant that first message posts, so a retry of the remaining files
+        // never re-sends the caption onto a different file.
         let captionID = files.first?.id
-        let sender = GramAttachmentSender(
-            upload: { file in
-                uploadBytes = (sent: 0, total: file.size)
-                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
-                    uploadBytes = (sent: sent, total: total)
-                }
-                uploadBytes = nil
-                return uploadID
-            },
-            post: { file, attachment in
-                let posted = try await client.gramPost(
-                    text: file.id == captionID ? text : "", to: to, attachment: attachment)
-                // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
-                // cannot drop it; de-duped by id, reconciled once the server reflects it.
-                pendingPosts.removeAll { $0.id == posted.id }
-                pendingPosts.insert(posted, at: 0)
-                if file.id == captionID { draft = "" }
-                return posted.id
-            })
+        let sender = uploader.sender(client: client, into: $attachedFiles, post: { file, attachment in
+            let posted = try await client.gramPost(
+                text: file.id == captionID ? text : "", to: to, attachment: attachment)
+            // Optimistic: kept in `pendingPosts`, so a concurrent poll's snapshot
+            // cannot drop it; de-duped by id, reconciled once the server reflects it.
+            pendingPosts.removeAll { $0.id == posted.id }
+            pendingPosts.insert(posted, at: 0)
+            if file.id == captionID { draft = "" }
+            return posted.id
+        })
         let result = await sender.send(files, sending: { sendingAttachmentID = $0.id }) { file in
             guard let index = attachedFiles.firstIndex(where: { $0.id == file.id }) else { return }
             attachedFiles[index] = file
@@ -2083,7 +2093,10 @@ struct GramView: View {
         // for a one-tap retry (the failed file keeps its upload id, so the retry posts
         // the bytes already uploaded); a full success clears the strip. Already-sent
         // messages are live and are not rolled back.
-        attachedFiles.removeAll { $0.messageID != nil }
+        let posted = Set(attachedFiles.filter { $0.messageID != nil }.map(\.id))
+        attachedFiles.removeAll { posted.contains($0.id) }
+        // Each post consumed its upload: nothing left on the host to discard.
+        uploader.forget(posted)
         if case .failure(let failure) = result {
             failedAttachmentID = failure.attachment.id
             let reason: String

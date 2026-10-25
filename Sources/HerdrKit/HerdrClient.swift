@@ -642,6 +642,43 @@ public actor HerdrClient {
         _ = try await call("gram.delete", GramDeleteParams(id: id), as: JSONNull.self)
     }
 
+    struct GramUploadDiscardParams: Encodable {
+        let uploadID: String
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "upload_id"
+        }
+    }
+
+    struct GramUploadDiscardResult: Decodable { let discarded: Bool }
+
+    /// Drops a staged upload that will never be posted (`gram.upload.discard`), so its
+    /// bytes stop counting against the host's shared staging budget before the 24 h sweep
+    /// would reclaim them. Owner or guest: the host scopes a guest to its own uploads.
+    ///
+    /// Returns whether the host held an upload under that id; `false` (unknown, already
+    /// discarded, or consumed by a post) is a normal answer. A host that predates the
+    /// method cannot even deserialize it (`invalid_request` / "unknown variant", see
+    /// `probeFork`), and that also answers `false`: the sweep reclaims the bytes there.
+    @discardableResult
+    public func gramUploadDiscard(uploadID: String) async throws -> Bool {
+        do {
+            return try await call("gram.upload.discard", GramUploadDiscardParams(uploadID: uploadID),
+                                  as: GramUploadDiscardResult.self).discarded
+        } catch let error as APIError where Self.isUnknownMethod(error, "gram.upload.discard") {
+            return false
+        }
+    }
+
+    /// The answer a host gives a method it predates: it parses `method` as an enum, so an
+    /// unknown one fails deserialization with `invalid_request` naming the variant
+    /// (`unknown_method` on hosts that report it by name).
+    static func isUnknownMethod(_ error: APIError, _ method: String) -> Bool {
+        if error.code == "unknown_method" { return true }
+        return error.code == "invalid_request"
+            && error.message.lowercased().contains("unknown variant")
+            && error.message.contains(method)
+    }
+
     struct GramUploadChunkParams: Encodable {
         let uploadID: String
         let offset: UInt64
@@ -816,6 +853,10 @@ public actor HerdrClient {
         var offset = 0
         await onProgress?(0, total)
         while let chunk = try handle.read(upToCount: chunkBytes), !chunk.isEmpty {
+            // A composer cancels a pre-upload whose chip was removed. The streaming channel
+            // tears itself down on cancellation; the per-chunk path stops here, between
+            // chunks, rather than sending the rest of a file nobody will post.
+            try Task.checkCancellation()
             let encoded = chunk.base64EncodedString()
             if streaming, let channel {
                 try await channel.sendChunk(offset: UInt64(offset), dataBase64: encoded)

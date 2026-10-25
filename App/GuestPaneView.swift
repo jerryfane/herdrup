@@ -57,7 +57,9 @@ struct GuestPaneView: View {
     @State private var attachments: [ComposerAttachment] = []
     @State private var sendingAttachmentID: UUID?
     @State private var failedAttachmentID: UUID?
-    @State private var uploadBytes: (sent: Int, total: Int)?
+    /// Uploads each staged file as it is added, so Send only posts and prompts. Released
+    /// with the pane, which abandons the draft (cancels and discards its uploads).
+    @State private var uploader = ComposerUploader()
     @State private var loadingAttachment = false
     @State private var showAttachSheet = false
     @State private var findOpen = false
@@ -192,12 +194,19 @@ struct GuestPaneView: View {
             isPresented: $showAttachSheet, loading: $loadingAttachment,
             room: { ComposerStaging.maxAttachments - attachments.count }
         ) { outcome in
-            attachments += outcome.files.map {
+            let picked = outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime,
                                    isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
             }
+            attachments += picked
+            // Upload at once, so Send only has to post them and prompt.
+            uploader.start(picked, client: client, into: $attachments)
             note = outcome.note
         }
+        // Leaving the pane stops its uploads (a send waiting on one keeps it); closing it
+        // for good releases the uploader, which cancels and discards them.
+        .onDisappear { uploader.pause() }
+        .onAppear { uploader.resume() }
         #if DEBUG
         .overlay(alignment: .topLeading) { debugProbes }
         #endif
@@ -499,7 +508,7 @@ struct GuestPaneView: View {
             .overlay(alignment: .bottom) {
                 VStack(spacing: 0) {
                     Group {
-                        if !showingTerminal && note == nil && connectionNote == nil && uploadBytes == nil && !isBlocked {
+                        if !showingTerminal && note == nil && connectionNote == nil && !isBlocked {
                             Color.clear.frame(height: 4)
                         } else {
                             noteRow.padding(.top, 2).padding(.bottom, 10)
@@ -518,17 +527,14 @@ struct GuestPaneView: View {
             }
     }
 
-    /// The single line above the composer: an error or progress note when there is one,
-    /// else the blocked banner, else the view-only reminder.
+    /// The single line above the composer: an error note when there is one, else the
+    /// blocked banner, else the view-only reminder.
     @ViewBuilder
     private var noteRow: some View {
         HStack(spacing: 7) {
             if let text = note ?? connectionNote {
                 Text(text).foregroundStyle(Palette.textDim)
                     .accessibilityIdentifier("guest-note")
-            } else if let bytes = uploadBytes, bytes.total > 0 {
-                Text("Uploading… \(Int(Double(bytes.sent) / Double(bytes.total) * 100))%")
-                    .foregroundStyle(Palette.textDim)
             } else if isBlocked {
                 Image(systemName: "clock").font(.system(size: 12, weight: .semibold))
                 Text("\(access.agentName) is asking a question only \(access.ownerName) can answer")
@@ -624,7 +630,8 @@ struct GuestPaneView: View {
                     .accessibilityIdentifier("guest-mic-button")
                 if hasContent {
                     Button { send() } label: {
-                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending,
+                                           progress: uploader.sendProgress(attachments, sending: sending))
                     }
                     .disabled(!canCompose || sending || dictating)
                     .fixedSize()
@@ -650,15 +657,23 @@ struct GuestPaneView: View {
 
     private func attachmentChip(_ file: ComposerAttachment) -> some View {
         let state = ComposerAttachmentState.for(
-            file, sending: sending, sendingID: sendingAttachmentID,
-            failedID: failedAttachmentID, uploadBytes: uploadBytes)
+            file, upload: uploader.phase(of: file.id), sending: sending,
+            sendingID: sendingAttachmentID, failedID: failedAttachmentID)
+        // A file still uploading can go: removing it cancels its upload. Only a send in
+        // flight holds the strip, so the batch it is delivering stays whole.
         return ComposerAttachmentChip(
             name: file.name, size: file.staged.size, isImage: file.isImage, state: state,
-            canRemove: !sending
-        ) {
-            try? FileManager.default.removeItem(at: file.staged.dir)
-            attachments.removeAll { $0.id == file.id }
-        }
+            canRemove: !sending,
+            onRemove: { removeAttachment(file.id) },
+            onRetry: { uploader.retry(file.id) }
+        )
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        guard let current = attachments.first(where: { $0.id == id }) else { return }
+        attachments.removeAll { $0.id == id }
+        // Cancels a running upload, deletes the staged bytes, and discards a finished upload.
+        uploader.remove(current)
     }
 
     // MARK: - Find
@@ -761,7 +776,7 @@ struct GuestPaneView: View {
         // relay connection and fails the send; this keeps it running for iOS's grace period.
         let background = BackgroundAssertion(name: "herdr.guest.send")
         Task {
-            defer { sending = false; uploadBytes = nil; sendingAttachmentID = nil; background.end() }
+            defer { sending = false; sendingAttachmentID = nil; background.end() }
             failedAttachmentID = nil
             var promptAttempted = false
             if let outgoingID, !(await chatModel.prepareOutgoing(outgoingID, client: client)) {
@@ -780,9 +795,11 @@ struct GuestPaneView: View {
                     pane: access.agentTarget, text: prompt,
                     waitUntil: HerdrClient.anyAgentStatus, timeoutMs: 6000)
                 chatModel.updateOutgoing(outgoingID, state: receipt == .submitted ? .submitted : .unconfirmed)
-                // Each file's staged bytes went when its gram posted (the sender).
+                // Each file's staged bytes went when its gram posted (the sender), and each
+                // post consumed its upload: nothing left on the host to discard.
                 let sentIDs = Set(batch.map(\.id))
                 attachments.removeAll { sentIDs.contains($0.id) }
+                uploader.forget(sentIDs)
                 if reply.trimmingCharacters(in: .whitespacesAndNewlines) == text { reply = "" }
                 // Attachments are the guest's own Grams: show them in the Gram tab.
                 if !batch.isEmpty, showsGram { await gram.refresh(client: client, access: access) }
@@ -803,30 +820,24 @@ struct GuestPaneView: View {
                     // An uncertain response must not leave a one-tap duplicate send.
                     let sentIDs = Set(batch.map(\.id))
                     attachments.removeAll { sentIDs.contains($0.id) }
+                    uploader.forget(sentIDs)
                 }
             }
         }
     }
 
-    /// Uploads and posts each staged file as a gram to the shared agent
-    /// (`GramAttachmentSender`), remembering each step so a retry after a failure resumes
-    /// rather than re-sends.
+    /// Posts each staged file as a gram to the shared agent (`GramAttachmentSender`),
+    /// remembering each step so a retry after a failure resumes rather than re-sends. Each
+    /// file has been uploading since it was added (`uploader`): the ones that landed post at
+    /// once, the rest are awaited, and only one whose upload failed or the host lost
+    /// uploads here.
     private func deliver(_ batch: [ComposerAttachment]) async throws -> [GramAttachmentPrompt.Delivered] {
-        let sender = GramAttachmentSender(
-            upload: { file in
-                uploadBytes = (sent: 0, total: file.size)
-                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
-                    uploadBytes = (sent: sent, total: total)
-                }
-                uploadBytes = nil
-                return uploadID
-            },
-            post: { _, attachment in
-                try await client.guestGramPost(
-                    text: "Attachment from \(access.guestName).", to: access.agentName,
-                    attachment: attachment
-                ).id
-            })
+        let sender = uploader.sender(client: client, into: $attachments, post: { _, attachment in
+            try await client.guestGramPost(
+                text: "Attachment from \(access.guestName).", to: access.agentName,
+                attachment: attachment
+            ).id
+        })
         let result = await sender.send(batch, sending: { sendingAttachmentID = $0.id }) { file in
             guard let index = attachments.firstIndex(where: { $0.id == file.id }) else { return }
             attachments[index] = file

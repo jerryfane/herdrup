@@ -81,7 +81,7 @@ struct GuestMockTransport: HerdrTransport {
 
     static let allowlist: Set<String> = [
         "ping", "agent.list", "agent.get", "agent.read", "pane.stream", "agent.prompt",
-        "gram.upload_chunk", "gram.post", "pane.set_pty_size",
+        "gram.upload_chunk", "gram.upload.discard", "gram.post", "pane.set_pty_size",
     ]
 
     /// Allowed only where the host advertises the feature (herdrup#338).
@@ -167,6 +167,12 @@ struct GuestMockTransport: HerdrTransport {
             return #"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(sharedAgentJSON),\#(Self.otherAgentJSON)]}}"#
         case "agent.get":
             return #"{"id":"\#(id)","result":{"type":"agent_info","agent":\#(sharedAgentJSON)}}"#
+        case "gram.upload.discard":
+            // A guest drops its own staged upload (a removed chip, an abandoned draft).
+            let uploadID = params["upload_id"] as? String ?? ""
+            Self.hostRecorder.append("gram.upload.discard:\(uploadID)")
+            let discarded = Self.gram.discard(uploadID: uploadID)
+            return #"{"id":"\#(id)","result":{"type":"gram_upload_discarded","discarded":\#(discarded)}}"#
         case "agent.read":
             if scenario == .paused {
                 return Self.errorLine(id: id, code: "guest_paused", message: "llm-opt isn't running")
@@ -490,6 +496,11 @@ struct GuestMockTransport: HerdrTransport {
 
         func stage(uploadID: String, bytes: Int) {
             lock.withLock { staged[uploadID, default: 0] += bytes }
+        }
+
+        /// Drops a staged upload; false when none is staged under that id.
+        func discard(uploadID: String) -> Bool {
+            lock.withLock { staged.removeValue(forKey: uploadID) != nil }
         }
 
         /// Stores the guest's post and returns the host's guest projection of it, or nil when
