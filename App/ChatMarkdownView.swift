@@ -42,7 +42,7 @@ struct ChatMarkdownView: View {
             }
             .padding(.top, 2)
         case .code(let language, let code):
-            GramCodeBlock(code: code, language: language)
+            GramCodeBlock(code: code, language: language, textScale: textScale)
         case .table(let header, let rows):
             ChatMarkdownTable(header: header, rows: rows)
         case .quote(let text):

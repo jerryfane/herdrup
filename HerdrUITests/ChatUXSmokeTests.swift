@@ -346,5 +346,29 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["Select Text"].exists, "a prompt offers Select Text")
         bubbleCopy.tap()
         waitForCopied(app, "Check typography and wrapped tables.")
+
+        // The chat's text-size control grows the code block's code too, as it does the
+        // rest of the reply (GramCodeBlock's `textScale`; Gram itself keeps 1).
+        app.buttons["terminal-actions"].tap()
+        app.buttons["Reset"].tap()
+        dismissTextSizeMenu(app)
+        let code = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "let copied = true")).firstMatch
+        XCTAssertTrue(code.waitForExistence(timeout: 5), app.debugDescription)
+        let codeHeight = code.frame.height
+        for _ in 0..<4 {
+            app.buttons["terminal-actions"].tap()
+            app.buttons["terminal-font-increase"].tap()
+            dismissTextSizeMenu(app)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while code.frame.height <= codeHeight + 4, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertGreaterThan(code.frame.height, codeHeight + 4,
+                             "four text-size steps grow the chat code block's code (was \(codeHeight) pt)")
+        record(app, "Chat code block follows the chat text size")
+        app.buttons["terminal-actions"].tap()
+        app.buttons["Reset"].tap()
+        dismissTextSizeMenu(app)
     }
 }
