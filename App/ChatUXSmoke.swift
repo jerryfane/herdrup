@@ -25,6 +25,9 @@ enum ChatUXSmoke {
               let response = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any],
               var result = response["result"] as? [String: Any],
               var entries = result["entries"] as? [[String: Any]] else { return original }
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_LARGE"] == "1" {
+            entries += largeTurns(endingBefore: timestamp)
+        }
         entries.append(["id": "ux-user", "kind": "user", "author": "owner",
                         "text": "Check typography and wrapped tables.", "ts_ms": timestamp])
         entries.append(["id": "ux-thought", "kind": "thinking",
@@ -49,6 +52,46 @@ enum ChatUXSmoke {
         ]
         result["recap"] = ["turn_id": "ux-reply", "text": "Fixture recap only: typography is ready for inspection."]
         return ChatMockConversation.encode(id: id, result: result)
+    }
+
+    /// Six turns × 80 reply paragraphs: the large fixture says "example" 480 times, once
+    /// per reply paragraph and nowhere else in the mock conversation (under the search cap,
+    /// so `ChatUXSmokeTests` can expect the exact count).
+    private static let largeTurnCount = 6
+    private static let largeReplyParagraphs = 80
+
+    /// `HERDR_CHAT_UX_LARGE=1`: a long session like the one that froze Chat search
+    /// (herdrup#523 item 8). Six turns with ~14 KB replies, ~6 KB thoughts and 300-character
+    /// step details, full of characters that case folding splits or expands (skin tones,
+    /// flags, a ZWJ family, ß, İ, the ﬁ ligature, a decomposed é). A one-letter search
+    /// finds thousands of matches.
+    private static func largeTurns(endingBefore end: UInt64) -> [[String: Any]] {
+        let family = "👨\u{200D}👩\u{200D}👧\u{200D}👦"
+        let reply = String(repeating: "Release review: the service executes every queued request, then rechecks the cache entries 👍🏽 🇺🇸 \(family) Straße İstanbul ﬁle cafe\u{301} example.\n\n",
+                           count: largeReplyParagraphs)
+        let thought = String(repeating: "Considering whether the deployment needs another pass over the queue 👍🏽 \(family) STRASSE ﬁnal rese\u{301}rve.\n\n",
+                             count: 40)
+        let detail = String(String(repeating: "verify the release sequence step ", count: 10).prefix(300))
+        var entries: [[String: Any]] = []
+        var ts = end - 1_000_000
+        func add(_ id: String, _ fields: [String: Any]) {
+            var entry = fields
+            entry["id"] = id
+            entry["ts_ms"] = ts
+            ts += 1_000
+            entries.append(entry)
+        }
+        for turn in 0..<largeTurnCount {
+            add("large-\(turn)u", ["kind": "user", "author": "owner", "text": "Large review \(turn): go over the release notes"])
+            add("large-\(turn)t", ["kind": "thinking", "text": thought])
+            for step in 0..<(turn == 0 ? 50 : 4) {
+                add("large-\(turn)s\(step)", ["kind": "step", "tool": "bash", "intent": "Verifying release step \(step)",
+                                              "status": "ok", "detail": detail])
+            }
+            add("large-\(turn)r", ["kind": "reply", "final": true, "text": reply])
+            add("large-\(turn)e", ["kind": "turn_end", "status": "done"])
+        }
+        return entries
     }
 }
 #endif

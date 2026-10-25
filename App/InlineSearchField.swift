@@ -15,8 +15,9 @@ struct InlineSearchField: View {
     let placeholder: String
     @Binding var text: String
     var focus: FocusState<Bool>.Binding
-    /// `(index, total)` for a walk-the-matches search; nil for a filter.
-    var matches: (index: Int, total: Int)?
+    /// `(index, total, capped)` for a walk-the-matches search; nil for a filter. `capped`
+    /// means more matches exist than `total`: the counter reads "3/500+".
+    var matches: (index: Int, total: Int, capped: Bool)?
     var onNext: (() -> Void)?
     var onPrevious: (() -> Void)?
     /// Identifier prefix so each host's controls are addressable in UI tests.
@@ -43,11 +44,14 @@ struct InlineSearchField: View {
                 // the list itself, and a "0 results" chip above a visibly empty list is
                 // the same fact twice.
                 if matches.total > 0 {
-                    Text("\(matches.index)/\(matches.total)")
+                    Text("\(matches.index)/\(matches.total)\(matches.capped ? "+" : "")")
                         .font(Typography.machine(11))
                         .foregroundStyle(Palette.textFaint)
                         .monospacedDigit()
                         .accessibilityIdentifier("\(identifierPrefix)-count")
+                        .accessibilityLabel(matches.capped
+                            ? "Match \(matches.index) of \(matches.total) or more matches"
+                            : "\(matches.index)/\(matches.total)")
                 } else if !text.isEmpty {
                     Text("none")
                         .font(Typography.machine(11))
