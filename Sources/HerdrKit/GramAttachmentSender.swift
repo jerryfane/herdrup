@@ -49,6 +49,9 @@ public struct ComposerAttachment: Identifiable, Sendable, Equatable {
 ///   they are known. The caller writes them back into its staged list, so a retry after
 ///   a mid-batch failure skips every file already posted and posts an uploaded one
 ///   without transferring it again.
+/// - PRE-UPLOAD. A composer starts each file's upload as it is added (`ComposerUploader`).
+///   A file Send reaches without an `uploadID` first awaits that upload (`preUploaded`),
+///   so a file still uploading is never sent twice; only a file with none is uploaded here.
 /// - A post refused with `upload_in_progress` is asked again (`postAttempts` tries,
 ///   `retryDelayNanoseconds` apart), never re-uploaded: see `postRetryingInProgress(_:)`.
 /// - A post refused because the host holds no upload under that id (`isStaleUpload`)
@@ -57,6 +60,10 @@ public struct ComposerAttachment: Identifiable, Sendable, Equatable {
 public struct GramAttachmentSender {
     /// Uploads one file's staged bytes; returns the host's `upload_id`.
     public typealias Upload = @MainActor (ComposerAttachment) async throws -> String
+    /// The composer's pre-upload of a file (`ComposerUploader.waitForUpload`): its
+    /// `upload_id` once it finishes (throwing its failure), or nil when there is none and
+    /// the file is uploaded now.
+    public typealias PreUploaded = @MainActor (ComposerAttachment) async throws -> String?
     /// Posts one uploaded file as a gram; returns the posted message's id.
     public typealias Post = @MainActor (ComposerAttachment, HerdrClient.GramFileAttachment) async throws -> String
 
@@ -80,28 +87,39 @@ public struct GramAttachmentSender {
     public nonisolated static let postAttempts = 3
 
     private let upload: Upload
+    private let preUploaded: PreUploaded
     private let post: Post
     private let retryDelayNanoseconds: UInt64
 
-    public init(upload: @escaping Upload, post: @escaping Post, retryDelayNanoseconds: UInt64 = 1_000_000_000) {
+    public init(
+        upload: @escaping Upload,
+        preUploaded: @escaping PreUploaded = { _ in nil },
+        post: @escaping Post,
+        retryDelayNanoseconds: UInt64 = 1_000_000_000
+    ) {
         self.upload = upload
+        self.preUploaded = preUploaded
         self.post = post
         self.retryDelayNanoseconds = retryDelayNanoseconds
     }
 
-    /// Delivers every file of `batch` that has not posted yet, in order, and returns the
-    /// whole batch as delivered (for `GramAttachmentPrompt`), or the failure that stopped
-    /// it. `sending` names each file as its upload/post starts; `update` receives every
-    /// change to a file's `uploadID` / `messageID`. A posted file's staged bytes are
-    /// removed at once: nothing reads them again.
+    /// Delivers every file of `batch` that has not posted yet and returns the whole batch
+    /// as delivered, in batch order (for `GramAttachmentPrompt`), or the failure that
+    /// stopped it. Files already on the host (a finished pre-upload, or a resumed send's)
+    /// post first, so a finished upload never waits behind one still running; the rest
+    /// follow in order. `sending` names each file as its upload/post starts; `update`
+    /// receives every change to a file's `uploadID` / `messageID`. A posted file's staged
+    /// bytes are removed at once: nothing reads them again.
     public func send(
         _ batch: [ComposerAttachment],
         sending: (ComposerAttachment) -> Void = { _ in },
         update: (ComposerAttachment) -> Void
     ) async -> Result<[GramAttachmentPrompt.Delivered], Failure> {
-        var delivered: [GramAttachmentPrompt.Delivered] = []
-        for original in batch {
-            var file = original
+        let onHost = batch.indices.filter { batch[$0].uploadID != nil || batch[$0].messageID != nil }
+        let order = onHost + batch.indices.filter { !onHost.contains($0) }
+        var delivered: [Int: GramAttachmentPrompt.Delivered] = [:]
+        for index in order {
+            var file = batch[index]
             if file.messageID == nil {
                 sending(file)
                 do {
@@ -111,15 +129,21 @@ public struct GramAttachmentSender {
                         attachment: file, delivered: delivered.count, total: batch.count, error: error))
                 }
             }
-            delivered.append(GramAttachmentPrompt.Delivered(
-                name: file.name, isImage: file.isImage, messageID: file.messageID ?? ""))
+            delivered[index] = GramAttachmentPrompt.Delivered(
+                name: file.name, isImage: file.isImage, messageID: file.messageID ?? "")
         }
-        return .success(delivered)
+        return .success(batch.indices.compactMap { delivered[$0] })
     }
 
     private func deliver(_ file: inout ComposerAttachment, update: (ComposerAttachment) -> Void) async throws {
         if file.uploadID == nil {
-            file.uploadID = try await upload(file)
+            // A file the composer started uploading as it was added: wait for that upload
+            // (or take the one that already landed) rather than send the bytes twice.
+            if let pending = try await preUploaded(file) {
+                file.uploadID = pending
+            } else {
+                file.uploadID = try await upload(file)
+            }
             update(file)
         }
         let messageID: String

@@ -91,8 +91,10 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     private var scenario = Scenario.quiet
     private var kitty = false
     /// What reached the host on the attachment path — uploaded bytes, gram posts and
-    /// prompts — so a receipt can prove a send delivered, not just that its chip left.
+    /// prompts — so a receipt can prove a send delivered, not just that its chip left, and
+    /// that a file uploaded as soon as it was picked was not uploaded again on Send.
     private var uploadedBytes = 0
+    private var uploadDiscards = 0
     private var gramPosts = 0
     private var prompts = 0
     private var lastPrompt = ""
@@ -159,6 +161,7 @@ final class TerminalInteractionDriver: @unchecked Sendable {
                 case "gram.upload_chunk":
                     uploadedBytes += Data(base64Encoded: request.params?.dataBase64 ?? "")?.count ?? 0
                 case "gram.post": gramPosts += 1
+                case "gram.upload.discard": uploadDiscards += 1
                 case "agent.prompt":
                     prompts += 1
                     lastPrompt = request.params?.text ?? ""
@@ -397,8 +400,8 @@ final class TerminalInteractionDriver: @unchecked Sendable {
     /// The attachment-path receipt. Kept on the ROOT driver: gram and prompt calls
     /// carry no `pane_id`, so they never reach a pane's child driver.
     func hostReceipt() -> [String: Any] {
-        locked { ["uploadedBytes": uploadedBytes, "gramPosts": gramPosts,
-                  "prompts": prompts, "lastPrompt": lastPrompt] }
+        locked { ["uploadedBytes": uploadedBytes, "uploadDiscards": uploadDiscards,
+                  "gramPosts": gramPosts, "prompts": prompts, "lastPrompt": lastPrompt] }
     }
 
     func snapshot() -> [String: Any] {

@@ -48,9 +48,11 @@ enum ComposerStaging {
     /// file was held in memory as `Data`: ten 100 MB picks would have been ~1 GB
     /// resident. Staged bytes now live in a temp file and the upload reads them one frame
     /// at a time, so the resident ceiling is a single frame no matter how many files are
-    /// staged or how large they are. Every composer sends through the SERIAL
-    /// `GramAttachmentSender` and `gram.post` consumes each staging file, so the daemon's
-    /// 1 GiB aggregate staging budget never sees more than one upload in flight.
+    /// staged or how large they are. Every composer uploads through its SERIAL
+    /// `ComposerUploader` (one file at a time, and Send's own uploads queue on the same
+    /// line), so one composer never has more than one upload in flight against the
+    /// daemon's 1 GiB aggregate staging budget; `gram.post` consumes each staging file,
+    /// and a removed or abandoned one is discarded (`gram.upload.discard`).
     static let maxAttachments = 10
 
     static let root = FileManager.default.temporaryDirectory
@@ -81,6 +83,64 @@ enum ComposerStaging {
         await Task.detached(priority: .utility) {
             GramStaging.sweepAbandoned(root: stagingRoot, keeping: current)
         }.value
+    }
+}
+
+/// The one way every composer (the terminal reply, the guest pane, the Gram page) drives
+/// its `ComposerUploader` against its host: each file starts uploading as it is added, Send
+/// waits on those uploads through `sender`, and a file that leaves the draft (its chip's X,
+/// or the composer closing) is cancelled or discarded on the host.
+extension ComposerUploader {
+    /// Uploads a file's staged bytes to `client`'s host, reporting byte progress.
+    static func upload(to client: HerdrClient) -> Upload {
+        { file, progress in
+            try await client.gramUploadFile(fileURL: file.staged.url, onProgress: progress)
+        }
+    }
+
+    /// Drops a finished upload on `client`'s host; a host that predates the call ignores it.
+    static func discard(on client: HerdrClient) -> Discard {
+        { uploadID in _ = try await client.gramUploadDiscard(uploadID: uploadID) }
+    }
+
+    /// Writes each landed upload's host id into the composer's staged list, so Send posts
+    /// it as a resumed send would. Through the list's `Binding`, never a closure over the
+    /// view: the uploader keeps this for as long as the file is staged, and a captured
+    /// view (which holds the uploader in its `@State`) would keep the uploader alive past
+    /// its pane, so closing the pane would never cancel or discard the draft's uploads.
+    static func record(into list: Binding<[ComposerAttachment]>) -> Uploaded {
+        { id, uploadID in
+            guard let index = list.wrappedValue.firstIndex(where: { $0.id == id }) else { return }
+            list.wrappedValue[index].uploadID = uploadID
+        }
+    }
+
+    /// Starts uploading newly staged files; each host id lands in `list` (`record(into:)`).
+    func start(_ files: [ComposerAttachment], client: HerdrClient, into list: Binding<[ComposerAttachment]>) {
+        for file in files {
+            start(file, upload: Self.upload(to: client), uploaded: Self.record(into: list),
+                  discard: Self.discard(on: client))
+        }
+    }
+
+    /// Send's sender: a file still uploading is awaited, a finished one posts at once, and
+    /// one with no upload (failed, paused, or lost by the host) uploads in this line.
+    func sender(
+        client: HerdrClient, into list: Binding<[ComposerAttachment]>,
+        post: @escaping GramAttachmentSender.Post
+    ) -> GramAttachmentSender {
+        GramAttachmentSender(
+            upload: { [self] file in
+                try await upload(file, using: Self.upload(to: client), uploaded: Self.record(into: list),
+                                 discard: Self.discard(on: client))
+            },
+            preUploaded: { [self] file in try await waitForUpload(file.id) },
+            post: post)
+    }
+
+    /// The Send button's ring while it waits on uploads still running among `files`.
+    func sendProgress(_ files: [ComposerAttachment], sending: Bool) -> Double? {
+        sending ? pendingProgress(of: files.map(\.id)) : nil
     }
 }
 

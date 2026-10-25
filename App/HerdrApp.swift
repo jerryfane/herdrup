@@ -5156,8 +5156,10 @@ struct TerminalPaneContent: View {
     /// The paperclip's attach sheet (`composerAttachPicker`), the third way in beside
     /// paste and drag-and-drop.
     @State private var showReplyAttachSheet = false
-    /// Progress belongs to an attachment identity, including while its gram is posting.
-    @State private var replyUploadBytes: (sent: Int, total: Int)?
+    /// Uploads each staged attachment as it is added, so Send only posts and prompts; its
+    /// per-file progress drives the chips. Released with the pane, which abandons the draft.
+    @State private var replyUploader = ComposerUploader()
+    /// The file being posted, while a send runs.
     @State private var replySendingAttachmentID: UUID?
     @State private var replyFailedAttachmentID: UUID?
     /// The agent this pane hosts (drives identity, status badge, and input mode).
@@ -5575,10 +5577,14 @@ struct TerminalPaneContent: View {
         }
         // Re-resolve status each time the pane returns to the front; drop either
         // keyboard owner when it backgrounds so a hidden keep-mounted pane cannot
-        // retain the software keyboard.
+        // retain the software keyboard. Leaving the pane stops its attachments' uploads
+        // (a send already waiting on one keeps it); coming back picks them up again.
         .onChange(of: isForeground) { _, nowFront in
-            if nowFront { Task { await refresh() }
+            if nowFront {
+                replyUploader.resume()
+                Task { await refresh() }
             } else {
+                replyUploader.pause()
                 ctrlArmed = false
                 replyFocused = false
                 terminalInputFocused = false
@@ -6115,10 +6121,13 @@ struct TerminalPaneContent: View {
     private func replyAttachmentChip(_ attachment: ComposerAttachment) -> some View {
         ComposerAttachmentChip(
             name: attachment.name, size: attachment.size, isImage: attachment.isImage,
-            state: .for(attachment, sending: sending, sendingID: replySendingAttachmentID,
-                        failedID: replyFailedAttachmentID, uploadBytes: replyUploadBytes),
+            state: .for(attachment, upload: replyUploader.phase(of: attachment.id), sending: sending,
+                        sendingID: replySendingAttachmentID, failedID: replyFailedAttachmentID),
+            // A file still uploading can go: removing it cancels its upload. Only a send
+            // in flight holds the strip, so the batch it is delivering stays whole.
             canRemove: !sending,
-            onRemove: { removeReplyAttachment(attachment) }
+            onRemove: { removeReplyAttachment(attachment) },
+            onRetry: { replyUploader.retry(attachment.id) }
         )
         .accessibilityIdentifier("terminal-attachment")
     }
@@ -6191,7 +6200,8 @@ struct TerminalPaneContent: View {
                             replyFocused = false
                         }
                     } label: {
-                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending)
+                        ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending,
+                                           progress: replyUploader.sendProgress(replyAttachments, sending: sending))
                     }
                     .disabled(!canSend)
                     .fixedSize()
@@ -6218,9 +6228,11 @@ struct TerminalPaneContent: View {
             isPresented: $showReplyAttachSheet, loading: $loadingReplyAttachment,
             room: { ComposerStaging.maxAttachments - replyAttachments.count }
         ) { outcome in
-            replyAttachments += outcome.files.map {
+            let picked = outcome.files.map {
                 ComposerAttachment(name: $0.name, mime: $0.mime, isImage: $0.isImage, staged: $0.staged)
             }
+            replyAttachments += picked
+            startReplyUploads(picked)
             actionNote = outcome.note
         }
         .overlay {
@@ -6424,16 +6436,23 @@ struct TerminalPaneContent: View {
             return
         }
         replyAttachments.append(attachment)
+        startReplyUploads([attachment])
         actionNote = nil
     }
 
+    /// Starts uploading newly staged files at once, so Send only has to post them.
+    private func startReplyUploads(_ files: [ComposerAttachment]) {
+        replyUploader.start(files, client: client, into: $replyAttachments)
+    }
+
     private func removeReplyAttachment(_ attachment: ComposerAttachment) {
-        guard replyAttachments.contains(where: { $0.id == attachment.id }) else { return }
+        guard let current = replyAttachments.first(where: { $0.id == attachment.id }) else { return }
         replyAttachments.removeAll { $0.id == attachment.id }
-        try? FileManager.default.removeItem(at: attachment.staged.dir)
+        // Cancels a running upload, deletes the staged bytes, and discards a finished upload.
+        replyUploader.remove(current)
         // An attachment dropped AFTER its gram message posted (a batch that failed
         // halfway) must not leave that message behind in the agent's inbox.
-        if let messageID = attachment.messageID {
+        if let messageID = current.messageID {
             Task { try? await client.gramDelete(id: messageID) }
         }
     }
@@ -6591,8 +6610,9 @@ struct TerminalPaneContent: View {
         }
         if isKeyAction { keySendTask = task }
     }
-    /// Uploads and posts every staged attachment (`GramAttachmentSender`), then submits
-    /// ONE prompt naming them all.
+    /// Posts every staged attachment (`GramAttachmentSender`), then submits ONE prompt
+    /// naming them all. Each file has been uploading since it was added (`replyUploader`),
+    /// so Send posts the uploaded ones at once and waits on any still uploading.
     ///
     /// A file that already uploaded or already posted is skipped on a retry: the sender
     /// writes each attachment's `uploadID` / `messageID` back into `replyAttachments` as
@@ -6613,24 +6633,18 @@ struct TerminalPaneContent: View {
         let outgoingID = outgoingModel?.stageOutgoing(text: text, author: .owner, files: attachments)
         sending = true
         let precedingKeySend = keySendTask
-        let sender = GramAttachmentSender(
-            upload: { file in
-                replyUploadBytes = (sent: 0, total: file.size)
-                let uploadID = try await client.gramUploadFile(fileURL: file.staged.url) { sent, total in
-                    replyUploadBytes = (sent: sent, total: total)
-                }
-                replyUploadBytes = nil
-                return uploadID
-            },
-            post: { _, attachment in
-                try await client.gramPost(
-                    text: "Attachment from the terminal composer.", to: target, attachment: attachment
-                ).id
-            })
+        // Each file has been uploading since it was added: the sender posts the ones that
+        // landed at once, waits on the rest (the Send button shows what is left), and only
+        // uploads a file whose pre-upload failed or the host lost.
+        let sender = replyUploader.sender(client: client, into: $replyAttachments, post: { _, attachment in
+            try await client.gramPost(
+                text: "Attachment from the terminal composer.", to: target, attachment: attachment
+            ).id
+        })
         Task {
             if let precedingKeySend { await precedingKeySend.value }
             replyFailedAttachmentID = nil
-            defer { sending = false; replyUploadBytes = nil; replySendingAttachmentID = nil }
+            defer { sending = false; replySendingAttachmentID = nil }
             if let outgoingModel, let outgoingID,
                !(await outgoingModel.prepareOutgoing(outgoingID, client: client)) { return }
             let result = await sender.send(
@@ -6650,7 +6664,6 @@ struct TerminalPaneContent: View {
                 outgoingModel?.updateOutgoing(outgoingID, state: .notDelivered("Attachment upload did not complete."))
                 return
             }
-            replyUploadBytes = nil
             replySendingAttachmentID = nil
 
             let prompt = GramAttachmentPrompt.text(text, delivered: delivered)
@@ -6680,6 +6693,8 @@ struct TerminalPaneContent: View {
             // unknown delivery also clears them rather than duplicating a prompt.
             let deliveredIDs = Set(attachments.map(\.id))
             replyAttachments.removeAll { deliveredIDs.contains($0.id) }
+            // Each post consumed its upload: nothing left on the host to discard.
+            replyUploader.forget(deliveredIDs)
             if reply == text { reply = "" }
             try? await Task.sleep(nanoseconds: 300_000_000)
             await refresh()
@@ -9543,6 +9558,9 @@ struct MockTransport: HerdrTransport {
             // the card decodes a preview. gh1 is the HTML mock's report.
             if id == "gh1" { return MockWireFixtures.gramHtmlContent }
             return id == "g3" || id.hasPrefix("gi") ? Self.gramImageContent : MockWireFixtures.gramFileContent
+        }
+        if requestLine.contains("gram.upload.discard") {
+            return #"{"id":"mock","result":{"type":"gram_upload_discarded","discarded":true}}"#
         }
         if requestLine.contains("gram.upload_chunk") { return MockWireFixtures.gramOk }
         if requestLine.contains("gram.delete") { return MockWireFixtures.gramOk }

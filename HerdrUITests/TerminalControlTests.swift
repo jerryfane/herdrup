@@ -453,7 +453,8 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
     /// THE PAPERCLIP (TestFlight 176 feedback). The owner's terminal composer offers the
     /// guest composer's attach button, beside the mic in the one-row composer. A file
     /// picked through its sheet stages a chip and sends exactly as a paste does: its
-    /// bytes uploaded, one gram posted, and one prompt naming it.
+    /// bytes uploaded as soon as it is picked, then on Send one gram posted (without
+    /// uploading again) and one prompt naming it.
     func testAttachButtonPicksAFileThatUploadsAndPrompts() {
         launch("control")
         let paperclip = app.buttons["terminal-attach-button"]
@@ -478,18 +479,30 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
                       "the picked file should stage a chip — note=\(note.exists ? note.label : "none")")
         attach("terminal-composer-attach-chip")
 
+        // The bytes go up as soon as the file is picked (herdrup#523 item 11), but nothing
+        // reaches the agent until Send: no gram post, no prompt.
+        let size = "picked through the paperclip".utf8.count
+        let uploaded = wait { ($0["uploadedBytes"] as? Int) == size }
+        XCTAssertEqual(uploaded["gramPosts"] as? Int, 0, "picking a file must not post it")
+        XCTAssertEqual(uploaded["prompts"] as? Int, 0, "picking a file must not prompt the agent")
+
         let send = app.buttons["terminal-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5), "a picked file should be sendable without text")
         send.tap()
         let delivered = wait {
             ($0["prompts"] as? Int) == 1 && ($0["gramPosts"] as? Int) == 1
         }
-        XCTAssertEqual(delivered["uploadedBytes"] as? Int, "picked through the paperclip".utf8.count,
-                       "the picked file's bytes should be uploaded")
+        XCTAssertEqual(delivered["uploadedBytes"] as? Int, size,
+                       "Send should post the upload made at pick time, not upload the file again")
+        XCTAssertEqual(delivered["uploadDiscards"] as? Int, 0, "a sent file's upload is consumed, not discarded")
         XCTAssertTrue((delivered["lastPrompt"] as? String ?? "").contains("File picked-notes.txt attached"),
                       "the prompt should name the picked file: \(delivered["lastPrompt"] ?? "")")
         XCTAssertTrue(poll(15, every: 0.25) { !chip.exists },
                       "the chip should clear once the prompt is delivered")
+        Thread.sleep(forTimeInterval: 1)
+        let settled = probe()
+        XCTAssertEqual(settled["prompts"] as? Int, 1, "one prompt: \(settled)")
+        XCTAssertEqual(settled["gramPosts"] as? Int, 1, "one post: \(settled)")
     }
 
     /// The staged-attachment chip. A container, so it is matched across element types

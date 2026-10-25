@@ -260,6 +260,8 @@ final class GuestGramPaneTests: XCTestCase {
         let calls = sendWithAttachment(app, text: "summarise this")
 
         XCTAssertEqual(calls.filter { $0.hasPrefix("gram.upload_chunk:") }.count, 1, "\(calls)")
+        XCTAssertFalse(calls.contains { $0.hasPrefix("gram.upload.discard:") },
+                       "a sent file's upload is consumed by its post, not discarded: \(calls)")
         let posts = calls.filter { $0.hasPrefix("gram.post:") }
         XCTAssertEqual(posts.count, 1, "one post for the one file: \(calls)")
         XCTAssertTrue(posts.first?.hasPrefix("gram.post:picked-notes.txt@") == true, "\(posts)")
@@ -319,6 +321,12 @@ final class GuestGramPaneTests: XCTestCase {
         file.tap()
         let chip = app.staticTexts["picked-notes.txt"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10), "the picked file should stage a chip")
+        // The bytes go up as soon as the file is picked (herdrup#523 item 11), but nothing
+        // reaches the agent until Send.
+        let staged = pollLabel(app, "guest-host-calls", "the picked file should upload before Send",
+                               timeout: 15) { $0.contains("gram.upload_chunk:") }
+        XCTAssertFalse(staged.contains("gram.post:"), "picking a file must not post it: \(staged)")
+        XCTAssertFalse(staged.contains("agent.prompt:"), "picking a file must not prompt the agent: \(staged)")
 
         if !text.isEmpty {
             let input = app.textViews["guest-composer-input"]
