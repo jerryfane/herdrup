@@ -1755,15 +1755,17 @@ public actor HerdrClient {
     /// One page of an omp agent's conversation (`agent.transcript`), oldest entry first.
     /// `before` pages back from an older page's cursor; `after` returns what was appended
     /// (or changed) since a page's `after` cursor; neither asks for the newest turns.
-    /// `limit` counts turns and is clamped to the server's 1...50.
+    /// `limit` counts turns and is clamped to the server's 1...50. `subagent` pages that
+    /// subagent's own conversation (a `TranscriptSubagent.id` with `hasTranscript`).
     ///
     /// The refusals the view acts on are typed (`AgentTranscriptError`); an older server
     /// that cannot deserialize the method reports `.unsupported` like a non-omp agent.
     public func agentTranscript(
-        target: String, before: String? = nil, after: String? = nil, limit: UInt32? = nil
+        target: String, before: String? = nil, after: String? = nil, limit: UInt32? = nil,
+        subagent: String? = nil
     ) async throws -> AgentTranscriptPage {
         let params = AgentTranscriptParams(target: target, before: before, after: after,
-                                           limit: limit.map { min(max($0, 1), 50) })
+                                           limit: limit.map { min(max($0, 1), 50) }, subagent: subagent)
         do {
             return try await call("agent.transcript", params, as: AgentTranscriptPage.self)
         } catch let error as APIError {
@@ -1772,6 +1774,7 @@ public actor HerdrClient {
             case "transcript_unsupported": throw AgentTranscriptError.unsupported
             case "transcript_unavailable": throw AgentTranscriptError.unavailable
             case "cursor_expired": throw AgentTranscriptError.cursorExpired
+            case "subagent_not_found": throw AgentTranscriptError.subagentNotFound
             case "invalid_request"
                 where error.message.lowercased().contains("unknown variant")
                     && error.message.contains("agent.transcript"):

@@ -78,6 +78,9 @@ final class ChatMockConversation: @unchecked Sendable {
     /// older history: the client appends entries it has not seen at the tail, so older
     /// turns there would draw below the conversation.
     func transcript(id: String, params: [String: Any]) -> String {
+        if let subagent = params["subagent"] as? String {
+            return subagentTranscript(id: id, subagent: subagent)
+        }
         let limit = max(1, min(params["limit"] as? Int ?? 20, 50))
         let (turns, sentCount) = lock.withLock { (buildTurns(), prompted.count) }
         let start: Int
@@ -124,6 +127,73 @@ final class ChatMockConversation: @unchecked Sendable {
                 "answerable": audience == .owner,
             ]
         }
+        if let subagents = subagents {
+            result["subagents"] = subagents
+        }
+        return Self.encode(id: id, result: result)
+    }
+
+    // MARK: Subagents
+
+    /// `HERDR_CHAT_UX_SUBAGENTS=1`: omp's `task` tool has two reviewers running and one
+    /// render finished, ordered as herdr sends them (running first, newest first). A guest
+    /// gets no assignment and no transcript to open.
+    private var subagents: [[String: Any]]? {
+        guard ProcessInfo.processInfo.environment["HERDR_CHAT_UX_SUBAGENTS"] == "1" else { return nil }
+        let owner = audience == .owner
+        let now = Self.launchMs
+        func subagent(_ id: String, agent: String, label: String, status: String, startedAgo: UInt64,
+                      finishedAgo: UInt64? = nil, intent: String? = nil) -> [String: Any] {
+            // A nil field goes out as JSON null, as herdr sends it.
+            let fields: [String: Any?] = [
+                "id": id, "agent": agent, "label": label,
+                "task": owner ? "\(label) for the chat round 3 changes." : nil,
+                "status": status, "started_ms": now - startedAgo,
+                "finished_ms": finishedAgo.map { now - $0 },
+                "duration_ms": finishedAgo.map { startedAgo - $0 },
+                "last_intent": intent, "last_ms": intent == nil ? nil : now - 5_000,
+                "has_transcript": owner,
+            ]
+            return fields.mapValues { $0 ?? NSNull() }
+        }
+        return [
+            subagent("DaemonHeadReview", agent: "reviewer", label: "Review the daemon head", status: "running",
+                     startedAgo: 40_000, intent: "Running cargo test"),
+            subagent("AppHeadReview", agent: "reviewer", label: "Review the app head", status: "running",
+                     startedAgo: 125_000, intent: "Reading ChatView.swift"),
+            subagent("MermaidRender", agent: "task", label: "Render the diagram", status: "completed",
+                     startedAgo: 600_000, finishedAgo: 300_000),
+        ]
+    }
+
+    /// When the mock launched: the subagents' times stay put across polls, as herdr's do.
+    private static let launchMs = ms(Date())
+
+    /// `agent.transcript` with `subagent`: that subagent's own conversation, one turn (its
+    /// assignment and its answer so far). A guest is refused like a forged target.
+    private func subagentTranscript(id: String, subagent: String) -> String {
+        guard audience == .owner,
+              let fixture = subagents?.first(where: { $0["id"] as? String == subagent }) else {
+            return Self.error(id: id, code: "subagent_not_found", message: "no such subagent")
+        }
+        let started = fixture["started_ms"] as? UInt64 ?? Self.launchMs
+        let result: [String: Any] = [
+            "type": "agent_transcript",
+            "agent": "herdr-app",
+            "pane_id": ChatMockTransport.paneID,
+            "session_id": "mock-subagent-\(subagent)",
+            "entries": [
+                Self.entry("\(subagent)-task", started, ["kind": "user",
+                                                          "text": fixture["task"] as? String ?? subagent]),
+                Self.entry("\(subagent)-reply", started + 2_000, ["kind": "reply", "final": true,
+                                                                   "text": "\(subagent) fixture conversation."]),
+            ],
+            "before": NSNull(),
+            "after": "a1",
+            "working": NSNull(),
+            "pending_ask": NSNull(),
+            "model": ["provider": "fixture", "id": "fixture-subagent-model", "thinking_level": "medium"],
+        ]
         return Self.encode(id: id, result: result)
     }
 

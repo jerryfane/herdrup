@@ -203,6 +203,9 @@ public final class TranscriptStore {
     public nonisolated static let newestPageTurns: UInt32 = 5
 
     public let target: String
+    /// The subagent whose own conversation this store pages (read-only), or nil for the
+    /// agent's.
+    public let subagent: String?
     public private(set) var entries: [TranscriptEntry] = []
     public private(set) var turns: [TranscriptTurn] = []
     public private(set) var pendingAsk: TranscriptPendingAsk?
@@ -210,6 +213,9 @@ public final class TranscriptStore {
     public private(set) var model: TranscriptModel?
     public private(set) var recap: TranscriptRecap?
     public private(set) var plan: [TranscriptPlanItem]?
+    /// Live metadata like `plan`: the newest and every `after` page replace it (absent
+    /// clears it); an older page never rolls it back.
+    public private(set) var subagents: [TranscriptSubagent] = []
 
     public var currentPlan: [TranscriptPlanItem] {
         if let plan { return plan }
@@ -246,10 +252,11 @@ public final class TranscriptStore {
     /// The clock that ages unmatched sends (`TranscriptOutbox.demoteUnseen`); tests inject one.
     private let now: () -> Date
 
-    public init(target: String, pageTurns: UInt32 = TranscriptStore.pageTurns,
+    public init(target: String, subagent: String? = nil, pageTurns: UInt32 = TranscriptStore.pageTurns,
                 newestPageTurns: UInt32 = TranscriptStore.newestPageTurns,
                 now: @escaping () -> Date = { Date() }) {
         self.target = target
+        self.subagent = subagent
         self.pageTurns = pageTurns
         self.newestPageTurns = newestPageTurns
         self.now = now
@@ -288,7 +295,7 @@ public final class TranscriptStore {
         }
         let version = generation
         do {
-            let page = try await client.agentTranscript(target: target, after: after)
+            let page = try await client.agentTranscript(target: target, after: after, subagent: subagent)
             guard version == generation else { return }
             if let session = page.sessionID, let known = sessionID, session != known {
                 // omp started a new session in this pane: the old cursor's history is not
@@ -315,7 +322,7 @@ public final class TranscriptStore {
         generation += 1
         let version = generation
         do {
-            let page = try await client.agentTranscript(target: target, limit: newestPageTurns)
+            let page = try await client.agentTranscript(target: target, limit: newestPageTurns, subagent: subagent)
             guard version == generation else { return }
             applyNewest(page)
         } catch is CancellationError {
@@ -346,7 +353,8 @@ public final class TranscriptStore {
         let version = generation
         let page: AgentTranscriptPage
         do {
-            page = try await client.agentTranscript(target: target, before: before, limit: pageTurns)
+            page = try await client.agentTranscript(target: target, before: before, limit: pageTurns,
+                                                    subagent: subagent)
         } catch AgentTranscriptError.cursorExpired {
             guard version == generation else { return }
             // The file was replaced under us: the history we hold is no longer pageable.
@@ -412,11 +420,13 @@ public final class TranscriptStore {
         let unchanged = loaded && lastError == nil && hasSnapshot
             && newest == entries && (page.before != nil) == hasOlder
             && page.model == model && page.plan == plan && page.recap == recap
+            && (page.subagents ?? []) == subagents
             && page.pendingAsk == pendingAsk && page.working == working
             && page.sessionID == sessionID && outbox == outboxBefore
         hasSnapshot = true
         model = page.model
         plan = page.plan
+        subagents = page.subagents ?? []
         recap = page.recap
         entries = newest
         beforeCursor = page.before
@@ -467,9 +477,11 @@ public final class TranscriptStore {
             || (page.working == nil) != (working == nil)
         let notifies = regroups || page.working != working
             || page.model != model || page.plan != plan || page.recap != recap
+            || (page.subagents ?? []) != subagents
             || outbox != outboxBefore || lastError != nil || !loaded
         model = page.model
         plan = page.plan
+        subagents = page.subagents ?? []
         recap = page.recap
         pendingAsk = page.pendingAsk
         working = page.working

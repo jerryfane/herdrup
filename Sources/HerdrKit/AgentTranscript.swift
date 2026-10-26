@@ -10,18 +10,22 @@ import Foundation
 // MARK: - Params
 
 /// Params of `agent.transcript`. `before` and `after` are mutually exclusive (the server
-/// refuses both); neither asks for the newest page.
+/// refuses both); neither asks for the newest page. `subagent` pages that subagent's own
+/// conversation (owner only) instead of the agent's.
 public struct AgentTranscriptParams: Encodable, Sendable, Equatable {
     public let target: String
     public let before: String?
     public let after: String?
     public let limit: UInt32?
+    public let subagent: String?
 
-    public init(target: String, before: String? = nil, after: String? = nil, limit: UInt32? = nil) {
+    public init(target: String, before: String? = nil, after: String? = nil, limit: UInt32? = nil,
+                subagent: String? = nil) {
         self.target = target
         self.before = before
         self.after = after
         self.limit = limit
+        self.subagent = subagent
     }
 }
 
@@ -92,6 +96,53 @@ public struct TranscriptNote: Sendable, Equatable {
 public struct TranscriptModel: Decodable, Sendable, Equatable {
     public let provider: String
     public let id: String
+    /// omp's thinking (effort) level: minimal, low, medium, high, xhigh or max. Absent when
+    /// thinking is off, or while `auto` has not picked a level yet.
+    public let thinkingLevel: String?
+    /// The level is omp's `auto`: `thinkingLevel` is what auto resolved to, if anything.
+    public let thinkingAuto: Bool
+
+    public init(provider: String, id: String, thinkingLevel: String? = nil, thinkingAuto: Bool = false) {
+        self.provider = provider
+        self.id = id
+        self.thinkingLevel = thinkingLevel
+        self.thinkingAuto = thinkingAuto
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider, id
+        case thinkingLevel = "thinking_level"
+        case thinkingAuto = "thinking_auto"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(provider: try c.decode(String.self, forKey: .provider),
+                  id: try c.decode(String.self, forKey: .id),
+                  thinkingLevel: try c.decodeIfPresent(String.self, forKey: .thinkingLevel),
+                  thinkingAuto: try c.decodeIfPresent(Bool.self, forKey: .thinkingAuto) ?? false)
+    }
+
+    /// The effort as the chat words it: "high", "high (auto)" once auto picked a level,
+    /// "auto" before it has; nil without a level.
+    public var effort: String? {
+        switch (thinkingLevel, thinkingAuto) {
+        case (let level?, false): return level
+        case (let level?, true): return "\(level) (auto)"
+        case (nil, true): return "auto"
+        case (nil, false): return nil
+        }
+    }
+
+    /// The chat's model line: "claude-opus-5-5 · high", or the id alone without a level.
+    public var label: String {
+        effort.map { "\(id) · \($0)" } ?? id
+    }
+
+    /// "Model: anthropic, claude-opus-5-5, effort high".
+    public var accessibilityLabel: String {
+        "Model: \(provider), \(id)" + (effort.map { ", effort \($0)" } ?? "")
+    }
 }
 
 public struct TranscriptRecap: Decodable, Sendable, Equatable {
@@ -308,6 +359,77 @@ public struct TranscriptWorking: Decodable, Sendable, Equatable {
     }
 }
 
+public enum TranscriptSubagentStatus: String, Sendable, Equatable {
+    case running, completed, failed, aborted, unknown
+
+    public var isRunning: Bool { self == .running }
+}
+
+/// A subagent the agent spawned with omp's `task` tool, as the page's live metadata: every
+/// one still running, plus those that finished since the newest prompt.
+public struct TranscriptSubagent: Decodable, Sendable, Equatable, Identifiable {
+    /// omp's agent (job) id, e.g. `AppHeadReview`.
+    public let id: String
+    /// The agent type, e.g. `reviewer`; may be empty.
+    public let agent: String
+    /// omp's progress description, else the spawn's name.
+    public let label: String?
+    /// The start of the assignment (owner only).
+    public let task: String?
+    public let status: TranscriptSubagentStatus
+    public let startedMs: UInt64
+    public let finishedMs: UInt64?
+    public let durationMs: UInt64?
+    /// The intent of the subagent's newest tool call, and when it started.
+    public let lastIntent: String?
+    public let lastMs: UInt64?
+    /// The subagent's own conversation can be paged (`agent.transcript` with `subagent`).
+    public let hasTranscript: Bool
+
+    public init(id: String, agent: String = "", label: String? = nil, task: String? = nil,
+                status: TranscriptSubagentStatus, startedMs: UInt64, finishedMs: UInt64? = nil,
+                durationMs: UInt64? = nil, lastIntent: String? = nil, lastMs: UInt64? = nil,
+                hasTranscript: Bool = false) {
+        self.id = id
+        self.agent = agent
+        self.label = label
+        self.task = task
+        self.status = status
+        self.startedMs = startedMs
+        self.finishedMs = finishedMs
+        self.durationMs = durationMs
+        self.lastIntent = lastIntent
+        self.lastMs = lastMs
+        self.hasTranscript = hasTranscript
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, agent, label, task, status
+        case startedMs = "started_ms"
+        case finishedMs = "finished_ms"
+        case durationMs = "duration_ms"
+        case lastIntent = "last_intent"
+        case lastMs = "last_ms"
+        case hasTranscript = "has_transcript"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decode(String.self, forKey: .id),
+                  agent: try c.decodeIfPresent(String.self, forKey: .agent) ?? "",
+                  label: try c.decodeIfPresent(String.self, forKey: .label),
+                  task: try c.decodeIfPresent(String.self, forKey: .task),
+                  status: try c.decodeIfPresent(String.self, forKey: .status)
+                    .flatMap(TranscriptSubagentStatus.init(rawValue:)) ?? .unknown,
+                  startedMs: try c.decodeIfPresent(UInt64.self, forKey: .startedMs) ?? 0,
+                  finishedMs: try c.decodeIfPresent(UInt64.self, forKey: .finishedMs),
+                  durationMs: try c.decodeIfPresent(UInt64.self, forKey: .durationMs),
+                  lastIntent: try c.decodeIfPresent(String.self, forKey: .lastIntent),
+                  lastMs: try c.decodeIfPresent(UInt64.self, forKey: .lastMs),
+                  hasTranscript: try c.decodeIfPresent(Bool.self, forKey: .hasTranscript) ?? false)
+    }
+}
+
 /// Result of `agent.transcript` (`type: "agent_transcript"`), entries oldest first.
 public struct AgentTranscriptPage: Decodable, Sendable, Equatable {
     public let agent: String?
@@ -323,12 +445,14 @@ public struct AgentTranscriptPage: Decodable, Sendable, Equatable {
     public let model: TranscriptModel?
     public let plan: [TranscriptPlanItem]?
     public let recap: TranscriptRecap?
+    /// The subagents omp's `task` tool spawned (running, and finished this turn); nil when none.
+    public let subagents: [TranscriptSubagent]?
 
     public init(agent: String? = nil, paneID: String? = nil, sessionID: String? = nil,
                 entries: [TranscriptEntry], before: String? = nil, after: String? = nil,
                 pendingAsk: TranscriptPendingAsk? = nil, working: TranscriptWorking? = nil,
                 model: TranscriptModel? = nil, plan: [TranscriptPlanItem]? = nil,
-                recap: TranscriptRecap? = nil) {
+                recap: TranscriptRecap? = nil, subagents: [TranscriptSubagent]? = nil) {
         self.agent = agent
         self.paneID = paneID
         self.sessionID = sessionID
@@ -340,10 +464,11 @@ public struct AgentTranscriptPage: Decodable, Sendable, Equatable {
         self.model = model
         self.plan = plan
         self.recap = recap
+        self.subagents = subagents
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, entries, before, after, working, model, plan, recap
+        case agent, entries, before, after, working, model, plan, recap, subagents
         case paneID = "pane_id"
         case sessionID = "session_id"
         case pendingAsk = "pending_ask"
@@ -359,6 +484,8 @@ public enum AgentTranscriptError: Error, Equatable, Sendable {
     case unavailable
     /// The cursor is unknown to the server; restart from the newest page.
     case cursorExpired
+    /// `subagent` names no subagent conversation of this agent (or the reader is a guest).
+    case subagentNotFound
 }
 
 /// Result of `agent.answer`. `sentUnconfirmed`: the keys reached omp's question UI but

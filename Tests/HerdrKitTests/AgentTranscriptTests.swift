@@ -82,6 +82,57 @@ final class AgentTranscriptDecodingTests: XCTestCase {
         XCTAssertFalse(old.agentTranscript)
         XCTAssertFalse(old.agentAnswer)
     }
+
+    func testDecodesSubagentsWithMissingOptionalsAndUnknownStatus() throws {
+        let page = try decodePage(#"""
+        {"type":"agent_transcript","entries":[],"before":null,"after":"a",
+         "subagents":[
+          {"id":"AppHeadReview","agent":"reviewer","label":"Review the app head","task":"Target: app\nReview",
+           "status":"running","started_ms":1000,"finished_ms":null,"duration_ms":null,
+           "last_intent":"Reading ChatView","last_ms":1500,"has_transcript":true},
+          {"id":"DaemonHeadReview","agent":"","label":null,"task":null,"status":"completed",
+           "started_ms":900,"finished_ms":1900,"duration_ms":1000,"last_intent":null,"last_ms":null,
+           "has_transcript":false},
+          {"id":"Later","status":"paused","started_ms":5}
+         ]}
+        """#)
+        XCTAssertEqual(page.subagents, [
+            TranscriptSubagent(id: "AppHeadReview", agent: "reviewer", label: "Review the app head",
+                               task: "Target: app\nReview", status: .running, startedMs: 1000,
+                               lastIntent: "Reading ChatView", lastMs: 1500, hasTranscript: true),
+            TranscriptSubagent(id: "DaemonHeadReview", status: .completed, startedMs: 900,
+                               finishedMs: 1900, durationMs: 1000),
+            TranscriptSubagent(id: "Later", status: .unknown, startedMs: 5),
+        ])
+        XCTAssertEqual(page.subagents?.map(\.status.isRunning), [true, false, false])
+        let without = try decodePage(#"{"type":"agent_transcript","entries":[],"before":null,"after":"a"}"#)
+        XCTAssertNil(without.subagents)
+    }
+
+    func testModelThinkingLevelDecodesAndLabelsTheEffort() throws {
+        func model(_ json: String) throws -> TranscriptModel {
+            try JSONDecoder().decode(TranscriptModel.self, from: Data(json.utf8))
+        }
+        let plain = try model(#"{"provider":"anthropic","id":"claude-opus-5-5"}"#)
+        XCTAssertNil(plain.thinkingLevel)
+        XCTAssertFalse(plain.thinkingAuto)
+        XCTAssertEqual(plain.label, "claude-opus-5-5")
+        XCTAssertEqual(plain.accessibilityLabel, "Model: anthropic, claude-opus-5-5")
+
+        let high = try model(#"{"provider":"anthropic","id":"claude-opus-5-5","thinking_level":"high"}"#)
+        XCTAssertEqual(high, TranscriptModel(provider: "anthropic", id: "claude-opus-5-5", thinkingLevel: "high"))
+        XCTAssertEqual(high.label, "claude-opus-5-5 · high")
+        XCTAssertEqual(high.accessibilityLabel, "Model: anthropic, claude-opus-5-5, effort high")
+
+        let resolved = try model(#"{"provider":"a","id":"m","thinking_level":"medium","thinking_auto":true}"#)
+        XCTAssertTrue(resolved.thinkingAuto)
+        XCTAssertEqual(resolved.label, "m · medium (auto)")
+        XCTAssertEqual(resolved.accessibilityLabel, "Model: a, m, effort medium (auto)")
+
+        let pending = try model(#"{"provider":"a","id":"m","thinking_auto":true}"#)
+        XCTAssertEqual(pending.label, "m · auto")
+        XCTAssertEqual(pending.accessibilityLabel, "Model: a, m, effort auto")
+    }
 }
 
 final class AgentTranscriptClientTests: XCTestCase {
@@ -96,6 +147,23 @@ final class AgentTranscriptClientTests: XCTestCase {
         XCTAssertEqual(params["before"] as? String, "b7")
         XCTAssertEqual(params["limit"] as? Int, 50)
         XCTAssertNil(params["after"])
+    }
+
+    func testSubagentTranscriptRequestCarriesTheSubagentAndItsRefusalIsTyped() async throws {
+        let transport = RecordingTransport(reply: #"{"id":"x","result":{"type":"agent_transcript","entries":[],"before":null,"after":"a"}}"#)
+        let client = HerdrClient(transport: transport)
+        _ = try await client.agentTranscript(target: "w1:p1", subagent: "AppHeadReview")
+        XCTAssertEqual(try transport.last().1["subagent"] as? String, "AppHeadReview")
+        _ = try await client.agentTranscript(target: "w1:p1")
+        XCTAssertNil(try transport.last().1["subagent"], "the agent's own page sends no subagent")
+
+        let refusing = HerdrClient(transport: RecordingTransport.error(code: "subagent_not_found", message: "no"))
+        do {
+            _ = try await refusing.agentTranscript(target: "w1:p1", subagent: "Gone")
+            XCTFail("subagent_not_found should throw")
+        } catch {
+            XCTAssertEqual(error as? AgentTranscriptError, .subagentNotFound)
+        }
     }
 
     func testTranscriptRefusalsAreTyped() async {
@@ -328,6 +396,61 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.currentPlan.map(\.status), [.blocked])
         await store.refresh(client: client)
         XCTAssertTrue(store.currentPlan.isEmpty, "an explicit empty snapshot must not revive an older plan")
+    }
+
+    func testSubagentsAreLiveMetadataThatOlderPagesNeverRollBack() async throws {
+        func with(_ page: String, subagents: String) -> String {
+            page.replacingOccurrences(of: #""result":{"#, with: #""result":{"subagents":\#(subagents),"#)
+        }
+        let running = #"{"id":"A","agent":"reviewer","label":"Review","status":"running","started_ms":10,"has_transcript":true}"#
+        let finished = #"{"id":"A","agent":"reviewer","label":"Review","status":"completed","started_ms":10,"finished_ms":40,"duration_ms":30,"has_transcript":true}"#
+        let second = #"{"id":"B","agent":"task","status":"running","started_ms":20,"last_intent":"Reading","last_ms":30}"#
+        var round = 0
+        let (client, _) = scripted { params in
+            if params["before"] != nil {
+                return with(Self.page([Self.entry("older")]), subagents: #"[{"id":"Old","status":"running","started_ms":1}]"#)
+            }
+            defer { round += 1 }
+            switch round {
+            case 0: return with(Self.page([Self.entry("r1")], before: "older"), subagents: "[\(running)]")
+            case 1: return with(Self.page([], before: "older"), subagents: "[\(second),\(finished)]")
+            default: return Self.page([])
+            }
+        }
+        let store = TranscriptStore(target: "agent")
+        var changes = 0
+        store.onChange = { changes += 1 }
+        await store.refresh(client: client)
+        XCTAssertEqual(store.subagents.map(\.id), ["A"])
+        XCTAssertEqual(store.subagents.first?.status, .running)
+        changes = 0
+        await store.refresh(client: client)
+        XCTAssertEqual(store.subagents.map(\.id), ["B", "A"], "an after page replaces the list")
+        XCTAssertEqual(store.subagents.map(\.status), [.running, .completed])
+        XCTAssertEqual(store.subagents.last?.durationMs, 30)
+        XCTAssertGreaterThan(changes, 0, "a subagent change alone must notify the view")
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(store.subagents.map(\.id), ["B", "A"], "an older page must not roll the list back")
+        await store.refresh(client: client)
+        XCTAssertTrue(store.subagents.isEmpty, "a live page without subagents clears them")
+    }
+
+    func testSubagentStoreAsksForTheSubagentOnEveryPage() async throws {
+        var round = 0
+        let (client, transport) = scripted { params in
+            if params["before"] != nil { return Self.page([Self.entry("older")]) }
+            defer { round += 1 }
+            return round == 0 ? Self.page([Self.entry("r1")], before: "older") : Self.page([])
+        }
+        let store = TranscriptStore(target: "w1:p1", subagent: "AppHeadReview")
+        await store.refresh(client: client)
+        XCTAssertEqual(try transport.last().params["subagent"] as? String, "AppHeadReview")
+        await store.refresh(client: client)
+        XCTAssertEqual(try transport.last().params["after"] as? String, "a")
+        XCTAssertEqual(try transport.last().params["subagent"] as? String, "AppHeadReview")
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(try transport.last().params["before"] as? String, "older")
+        XCTAssertEqual(try transport.last().params["subagent"] as? String, "AppHeadReview")
     }
 
     func testOutgoingMessagesReconcileOncePerNewPromptAndAuthor() async {

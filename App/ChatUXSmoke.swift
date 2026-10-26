@@ -13,6 +13,8 @@ enum ChatUXSmoke {
         guard request["method"] as? String == "agent.transcript" else { return nil }
         let id = request["id"] as? String ?? "smoke"
         let params = request["params"] as? [String: Any] ?? [:]
+        // A subagent's own conversation: the mock's, at once, without counting as a refresh.
+        if params["subagent"] != nil { return ChatMockConversation.owner.transcript(id: id, params: params) }
         responses += 1
         if responses > 1 {
             try? await Task.sleep(for: .seconds(3))
@@ -62,7 +64,7 @@ enum ChatUXSmoke {
             result["pending_ask"] = NSNull()
         }
         result["working"] = NSNull()
-        result["model"] = ["provider": "fixture", "id": "fixture-model"]
+        result["model"] = ["provider": "fixture", "id": "fixture-model", "thinking_level": "high"]
         result["plan"] = plan(ProcessInfo.processInfo.environment["HERDR_CHAT_UX_PLAN"])
         result["recap"] = ["turn_id": "ux-reply", "text": "Fixture recap only: typography is ready for inspection."]
         return ChatMockConversation.encode(id: id, result: result)

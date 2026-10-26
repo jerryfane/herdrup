@@ -62,9 +62,13 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   envelopes appear as collapsed file bundles, with captions preserved. Opening a file uses
   Gram's permission-checked, size-bounded download and existing viewer; unrecognized instructions
   remain visible as text.
-  The model baseline, working dots, checklist and completion divider use current session metadata.
-  A compaction summary is not a completion recap; guests do not receive private recap text or
-  blocker details. Chat text size is separate from terminal text size; the existing size controls
+  The model baseline (with omp's effort, e.g. `claude-opus-5-5 · high`), working dots, checklist
+  and completion divider use current session metadata. A blocked checklist item shows its pause
+  icon without the blocker text. A Subagents card lists the subagents omp's `task` tool runs
+  (what each does now and for how long; finished ones fold into one line), and an owner can open
+  a subagent's own conversation read-only. A compaction summary is not a completion recap; guests
+  do not receive private recap text, blocker details, subagent assignments or subagent
+  conversations. Chat text size is separate from terminal text size; the existing size controls
   and shortcuts affect the selected surface. Markdown tables wrap to the available width and
   scroll horizontally only when their columns cannot fit readably.
   Find searches the active Chat or Terminal view. Chat search treats punctuation literally,
