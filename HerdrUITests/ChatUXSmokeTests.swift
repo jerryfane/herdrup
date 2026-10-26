@@ -610,7 +610,7 @@ final class ChatUXSmokeTests: XCTestCase {
             XCTAssertTrue((right.value as? String)?.hasSuffix("points") == true
                           || (right.value as? String)?.contains("points,") == true,
                           "the handle reads its width: \(String(describing: right.value))")
-            if column.frame.width < chat.frame.width - 30 {
+            if column.frame.width <= chat.frame.width - 44 {
                 XCTAssertEqual(left.frame.midX, column.frame.minX, accuracy: 1, "the left handle sits on the column's edge")
                 XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the right handle sits on the column's edge")
             }
@@ -655,7 +655,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let initial = settle({ column.frame.width }, until: { abs($0 - wide) < 0.5 })
         XCTAssertEqual(initial, wide, accuracy: 0.5, "the column starts Wide (or Full when narrower)")
         XCTAssertEqual(column.frame.midX, chat.frame.midX, accuracy: 1, "the column is centred")
-        if initial < available - 30 {
+        if initial <= available - 44 {
             XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle sits on the column's edge")
         }
         assertComposerMatchesColumn(app, "Wide")

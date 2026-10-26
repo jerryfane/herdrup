@@ -84,9 +84,12 @@ struct ChatColumnResizer: View {
     private var width: Double { ChatColumnWidth.displayed(stored: stored, available: availableWidth) }
 
     var body: some View {
+        // On the column's edges, but never past the chat's own: at Full the bands sit just
+        // inside, so they never cover the sidebar or the window edge.
+        let reach = max(0, min(CGFloat(width), available - Self.hitWidth) / 2)
         ZStack {
-            handle(.leading).offset(x: -CGFloat(width) / 2)
-            handle(.trailing).offset(x: CGFloat(width) / 2)
+            handle(.leading).offset(x: -reach)
+            handle(.trailing).offset(x: reach)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .top) {
