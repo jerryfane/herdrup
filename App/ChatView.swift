@@ -329,6 +329,8 @@ struct ChatView: View {
     @State private var searchKey = ChatSearchKey.none
     @State private var searchTexts = ChatSearchTextCache()
     @State private var openQuestionID: String?
+    /// The message whose Select Text sheet is open.
+    @State private var selectingText: ChatSelectableText?
 
     /// How long typing must pause before the term is searched.
     private static let typingPause: Duration = .milliseconds(180)
@@ -406,6 +408,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             transcriptScroll(proxy, hits: hits)
         }
+        .overlay(alignment: .topLeading) { copyProbe }
         .background(ground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-view")
@@ -428,6 +431,9 @@ struct ChatView: View {
         }
         .sheet(isPresented: Binding(get: { openQuestionID != nil }, set: { if !$0 { openQuestionID = nil } })) {
             questionSheet
+        }
+        .sheet(item: $selectingText) { item in
+            ChatSelectTextSheet(text: item.text)
         }
         .environment(\.chatTextScale, textScale)
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
@@ -627,7 +633,7 @@ struct ChatView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     questionCard(id: id, ask: ask, pending: pending)
                     if case .user(let text, _) = turn.prompt?.kind, !text.isEmpty {
-                        DisclosureGroup("Show context") { ChatMarkdownView(markdown: text) }
+                        DisclosureGroup("Show context") { ChatMarkdownView(markdown: text).textSelection(.enabled) }
                             .font(Typography.app(14 * textScale))
                     }
                 }
@@ -691,6 +697,7 @@ struct ChatView: View {
             workView(work)
         case .reply(_, let text, _):
             ChatMarkdownView(markdown: text)
+                .stableContextMenu { messageMenu(text, markdown: true, offersMarkdown: true) }
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chat-reply")
         case .note(_, let tsMs, let note):
@@ -811,13 +818,41 @@ struct ChatView: View {
             .foregroundStyle(Palette.text)
             .lineSpacing(1)
             .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
             .padding(.horizontal, 14).padding(.top, 9).padding(.bottom, 10)
             .background(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
                                                bottomTrailingRadius: 6, topTrailingRadius: 18)
                 .fill(Palette.surfaceRaised))
+            .stableContextMenu(previewCornerRadius: 18) { messageMenu(text, markdown: false) }
             .frame(maxWidth: sizeClass == .regular ? 480 : 296, alignment: .trailing)
             .accessibilityIdentifier("chat-user-bubble")
+    }
+
+    /// A message's menu, on a long press (a right click on a Mac): Copy, Copy as Markdown on
+    /// a reply, and Select Text. A `stableContextMenu`, never `.contextMenu`: this view
+    /// redraws on every poll and stream event, which rebuilds an open SwiftUI menu (#437).
+    /// Its entries are also the message's VoiceOver actions, so Copy needs no long press.
+    /// `markdown`: the text is rendered markdown (a reply or a thought), so Copy and Select
+    /// Text give it as read, without the syntax. Nothing is parsed until an entry is chosen.
+    @MainActor @StableMenuBuilder
+    private func messageMenu(_ text: String, markdown: Bool, offersMarkdown: Bool = false) -> [StableMenuItem] {
+        StableMenuItem("Copy", systemImage: "doc.on.doc") {
+            ChatClipboard.write(markdown ? ChatMessageText.plain(text) : text)
+        }
+        if offersMarkdown {
+            StableMenuItem("Copy as Markdown", systemImage: "chevron.left.forwardslash.chevron.right") {
+                ChatClipboard.write(text)
+            }
+        }
+        StableMenuItem("Select Text", systemImage: "selection.pin.in.out") {
+            selectingText = ChatSelectableText(text: markdown ? ChatMessageText.readable(text) : AttributedString(text))
+        }
+    }
+
+    /// The UI tests' `chat-copy-probe` (`ChatCopyProbe`), in a mock run only.
+    @ViewBuilder private var copyProbe: some View {
+        #if DEBUG
+        if ScreenshotMock.mode != nil { ChatCopyProbe() }
+        #endif
     }
 
     private func outgoingBubble(_ message: TranscriptOutgoingMessage) -> some View {
@@ -884,7 +919,7 @@ struct ChatView: View {
                 if expanded.contains(thoughtKey) {
                     ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                        .stableContextMenu { messageMenu(work.thoughts.joined(separator: "\n\n"), markdown: true) }
                         .padding(.vertical, 2).padding(.leading, 12)
                         .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
                         .padding(.leading, 5)
@@ -1269,7 +1304,7 @@ private struct ChatNoteSheet: View {
                     .font(Typography.machine(10.5 * textScale, .semibold))
                     .foregroundStyle(Palette.textFaint)
                 DisclosureGroup("Show context") {
-                    ChatMarkdownView(markdown: note.body)
+                    ChatMarkdownView(markdown: note.body).textSelection(.enabled)
                 }
                 .font(Typography.app(14 * textScale))
             }

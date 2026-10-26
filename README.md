@@ -76,6 +76,9 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   changes keep the tail visible; scrolling into history or searching stops that follow. The centered
   glass down arrow has a 44 pt circular touch target and returns to the latest message, then disappears.
   A 48 pt fade joins chat to the existing composer; the final line stays above it.
+  Long-press a message (right-click on a Mac) for Copy and Select Text; replies also offer Copy as
+  Markdown, and Copy gives a reply without its markdown syntax. Select Text opens the message in a
+  sheet with normal text selection. Code blocks have their own Copy and language label.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation

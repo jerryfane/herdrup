@@ -409,6 +409,8 @@ struct GramLoneMessage<Header: View, Card: View>: View {
 struct GramCodeBlock: View {
     let code: String
     let language: String?
+    /// The chat's text-size scale (`chatTextScale`) for the code; Gram keeps 1.
+    var textScale: CGFloat = 1
 
     @State private var receipt = CopiedCommandReceipt.shared
 
@@ -467,8 +469,8 @@ struct GramCodeBlock: View {
     private var codeText: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(code)
-                .font(GramType.code)
-                .lineSpacing(GramType.codeLineSpacing)
+                .font(textScale == 1 ? GramType.code : Typography.machine(13 * textScale))
+                .lineSpacing(GramType.codeLineSpacing * textScale)
                 .foregroundStyle(Palette.text)
                 .fixedSize()
         }

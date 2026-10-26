@@ -34,6 +34,11 @@ enum ChatUXSmoke {
                         "text": "**Check the table**\n\nUse *wrapped* cells and `literal` code.\n\n- Keep the caption\n- Preserve Unicode: café\n- Find literal `.*[x]` safely.", "ts_ms": timestamp + 1])
         entries.append(["id": "ux-reply", "kind": "reply", "final": true,
                         "text": "## Wrapped table\n\n| Metric | Description | Result |\n| --- | --- | --- |\n| Latency | A deliberately long description that must wrap within its column | +12% |\n| Unicode | café 東京 résumé | 42 |\n\nA complete fixture response.", "ts_ms": timestamp + 2])
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_COPY"] == "1" {
+            entries.append(["id": "ux-copy", "kind": "reply", "final": true,
+                            "text": "Copy **this** reply, then *paste* it.\n\n```swift\nlet copied = true\nprint(copied)\n```",
+                            "ts_ms": timestamp + 2])
+        }
         if responses > 1 {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])
