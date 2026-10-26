@@ -320,7 +320,9 @@ case "$shard" in
     run_suite iPadControl "$IPAD_UDID" 20m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
-    run_suite iPadChatUX "$IPAD_UDID" 15m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    # 20m: the chat-width tests (#523, ~100 s on iPad) took run 40289743354's slow runner to
+    # 848 s of tests, past the old 15m once xcodebuild's own start-up was added.
+    run_suite iPadChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
     check_classes_ran TestReceipts/iPadChatUX-first.xcresult ChatUXSmokeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
     ;;

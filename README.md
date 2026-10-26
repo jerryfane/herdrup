@@ -79,6 +79,10 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   Long-press a message (right-click on a Mac) for Copy and Select Text; replies also offer Copy as
   Markdown, and Copy gives a reply without its markdown syntax. Select Text opens the message in a
   sheet with normal text selection. Code blocks have their own Copy and language label.
+  On iPad and Mac, drag either edge of the chat to resize it around its centre, from 560 pt to the
+  full width, with snap points at Readable (720), Wide (1000, the default) and Full; double-tap
+  (double-click) an edge to go back to Wide. The width is remembered on the device, and in Chat
+  the composer takes the same width.
 - **Composer**: Terminal and Gram share one editor. It is a single row beside the mic and
   send buttons until the text wraps; then the buttons drop to a toolbar and the text grows
   to five lines before scrolling. From three lines, a handle opens a tall editor. Dictation

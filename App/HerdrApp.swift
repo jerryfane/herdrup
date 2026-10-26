@@ -5546,6 +5546,9 @@ struct TerminalPaneContent: View {
                             // is a stable measure of the room the composer grows over.
                             replyBar
                                 .environment(\.composerEditorRoom, terminalHeight)
+                                // In Chat on iPad and Mac, the composer takes the chat column's
+                                // width, centred under it; the terminal keeps the full width.
+                                .chatColumnComposerWidth(showingChat)
                         }
                         .fixedSize(horizontal: false, vertical: true)
                         // Opaque, so rows the composer grows over do not show through the
