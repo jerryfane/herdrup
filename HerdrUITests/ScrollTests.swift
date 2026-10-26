@@ -54,6 +54,41 @@ final class ScrollTests: XCTestCase {
             "Terminal did NOT scroll: rendered content is unchanged after swiping (diff=\(movedDiff)). This is the dead-scroll symptom.")
     }
 
+    /// The owner terminal's jump button: absent at the tail, shown once a swipe moves into
+    /// history, and a tap renders the tail again (pixel-identical to before the swipe) and
+    /// hides it.
+    func testJumpToLatestReturnsTheOwnerTerminalToItsTail() {
+        let app = XCUIApplication.launched(mock: "scroll")
+        let viewport = app.terminalSurface
+        XCTAssertTrue(viewport.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 3.0)
+        let latest = app.buttons["terminal-jump-latest"]
+        XCTAssertFalse(latest.exists, "no jump button at the tail")
+        let tail = viewport.screenshot()
+        attach(tail, "01-tail")
+
+        let high = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let low  = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        for _ in 0..<3 {
+            high.press(forDuration: 0.05, thenDragTo: low)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        XCTAssertTrue(latest.waitForExistence(timeout: 5), "scrolled into history, the jump button should show")
+        XCTAssertEqual(latest.label, "Jump to latest output")
+        Thread.sleep(forTimeInterval: 1.0)
+        let history = viewport.screenshot()
+        attach(history, "02-history-with-jump-button")
+        XCTAssertGreaterThan(pixelDiffFraction(tail, history), 0.10, "the swipe should have moved into history")
+
+        latest.tap()
+        XCTAssertTrue(latest.waitForNonExistence(timeout: 5), "back at the tail, the button goes")
+        Thread.sleep(forTimeInterval: 1.0)
+        let back = viewport.screenshot()
+        attach(back, "03-after-jump")
+        let backDiff = pixelDiffFraction(tail, back)
+        XCTAssertLessThan(backDiff, 0.02, "the tap should render the tail again (diff=\(backDiff))")
+    }
+
     /// The CLAUDE CODE receipt. Launches a pane in alt-screen + mouse-mode (Claude Code
     /// fullscreen shape) whose stand-in agent (CCScrollDriver) redraws shifted content
     /// ONLY when the app sends it an SGR wheel event. Swiping must therefore move the

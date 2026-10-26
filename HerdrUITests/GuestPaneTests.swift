@@ -318,8 +318,8 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertEqual(forbiddenCalls(app), "", "a reconnect calls only what a guest may")
     }
 
-    /// The owner's "Latest" pill: it appears once the guest scrolls up into history, and a
-    /// tap returns the terminal to its newest output (and the pill goes).
+    /// The owner's jump-to-latest button: it appears once the guest scrolls up into history,
+    /// and a tap returns the terminal to its newest output (and the button goes).
     func testLatestPillAppearsInHistoryAndReturnsToTheTail() {
         let app = XCUIApplication.launched(mock: "guestpane", environment: ["HERDR_MOCK_STILL": "1"])
         let terminal = app.descendants(matching: .any)["guest-terminal"]

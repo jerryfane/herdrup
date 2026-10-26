@@ -120,30 +120,6 @@ struct TerminalTextSizeMenuSection: View {
     }
 }
 
-/// Shown only while the terminal is scrolled away from its newest output, so it is out of
-/// the way the rest of the time. Uses the app's primary ink-fill treatment, the same one the
-/// send arrow and the banner's Switch button use. An overlay, not a gesture: only the pill
-/// hit-tests, taps elsewhere reach the terminal.
-struct TerminalJumpToLatestPill: View {
-    var identifier: String?
-    let action: () -> Void
-
-    @ViewBuilder var body: some View {
-        let pill = Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
-                Text("Latest").font(Typography.app(12, .semibold))
-            }
-            .foregroundStyle(Palette.ground)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(Palette.text).clipShape(Capsule())
-        }
-        .padding(.trailing, 16).padding(.bottom, 12)
-        .accessibilityLabel(Text("Jump to latest output"))
-        if let identifier { pill.accessibilityIdentifier(identifier) } else { pill }
-    }
-}
-
 /// Shown at the top of the terminal while an older page of its history loads, in the words
 /// and ink of Gram's "Loading older messages…" sentinel, on a surface capsule so it reads
 /// over terminal output. Not a control: the page lands by itself, and touches pass through
